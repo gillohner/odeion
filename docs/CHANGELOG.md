@@ -54,6 +54,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Health no longer labels a large homeserver library as down.** The authenticated check reads at most one private file-list entry instead of listing and checking every file. Empty accounts stay healthy; permission errors and the four-second deadline still apply.
+
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.
