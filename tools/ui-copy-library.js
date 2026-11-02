@@ -209,6 +209,22 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         await p.click('#jobpop [data-jobclose]'); await sleep(200);
       }
       job.last = null;
+      // A bring this page saw running says how it ended, once: from an event, then the same
+      // answer again (no second toast)
+      await p.evaluate(() => { window.__toasts = []; new MutationObserver(() => { const t = document.querySelector('#toast').textContent; if (t) window.__toasts.push(t); }).observe(document.querySelector('#toast'), { childList: true, characterData: true, subtree: true }); });
+      const bring = { id: 'b1', kind: 'bring', state: 'running', total: 5, done: 2, failed: 0, skipped: 0, bytes_total: 5e6, bytes_done: 2e6, errors: [] };
+      sock.send(JSON.stringify({ type: 'jobs', current: bring, queued: [], last: null })); await sleep(300);
+      const bringEnd = { type: 'jobs', current: null, queued: [], last: { ...bring, state: 'finished', finished: true, done: 5, bytes_done: 5e6 } };
+      sock.send(JSON.stringify(bringEnd)); await sleep(300); sock.send(JSON.stringify(bringEnd)); await sleep(300);
+      const brought = await p.evaluate(() => window.__toasts.filter((t) => /Brought/.test(t)));
+      check(brought.length === 1 && /Brought 5 files here/.test(brought[0]), `${W} a bring that ends says so once (${JSON.stringify(brought)})`);
+      // One stopped: the reason, once
+      const b2 = { ...bring, id: 'b2' };
+      sock.send(JSON.stringify({ type: 'jobs', current: b2, queued: [], last: null })); await sleep(300);
+      sock.send(JSON.stringify({ type: 'jobs', current: null, queued: [], last: { ...b2, state: 'finished', finished: true, stopped_reason: 'Not enough space on this machine.' } })); await sleep(300);
+      const stoppedT = await p.evaluate(() => window.__toasts.filter((t) => /Stopped bringing/.test(t)));
+      check(stoppedT.length === 1 && /Not enough space/.test(stoppedT[0]), `${W} a stopped bring says why, once (${JSON.stringify(stoppedT)})`);
+      job.last = null; sock.send(JSON.stringify({ type: 'jobs', ...job })); await sleep(200);
       // Downloads shows the job too
       job.current = { id: 'j1', kind: 'copy', state: 'running', total: 25, done: 3, failed: 0, skipped: 0, bytes_total: 750e6, bytes_done: 90e6, errors: [], errors_count: 0 };
       await p.goto(BASE + '/downloads');
@@ -259,12 +275,21 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       // (the second page answers slowly the first time, so the choice can change while it loads)
       const albumAsks = []; let slowPage = true;
       await ctx.route(/\/v1\/library\/albums(\?.*)?$/, async (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); if (u.searchParams.get('after') === '1000' && slowPage) { slowPage = false; await sleep(1500); } const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });
+      // Artists already loaded; Albums, then back to Artists while an album page is out: its
+      // albums don't land in the artist list
+      await p.click('[data-cpick="artist"]'); await p.waitForSelector('[data-cpid="1"]');
       await p.click('[data-cpick="album"]');
       await until(async () => albumAsks.length >= 2, 5000);
-      // Artists while the albums still page in, then Albums again: the whole list, not the part
-      await p.click('[data-cpick="artist"]'); await sleep(1800); const asked = albumAsks.length;
-      await p.click('[data-cpick="album"]'); await p.fill('#cpq', 'Album 2400');
-      check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))) && albumAsks.length - asked === 3 && albumAsks.every((q) => /limit=1000/.test(q)), `the album picker pages to the 2 500th album, also after leaving it part way (${albumAsks.length - asked} requests)`);
+      await p.click('[data-cpick="artist"]'); await sleep(1800);
+      const artistList = await p.textContent('#cplist');
+      check(/Slow Artist/.test(artistList) && !/Album \d/.test(artistList), `a late album page stays out of the artist list (${artistList.replace(/\s+/g, ' ').slice(0, 80)})`);
+      // Two album loads overlapping (Albums, Artists, Albums again before the old page answers):
+      // the newer one is kept whole, and the old one changes nothing
+      slowPage = true; let asked = albumAsks.length;
+      await p.click('[data-cpick="album"]'); await until(async () => albumAsks.length - asked >= 2, 5000);
+      await p.click('[data-cpick="artist"]'); await sleep(150); asked = albumAsks.length;
+      await p.click('[data-cpick="album"]'); await sleep(2000); await p.fill('#cpq', 'Album 2400');
+      check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))) && albumAsks.length - asked === 3 && albumAsks.every((q) => /limit=1000/.test(q)), `overlapping album loads: the newer list is whole and searchable (${albumAsks.length - asked} requests)`);
       // An artist's songs answering slowly belong to that artist, not to the one chosen meanwhile
       await p.click('[data-cpick="artist"]'); await p.fill('#cpq', ''); await p.waitForSelector('[data-cpid="1"]');
       await p.click('[data-cpid="1"]'); await sleep(700); await p.click('[data-cpid="2"]'); await sleep(2000);
@@ -311,6 +336,14 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       await p.click('#jobchip');
       check(/cannot read/.test(await p.textContent('#jobpop')) || /2 errors/.test(await p.textContent('#jobpop')), "today's node: with its errors");
       check(!(await p.$('#jobpop [data-jact="pause"]')) && !(await p.$('#jobpop [data-jact="dismiss"]')), "today's node: no Pause or Dismiss it can't do");
+      // A bring running after a reload, then forgotten by /jobs: its own answer says how it ended, once
+      old = { id: 'o1', kind: 'bring', total: 3, done: 1, failed: 0, skipped: 0, bytes_total: 3e6, bytes_done: 1e6, finished: false, errors: [] };
+      await p.reload(); await p.waitForSelector('#jobchip:not([hidden])', { timeout: 15000 }).catch(() => {});
+      await p.evaluate(() => { window.__toasts = []; new MutationObserver(() => { const t = document.querySelector('#toast').textContent; if (t) window.__toasts.push(t); }).observe(document.querySelector('#toast'), { childList: true, characterData: true, subtree: true }); });
+      old = { ...old, done: 3, bytes_done: 3e6, finished: true };
+      await until(async () => (await p.evaluate(() => window.__toasts.length)) > 0, 10000); await sleep(4500);
+      const legacyT = await p.evaluate(() => window.__toasts.filter((t) => /Brought/.test(t)));
+      check(legacyT.length === 1 && /Brought 3 files here/.test(legacyT[0]), `today's node: a bring that ends says so once (${JSON.stringify(legacyT)})`);
       check(errors.length === 0, `today's node: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
     }
