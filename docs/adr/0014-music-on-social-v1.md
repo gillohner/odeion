@@ -124,7 +124,7 @@ then. ADR 0011 is amended.
 - `name` (both, owner decision 2026-10-27): optional, trimmed, 1 to 100 code points. A client that
   publishes one without a name from the person writes the generic one (`"<display name>'s
   listening session"`, `"<display name> is listening"`), and a reader shows the same when it is
-  absent. Vectors: `crates/pubky-music-specs/tests/vectors/live-v1.json`.
+  absent.
 - Both `embed` the music playing now, never a content `uri`.
 - *Amended 2026-10-31 (owner):* both kinds are dropped from the spec draft, and nothing writes
   them. Sharing what you listen to is "Post about this": a plain social post with the song as its

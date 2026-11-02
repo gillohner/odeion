@@ -6,8 +6,16 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Copies to the homeserver: the disk guards, tightened.**
+  - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
+  - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.
+  - A broken copy that fails to be replaced leaves nothing half written.
+  - An upload cut off by a crash is only cleaned up under the account that made it.
+  - The node's own copy of an imported song never replaces another file there: the song gets the next free name.
+  - Songs dropped on the Add music page keep the reserve of the disk they wait on while they arrive, counting the other uploads too.
 - **The copy dialog's artist and album lists, two more races fixed.** Going back to Albums while an older album page was still on its way no longer empties the list (it stayed blank to a search, or failed to load). Going from Albums to Artists while albums still load no longer puts albums into the artist list, where choosing one copied the artist chosen before.
 - **Copying to the homeserver, follow-ups from review.** Job progress and its controls show for the owner only, as the polling always did. Choosing another artist while the first one's songs still load no longer copies the first one's songs for it. A node that lists running jobs only keeps the finished summary when one look at it fails (it looks again). Leaving the album list while it pages in no longer keeps half the albums: the list loads whole next time. Bringing files here says how it ended (or why it stopped) however the node reports it.
+- **A smart playlist's feed keeps when it was created.** Rewriting the music feed of a smart playlist with tags from the network (any edit) set its `created_at` to the time of the edit; it now keeps the first save's.
 
 ### 2026-11-01
 
