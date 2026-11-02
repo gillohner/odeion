@@ -610,6 +610,7 @@ pub struct NewImport {
 }
 
 fn claim(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
+    let _admitted = crate::copy_jobs::admit(s);
     if let Some(copy) = crate::copy_jobs::busy(s) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,

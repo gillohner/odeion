@@ -4,7 +4,8 @@
 //!
 //! - **Kept** in the setting [`JOBS_KEY`]: the job running or paused now, the queue and the last
 //!   job's summary. A job keeps what was picked, not the file list: that is read again from the
-//!   library (by path) and `cursor` says how far it got, so a restart carries on from there.
+//!   library (by path) and `after` is the last path it got through, so a pause or a restart carries
+//!   on with the files after it, also when the library's list changed meanwhile.
 //! - **Guarded** as every copy is (copy_guard.rs): the disk's reserve before each file, failures
 //!   in a row, audio only, nothing half written. A file that can't be read is a failure.
 //! - **Seen** through `GET /v1/pubky/files/jobs` and the owner's `jobs` events.
@@ -55,9 +56,12 @@ pub struct Selection {
 pub struct CopyJob {
     pub progress: UploadProgress,
     pub selection: Selection,
-    /// How many files of the selection (by path) are behind it.
-    #[serde(default)]
-    pub cursor: usize,
+    /// The last file (by path, the selection's order) it got through: it carries on after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// Retry failed made a job of this one's files already.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    retried: bool,
     /// The files that failed, for Retry failed.
     #[serde(default)]
     pub failed_files: Vec<(String, u64)>,
@@ -80,6 +84,9 @@ pub struct Queue {
     history: VecDeque<UploadProgress>,
     #[serde(skip)]
     runner: bool,
+    /// Loaded after a restart, held until what the stopped node left is settled.
+    #[serde(skip)]
+    held: bool,
     #[serde(skip)]
     ticked: Option<Instant>,
 }
@@ -98,6 +105,9 @@ pub struct Listed {
 pub struct CopyJobs {
     pub queue: Mutex<Queue>,
     persist: Mutex<()>,
+    /// Held while a files job is let in (a copy, an import, bringing files here): its check
+    /// and its start happen together, so two never start side by side.
+    admission: Mutex<()>,
     pub listed: Mutex<Listed>,
     /// Tests: what the quota leaves on the homeserver (bytes), in place of asking it.
     pub quota_seam: Mutex<Option<u64>>,
@@ -193,9 +203,19 @@ fn state_of(s: &NodeState, id: &str) -> Option<String> {
         .map(|j| j.progress.state.clone())
 }
 
+/// Taken while a files job checks that nothing else runs and starts (copy_jobs, `files::claim_job`,
+/// `add_music::claim`).
+pub fn admit(s: &NodeState) -> std::sync::MutexGuard<'_, ()> {
+    s.copy_jobs.admission.lock().expect("admission")
+}
+
 /// A copy is running, paused or waiting: an import or bring job waits for it.
 pub fn busy(s: &NodeState) -> Option<UploadProgress> {
     let q = s.copy_jobs.queue.lock().expect("copy jobs");
+    // Held after a restart: a bring job resuming goes first, the copy waits for it
+    if q.held {
+        return None;
+    }
     q.current
         .as_ref()
         .or(q.queued.front())
@@ -355,6 +375,10 @@ fn remember_listed(s: &NodeState, paths: impl Iterator<Item = String>) {
 /// The hash prefixes the homeserver has, when known; asks it again in the background when the
 /// list is old or missing (`None` meanwhile, the first time).
 pub(crate) fn listed_hashes(s: &Arc<NodeState>) -> Option<HashSet<String>> {
+    // Without a homeserver session there is nothing to ask
+    if crate::copy_guard::target_of(s).is_err() {
+        return None;
+    }
     let (known, stale) = {
         let mut l = s.copy_jobs.listed.lock().expect("listed");
         let stale = l.at.is_none_or(|t| t.elapsed() >= LIST_FRESH);
@@ -504,7 +528,8 @@ pub(crate) async fn start(
     let job = CopyJob {
         progress,
         selection: sel,
-        cursor: 0,
+        after: None,
+        retried: false,
         failed_files: Vec::new(),
         sent_bytes: 0,
         samples: VecDeque::new(),
@@ -515,6 +540,7 @@ pub(crate) async fn start(
 
 /// Puts a job in line: it runs now when nothing else does, else it is queued.
 fn enqueue(s: &Arc<NodeState>, mut job: CopyJob) -> UploadProgress {
+    let admitted = admit(s);
     let other = other_running(s);
     let out = {
         let mut q = s.copy_jobs.queue.lock().expect("copy jobs");
@@ -531,6 +557,7 @@ fn enqueue(s: &Arc<NodeState>, mut job: CopyJob) -> UploadProgress {
             p
         }
     };
+    drop(admitted);
     changed(s);
     ensure_runner(s);
     out
@@ -562,6 +589,7 @@ enum Next {
 /// left to run (a paused job waits for Resume, which starts it again).
 async fn run(s: Arc<NodeState>) {
     loop {
+        let admitted = admit(&s);
         let other = other_running(&s);
         let mut started = false;
         let next = {
@@ -571,6 +599,11 @@ async fn run(s: Arc<NodeState>) {
                 .as_ref()
                 .map(|j| (j.progress.id.clone(), j.progress.state.clone()))
             {
+                _ if q.held => {
+                    q.runner = false;
+                    Next::Exit
+                }
+                Some((_, st)) if st == "running" && other => Next::Wait,
                 Some((id, st)) if st == "running" => Next::Run(id),
                 Some((id, st)) if st == "cancelled" => Next::Finish(id),
                 Some(_) => {
@@ -593,6 +626,7 @@ async fn run(s: Arc<NodeState>) {
                 }
             }
         };
+        drop(admitted);
         if started {
             changed(&s);
         }
@@ -631,9 +665,11 @@ fn finish(s: &NodeState, id: &str, state: &str) {
     changed(s);
 }
 
-/// Stops the current job `id` early, saying why (`state` failed).
-fn stop(s: &NodeState, id: &str, why: String, full: bool) {
+/// Stops the current job `id` early, saying why (`state` failed). `left`: the files it never
+/// tried, which Retry sends with the failed ones.
+fn stop(s: &NodeState, id: &str, why: String, full: bool, left: usize) {
     update(s, id, |j| {
+        j.progress.failed_retryable = j.failed_files.len() + left;
         j.progress.errors.push(why.clone().into());
         j.progress.errors_count += 1;
         j.progress.stopped_reason = Some(why.clone());
@@ -669,12 +705,12 @@ async fn target_for(s: &Arc<NodeState>, id: &str) -> Option<Arc<dyn crate::copy_
 }
 
 async fn run_job(s: &Arc<NodeState>, id: &str) {
-    let Some((sel, cursor)) = ({
+    let Some((sel, after)) = ({
         let q = s.copy_jobs.queue.lock().expect("copy jobs");
         q.current
             .as_ref()
             .filter(|j| j.progress.id == id)
-            .map(|j| (j.selection.clone(), j.cursor))
+            .map(|j| (j.selection.clone(), j.after.clone()))
     }) else {
         return;
     };
@@ -682,10 +718,15 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
         let s2 = s.clone();
         match tokio::task::spawn_blocking(move || resolve(&s2, &sel)).await {
             Ok(Ok(f)) => f,
-            Ok(Err(e)) => return stop(s, id, e.message, false),
-            Err(e) => return stop(s, id, e.to_string(), false),
+            Ok(Err(e)) => return stop(s, id, e.message, false, 0),
+            Err(e) => return stop(s, id, e.to_string(), false, 0),
         }
     };
+    // Carries on after the last file it got through (the list is in path order)
+    let start = after.as_deref().map_or(0, |a| {
+        files.partition_point(|(p, _)| p.to_string_lossy().as_ref() <= a)
+    });
+    let left = files.len() - start;
     update(s, id, |j| {
         j.progress.total = files.len();
         j.progress.bytes_total = files.iter().map(|(_, b)| b).sum();
@@ -697,6 +738,7 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
                 id,
                 "sign in to your homeserver first (Settings › Pubky)".into(),
                 false,
+                left,
             );
         }
         return;
@@ -712,12 +754,13 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
                 id,
                 format!("the homeserver did not list its files: {e}"),
                 false,
+                left,
             )
         }
     };
     let room = crate::copy_guard::room_of(s);
     let mut streak = crate::copy_guard::Streak::default();
-    for (i, (path, size)) in files.iter().enumerate().skip(cursor) {
+    for (i, (path, size)) in files.iter().enumerate().skip(start) {
         // Paused or cancelled: after the file in hand, nothing more
         if state_of(s, id).as_deref() != Some("running") {
             save(s);
@@ -757,7 +800,10 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
         let p = path.to_string_lossy().into_owned();
         let at = Instant::now();
         update(s, id, |j| {
-            j.cursor = i + 1;
+            // A file the reserve stopped before was never tried: the job isn't past it
+            if !matches!(outcome, Outcome::Space(_)) {
+                j.after = Some(p.clone());
+            }
             let pr = &mut j.progress;
             match &outcome {
                 Outcome::Sent => {
@@ -807,12 +853,19 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
         match outcome {
             Outcome::Full(e) => {
                 crate::storage::note_full(s, true);
-                return stop(s, id, format!("{e}; the files after it were not copied"), true);
+                let left = files.len() - i - 1;
+                return stop(
+                    s,
+                    id,
+                    format!("{e}; the files after it were not copied"),
+                    true,
+                    left,
+                );
             }
-            Outcome::Space(e) => return stop(s, id, e, false),
+            Outcome::Space(e) => return stop(s, id, e, false, files.len() - i),
             Outcome::Failed(e) => {
                 if let Some(why) = streak.failed(&e) {
-                    return stop(s, id, why, false);
+                    return stop(s, id, why, false, files.len() - i - 1);
                 }
             }
             _ => streak.ok(),
@@ -915,23 +968,57 @@ pub(crate) async fn cancel_route(
     cancel(&s, &id).map(Json).ok_or_else(no_job)
 }
 
-/// `POST /v1/pubky/files/upload/{id}/retry`: a new job, queued, of the files this one couldn't
-/// send.
+/// `POST /v1/pubky/files/upload/{id}/retry`: a new job, queued, of the files the last copy
+/// couldn't send: those that failed and, when it stopped early (failures in a row, the homeserver
+/// full, the disk's reserve), every file it never got to. Once per copy.
 pub(crate) async fn retry(
     State(s): State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<UploadProgress>), ApiError> {
-    let files = {
+    let (mut files, stopped, sel, after) = {
         let q = s.copy_jobs.queue.lock().expect("copy jobs");
-        q.last
-            .iter()
-            .chain(q.current.iter())
-            .find(|j| j.progress.id == id)
-            .map(|j| j.failed_files.clone())
-            .ok_or_else(no_job)?
+        if q.current.as_ref().is_some_and(|j| j.progress.id == id) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "that copy is still going"));
+        }
+        let j = q
+            .last
+            .as_ref()
+            .filter(|j| j.progress.id == id)
+            .ok_or_else(no_job)?;
+        if j.retried {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "that copy was retried already",
+            ));
+        }
+        (
+            j.failed_files.clone(),
+            j.progress.state == "failed",
+            j.selection.clone(),
+            j.after.clone(),
+        )
     };
+    if stopped {
+        let s2 = s.clone();
+        let all = tokio::task::spawn_blocking(move || resolve(&s2, &sel))
+            .await
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+        files.extend(
+            all.into_iter()
+                .map(|(p, n)| (p.to_string_lossy().into_owned(), n))
+                // The failed ones are all before it
+                .filter(|(p, _)| after.as_deref().is_none_or(|a| p.as_str() > a)),
+        );
+    }
     if files.is_empty() {
         return Err(ApiError::new(StatusCode::CONFLICT, "nothing failed in that copy"));
+    }
+    {
+        let mut q = s.copy_jobs.queue.lock().expect("copy jobs");
+        if let Some(j) = q.last.as_mut().filter(|j| j.progress.id == id) {
+            j.retried = true;
+            j.progress.failed_retryable = 0;
+        }
     }
     let sel = Selection {
         files,
@@ -947,7 +1034,8 @@ pub(crate) async fn retry(
             ..Default::default()
         },
         selection: sel,
-        cursor: 0,
+        after: None,
+        retried: false,
         failed_files: Vec::new(),
         sent_bytes: 0,
         samples: VecDeque::new(),
@@ -967,8 +1055,9 @@ pub(crate) async fn dismiss_last(State(s): State<Arc<NodeState>>) -> ApiResult<J
     Ok(Json(view(&s)))
 }
 
-/// At start: the copy jobs a stopped node had. A running one carries on from where it got, a
-/// paused one waits for Resume, the queue after them.
+/// At start: the copy jobs a stopped node had, back in place (held: nothing runs before
+/// [`release_after_restart`]). A running one then carries on from where it got, a paused one
+/// waits for Resume, the queue after them.
 pub fn resume_after_restart(s: &Arc<NodeState>) {
     let kept = s
         .library
@@ -979,21 +1068,37 @@ pub fn resume_after_restart(s: &Arc<NodeState>) {
         .flatten()
         .and_then(|j| serde_json::from_str::<Queue>(&j).ok());
     let Some(kept) = kept else { return };
+    // Cancelled just before the node stopped: it ends now, and doesn't hold the queue
+    let cancelled = kept
+        .current
+        .as_ref()
+        .filter(|j| j.progress.state == "cancelled")
+        .map(|j| j.progress.id.clone());
     let go = kept
         .current
         .as_ref()
         .is_some_and(|j| j.progress.state == "running")
-        || (kept.current.is_none() && !kept.queued.is_empty());
+        || ((kept.current.is_none() || cancelled.is_some()) && !kept.queued.is_empty());
     {
         let mut q = s.copy_jobs.queue.lock().expect("copy jobs");
         q.current = kept.current;
         q.queued = kept.queued;
         q.last = kept.last;
+        q.held = true;
+    }
+    if let Some(id) = cancelled {
+        finish(s, &id, "cancelled");
     }
     if go {
         tracing::info!("a copy to the homeserver carries on after the restart");
-        ensure_runner(s);
     }
+}
+
+/// After the start's settling (what a stopped node half wrote is cleaned up first, never while a
+/// copy writes the same paths): the kept copies run.
+pub fn release_after_restart(s: &Arc<NodeState>) {
+    s.copy_jobs.queue.lock().expect("copy jobs").held = false;
+    ensure_runner(s);
 }
 
 // ---- the folder tree --------------------------------------------------------------------------
@@ -1096,6 +1201,8 @@ fn roots(s: &NodeState) -> Result<Vec<(String, String)>, ApiError> {
     for r in s.drives.read().expect("drives").roots.iter() {
         out.push((r.key().to_string_lossy().into_owned(), r.name.clone()));
     }
+    // By name, the order `after` pages in
+    out.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     Ok(out)
 }
 

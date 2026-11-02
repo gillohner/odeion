@@ -18,9 +18,9 @@ use std::sync::Arc;
 
 /// How fast copies to the homeserver go (bytes per second, 0 = full speed).
 pub const COPY_RATE_KEY: &str = "copy.rate";
-/// Off by default (TASK-copy-library-folders: "optional limit, default off"); Settings sets one
-/// when a copy would starve the uplink (a full-speed copy did on the owner's, 2026-10-22).
-pub const DEFAULT_COPY_RATE: u64 = 0;
+/// The default leaves room on a home uplink (often 20–40 Mbit/s) for the node's pages and the
+/// music it streams to a browser away from home: a full-speed copy starved both (owner, 2026-10-22).
+pub const DEFAULT_COPY_RATE: u64 = 2_500_000;
 
 pub fn copy_rate(s: &NodeState) -> u64 {
     s.library
@@ -263,6 +263,7 @@ pub(crate) async fn upload_progress(
 /// Only one files job at a time (copy, import or bring): they share the uplink and the
 /// homeserver. A copy is queued instead (copy_jobs.rs).
 pub(crate) fn claim_job(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
+    let _admitted = crate::copy_jobs::admit(s);
     if let Some(copy) = crate::copy_jobs::busy(s) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -671,31 +672,35 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
 /// After a restart: carry on with a bring job the node was running (what already arrived is
 /// matched and not fetched again).
 pub fn resume_jobs(s: &Arc<NodeState>) {
-    // Uploads a stopped node left unsettled: what they half wrote on the homeserver goes
-    let s2 = s.clone();
-    tokio::spawn(async move {
-        crate::copy_guard::settle_in_flight(&s2, 120, std::time::Duration::from_secs(1)).await
-    });
-    // Copies to the homeserver: the running one carries on, the queue after it
+    // The copies the node had are back in place now (a copy started meanwhile queues behind
+    // them); they run once the rest is done
     crate::copy_jobs::resume_after_restart(s);
-    let Some(v) = s
+    let dest = s
         .library
         .lock()
         .expect("library poisoned")
         .get_setting(BRING_RESUME_KEY)
         .ok()
         .flatten()
-    else {
-        return;
-    };
-    let Some(dest) = serde_json::from_str::<serde_json::Value>(&v)
-        .ok()
-        .and_then(|v| v["dest"].as_str().map(PathBuf::from))
-    else {
-        return;
-    };
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+        .and_then(|v| v["dest"].as_str().map(PathBuf::from));
     let s = s.clone();
     tokio::spawn(async move {
+        // First what uploads of a stopped node left half written on the homeserver goes: a copy
+        // carrying on would write the same paths
+        crate::copy_guard::settle_in_flight(&s, 120, std::time::Duration::from_secs(1)).await;
+        // A bring job before the copies, which would otherwise find a copy in its place
+        if let Some(dest) = dest {
+            resume_bring(&s, dest).await;
+        }
+        crate::copy_jobs::release_after_restart(&s);
+    });
+}
+
+/// A bring job the node was running when it stopped carries on.
+async fn resume_bring(s: &Arc<NodeState>, dest: PathBuf) {
+    let s = s.clone();
+    {
         // The Pubky session comes back in the background after start-up
         let mut sync = None;
         for _ in 0..120 {
@@ -738,7 +743,7 @@ pub fn resume_jobs(s: &Arc<NodeState>) {
             );
             start_bring(s.clone(), sync, plan, progress.id);
         }
-    });
+    }
 }
 
 /// `DELETE /v1/pubky/files {paths}`: remove private files (broken uploads, doubled copies).
