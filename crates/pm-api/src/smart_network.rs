@@ -469,13 +469,8 @@ pub(crate) async fn save_feed(s: &Arc<NodeState>, p: &SmartPlaylist) -> Result<F
     let sync = s
         .sync_handle()
         .ok_or("Sign in with Pubky to save tags from the network as a feed")?;
-    let micros = pm_pubky::ids::now_micros();
-    let id = p
-        .feed
-        .as_ref()
-        .map(|f| f.id.clone())
-        .unwrap_or_else(|| pm_pubky::v1::id_of(micros));
-    let feed = as_feed(s, p, micros)?;
+    let (id, created_at) = feed_id(p, pm_pubky::ids::now_micros());
+    let feed = as_feed(s, p, created_at)?;
     feed.validate(Some(&id), true)?;
     let (private, _) = pubky_music_specs::MusicFeed::paths(&id)?;
     sync.homeserver()
@@ -487,6 +482,15 @@ pub(crate) async fn save_feed(s: &Arc<NodeState>, p: &SmartPlaylist) -> Result<F
         id,
         public: false,
     })
+}
+
+/// The feed's id and `created_at`: a rewrite keeps both (the id is a timestamp id of the first
+/// save, so that is when it was created); a new feed takes `now`'s.
+fn feed_id(p: &SmartPlaylist, now: i64) -> (String, i64) {
+    match &p.feed {
+        Some(f) => (f.id.clone(), pm_pubky::v1::micros_of(&f.id).unwrap_or(now)),
+        None => (pm_pubky::v1::id_of(now), now),
+    }
 }
 
 /// Deletes the smart playlist's music feed (both copies).
@@ -505,7 +509,7 @@ pub(crate) async fn delete_feed(s: &NodeState, f: &FeedRef) -> Result<(), String
 
 #[cfg(test)]
 mod tests {
-    use super::feed_rule;
+    use super::{feed_id, feed_rule};
     use crate::smart::Rule;
     use serde_json::json;
 
@@ -579,5 +583,29 @@ mod tests {
             feed.validate(None, true)
                 .unwrap_or_else(|e| panic!("{given}: {e}"));
         }
+    }
+
+    /// Review of #159, L7: rewriting a smart playlist's feed keeps when it was created (the first
+    /// save's), instead of saying it was created at every edit.
+    #[test]
+    fn a_rewritten_feed_keeps_its_created_at() {
+        let first = 1_790_000_000_000_000;
+        let later = first + 86_400_000_000;
+        let mut p: crate::smart::SmartPlaylist = serde_json::from_value(
+            json!({"id": "s1", "name": "Mine", "reach": "following", "tags": ["chill"]}),
+        )
+        .unwrap();
+        let (id, created) = feed_id(&p, first);
+        assert_eq!(created, first, "a new feed is created now");
+        p.feed = Some(super::FeedRef {
+            uri: format!("pubky://x/priv/music/v1/feeds/{id}.json"),
+            id: id.clone(),
+            public: false,
+        });
+        assert_eq!(
+            feed_id(&p, later),
+            (id, first),
+            "a rewrite keeps the id and its time"
+        );
     }
 }

@@ -6,8 +6,16 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Copies to the homeserver: the disk guards, tightened.**
+  - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
+  - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.
+  - A broken copy that fails to be replaced leaves nothing half written.
+  - An upload cut off by a crash is only cleaned up under the account that made it.
+  - The node's own copy of an imported song never replaces another file there: the song gets the next free name.
+  - Songs dropped on the Add music page keep the reserve of the disk they wait on while they arrive, counting the other uploads too.
 - **Phones and tablets, the rest of the UX sweep.** Sources › TIDAL says under its title that your collection is loading (a cold node can take 20 s), draws your playlists as they come, and next time shows the last copy at once while it updates. Touch layouts give a playlist's Move and Remove, a song row's actions, Select and the play-from order's grips 40 px; a tablet's song rows keep the heart and ⋯, like a phone. Play to has one way to move playback: Move here on each device (the Queue page keeps Move to…). An album's and a playlist's buttons stay on one row on phones and tablets (Play on… is its icon, and a playlist's Delete is in ⋯). Phones and tablets have a back link and the desktop the trail, and a back link never repeats the page's own name. A tablet's Now playing shows all its tabs and its sound pill in words. The Log in screen's token help is one line, with where to find it folded. A song's File is its name, the path on the node a tooltip. Long notes in Service apps fold behind More, and a sign-in way you haven't chosen shows one sentence.
 - **Copying to the homeserver, follow-ups from review.** Job progress and its controls show for the owner only, as the polling always did. Choosing another artist while the first one's songs still load no longer copies the first one's songs for it. A node that lists running jobs only keeps the finished summary when one look at it fails (it looks again). Leaving the album list while it pages in no longer keeps half the albums: the list loads whole next time. Bringing files here says how it ended (or why it stopped) however the node reports it.
+- **A smart playlist's feed keeps when it was created.** Rewriting the music feed of a smart playlist with tags from the network (any edit) set its `created_at` to the time of the edit; it now keeps the first save's.
 
 ### 2026-11-01
 
