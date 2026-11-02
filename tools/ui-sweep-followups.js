@@ -61,6 +61,10 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
         await p.goto(BASE + '/tracks'); await p.waitForSelector('.track', { timeout: 20000 });
         const ra = await boxes(p, '.track .row-actions .icon-btn');
         check(ra.length && ra.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: a song row's actions are 40 px (${JSON.stringify(ra.slice(0, 3))})`);
+        // A touch screen has no hover: ⋯ is shown without one (the pointer is moved away first)
+        await p.mouse.move(0, 0); await sleep(200);
+        const op = await p.$eval('.track [data-act="more"]', (b) => { let o = 1; for (let e = b; e && e !== document.body; e = e.parentElement) o *= Number(getComputedStyle(e).opacity); return o; }).catch(() => 0);
+        check(op === 1, `${w}: a song row's ⋯ shows without hover (opacity ${op})`);
       }
       // ---- A10: the play-from order's grips, on touch ----
       if (touch(w)) {
@@ -140,7 +144,10 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       await ctx.route(/\/v1\/sources$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: j.map((s) => (s.id === 'tidal' ? { ...s, enabled: true, status: 'signed in' } : s)) }); });
       await ctx.route(/\/v1\/sources\/tidal\/signin$/, (r) => r.fulfill({ json: { ways: [], imports: [], places: [], in_use: { way: 'app', label: 'Your own TIDAL app' }, chosen: 'app', line: 'Signed in', details: { status: { configured: true, signed_in: true }, unofficial: {} } } }));
       await ctx.route(/\/v1\/sources\/tidal\/playlists$/, (r) => r.fulfill({ json: [{ id: 'tp1', name: 'Mock TIDAL list', items: 3 }] }));
-      await ctx.route(/\/v1\/sources\/tidal\/collection$/, async (r) => { await sleep(colDelay); return r.fulfill({ json: { tracks: [{ id: 'tidal-1', title: 'Cold Song', creator: 'Someone', kind: 'track' }], albums: [{ id: 'tidal-2', title: 'Cold Album', creator: 'Someone', kind: 'album' }] } }); });
+      let imports = 0; let importDelay = 4500;
+      await ctx.route(/\/v1\/sources\/tidal\/playlists\/tp1\/import/, async (r) => { imports++; await sleep(importDelay); return r.fulfill({ json: { playlist: { summary: { id: 'x', name: 'Mock TIDAL list' } }, imported: 3, kept: 0, missing: [] } }); });
+      let colFail = false;
+      await ctx.route(/\/v1\/sources\/tidal\/collection$/, async (r) => { if (colFail) return r.fulfill({ status: 502, json: { error: 'TIDAL answered 502' } }); await sleep(colDelay); return r.fulfill({ json: { tracks: [{ id: 'tidal-1', title: 'Cold Song', creator: 'Someone', kind: 'track' }], albums: [{ id: 'tidal-2', title: 'Cold Album', creator: 'Someone', kind: 'album' }] } }); });
       await p.goto(BASE + '/sources/tidal');
       const status = '#src-tidal .srcmine-status';
       check(await until(async () => /Loading your TIDAL collection/.test(await p.textContent(status)), 5000), 'A7: the top of the page says the collection is loading');
@@ -154,8 +161,24 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       check(await until(async () => /Cold Album/.test(await p.textContent('#tidalmine')), 1500) && /Updating/.test(await p.textContent(status)), 'A7: next time the last copy shows at once, "Updating…" above');
       await sleep(3500);
       check(!(await p.isVisible(status)), 'A7: and the status goes once the fresh answer is in');
-      // A failure says so, with Try again
-      await ctx.route(/\/v1\/sources\/tidal\/collection$/, (r) => r.fulfill({ status: 502, json: { error: 'TIDAL answered 502' } }));
+      // An import running while the collection answers: its button stays off, so it can't run twice
+      colDelay = 2500; await p.reload();
+      await p.waitForSelector('#tidalpls [data-tpl="tp1"]'); await p.click('#tidalpls [data-tpl="tp1"]');
+      await p.locator('dialog .choice', { hasText: 'Keep' }).first().click();
+      await until(async () => imports === 1, 3000); await sleep(3000); // the collection and the playlists have answered meanwhile
+      check(await p.isDisabled('#tidalpls [data-tpl="tp1"]'), 'A7: an import in flight keeps its button off across the redraws');
+      await p.click('#tidalpls [data-tpl="tp1"]', { force: true }).catch(() => {}); await sleep(300);
+      check(imports === 1 && await p.locator('dialog .choice').count() === 0, `A7: so it isn't imported twice (${imports} imports)`);
+      check(await until(async () => !(await p.isDisabled('#tidalpls [data-tpl="tp1"]')), 6000), 'A7: and the button is back once it is done');
+      // A failed refresh over the kept copy: the copy shows, and the top says the refresh failed, with Try again
+      colFail = true;
+      await p.reload();
+      check(await until(async () => /Cold Album/.test(await p.textContent('#tidalmine')) && await p.isVisible(status) && /Couldn’t update/.test(await p.textContent(status)) && await p.locator(`${status} [data-tretry]`).count() === 1, 8000), 'A7: a failed refresh over the last copy says so at the top, with Try again');
+      colFail = false; colDelay = 0;
+      await p.click(`${status} [data-tretry]`);
+      check(await until(async () => !(await p.isVisible(status)), 8000), 'A7: and Try again clears it');
+      // A failure with no copy says so, with Try again
+      colFail = true;
       await p.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith('pm.srcmine.')) localStorage.removeItem(k); });
       await p.reload();
       check(await until(async () => /Couldn’t load it/.test(await p.textContent('#tidalmine')) && await p.locator('#tidalmine [data-tretry]').count() === 1, 8000) && !/Nothing in your TIDAL collection/.test(await p.textContent('#tidalmine')), 'A7: a failed collection says so with Try again, not "Nothing in your collection"');

@@ -1173,6 +1173,9 @@ html[data-shell="phone"] .track .row-actions .icon-btn, html[data-shell="tablet"
    (when on) and More, like a phone (Play next and Add to queue are in More); a playlist's Move and
    Remove, small buttons like Select, and the play-from order's grips */
 html[data-shell="tablet"] .track .row-actions .icon-btn { flex: none; }
+/* No hover on a touch screen: the row's actions are always shown there, not only on hover */
+html[data-shell="tablet"] .track .row-actions, html[data-shell="tablet"] .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
+@media (hover: none) { .track .row-actions, .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; } }
 html[data-shell="tablet"] .track .row-actions .icon-btn:not([data-act="more"]):not(.heart.on) { display: none; }
 html[data-shell="phone"] .q-actions .icon-btn, html[data-shell="tablet"] .q-actions .icon-btn { width: 40px; height: 40px; }
 html[data-shell="phone"] .btn.sm, html[data-shell="tablet"] .btn.sm { min-height: 40px; }

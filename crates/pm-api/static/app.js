@@ -578,18 +578,21 @@
     show();
   };
   // Importing a provider playlist asks once: keep that provider as each song's source, or Auto.
+  // Imports in flight, by service and playlist: a redrawn list keeps their buttons off (no second import)
+  const importing = new Set();
   const importPlaylist = async (b, service, id) => {
+    const key = `${service}:${id}`; if (importing.has(key)) return;
     const name = SERVICE_NAMES[service] || service;
     let order = 'your play order'; try { const o = await api('GET', '/play-order'); order = o.order.map(srcName).join(' › '); } catch { /* keep the words */ }
     const how = await choiceDialog({ title: 'Import this playlist', text: 'Where should its songs play from?', choices: [
       { label: `Keep ${name}`, note: `Each song is pinned to its ${name} track.`, value: 'keep', primary: true },
       { label: 'Auto', note: `Each song plays from the first source that has it (${order}).`, value: 'auto' },
     ] });
-    if (!how) return;
-    b.disabled = true;
+    if (!how || importing.has(key)) return;
+    b.disabled = true; importing.add(key);
     try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.kept ? `, ${countOf(r.kept, 'kept as links')}` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
     catch (e) { toast(e.message, 'error'); }
-    b.disabled = false;
+    importing.delete(key); b.disabled = false;
   };
   // Theme: System (no attribute), or Light/Dark kept in this browser (index.html applies it early).
   const themePref = () => { try { return localStorage.getItem('pm.theme') || 'system'; } catch { return 'system'; } };
@@ -1096,7 +1099,7 @@
       // Another tab may have logged in again meanwhile: its token stays
       if (localStorage.getItem('pm.token') !== mine) return;
       ACCOUNT_KEYS.forEach((k) => localStorage.removeItem(k));
-      Object.keys(localStorage).filter((k) => k.startsWith('pm.up.')).forEach((k) => localStorage.removeItem(k));
+      Object.keys(localStorage).filter((k) => k.startsWith('pm.up.') || k.startsWith('pm.srcmine.')).forEach((k) => localStorage.removeItem(k));
     } catch { /* no storage */ }
   };
   const ringFirst = () => matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -5013,7 +5016,7 @@
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
           $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) },
-            ...(shellMode() === 'desktop' ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+            ...($('#pldel') ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); state.plPf = null; render(); } catch (er) { toast(er.message, 'error'); } });
           const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; render(); } catch (e) { toast(e.message, 'error'); } };
@@ -5328,44 +5331,58 @@
             // Your collection and playlists, with imports into the node's favourites and Pubky playlists.
             // A cold node can take 20 s and more: the last good copy shows at once (this browser keeps
             // it), each part draws as it comes, and the top of the page says it is loading (UX A7)
-            const box = document.createElement('div'); box.id = 'tidalmine'; ($('#srcmine') || main).appendChild(box);
+            const box = document.createElement('div'); box.id = 'tidalmine'; box.innerHTML = '<div id="tidalcol"></div><div id="tidalpls"></div>'; ($('#srcmine') || main).appendChild(box);
             const memo = `pm.srcmine.tidal.${(state.me && state.me.key) || 'owner'}`;
             let kept = null; try { kept = JSON.parse(localStorage.getItem(memo) || 'null'); } catch { kept = null; }
             const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind)}</span></div>`;
             const failed = (what, err) => `<section class="section"><div class="section-head"><h3>${what}</h3></div><p class="muted small">Couldn’t load it: ${esc(err)} <button class="btn sm" type="button" data-tretry>Try again</button></p></section>`;
             const colHtml = (col) => view.colErr && !col ? failed('Your collection', view.colErr) : col ? `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.nTracks, 'tracks')} · ${countOf(col.nAlbums, 'albums')}</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.map(hit).join('')}${col.tracks.map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>`
               : '<section class="section"><div class="section-head"><h3>Your collection</h3></div><p class="muted small" data-loading>Loading your TIDAL collection…</p></section>';
-            const plsHtml = (pls) => view.plsErr && !pls ? failed('Your playlists', view.plsErr) : pls ? `<section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`
+            const plsHtml = (pls) => view.plsErr && !pls ? failed('Your playlists', view.plsErr) : pls ? `<section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}" ${importing.has(`tidal:${p.id}`) ? 'disabled' : ''}>${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`
               : '<section class="section"><div class="section-head"><h3>Your playlists</h3></div><p class="muted small" data-loading>Loading your TIDAL playlists…</p></section>';
-            const view = { col: kept && kept.col, pls: kept && kept.pls, fresh: { col: false, pls: false }, colErr: null, plsErr: null };
+            const view = { col: kept && kept.col, pls: kept && kept.pls, fresh: { col: false, pls: false }, colErr: null, plsErr: null, slow: false, topKey: null };
             const here = () => state.view === 'sources' && state.sourceId === 'tidal' && box.isConnected;
             // Under the page's title, where the eye is: loading, updating a kept copy, or the error
             const top = document.createElement('p'); top.className = 'muted small srcmine-status'; top.setAttribute('role', 'status');
             const desc = $('#src-tidal .src-desc') || $('#src-tidal .set-title'); if (desc) desc.after(top);
-            const drawTop = (slow) => {
+            // Rewritten only when what it says changes (a screen reader hears it once); an error stays,
+            // with Try again, also over a kept copy
+            const drawTop = () => {
               if (!top.isConnected) return;
-              const done = view.fresh.col && view.fresh.pls;
-              const err = view.colErr || view.plsErr;
-              if (done && err) { top.innerHTML = `<span class="warn-text">Couldn’t update your TIDAL collection: ${esc(err)}</span>${kept ? ' Showing the last copy.' : ''} <a href="#tidalmine" data-jump>Show</a>`; top.hidden = false; }
-              top.hidden = done;
-              if (!done) top.innerHTML = `<span class="spin" aria-hidden="true"></span> ${kept ? 'Updating your TIDAL collection' : 'Loading your TIDAL collection'}${slow ? '… the first time after a restart can take a while' : '…'} <a href="#tidalmine" data-jump>${kept ? 'Show the last copy' : 'Show'}</a>`;
+              const done = view.fresh.col && view.fresh.pls; const err = view.colErr || view.plsErr;
+              const k = done ? (err ? `e:${err}` : 'done') : `l:${view.slow}`; if (k === view.topKey) return; view.topKey = k;
+              if (done && !err) { top.hidden = true; top.innerHTML = ''; return; }
+              top.hidden = false;
+              top.innerHTML = done
+                ? `<span class="warn-text">Couldn’t ${kept ? 'update' : 'load'} your TIDAL collection: ${esc(err)}</span>${kept ? ' Showing the last copy.' : ''} <button class="btn sm" type="button" data-tretry>Try again</button>`
+                : `<span class="spin" aria-hidden="true"></span> ${kept ? 'Updating your TIDAL collection' : 'Loading your TIDAL collection'}${view.slow ? '… the first time after a restart can take a while' : '…'} <a href="#tidalmine" data-jump>${kept ? 'Show the last copy' : 'Show'}</a>`;
               const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+              const t = $('[data-tretry]', top); if (t) t.onclick = () => render();
             };
-            const draw = () => {
-              if (!here()) return;
-              box.innerHTML = colHtml(view.col) + plsHtml(view.pls);
-              $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
-              const fav = $('#tidalfav', box); if (fav) fav.onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
-              $$('[data-tpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'tidal', b.dataset.tpl));
-              $$('[data-tretry]', box).forEach((b) => b.onclick = () => render());
-              drawTop(false);
+            // Each part redraws on its own, so focus in the other one stays
+            const drawCol = () => {
+              const el = $('#tidalcol', box); if (!el || !here()) return;
+              el.innerHTML = colHtml(view.col);
+              $$('[data-sitem]', el).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
+              const fav = $('#tidalfav', el); if (fav) fav.onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+              $$('[data-tretry]', el).forEach((b) => b.onclick = () => render());
+            };
+            const drawPls = () => {
+              const el = $('#tidalpls', box); if (!el || !here()) return;
+              el.innerHTML = plsHtml(view.pls);
+              $$('[data-tpl]', el).forEach((b) => b.onclick = async () => { await importPlaylist(b, 'tidal', b.dataset.tpl); drawPls(); });
+              $$('[data-tretry]', el).forEach((b) => b.onclick = () => render());
+            };
+            const settled = () => {
+              drawTop();
               if (view.fresh.col && view.fresh.pls && !view.colErr && !view.plsErr) { try { localStorage.setItem(memo, JSON.stringify({ at: Date.now(), col: view.col, pls: view.pls })); } catch { /* a full or blocked store: shown fresh next time */ } }
             };
-            draw(); setTimeout(() => { if (!(view.fresh.col && view.fresh.pls)) drawTop(true); }, 2000);
-            api('GET', '/sources/tidal/collection').then((col) => { view.col = { albums: col.albums.slice(0, 20), tracks: col.tracks.slice(0, 50), nAlbums: col.albums.length, nTracks: col.tracks.length }; view.fresh.col = true; draw(); })
-              .catch((e) => { view.colErr = e.message; view.fresh.col = true; draw(); });
-            api('GET', '/sources/tidal/playlists').then((pls) => { view.pls = pls; view.fresh.pls = true; draw(); })
-              .catch((e) => { view.plsErr = e.message; view.fresh.pls = true; draw(); });
+            drawCol(); drawPls(); drawTop();
+            setTimeout(() => { if (!(view.fresh.col && view.fresh.pls)) { view.slow = true; drawTop(); } }, 2000);
+            api('GET', '/sources/tidal/collection').then((col) => { view.col = { albums: col.albums.slice(0, 20), tracks: col.tracks.slice(0, 50), nAlbums: col.albums.length, nTracks: col.tracks.length }; view.fresh.col = true; drawCol(); settled(); })
+              .catch((e) => { view.colErr = e.message; view.fresh.col = true; drawCol(); settled(); });
+            api('GET', '/sources/tidal/playlists').then((pls) => { view.pls = pls; view.fresh.pls = true; drawPls(); settled(); })
+              .catch((e) => { view.plsErr = e.message; view.fresh.pls = true; drawPls(); settled(); });
           }
           const ssa = $('#ssearchall'); if (ssa) ssa.onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); search.select(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
           break;
