@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-02
+
+- **Copying to the homeserver, follow-ups from review.** Job progress and its controls show for the owner only, as the polling always did. Choosing another artist while the first one's songs still load no longer copies the first one's songs for it. A node that lists running jobs only keeps the finished summary when one look at it fails (it looks again). Leaving the album list while it pages in no longer keeps half the albums: the list loads whole next time. Bringing files here says how it ended (or why it stopped) however the node reports it.
+
 ### 2026-11-01
 
 - **Each person signs in to their own streaming accounts** (owner's decision). TIDAL, Qobuz and Spotify had one sign-in per node, the owner's, and a listener's TIDAL song played with it; sharing one paid account breaks those services' terms. Now:
