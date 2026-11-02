@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-02
+
+- **A smart playlist's feed keeps when it was created.** Rewriting the music feed of a smart playlist with tags from the network (any edit) set its `created_at` to the time of the edit; it now keeps the first save's.
+
 ### 2026-11-01
 
 - **Each person signs in to their own streaming accounts** (owner's decision). TIDAL, Qobuz and Spotify had one sign-in per node, the owner's, and a listener's TIDAL song played with it; sharing one paid account breaks those services' terms. Now:
