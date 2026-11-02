@@ -23,8 +23,8 @@
 //     redraws only About when it arrives in the background;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
-//   * Play to: while something plays or is queued, every other device gets Move here (This zone
-//     gets Move to…): the song at its position, the queue and repeat move, paused stays paused,
+//   * Play to: while something plays or is queued, every other device gets Move here (the one way
+//     to move there; the Queue page has Move to…): the song at its position, the queue and repeat move, paused stays paused,
 //     out of and into This browser too, and the menu follows; the node's errors show in the menu;
 //     the device line says the protocol and model in words, with the id as a tooltip;
 //   * the sound pill in the player bar says where it plays from (the provider's mark), the path in
@@ -331,7 +331,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const sub = row(nz.id).locator('.sub').first();
       const subText = await sub.evaluate((e) => { const c = e.cloneNode(true); c.querySelectorAll('.sr-only').forEach((x) => x.remove()); return c.textContent; }); // the id is there too, for screen readers only
       check(subText === 'Null output, for developers · HomePod mini' && (await sub.getAttribute('title')) === nz.output, `the device line is in words, the id a tooltip (${subText})`);
-      check(await p.locator('#zpmove').count() === 1, 'and This zone has Move to…');
+      check(await p.locator('#zpmove').count() === 0 && !/Move to…/.test(await p.textContent('#zonepop')), 'one way to move: no Move to… under This zone (UX sweep A14)');
       await row(nz.id).locator('[data-move]').click();
       check(await waitText(p, '#zonename', nz.name), 'Move here: the zone in use is the new one');
       const zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`);
@@ -651,7 +651,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           const vis = !!crumb && getComputedStyle(crumb.closest('.crumbs')).display !== 'none';
           return { trail: vis, diff: vis ? Math.round(Math.abs(mid(back) - mid(crumb)) * 10) / 10 : 0, backFont: getComputedStyle(back).fontSize, crumbFont: vis ? getComputedStyle(crumb).fontSize : null, backMb: getComputedStyle(back).marginBottom, barMb: getComputedStyle(bar).marginBottom };
         });
-        check(m.trail === (w > 720) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
+        check(m.trail === (w > 1024) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
         // An artist page has no trail: the bar keeps the same gap below
         await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
         const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
@@ -905,8 +905,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(/^pubkyauth:/.test(await p.getAttribute('#loginring', 'href')), 'the link opens Pubky Ring');
       check((await p.textContent('#loginh')).trim() === 'Log in to CI node', 'the screen names the node');
       const hint = await p.textContent('#logintoken');
-      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1, 'the API token stays as the alternative, saying where it is');
-      await p.click('#logintoken summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
+      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1 && !(await p.$eval('#logintoken .tokwhere', (d) => d.open)) && (await p.$eval('#tokhint', (e) => e.textContent.length)) < 90, 'the API token stays as the alternative (one short line, where to find it folded: UX sweep A20), saying where it is');
+      await p.click('#logintoken > summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
       check(await waitText(p, '#tokerr', 'The node doesn\u2019t take that token.') && await p.isVisible('#loginpage'), 'a wrong token is said on the screen');
       await p.fill('#tok', TOKEN); await p.click('#tokform button[type=submit]');
       check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false) && await visible(p, '#me'), 'the right token logs in');

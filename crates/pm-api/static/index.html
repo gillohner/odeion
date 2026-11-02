@@ -131,8 +131,15 @@
     <div id="loginbody" aria-live="polite"></div>
     <details class="logintoken" id="logintoken"><summary class="muted small">Use the node’s API token instead</summary>
       <form id="tokform">
-        <p class="muted small">The node makes one and keeps it in the <code>api-token</code> file in its data folder (Docker: <code>docker exec pubky-music cat /data/api-token</code>). One set by hand is <code>[api] token</code> in node.toml or <code>PM_TOKEN</code>. <a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">Where to find it</a>. It stays in this browser.</p>
-        <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off" aria-describedby="tokerr"></label>
+        <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off" aria-describedby="tokhint tokerr"></label>
+        <p class="muted small" id="tokhint">It’s in the <code>api-token</code> file in the node’s data folder, and stays in this browser.</p>
+        <details class="tokwhere"><summary class="muted small">Where to find it</summary>
+          <ul class="muted small tokplaces">
+            <li>With Docker: <code>docker exec pubky-music cat /data/api-token</code></li>
+            <li>Set by hand: <code>[api] token</code> in node.toml, or <code>PM_TOKEN</code></li>
+            <li><a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">More in the troubleshooting guide</a></li>
+          </ul>
+        </details>
         <p class="warn-text small" id="tokerr" role="alert"></p>
         <div class="dialog-actions"><button class="btn" type="submit">Log in with the token</button></div>
       </form>
