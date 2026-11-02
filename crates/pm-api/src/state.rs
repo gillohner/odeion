@@ -157,6 +157,8 @@ pub struct NodeState {
     /// What the Pinakes in use ships (the names of its `/v1/info` limits), asked at most every
     /// ten minutes (`home::pinakes_limits`).
     pub pinakes_caps: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+    /// Copies to the homeserver: the queue, kept across restarts (copy_jobs.rs).
+    pub(crate) copy_jobs: crate::copy_jobs::CopyJobs,
     /// A fake homeserver and disk for the copy jobs' tests (copy_guard.rs); none in use.
     #[allow(clippy::type_complexity)]
     pub(crate) copy_seams: std::sync::Mutex<(
@@ -426,6 +428,7 @@ impl NodeState {
             upload_jobs: Default::default(),
             pinakes_caps: Default::default(),
             copy_seams: Default::default(),
+            copy_jobs: Default::default(),
             events,
             sources_off,
             sync: Mutex::new(None),

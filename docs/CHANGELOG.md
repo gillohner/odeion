@@ -15,6 +15,14 @@ Newest first. Dates are when the change landed on `main`.
   - Songs dropped on the Add music page keep the reserve of the disk they wait on while they arrive, counting the other uploads too.
 - **Copying to the homeserver, follow-ups from review.** Job progress and its controls show for the owner only, as the polling always did. Choosing another artist while the first one's songs still load no longer copies the first one's songs for it. A node that lists running jobs only keeps the finished summary when one look at it fails (it looks again). Leaving the album list while it pages in no longer keeps half the albums: the list loads whole next time. Bringing files here says how it ended (or why it stopped) however the node reports it.
 - **A smart playlist's feed keeps when it was created.** Rewriting the music feed of a smart playlist with tags from the network (any edit) set its `created_at` to the time of the edit; it now keeps the first save's.
+- **Copy chosen folders of the library to your homeserver, in the background** (owner's ask).
+  - Pick music folders, folders inside them, shares or drive folders. The folder tree loads one level at a time from the library, never from the disk, with each folder's files, size and how many are already on the homeserver (about 50 ms for a 20 000-song library).
+  - A copy starts at once and runs on the node. One runs at a time, and the next waits in a queue. Pause, Resume, Cancel (within seconds) and Retry failed (only the files that failed). The job chip follows it through events: speed, time left, the current folder, and the errors with their files.
+  - A copy carries on after the node restarts from where it got, a paused one stays paused, and the queue is kept.
+  - A copy that doesn't fit the quota you have on the node's own homeserver is refused before it starts, with what it needs and what is left.
+  - A file that can't be read (a share gone, a permission) counts as failed with its reason, no longer as "not audio".
+  - Your homeserver's file list comes a page at a time, and searched, for libraries of 10 000 files and more.
+  - **Changed:** copies to the homeserver now go at full speed by default. A copy speed limit in Settings still keeps a copy from slowing the music down.
 
 ### 2026-11-01
 

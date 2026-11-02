@@ -167,7 +167,7 @@ pub(crate) fn visible(s: &NodeState, c: &Caller, mut zones: Vec<ZoneState>) -> V
 }
 
 /// The event as this caller may see it: `None` when it is about a zone they may not see.
-fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<ApiEvent> {
+pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<ApiEvent> {
     match ev {
         ApiEvent::Snapshot { zones } => Some(ApiEvent::Snapshot {
             zones: visible(s, c, zones.clone()),
@@ -177,6 +177,8 @@ fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<ApiEvent> {
             may_use_zone(s, c, &zone.0).then(|| ev.clone())
         }
         ApiEvent::LibraryChanged => Some(ev.clone()),
+        // The owner's copies: file names and folders on their machine
+        ApiEvent::Jobs { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
     }
 }
 

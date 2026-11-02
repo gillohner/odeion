@@ -1495,7 +1495,8 @@ async fn bringing_files_here_skips_what_the_node_has() {
     let id = job["id"].as_str().unwrap().to_string();
     let mut midway = false;
     let last = loop {
-        let (_, p) = call(&app_b, "GET", "/v1/pubky/files/jobs", None).await;
+        let (_, jobs) = call(&app_b, "GET", "/v1/pubky/files/jobs", None).await;
+        let p = jobs["current"].clone();
         if p.is_null() {
             let (_, p) = call(&app_b, "GET", &format!("/v1/pubky/files/jobs/{id}"), None).await;
             break p;

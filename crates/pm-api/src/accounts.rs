@@ -473,6 +473,7 @@ const OWNER_ONLY: &[&str] = &[
     "/library/uploads",
     "/library/imports",
     "/library/folders",
+    "/library/tree",
     "/library/scan",
     "/library/tag-fixes",
     "/outputs",
