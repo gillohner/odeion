@@ -1382,7 +1382,7 @@
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
   const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
-  const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
+  const streamUrlFor = (uri) => { const local = /^track:(\d+)$/.exec(uri || ''); if (local) return `/v1/library/tracks/${local[1]}/file${tokenQ()}`; if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
   const playSourceItems = async (qitems, replace = true, at = 'end') => {
     if (!qitems.length) return;
@@ -1398,7 +1398,7 @@
       qitems = rest;
     }
     if (isBrowser()) {
-      const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
+      const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (at === 'now' && state.browserQueue.length) { state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); browserPlay(state.browserIndex + 1); return; }
       if (replace || at === 'now') { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
       if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${countOf(bitems.length, 'tracks')} added`);
@@ -1889,7 +1889,17 @@
   };
   const playPlaylist = async (id) => {
     try {
-      if (isBrowser()) { const d = await api('GET', `/playlists/${id}`); playTracks(d.tracks.filter(Boolean), true); return; }
+      if (isBrowser()) {
+        // The list's Play shortcut uses the same resolved sources as the detail
+        // page: d.tracks alone omits all service-only entries.
+        const [d, pf] = await Promise.all([api('GET', `/playlists/${id}`), api('GET', `/playlists/${encodeURIComponent(id)}/play-from`)]);
+        const songs = pf.items.flatMap((r, k) => !r.plays_from || ['link', 'post'].includes(d.entries && d.entries[k] && d.entries[k].kind) ? [] : [{
+          uri: r.stream_uri || r.uri, track_id: r.plays_from.service === 'library' ? (r.track_id ?? (d.tracks[k] && d.tracks[k].id)) : null,
+          title: r.title, artist: r.artist, album: r.album, duration_ms: r.duration_ms, image: r.image,
+        }]);
+        const local = (d.local_tracks || []).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), album: t.album && t.album.title, duration_ms: t.duration_ms }));
+        return playSongs([...songs, ...local]);
+      }
       startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
       const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
       startSent();
@@ -3871,7 +3881,7 @@
   // (`GET /v1/discover/play`); nothing connected offers Sources and a preview.
   // ---- one row, one tile, one menu (docs/ux/08-item-page.md) ----
   const imgSrc = (u) => (u && u.startsWith('/v1/') ? u + tokenQ() : u);
-  const qOf = (t, fallback = {}) => ({ uri: t.uri, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
+  const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
   // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
   const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
     const first = songs[k];
@@ -3883,7 +3893,9 @@
     if (!list.length) return toast('Nothing here plays on your services', 'error');
     if (pf && pf.mode === 'connect') return spotifyPlay(list.map((t) => t.uri).filter(Boolean), anchorEl);
     if (list.every((t) => t.track_id != null)) { try { const tr = await Promise.all(list.map((t) => api('GET', `/library/tracks/${t.track_id}`))); return how === 'replace' ? playTracks(tr, true) : playTracks(tr, false, how); } catch (e) { return toast(e.message, 'error'); } }
-    const items = list.filter((t) => t.uri).map((t) => qOf(t, fallback));
+    // In a mixed queue a library row has track_id, not a provider URI.
+    // Keep every playable row (and duplicates) in its original position.
+    const items = list.map((t) => qOf(t, fallback));
     return how === 'replace' ? playSourceItems(items, true) : playSourceItems(items, false, how);
   };
   const copyLink = async (path) => { const u = location.origin + path; try { await navigator.clipboard.writeText(u); toast('Link copied'); } catch { toast(u); } };
@@ -5502,7 +5514,7 @@
           const playFrom = async (i, replace = true) => {
             const items = qitems.slice(i);
             if (isBrowser()) {
-              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
+              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
               if (replace) { state.browserQueue = bitems; browserPlay(0); } else state.browserQueue.push(...bitems);
               return;
             }
@@ -5516,7 +5528,7 @@
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { await setFavourite({ uri: it.url }, !on); render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
           const ainlib = $('#ainlib'); if (ainlib) ainlib.onclick = () => setView('album', it.library_album_id);
-          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
         case 'radio': {
