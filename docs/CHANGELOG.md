@@ -14,6 +14,7 @@ Newest first. Dates are when the change landed on `main`.
   - The node's own copy of an imported song never replaces another file there: the song gets the next free name.
   - Songs dropped on the Add music page keep the reserve of the disk they wait on while they arrive, counting the other uploads too.
 - **Copying to the homeserver, follow-ups from review.** Job progress and its controls show for the owner only, as the polling always did. Choosing another artist while the first one's songs still load no longer copies the first one's songs for it. A node that lists running jobs only keeps the finished summary when one look at it fails (it looks again). Leaving the album list while it pages in no longer keeps half the albums: the list loads whole next time. Bringing files here says how it ended (or why it stopped) however the node reports it.
+- **A smart playlist's feed keeps when it was created.** Rewriting the music feed of a smart playlist with tags from the network (any edit) set its `created_at` to the time of the edit; it now keeps the first save's.
 
 ### 2026-11-01
 
