@@ -6,6 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Security fixes from the review of 2026-11-02.**
+  - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
+  - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".
+  - Posts, bookmarks, profiles and playlists read from a homeserver (anyone's, when reading someone's shared playlists) are read to 1 MiB each at most, within 30 seconds, as is each page of a listing. Music files still download as long as they take, but a homeserver that sends nothing for a minute is given up on.
+  - TIDAL tracks kept for the browser hold 256 MB together at most (they could reach six times 300 MB), and seeking in one sends a slice of it instead of copying the whole track first.
+  - A transcoded download takes a bitrate of 64, 96, 128, 160, 192, 256 or 320 kbit/s; any other number is refused (400) instead of making one more copy and ffmpeg run of the same song.
+  - TIDAL, Spotify and SoundCloud next-page links are followed only on the service's own API host. Elsewhere the call fails (502), so the account's token never goes to another host.
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.

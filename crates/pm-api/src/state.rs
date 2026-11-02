@@ -545,9 +545,17 @@ impl NodeState {
                                     );
                                 }
                             }
+                            // Scrobbles too: a listener's or a party's plays never go to the owner's
+                            // Last.fm or ListenBrainz
                             if let Some(n) = node.upgrade() {
-                                crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
-                                crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
+                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                    crate::listenbrainz::track_started(
+                                        &n,
+                                        zone_for_radio.clone(),
+                                        item.clone(),
+                                    );
+                                    crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
+                                }
                             }
                         }
                         if let pm_zones::ZoneEvent::TrackEnded { item, .. } = &event {

@@ -51,10 +51,69 @@ pub enum HomeserverError {
     },
     #[error("reading private objects needs the owner's session")]
     NeedsSession,
+    #[error("the homeserver's answer is over {max} bytes")]
+    TooLarge { max: usize },
+    #[error("the homeserver took too long to answer")]
+    Timeout,
 }
 
 /// Reads in flight at once during a sync.
 pub const FETCH_AT_ONCE: usize = 8;
+
+/// The most of one object read into memory: a post, a bookmark, a profile, a playlist (social v1
+/// caps a post at 512 KiB). Someone else's homeserver can answer anything, and a sync reads
+/// [`FETCH_AT_ONCE`] of them at a time.
+pub const OBJECT_MAX: usize = 1024 * 1024;
+
+/// The most of a private file read whole into memory by [`NodeHomeserver::download_private`];
+/// music files go to disk as they arrive with [`NodeHomeserver::download_private_to`].
+pub const FILE_MAX: usize = 1024 * 1024 * 1024;
+
+/// How long reading one object (or one page of a listing) may take, request and body. The Pubky
+/// client has no request timeout of its own, and a client-wide one would also cut the long music
+/// uploads and downloads, so each object read has its own.
+pub const OBJECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a file download may go without receiving a byte: a download takes as long as it
+/// takes (it may be paced to a rate), but a homeserver that stops sending is given up on.
+pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A response's body, refused unread when it says it is over `max` bytes and given up as soon
+/// as more than `max` arrive (a body need not say its length), or when nothing arrives for
+/// `stall` ([`STALL_TIMEOUT`]).
+async fn read_capped(
+    mut resp: reqwest::Response,
+    max: usize,
+    stall: std::time::Duration,
+) -> Result<Vec<u8>, HomeserverError> {
+    if resp.content_length().is_some_and(|n| n > max as u64) {
+        return Err(HomeserverError::TooLarge { max });
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = within(stall, async {
+        resp.chunk()
+            .await
+            .map_err(|e| HomeserverError::Transport(e.to_string()))
+    })
+    .await?
+    {
+        if out.len() + chunk.len() > max {
+            return Err(HomeserverError::TooLarge { max });
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// `read` within `limit`, else [`HomeserverError::Timeout`].
+async fn within<T>(
+    limit: std::time::Duration,
+    read: impl std::future::Future<Output = Result<T, HomeserverError>>,
+) -> Result<T, HomeserverError> {
+    tokio::time::timeout(limit, read)
+        .await
+        .unwrap_or(Err(HomeserverError::Timeout))
+}
 
 /// A tag read from a homeserver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,7 +336,7 @@ impl NodeHomeserver {
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
-                    match b.send().await {
+                    match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
                         Ok(p) => p,
                         Err(e) if is_not_found(&e) => break,
                         Err(e) => return Err(e.into()),
@@ -289,7 +348,7 @@ impl NodeHomeserver {
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
-                    match b.send().await {
+                    match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
                         Ok(p) => p,
                         Err(e) if is_not_found(&e) => break,
                         Err(e) => return Err(e.into()),
@@ -314,15 +373,15 @@ impl NodeHomeserver {
         visibility: Visibility,
         session: Option<&PubkySession>,
     ) -> Result<Vec<u8>, HomeserverError> {
-        let resp = match (visibility, session) {
-            (Visibility::Public, _) => self.pubky.public_storage().get((user, path)).await?,
-            (Visibility::Private, Some(session)) => session.storage().get(path).await?,
-            (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
-        };
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| HomeserverError::Transport(e.to_string()))
+        within(OBJECT_TIMEOUT, async {
+            let resp = match (visibility, session) {
+                (Visibility::Public, _) => self.pubky.public_storage().get((user, path)).await?,
+                (Visibility::Private, Some(session)) => session.storage().get(path).await?,
+                (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
+            };
+            read_capped(resp, OBJECT_MAX, STALL_TIMEOUT).await
+        })
+        .await
     }
 
     /// Every music post of a user: `(path, post)`. Ordinary posts are
@@ -694,14 +753,17 @@ impl NodeHomeserver {
     ) -> Result<u64, HomeserverError> {
         use tokio::io::AsyncWriteExt;
         let io = |e: std::io::Error| HomeserverError::Transport(format!("{}: {e}", dest.display()));
-        let mut resp = session.storage().get(path).await?;
+        let mut resp = within(STALL_TIMEOUT, async { Ok(session.storage().get(path).await?) }).await?;
         let mut file = tokio::fs::File::create(dest).await.map_err(io)?;
         let start = tokio::time::Instant::now();
         let mut written: u64 = 0;
-        while let Some(chunk) = resp
-            .chunk()
-            .await
-            .map_err(|e| HomeserverError::Transport(e.to_string()))?
+        // No limit on the whole download (a big file at a paced rate takes long), only on a stall
+        while let Some(chunk) = within(STALL_TIMEOUT, async {
+            resp.chunk()
+                .await
+                .map_err(|e| HomeserverError::Transport(e.to_string()))
+        })
+        .await?
         {
             file.write_all(&chunk).await.map_err(io)?;
             written += chunk.len() as u64;
@@ -720,16 +782,15 @@ impl NodeHomeserver {
         Ok(written)
     }
 
+    /// A private file whole in memory, at most [`FILE_MAX`]; music files go to disk with
+    /// [`Self::download_private_to`].
     pub async fn download_private(
         &self,
         session: &PubkySession,
         path: &str,
     ) -> Result<Vec<u8>, HomeserverError> {
-        let resp = session.storage().get(path).await?;
-        resp.bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|e| HomeserverError::Transport(e.to_string()))
+        let resp = within(STALL_TIMEOUT, async { Ok(session.storage().get(path).await?) }).await?;
+        read_capped(resp, FILE_MAX, STALL_TIMEOUT).await
     }
 }
 
@@ -1054,5 +1115,95 @@ mod full_tests {
         assert!(!is_full(&server(404)));
         assert!(!is_full(&server(413)));
         assert!(!is_full(&HomeserverError::Transport("reset".into())));
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// A server answering each connection with the next of `bodies` (`(with_length, size,
+    /// stall)`): `size` bytes, its length said or not, or after the head nothing at all for a
+    /// stall. Returns its URL and how many body bytes each answer got out.
+    fn serve(answers: Vec<(bool, usize, bool)>) -> (String, std::thread::JoinHandle<Vec<usize>>) {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/pub/x.json", server.local_addr().unwrap());
+        let t = std::thread::spawn(move || {
+            let mut sent_all = Vec::new();
+            for (with_length, size, stall) in answers {
+                let (mut c, _) = server.accept().unwrap();
+                let mut req = [0u8; 2048];
+                let _ = c.read(&mut req);
+                let len = if with_length {
+                    format!("Content-Length: {size}\r\n")
+                } else {
+                    String::new()
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{len}Connection: close\r\n\r\n"
+                );
+                c.write_all(head.as_bytes()).unwrap();
+                if stall {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    sent_all.push(0);
+                    continue;
+                }
+                let block = vec![b' '; 64 * 1024];
+                let mut sent = 0;
+                while sent < size {
+                    match c.write(&block[..block.len().min(size - sent)]) {
+                        Ok(n) if n > 0 => sent += n,
+                        _ => break,
+                    }
+                }
+                sent_all.push(sent);
+            }
+            sent_all
+        });
+        (url, t)
+    }
+
+    /// Someone else's homeserver can answer a post read with as much as it likes: an object over
+    /// [`OBJECT_MAX`] is refused unread when it says its size and given up past the cap when it
+    /// doesn't, and one that stops sending is given up (security review 2026-11-02, medium 3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_homeserver_object_is_read_to_a_cap_and_a_stall_is_given_up() {
+        const HUGE: usize = 64 * 1024 * 1024;
+        let (url, server) = serve(vec![
+            (true, 512 * 1024, false),
+            (true, HUGE, false),
+            (false, HUGE, false),
+            (false, 10, true),
+        ]);
+        let client = reqwest::Client::new();
+        let get = || async { client.get(&url).send().await.unwrap() };
+        let stall = std::time::Duration::from_millis(300);
+
+        // A post as big as social v1 allows reads whole
+        let ok = read_capped(get().await, OBJECT_MAX, stall).await.unwrap();
+        assert_eq!(ok.len(), 512 * 1024);
+        // Too big, said or not
+        for _ in 0..2 {
+            let e = read_capped(get().await, OBJECT_MAX, stall).await.unwrap_err();
+            assert!(matches!(e, HomeserverError::TooLarge { .. }), "{e}");
+        }
+        // Stalled
+        let started = std::time::Instant::now();
+        let e = read_capped(get().await, OBJECT_MAX, stall).await.unwrap_err();
+        assert!(matches!(e, HomeserverError::Timeout), "{e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        let sent = server.join().unwrap();
+        assert!(
+            sent[1] < HUGE / 4,
+            "read {} bytes of the one that said its size",
+            sent[1]
+        );
+        assert!(
+            sent[2] < HUGE / 4,
+            "read {} bytes of the one that didn't",
+            sent[2]
+        );
     }
 }
