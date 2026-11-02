@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **No smart playlist feed is left on the homeserver, and an own app stays yours after a restore** (review follow-ups). A smart playlist's music feed whose delete didn't reach the homeserver (deleting the playlist, or setting it back to "just me", while the homeserver didn't answer or the node wasn't signed in) is kept on this node and deleted at the next smart playlist list or change; a new smart playlist that can't be saved deletes the feed it just wrote. Settings › Service apps records which apps node.toml or the environment sets instead of guessing from client ids, so an app of your own that a restored backup has since replaced is still yours: it says so and can be changed (it got "set in node.toml" and 409).
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.

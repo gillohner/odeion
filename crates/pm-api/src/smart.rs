@@ -19,6 +19,12 @@ use std::sync::Arc;
 
 pub const KEY_PREFIX: &str = "smart.";
 
+/// The music feeds whose delete didn't reach the homeserver (it didn't answer, or the node wasn't
+/// signed in): tried again in the background at the next smart playlist list or write, so none
+/// stays there with nothing pointing to it (review of #159, L6). This node's own: not under
+/// [`KEY_PREFIX`], so it isn't a smart playlist and isn't in the settings copy.
+pub const GONE_FEEDS_KEY: &str = "smart_feeds.gone";
+
 /// One rule. `field`: `genre`, `artist`, `year`, `bookmark`, `plays`, `last_played`, `tag`.
 /// `favourite` is the older name of `bookmark` (rules saved before 2026-10-26 keep it).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -458,6 +464,7 @@ fn store(s: &NodeState, p: &SmartPlaylist) -> Result<(), ApiError> {
 
 /// `GET /v1/smart`.
 pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<SmartPlaylist>> {
+    sweep_gone(&s);
     Ok(Json(load_all(&s)))
 }
 
@@ -478,6 +485,7 @@ pub(crate) async fn create(
     if name.is_empty() {
         return Err(ApiError::bad_request("Give it a name"));
     }
+    sweep_gone(&s);
     let mut p = SmartPlaylist {
         id: crate::tidal::random_urlsafe(9),
         name,
@@ -485,7 +493,13 @@ pub(crate) async fn create(
         feed: None,
     };
     sync_feed(&s, &mut p).await?;
-    store(&s, &p)?;
+    if let Err(e) = store(&s, &p) {
+        // Not kept here: its new feed would point at nothing
+        if let Some(f) = p.feed {
+            forget_feed(&s, f).await;
+        }
+        return Err(e);
+    }
     Ok(Json(p))
 }
 
@@ -498,11 +512,69 @@ async fn sync_feed(s: &Arc<NodeState>, p: &mut SmartPlaylist) -> Result<(), ApiE
             .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e))?;
         p.feed = Some(f);
     } else if let Some(f) = p.feed.take() {
-        if let Err(e) = crate::smart_network::delete_feed(s, &f).await {
-            tracing::warn!(error = %e, "removing a smart playlist's music feed");
-        }
+        forget_feed(s, f).await;
     }
     Ok(())
+}
+
+/// Deletes a feed nothing points to any more; one the homeserver doesn't delete now is kept in
+/// [`GONE_FEEDS_KEY`] to try again.
+async fn forget_feed(s: &NodeState, f: crate::smart_network::FeedRef) {
+    if let Err(e) = crate::smart_network::delete_feed(s, &f).await {
+        tracing::warn!(error = %e, "removing a smart playlist's music feed; tried again later");
+        edit_gone(s, |v| {
+            if !v.iter().any(|g| g.id == f.id) {
+                v.push(f);
+            }
+        });
+    }
+}
+
+fn gone(s: &NodeState) -> Vec<crate::smart_network::FeedRef> {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(GONE_FEEDS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default()
+}
+
+/// Changes the feeds left to delete, read and written under one lock.
+fn edit_gone(s: &NodeState, f: impl FnOnce(&mut Vec<crate::smart_network::FeedRef>)) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut v: Vec<crate::smart_network::FeedRef> = lib
+        .get_setting(GONE_FEEDS_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    f(&mut v);
+    let r = if v.is_empty() {
+        lib.delete_setting(GONE_FEEDS_KEY).map(|_| ())
+    } else {
+        lib.set_setting(GONE_FEEDS_KEY, &serde_json::to_string(&v).expect("serializes"))
+    };
+    if let Err(e) = r {
+        tracing::warn!(error = %e, "keeping the music feeds left to delete");
+    }
+}
+
+/// Tries the feeds left to delete again, in the background (a delete that still fails stays).
+fn sweep_gone(s: &Arc<NodeState>) {
+    let pending = gone(s);
+    if pending.is_empty() || s.sync_handle().is_none() {
+        return;
+    }
+    let s = s.clone();
+    tokio::spawn(async move {
+        for f in pending {
+            if crate::smart_network::delete_feed(&s, &f).await.is_ok() {
+                edit_gone(&s, |v| v.retain(|g| g.id != f.id));
+            }
+        }
+    });
 }
 
 /// `PUT /v1/smart/{id}`.
@@ -512,11 +584,19 @@ pub(crate) async fn update(
     Json(b): Json<SaveSmart>,
 ) -> ApiResult<SmartPlaylist> {
     check(&b.rules)?;
+    sweep_gone(&s);
     let mut p = load(&s, &id)?;
+    let had_feed = p.feed.is_some();
     p.name = b.name.trim().chars().take(100).collect();
     p.rules = b.rules;
     sync_feed(&s, &mut p).await?;
-    store(&s, &p)?;
+    if let Err(e) = store(&s, &p) {
+        // A feed written just now (the old one keeps its id, so the stored playlist names it)
+        if let Some(f) = p.feed.filter(|_| !had_feed) {
+            forget_feed(&s, f).await;
+        }
+        return Err(e);
+    }
     Ok(Json(p))
 }
 
@@ -525,11 +605,10 @@ pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
+    sweep_gone(&s);
     let p = load(&s, &id)?;
-    if let Some(f) = &p.feed {
-        if let Err(e) = crate::smart_network::delete_feed(&s, f).await {
-            tracing::warn!(error = %e, "removing a smart playlist's music feed");
-        }
+    if let Some(f) = p.feed {
+        forget_feed(&s, f).await;
     }
     s.library
         .lock()
