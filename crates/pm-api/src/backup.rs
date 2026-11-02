@@ -71,11 +71,17 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 /// Settings that belong to this node and are never carried over (its stream key, its id, the
 /// backup schedule with its passphrase, and the hash of its API token the owner's browser
 /// sessions were made under: a short token set in the config could be guessed from it offline).
+/// Also the files jobs this node is running or keeps for its next start (copies to the
+/// homeserver, bringing files here, uploads it left half written): a restored backup never starts
+/// one nobody asked for, and the node's own carry on (#237 review, M2).
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
     SCHEDULE_KEY,
     crate::accounts::OWNER_SESSIONS_TOKEN,
+    crate::copy_jobs::JOBS_KEY,
+    crate::files::BRING_RESUME_KEY,
+    crate::copy_guard::IN_FLIGHT_KEY,
 ];
 const SCHEDULE_KEY: &str = "backup.schedule";
 /// The passphrase arrives in this header, never in a URL (URLs end up in logs).

@@ -2248,9 +2248,10 @@ pub struct UploadProgress {
     /// Every problem so far (`errors` keeps the last ones).
     #[serde(default, skip_serializing_if = "no_count")]
     pub errors_count: usize,
-    /// Failed files a retry would send again.
-    #[serde(default, skip_serializing_if = "no_count")]
-    pub failed_retryable: usize,
+    /// Failed files a retry would send again; for a copy always there, also `0` once retried
+    /// (the page then stops offering Retry failed, #237 review), left out for other jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_retryable: Option<usize>,
     /// It stopped because the homeserver is full.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub full: bool,

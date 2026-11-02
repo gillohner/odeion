@@ -8,6 +8,8 @@
 //!   on with the files after it, also when the library's list changed meanwhile.
 //! - **Guarded** as every copy is (copy_guard.rs): the disk's reserve before each file, failures
 //!   in a row, audio only, nothing half written. A file that can't be read is a failure.
+//! - **Bound** to the Pubky account signed in when it was started: it never sends into another
+//!   one (signed in as someone else while it waited, was paused or the node restarted).
 //! - **Seen** through `GET /v1/pubky/files/jobs` and the owner's `jobs` events.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -68,6 +70,11 @@ pub struct CopyJob {
     /// Bytes sent (not skipped), and samples of it for the speed.
     #[serde(default)]
     sent_bytes: u64,
+    /// The Pubky account (public key) it was started for: it never sends into another one, also
+    /// after a sign-out and a sign-in as someone else while it waited, was paused or the node
+    /// restarted (#237 review, L6). `None`: kept by a node from before, never run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
     #[serde(skip)]
     samples: VecDeque<(Instant, u64)>,
 }
@@ -212,14 +219,24 @@ pub fn admit(s: &NodeState) -> std::sync::MutexGuard<'_, ()> {
 /// A copy is running, paused or waiting: an import or bring job waits for it.
 pub fn busy(s: &NodeState) -> Option<UploadProgress> {
     let q = s.copy_jobs.queue.lock().expect("copy jobs");
-    // Held after a restart: a bring job resuming goes first, the copy waits for it
-    if q.held {
-        return None;
-    }
     q.current
         .as_ref()
         .or(q.queued.front())
         .map(|j| j.progress.clone())
+}
+
+/// The start is still settling what a stopped node left (between [`resume_after_restart`] and
+/// [`release_after_restart`]): no import or bring job is let in but the one the node resumes.
+pub fn held(s: &NodeState) -> bool {
+    s.copy_jobs.queue.lock().expect("copy jobs").held
+}
+
+/// The refusal of an import or bring job asked for while the start is held.
+pub fn settling() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "the node is still settling the uploads it had when it stopped; try again in a minute",
+    )
 }
 
 /// An import or bring job (upload_jobs) running: a copy waits for it.
@@ -472,6 +489,7 @@ pub(crate) async fn start(
         total: files.len(),
         bytes_total: files.iter().map(|(_, b)| b).sum(),
         label: Some(label_of(&s, &sel)),
+        failed_retryable: Some(0),
         ..Default::default()
     };
     let target = crate::copy_guard::target_of(&s);
@@ -521,7 +539,7 @@ pub(crate) async fn start(
     if let Err(e) = fits {
         return Ok(refused(&progress, e));
     }
-    target?;
+    let account = target?.account();
     // The plan's skips are found again as the job goes
     progress.skipped = 0;
     progress.bytes_skipped = None;
@@ -533,6 +551,7 @@ pub(crate) async fn start(
         failed_files: Vec::new(),
         sent_bytes: 0,
         samples: VecDeque::new(),
+        account: Some(account),
     };
     let out = enqueue(&s, job);
     Ok((StatusCode::ACCEPTED, Json(out)).into_response())
@@ -669,7 +688,7 @@ fn finish(s: &NodeState, id: &str, state: &str) {
 /// tried, which Retry sends with the failed ones.
 fn stop(s: &NodeState, id: &str, why: String, full: bool, left: usize) {
     update(s, id, |j| {
-        j.progress.failed_retryable = j.failed_files.len() + left;
+        j.progress.failed_retryable = Some(j.failed_files.len() + left);
         j.progress.errors.push(why.clone().into());
         j.progress.errors_count += 1;
         j.progress.stopped_reason = Some(why.clone());
@@ -677,6 +696,12 @@ fn stop(s: &NodeState, id: &str, why: String, full: bool, left: usize) {
         j.progress.error = Some(why);
     });
     finish(s, id, "failed");
+}
+
+/// Why a copy started for `account` doesn't run under the account signed in now.
+fn other_account(account: &str) -> String {
+    let short: String = account.chars().take(8).collect();
+    format!("this copy was started for another Pubky account ({short}…); sign in to it again to retry")
 }
 
 /// What became of one file.
@@ -705,12 +730,12 @@ async fn target_for(s: &Arc<NodeState>, id: &str) -> Option<Arc<dyn crate::copy_
 }
 
 async fn run_job(s: &Arc<NodeState>, id: &str) {
-    let Some((sel, after)) = ({
+    let Some((sel, after, account)) = ({
         let q = s.copy_jobs.queue.lock().expect("copy jobs");
         q.current
             .as_ref()
             .filter(|j| j.progress.id == id)
-            .map(|j| (j.selection.clone(), j.after.clone()))
+            .map(|j| (j.selection.clone(), j.after.clone(), j.account.clone()))
     }) else {
         return;
     };
@@ -743,6 +768,20 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
         }
         return;
     };
+    // Signed in as someone else since it was started: nothing goes into their homeserver
+    let Some(account) = account else {
+        return stop(
+            s,
+            id,
+            "this copy was kept by an older version that didn't note its Pubky account; start it again"
+                .into(),
+            false,
+            left,
+        );
+    };
+    if target.account() != account {
+        return stop(s, id, other_account(&account), false, left);
+    }
     let mut present: HashMap<String, Option<u64>> = match target.list().await {
         Ok(l) => {
             remember_listed(s, l.iter().map(|f| f.path.clone()));
@@ -766,6 +805,20 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
             save(s);
             notify(s);
             return;
+        }
+        // Signed out, or in as someone else, while it ran: it stops before the next file
+        match crate::copy_guard::target_of(s).map(|t| t.account()) {
+            Ok(now) if now == account => {}
+            Ok(_) => return stop(s, id, other_account(&account), false, files.len() - i),
+            Err(_) => {
+                return stop(
+                    s,
+                    id,
+                    "signed out of Pubky while it ran; sign in again and retry".into(),
+                    false,
+                    files.len() - i,
+                )
+            }
         }
         let name = path
             .file_name()
@@ -824,7 +877,7 @@ async fn run_job(s: &Arc<NodeState>, id: &str) {
                         pr.errors.drain(..n - KEEP_ERRORS);
                     }
                     j.failed_files.push((p.clone(), *size));
-                    pr.failed_retryable = j.failed_files.len();
+                    pr.failed_retryable = Some(j.failed_files.len());
                 }
                 Outcome::Space(_) => {}
             }
@@ -975,7 +1028,7 @@ pub(crate) async fn retry(
     State(s): State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<UploadProgress>), ApiError> {
-    let (mut files, stopped, sel, after) = {
+    let (mut files, stopped, sel, after, account) = {
         let q = s.copy_jobs.queue.lock().expect("copy jobs");
         if q.current.as_ref().is_some_and(|j| j.progress.id == id) {
             return Err(ApiError::new(StatusCode::CONFLICT, "that copy is still going"));
@@ -996,8 +1049,18 @@ pub(crate) async fn retry(
             j.progress.state == "failed",
             j.selection.clone(),
             j.after.clone(),
+            j.account.clone(),
         )
     };
+    // It goes to the account the copy went to; one kept from before that noted none, to the one
+    // signed in now (the owner asked for it)
+    let now = crate::copy_guard::target_of(&s)?.account();
+    if account.as_ref().is_some_and(|a| *a != now) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            other_account(account.as_deref().unwrap_or_default()),
+        ));
+    }
     if stopped {
         let s2 = s.clone();
         let all = tokio::task::spawn_blocking(move || resolve(&s2, &sel))
@@ -1014,11 +1077,22 @@ pub(crate) async fn retry(
         return Err(ApiError::new(StatusCode::CONFLICT, "nothing failed in that copy"));
     }
     {
+        // Asked twice at once: both passed the check above while the files were read, only the
+        // first one makes a job
         let mut q = s.copy_jobs.queue.lock().expect("copy jobs");
-        if let Some(j) = q.last.as_mut().filter(|j| j.progress.id == id) {
-            j.retried = true;
-            j.progress.failed_retryable = 0;
+        let j = q
+            .last
+            .as_mut()
+            .filter(|j| j.progress.id == id)
+            .ok_or_else(no_job)?;
+        if j.retried {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "that copy was retried already",
+            ));
         }
+        j.retried = true;
+        j.progress.failed_retryable = Some(0);
     }
     let sel = Selection {
         files,
@@ -1031,6 +1105,7 @@ pub(crate) async fn retry(
             total: sel.files.len(),
             bytes_total: sel.files.iter().map(|(_, b)| b).sum(),
             label: Some(label_of(&s, &sel)),
+            failed_retryable: Some(0),
             ..Default::default()
         },
         selection: sel,
@@ -1039,6 +1114,7 @@ pub(crate) async fn retry(
         failed_files: Vec::new(),
         sent_bytes: 0,
         samples: VecDeque::new(),
+        account: Some(now),
     };
     Ok((StatusCode::ACCEPTED, Json(enqueue(&s, job))))
 }
@@ -1059,6 +1135,8 @@ pub(crate) async fn dismiss_last(State(s): State<Arc<NodeState>>) -> ApiResult<J
 /// [`release_after_restart`]). A running one then carries on from where it got, a paused one
 /// waits for Resume, the queue after them.
 pub fn resume_after_restart(s: &Arc<NodeState>) {
+    // Held also without kept copies: no import or bring job comes in while the start settles
+    s.copy_jobs.queue.lock().expect("copy jobs").held = true;
     let kept = s
         .library
         .lock()

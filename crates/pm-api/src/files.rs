@@ -261,10 +261,20 @@ pub(crate) async fn upload_progress(
 }
 
 /// Only one files job at a time (copy, import or bring): they share the uplink and the
-/// homeserver. A copy is queued instead (copy_jobs.rs).
+/// homeserver. A copy is queued instead (copy_jobs.rs). None while the start settles.
 pub(crate) fn claim_job(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
+    claim_job_as(s, job, false)
+}
+
+/// `resuming`: the bring job the node resumes at start (`resume_bring`), the only one let in
+/// while the start is held; the kept copies wait for it.
+pub(crate) fn claim_job_as(s: &NodeState, job: &UploadProgress, resuming: bool) -> Result<(), ApiError> {
     let _admitted = crate::copy_jobs::admit(s);
-    if let Some(copy) = crate::copy_jobs::busy(s) {
+    if crate::copy_jobs::held(s) {
+        if !resuming {
+            return Err(crate::copy_jobs::settling());
+        }
+    } else if let Some(copy) = crate::copy_jobs::busy(s) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             format!(
@@ -736,7 +746,7 @@ async fn resume_bring(s: &Arc<NodeState>, dest: PathBuf) {
             broken: plan.broken,
             ..Default::default()
         };
-        if claim_job(&s, &progress).is_ok() {
+        if claim_job_as(&s, &progress, true).is_ok() {
             tracing::info!(
                 files = progress.total,
                 "bringing files here: carrying on after a restart"

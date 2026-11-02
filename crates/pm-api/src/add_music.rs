@@ -611,6 +611,10 @@ pub struct NewImport {
 
 fn claim(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
     let _admitted = crate::copy_jobs::admit(s);
+    // The start settles what a stopped node left first
+    if crate::copy_jobs::held(s) {
+        return Err(crate::copy_jobs::settling());
+    }
     if let Some(copy) = crate::copy_jobs::busy(s) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
