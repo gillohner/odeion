@@ -198,6 +198,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         [{ stopped_reason: 'Not enough space on this machine: 2.0 GB stay free for the homeserver.' }, 'Stopped: full', /space on this machine/],
         [{ failed: 3, stopped_reason: '3 failures in a row: the homeserver answered 503.' }, 'Stopped: failures', /3 failures in a row/],
         [{ cancelled: true, state: 'cancelled' }, 'Cancelled', /Cancelled\./],
+        [{ state: 'failed', error: 'The homeserver refused the upload: quota exceeded.' }, 'Stopped', /refused the upload: quota exceeded/],
       ];
       for (const [extra, chipText, why] of stops) {
         job.last = { id: 'j' + chipText.length, kind: 'copy', state: 'finished', finished: true, total: 25, done: 9, failed: 0, skipped: 0, bytes_total: 750e6, bytes_done: 270e6, errors: [], errors_count: 0, ...extra };
@@ -320,6 +321,8 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       await ctx.route(/\/v1\/pubky\/files$/, (r) => { if (r.request().method() !== 'DELETE') return r.continue(); const gone = r.request().postDataJSON().paths; files = files.filter((f) => !gone.includes(f.path)); return r.fulfill({ json: [] }); });
       let old = null; const sent = [];
       await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => { const b = r.request().postDataJSON(); sent.push(b); if (b.dry_run) return r.fulfill({ json: { total: 4, bytes_total: 1.2e8, skipped: 0 } }); old = { id: 'o1', kind: 'copy', total: 4, done: 0, failed: 0, skipped: 0, bytes_total: 1.2e8, bytes_done: 0, finished: false, errors: [] }; return r.fulfill({ json: old }); });
+      // Today's node has no folder list: said explicitly, since a node with the copy backend has one
+      await ctx.route(/\/v1\/library\/tree(\?.*)?$/, (r) => r.fulfill({ status: 404, json: { error: 'not found' } }));
       await ctx.route(/\/v1\/pubky\/files\/jobs$/, (r) => r.fulfill({ json: old && !old.finished ? old : null }));
       let o1fails = 1; await ctx.route(/\/v1\/pubky\/files\/jobs\/o1$/, (r) => (old && old.finished && o1fails-- > 0 ? r.fulfill({ status: 500, json: { error: 'busy' } }) : r.fulfill({ json: old })));
       const p = await ctx.newPage(); const errors = []; p.on('pageerror', (e) => errors.push(e.message));

@@ -966,7 +966,7 @@
   // the space it keeps free running out, failures in a row), never shown as done
   const jobCancelled = (p) => !!(p.cancelled || p.state === 'cancelled');
   const jobStopped = (p) => jobDone(p) && (jobCancelled(p) || p.state === 'failed' || !!p.stopped_reason || !!p.full);
-  const jobStopWhy = (p) => p.stopped_reason || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
+  const jobStopWhy = (p) => p.stopped_reason || (p.state === 'failed' && p.error) || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
   const jobStopShort = (p) => (jobCancelled(p) && !p.stopped_reason ? 'Cancelled' : /space|full|reserve|room/i.test(jobStopWhy(p)) ? 'Stopped: full' : /in a row/i.test(jobStopWhy(p)) ? 'Stopped: failures' : 'Stopped');
   const jobTitle = (p) => (p.kind === 'import' ? (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
     ? (jobDone(p) ? (jobStopped(p) ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
