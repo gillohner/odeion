@@ -273,8 +273,8 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => (await p.getAttribute('.ctrow[data-cpath="/slow"]', 'aria-checked')) === 'mixed' && (await p.getAttribute('.ctrow[data-cpath="/slow/f1"]', 'aria-checked')) === 'false' && (await p.getAttribute('.ctrow[data-cpath="/slow/f250"]', 'aria-checked')) === 'true', 6000), 'and the untick is done once the page is in');
       // The album picker pages through a library with 2 500 albums (the node answers 1 000 at most)
       // (the second page answers slowly the first time, so the choice can change while it loads)
-      const albumAsks = []; let slowPage = true;
-      await ctx.route(/\/v1\/library\/albums(\?.*)?$/, async (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); if (u.searchParams.get('after') === '1000' && slowPage) { slowPage = false; await sleep(1500); } const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });
+      const albumAsks = []; let slowPage = true; let failPage = false;
+      await ctx.route(/\/v1\/library\/albums(\?.*)?$/, async (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); if (u.searchParams.get('after') === '1000' && failPage) { failPage = false; return r.fulfill({ status: 500, json: { error: 'database is locked' } }); } if (u.searchParams.get('after') === '1000' && slowPage) { slowPage = false; await sleep(1500); } const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });
       // Artists already loaded; Albums, then back to Artists while an album page is out: its
       // albums don't land in the artist list
       await p.click('[data-cpick="artist"]'); await p.waitForSelector('[data-cpid="1"]');
@@ -290,6 +290,16 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       await p.click('[data-cpick="artist"]'); await sleep(150); asked = albumAsks.length;
       await p.click('[data-cpick="album"]'); await sleep(2000); await p.fill('#cpq', 'Album 2400');
       check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))) && albumAsks.length - asked === 3 && albumAsks.every((q) => /limit=1000/.test(q)), `overlapping album loads: the newer list is whole and searchable (${albumAsks.length - asked} requests)`);
+      // A failed page: the error and Try again stay, also while typing a search (the part that came
+      // isn't drawn over them); Try again loads the list whole
+      // (a new dialog: the one open has the whole list already)
+      await p.goto(BASE + '/library'); await p.waitForSelector('#pkcopyall', { timeout: 15000 }); await p.click('#pkcopyall'); await p.waitForSelector('[data-cpick="album"]');
+      failPage = true; await p.click('[data-cpick="album"]');
+      await until(async () => (await p.locator('#cplretry').count()) === 1, 5000);
+      await p.fill('#cpq', 'Album 1'); await sleep(300);
+      check(await p.locator('#cplretry').count() === 1 && /database is locked/.test(await p.textContent('#cplist')), 'a failed album page: the error and Try again stay while typing a search');
+      await p.click('#cplretry'); await p.fill('#cpq', 'Album 2400');
+      check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))), 'and Try again loads the whole list');
       // An artist's songs answering slowly belong to that artist, not to the one chosen meanwhile
       await p.click('[data-cpick="artist"]'); await p.fill('#cpq', ''); await p.waitForSelector('[data-cpid="1"]');
       await p.click('[data-cpid="1"]'); await sleep(700); await p.click('[data-cpid="2"]'); await sleep(2000);

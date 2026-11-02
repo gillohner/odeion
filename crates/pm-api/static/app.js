@@ -772,7 +772,14 @@
           }
           lists.albums = got; partial.albums = null;
         }
-      } catch (e) { if (gen === loadGen && box.isConnected) box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; const b = $('#cplretry', d); if (b) b.onclick = () => loadList(kind); return; }
+      } catch (e) {
+        // Only the newest load answers: the part it had goes (a search would draw it over the
+        // error), and its Try again is the one bound
+        if (gen !== loadGen) return;
+        partial[kind] = null;
+        if (box.isConnected) { box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; $('#cplretry', d).onclick = () => loadList(kind); }
+        return;
+      }
       if (gen === loadGen) pickList(kind);
     };
     let loadGen = 0;
