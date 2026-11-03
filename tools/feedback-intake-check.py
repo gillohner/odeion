@@ -61,11 +61,17 @@ import json, os, sys
 state = os.environ["FAKE_STATE"]
 with open(state) as f:
     s = json.load(f)
+import time
 if sys.argv[1] == "pending":
-    import time
+    if s.get("grandchild"):
+        import subprocess
+        g = subprocess.Popen(["sleep", "60"])
+        with open(s["grandchild"], "w") as f:
+            f.write(str(g.pid))
     time.sleep(s.get("sleep", 0))
     print(json.dumps(s["export"]))
 elif sys.argv[1] == "receipt":
+    time.sleep(s.get("receipt_sleep", 0))
     s["calls"].append(sys.argv[2:])
     with open(state, "w") as f:
         json.dump(s, f)
@@ -192,10 +198,29 @@ def fake():
         rc, out, err = intake(slow_path, "intake")
         took = time.monotonic() - t0
         check(rc == 1 and "Timeout" in err and took < 10, f"a hung fetch stops at the timeout ({rc}, {took:.1f} s)")
+        # What the stopped command started goes too (an ssh under a wrapper script)
+        pidfile = os.path.join(work, "grandchild.pid")
         with open(state, "w") as f:
-            json.dump({"export": dict(export, reports=[]), "calls": []}, f)
-        rc, out, err = intake(cfg_path, "intake")
-        check(rc == 0, f"the next intake runs: the lock went with the stopped one ({rc} {err.strip()})")
+            json.dump({"export": dict(export, reports=[]), "calls": [], "sleep": 30, "grandchild": pidfile}, f)
+        rc, out, err = intake(slow_path, "intake")
+        with open(pidfile) as f:
+            gpid = int(f.read())
+        time.sleep(0.3)
+        try:
+            with open(f"/proc/{gpid}/stat") as f:
+                alive = f.read().split(")")[-1].split()[0] != "Z"
+        except FileNotFoundError:
+            alive = False
+        check(rc == 1 and not alive, f"a stopped command's own children are stopped too ({rc}, alive={alive})")
+        # A link that drops after the fetch: the receipts stop at the first timeout, not one each
+        three = [dict(good, id=f"fb_00000000000001{i:02x}", text=f"SYNTHETIC {i}") for i in range(3)]
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=three), "calls": [], "receipt_sleep": 30}, f)
+        t0 = time.monotonic()
+        rc, out, err = intake(slow_path, "intake")
+        took = time.monotonic() - t0
+        res = json.loads(out or "{}")
+        check(rc == 0 and res.get("receipt_failed") == 3 and took < 2.5, f"receipts stop at the first timeout ({took:.1f} s, {res})")
 
         # A report the tool can't take is named by id (never by text), so it doesn't sit unseen
         stuck = dict(good, id="fb_00000000000000ee", text="y" * 4001)

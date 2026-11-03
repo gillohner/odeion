@@ -140,15 +140,17 @@
     text.setAttribute('aria-describedby', 'fb-share');
     const close = openDialog(d);
     cancel.addEventListener('click', close);
+    // Someone else is signed in now: a fresh report, shown as it would be sent
+    const cleared = () => {
+      dr = draft = fresh();
+      text.value = ''; counted(); tick.checked = false; showDetails();
+      for (const r of kinds.querySelectorAll('input')) r.checked = r.value === dr.kind;
+      error.textContent = 'The sign-in changed, so this report was cleared.';
+    };
     send.addEventListener('click', async () => {
       error.textContent = '';
       if (!text.value.trim()) { error.textContent = 'Describe the problem first.'; text.focus(); return; }
-      if (dr.who !== who()) {
-        dr = draft = fresh();
-        text.value = ''; counted(); tick.checked = false; showDetails();
-        error.textContent = 'The sign-in changed, so this report was cleared.';
-        return;
-      }
+      if (dr.who !== who()) { cleared(); return; }
       const sent = dr;
       const body = { kind: sent.kind, text: text.value, client_id: sent.client_id };
       if (sent.details) body.details = sent.details;
@@ -157,9 +159,11 @@
       try { r = await request('POST', '/feedback', body); } catch (e) { r = null; }
       const saved = r && (r.status === 201 || r.status === 200);
       if (saved && draft === sent) draft = null;
-      // Closed meanwhile, or someone else signed in: the answer is for no one here now
-      if (!d.isConnected || sent.who !== who()) return;
+      // Closed meanwhile: the answer is for no one here now
+      if (!d.isConnected) return;
       send.disabled = false; send.textContent = 'Send'; status.textContent = '';
+      // Someone else signed in meanwhile: nothing of the answer is shown to them
+      if (sent.who !== who()) { cleared(); return; }
       if (saved) {
         d.replaceChildren(
           h('h2', { id: 'fb-title', text: 'Report saved' }),

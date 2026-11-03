@@ -180,11 +180,22 @@ const afterIntake = async (browser) => {
         ok(await dlg.getByRole('textbox', { name: 'Description' }).inputValue() === '', `${w} another sign-in starts with an empty report`);
         // Signed in as someone else while the dialog is open: nothing is sent
         await dlg.getByRole('textbox', { name: 'Description' }).fill('BEN words');
+        await dlg.getByRole('radio', { name: 'Question' }).check();
         await page.evaluate(() => { window.__fbToken = 'cleo-token'; });
         const before = posts.length;
         await dlg.getByRole('button', { name: 'Send' }).click();
         await dlg.getByRole('alert').filter({ hasText: 'The sign-in changed' }).waitFor();
         ok(posts.length === before && await dlg.getByRole('textbox', { name: 'Description' }).inputValue() === '', `${w} a report is never sent under someone else's sign-in`);
+        ok(await dlg.getByRole('radio', { name: 'Problem' }).isChecked(), `${w} the cleared report shows the kind it will send`);
+        // The sign-in changes while a send is on its way: the dialog comes back usable, and says why
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('CLEO in flight');
+        let releaseFlight; hold = new Promise((res) => { releaseFlight = res; });
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await page.evaluate(() => { window.__fbToken = 'cleo2-token'; });
+        releaseFlight();
+        await dlg.getByRole('alert').filter({ hasText: 'The sign-in changed' }).waitFor();
+        const sendBtn = dlg.locator('[data-send]');
+        ok(await sendBtn.isEnabled() && (await sendBtn.textContent()) === 'Send', `${w} after a sign-in change mid-send the dialog is usable again`);
         // An edit after a lost answer: told so, and sent again as a new report
         await dlg.getByRole('textbox', { name: 'Description' }).fill('CLEO first');
         next = 409;
