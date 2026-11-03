@@ -1560,3 +1560,25 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 /* The account button: on every shell (Log out is always one tap away) */
 .me-btn.has-face { padding: 0; overflow: hidden; }
 .me-btn .face { width: 100%; height: 100%; border-radius: 50%; }
+
+/* Login and setup guides beside their controls (docs/ux/login-guides.md): a disclosure with a
+   heading, numbered steps, wrapping everywhere so a phone never scrolls sideways */
+.lguide { margin: 8px 0; max-width: 72ch; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); overflow-wrap: anywhere; }
+.lguide > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 8px 12px; cursor: pointer; }
+.lguide-h { margin: 0; font-size: 14px; font-weight: 600; color: var(--fg); }
+.lguide-body { padding: 0 12px 10px; font-size: 13px; color: var(--fg-2); }
+.lguide-meta, .lguide-done, .lguide-links { margin: 6px 0 2px; }
+.lguide-done { color: var(--fg); }
+.lguide-sub { margin: 8px 0 2px; font-size: 13px; }
+.lguide-steps, .lguide-needs, .lguide-fix { margin: 2px 0 6px; padding-left: 20px; }
+.lguide-steps > li, .lguide-needs > li, .lguide-fix > li { margin: 2px 0; }
+.lguide-code { margin: 4px 0; padding: 6px 8px; max-width: 100%; border-radius: 6px; background: var(--surface); white-space: pre-wrap; word-break: break-all; font-size: 12px; user-select: all; }
+.lguide-missing { margin: 4px 0 8px; }
+.lguide-missing > p { margin: 0 0 4px; }
+.logincard .lguide { width: 100%; text-align: left; }
+.lguide-sub { margin: 4px 0; }
+.lguide-sub > summary { cursor: pointer; }
+.lguide-sub-h { display: inline; margin: 0; font-size: 13px; }
+/* A pasted secret is masked until Show is pressed (Chromium and Safari dots; elsewhere blurred) */
+.secret-area.masked { -webkit-text-security: disc; }
+@supports not (-webkit-text-security: disc) { .secret-area.masked { filter: blur(5px); } }
