@@ -135,6 +135,25 @@ const cases={
   assert.equal(run.reads.length,2);assert.deepEqual(state.errors,[]);fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,'820-timeout-recovered.png')});
   console.log('PASS hung read times out and the retry hydrates');await run.context.close();
  },
+ // Structured credits with an explicit empty join phrase are structured: no read (review note 1).
+ async 'm2-empty-join'(browser){
+  const t={...lib(1),artists:[{id:11,name:'Artist 1',join_phrase:''}]};const m=mixed();m.d.tracks[0]=t;m.d.tracks[2]=t;
+  const run=await create(browser,820,{tracks:m.tracks,collections:[m.d.summary],fixtures:m.fx});await trackReads(run,m.tracks,()=>({}));const {page,state}=run;
+  await go(page,'/playlist/c1');await page.locator('#plsongs [data-splay]').first().waitFor();await sleep(1200);
+  assert.deepEqual(run.reads,[],'no hydration read');assert.deepEqual(await credits(page,'#plsongs .srow:first-child [data-artist-credit]'),['Artist 1']);
+  assert.equal(await page.locator('#plsongs [data-artist-credit]').first().getAttribute('href'),'/artist/lib-11');assert.deepEqual(state.errors,[]);
+  console.log('PASS structured credit with empty join phrase: zero reads, exact link');await run.context.close();
+ },
+ // A slow read for the page being left never writes the next page's credits (review note 2).
+ async 'm2-stale-generation'(browser){
+  const l=legacy(1);const run=await create(browser,1280,{tracks:l.ts,collections:[summary],fixtures:l.fx});const {page,state}=run;
+  await trackReads(run,l.ts,(id,n)=>n===0?{delay:1500,body:{...l.ts[0],artists:[{id:91,name:'Stale A'},{id:92,name:'Stale B'}]}}:{delay:300});
+  await go(page,'/playlist/c1');await until(()=>Promise.resolve(run.reads.length===1),'first read started');
+  await page.locator('#plsongs [data-artist-credit]').first().click();await page.waitForURL(/\/search/);await page.goBack();
+  const seen=new Set();const t0=Date.now();while(Date.now()-t0<3000){for(const n of await credits(page))seen.add(n);await sleep(50);}
+  assert.ok(!seen.has('Stale A')&&!seen.has('Stale B'),'stale answer never shown');assert.deepEqual(await credits(page),['Artist 1','Earth, Wind & Fire']);
+  assert.deepEqual(state.errors,[]);console.log('PASS stale same-ID read never writes the returned page');await run.context.close();
+ },
  // Hydrated links replace the fallback without losing keyboard focus, and an empty
  // structured answer keeps the fallback text.
  async 'm2-focus-empty'(browser){
@@ -145,7 +164,10 @@ const cases={
   {const l=legacy(1);const run=await create(browser,1280,{tracks:l.ts,collections:[summary],fixtures:l.fx});await trackReads(run,l.ts,()=>({body:{...l.ts[0],artists:[]}}));const {page,state}=run;
    await go(page,'/playlist/c1');await page.locator('#plsongs [data-artist-credit]').first().waitFor();await until(()=>Promise.resolve(run.reads.length===1),'read');await sleep(500);
    assert.deepEqual(await credits(page),['Artist 1, Earth, Wind & Fire'],'empty structured answer keeps the fallback');assert.deepEqual(state.errors,[]);await run.context.close();}
-  console.log('PASS hydration keeps focus; empty answer keeps fallback');
+  {const l=legacy(1);const run=await create(browser,1280,{tracks:l.ts,collections:[summary],fixtures:l.fx});await trackReads(run,l.ts,()=>({body:{...l.ts[0],artists:[{id:5},{id:6,name:''}]}}));const {page,state}=run;
+   await go(page,'/playlist/c1');await page.locator('#plsongs [data-artist-credit]').first().waitFor();await until(()=>Promise.resolve(run.reads.length===1),'read');await sleep(500);
+   assert.deepEqual(await credits(page),['Artist 1, Earth, Wind & Fire'],'nameless credits keep the fallback, no blank links');assert.deepEqual(state.errors,[]);await run.context.close();}
+  console.log('PASS hydration keeps focus; empty or nameless answer keeps fallback');
  },
 };
 (async()=>{const browser=await chromium.launch();let n=0;try{

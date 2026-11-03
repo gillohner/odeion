@@ -2380,6 +2380,8 @@
     hyd.seen.clear();
     for (const c of hyd.active) c.abort();
   };
+  // A structured answer worth showing: at least one named artist (else the flattened credit stays)
+  const namedCredits = (t) => Array.isArray(t && t.artists) && t.artists.some((a) => a && a.name);
   const showCredits = (id, t) => creditEls(id).forEach((el) => {
     const focused = el.contains(document.activeElement);
     el.insertAdjacentHTML('afterend', artistLinksHtml({ track_id: Number(id), artists: t.artists }));
@@ -2396,7 +2398,7 @@
       hyd.reading++; hyd.active.add(ctrl); s.tries++;
       api('GET', `/library/tracks/${id}`, undefined, { signal: ctrl.signal }).then((t) => {
         rememberTracks([t]);
-        if (Array.isArray(t.artists) && t.artists.length) showCredits(id, t);
+        if (gen === hyd.gen && namedCredits(t)) showCredits(id, t); // only the page that asked
       }).catch((e) => {
         if (gen !== hyd.gen || (ctrl.signal.aborted && !late)) return; // left the page: not a failure
         const transient = late || !e.status || e.status >= 500 || e.status === 408 || e.status === 429;
@@ -2407,8 +2409,9 @@
   };
   const hydrateArtistCredits = (root) => {
     $$('[data-credit-track]', root).forEach((el) => {
-      const id = el.dataset.creditTrack;
-      if (!/^\d+$/.test(id) || hyd.seen.has(id) || hyd.seen.size >= ARTIST_READS || (state.trackCache.get('track:' + id) || {}).artists) return;
+      const id = el.dataset.creditTrack; const known = state.trackCache.get('track:' + id);
+      if (known && Array.isArray(known.artists)) { if (namedCredits(known)) showCredits(id, known); return; } // read meanwhile
+      if (!/^\d+$/.test(id) || hyd.seen.has(id) || hyd.seen.size >= ARTIST_READS) return;
       hyd.seen.set(id, { tries: 0 }); hyd.queue.push(id);
     });
     pumpCredits();
