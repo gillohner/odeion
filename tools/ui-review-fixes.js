@@ -53,6 +53,17 @@ async function trackReads(run,ts,answer){
 }
 const credits=(page,sel='#plsongs [data-artist-credit]')=>page.locator(sel).allTextContents();
 const cases={
+ // A skipped Connect notice must not replace a failed local lookup's error.
+ async 'm1-play-error-visible'(browser){
+  const l=legacy(1);l.fx['/playlists/c1/play-from'].body.items.push({uri:mb(50),stream_uri:null,plays_from:{service:'spotify',mode:'connect'},title:'Connect only'});
+  l.fx['/playlists/c1'].body.tracks.push(null);l.fx['/playlists/c1'].body.entries.push({kind:'track',uri:mb(50)});
+  const run=await create(browser,1280,{tracks:[],collections:[summary],fixtures:l.fx});
+  await trackReads(run,l.ts,()=>({status:503,body:{error:'Track lookup failed'}}));
+  await go(run.page,'/playlists');await run.page.locator('[data-plplay="c1"]').click();
+  await until(()=>Promise.resolve(run.reads.length>0),'local lookup attempted');await sleep(300);
+  assert.match(await run.page.locator('#toast').innerText(),/Track lookup failed/,'actual playback failure remains visible, not replaced by Connect omission');
+  assert.deepEqual(run.state.errors,[]);await run.context.close();console.log('PASS list Play keeps failed lookup error visible when Connect rows are omitted');
+ },
  // M1: a Connect pick has no stream; its canonical page must never become audio.
  async 'm1-connect-omitted'(browser){
   for(const width of [1280,820,390])for(const how of ['list','detail']){

@@ -1912,8 +1912,9 @@
         const local = (d.local_tracks || []).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms }));
         const left = [...elsewhere].map(([name, n]) => `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} only through ${name}`).join('; ');
         if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
-        await playSongs([...songs, ...local]);
+        // Say what was omitted before starting: a playback failure must remain the last notice.
         if (left) toast(`${left}; left out of this browser's queue`);
+        await playSongs([...songs, ...local]);
         return;
       }
       startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
