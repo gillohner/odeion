@@ -142,6 +142,10 @@ impl Details {
 struct NewReport {
     kind: Kind,
     text: String,
+    /// The text as written (cleaned), before tokens come out: only for telling the same report
+    /// sent again from an edit, through `Inbox::digest`; never stored.
+    #[serde(skip)]
+    clean: String,
     client_id: String,
     #[serde(default)]
     details: Option<Details>,
@@ -265,6 +269,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS report (
     received_at INTEGER,
     reviewed_at INTEGER,
     receipt TEXT,
+    digest TEXT,
     UNIQUE (reporter, client_id)
 );
 CREATE INDEX IF NOT EXISTS report_sent ON report (sent_at);
@@ -316,6 +321,13 @@ impl Inbox {
         let conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
+        // An inbox made before the digest column
+        if !conn
+            .prepare("SELECT 1 FROM pragma_table_info('report') WHERE name = 'digest'")?
+            .exists([])?
+        {
+            conn.execute_batch("ALTER TABLE report ADD COLUMN digest TEXT")?;
+        }
         conn.execute(
             "INSERT OR IGNORE INTO meta (k, v) VALUES ('reporter_key', ?1)",
             params![rand::random::<[u8; 32]>().to_vec()],
@@ -346,6 +358,12 @@ impl Inbox {
         now: i64,
         still: &dyn Fn() -> bool,
     ) -> Result<(String, bool), InboxError> {
+        let details = r
+            .details
+            .as_ref()
+            .filter(|d| **d != Details::default())
+            .map(|d| serde_json::to_string(d).expect("serializes"));
+        let digest = self.digest(r, details.as_deref());
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -358,22 +376,17 @@ impl Inbox {
             "DELETE FROM report WHERE sent_at < ?1 OR (reviewed_at IS NOT NULL AND reviewed_at < ?2)",
             params![now - KEEP, now - KEEP_REVIEWED],
         )?;
-        let details = r
-            .details
-            .as_ref()
-            .filter(|d| **d != Details::default())
-            .map(|d| serde_json::to_string(d).expect("serializes"));
         let kind = serde_json::to_value(r.kind).expect("serializes");
-        let before: Option<(String, String, String, Option<String>)> = tx
+        let before: Option<(String, Option<String>)> = tx
             .query_row(
-                "SELECT id, kind, text, details FROM report WHERE reporter = ?1 AND client_id = ?2",
+                "SELECT id, digest FROM report WHERE reporter = ?1 AND client_id = ?2",
                 params![reporter, r.client_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if let Some((id, k, text, d)) = before {
-            // Sent again after a lost answer: the same report, or an edit that would be lost
-            if kind.as_str() != Some(k.as_str()) || text != r.text || d != details {
+        if let Some((id, d)) = before {
+            // Sent again after a lost answer: the same words, or an edit that would be lost
+            if d.as_deref() != Some(digest.as_str()) {
                 return Err(InboxError::Changed);
             }
             return Ok((id, false));
@@ -413,9 +426,18 @@ impl Inbox {
         }
         let id = format!("fb_{}", hex::encode(rand::random::<[u8; 8]>()));
         tx.execute(
-            "INSERT INTO report (id, client_id, reporter, kind, text, details, sent_at, state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'saved')",
-            params![id, r.client_id, reporter, kind.as_str(), r.text, details, now],
+            "INSERT INTO report (id, client_id, reporter, kind, text, details, sent_at, state, digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'saved', ?8)",
+            params![
+                id,
+                r.client_id,
+                reporter,
+                kind.as_str(),
+                r.text,
+                details,
+                now,
+                digest
+            ],
         )?;
         tx.commit()?;
         Ok((id, true))
@@ -562,6 +584,20 @@ impl Inbox {
     /// Who sent a report, as the inbox keeps it: the owner, or a listener's key hashed with this
     /// inbox's own secret. The inbox never holds anyone's key, and its short names can't be matched
     /// to a public key or to the same person on another node.
+    /// What a report says, as written: keyed with the inbox's secret, so it tells nothing by
+    /// itself. A report sent again is the same one only when this matches; comparing the stored
+    /// text instead (tokens out) would tell a sender whether a guess was a token.
+    fn digest(&self, r: &NewReport, details: Option<&str>) -> String {
+        let mut h = blake3::Hasher::new_keyed(&self.secret);
+        h.update(b"pm-feedback-report\0");
+        h.update(serde_json::to_string(&r.kind).expect("serializes").as_bytes());
+        h.update(b"\0");
+        h.update(r.clean.as_bytes());
+        h.update(b"\0");
+        h.update(details.unwrap_or("").as_bytes());
+        h.finalize().to_hex().to_string()
+    }
+
     fn reporter_of(&self, who: &Sender) -> String {
         match who {
             Sender::Owner => OWNER.into(),
@@ -588,29 +624,37 @@ fn clean(text: &str) -> String {
 /// The text with every token taken out: the `secrets` given (the sender's own, the node's API
 /// token) and anything shaped like one of the node's tokens.
 fn scrub(text: &str, secrets: &[String]) -> String {
-    // The token shapes first, so no secret inside one can cut it apart; then the secrets, longest
-    // first, every one however short
+    // Every range to take out, found in the text as written: each secret (however short) and
+    // each token shape; overlapping ranges become one, so no part of either stays
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for s in secrets.iter().filter(|s| !s.is_empty()) {
+        ranges.extend(text.match_indices(s.as_str()).map(|(at, m)| (at, at + m.len())));
+    }
     let token_char = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = TOKEN_PREFIXES.iter().filter_map(|p| rest.find(p)).min() {
-        let tail = &rest[at + 4..];
-        let run = tail.bytes().take_while(|&b| token_char(b)).count();
-        if run >= 16 {
-            out.push_str(&rest[..at]);
-            out.push_str(REMOVED);
-            rest = &tail[run..];
-        } else {
-            out.push_str(&rest[..at + 4]);
-            rest = tail;
+    for p in TOKEN_PREFIXES {
+        for (at, _) in text.match_indices(p) {
+            let run = text[at + 4..].bytes().take_while(|&b| token_char(b)).count();
+            if run >= 16 {
+                ranges.push((at, at + 4 + run));
+            }
         }
     }
-    out.push_str(rest);
-    let mut secrets: Vec<&String> = secrets.iter().filter(|s| !s.is_empty()).collect();
-    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-    for s in secrets {
-        out = out.replace(s.as_str(), REMOVED);
+    ranges.sort_unstable();
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    let mut i = 0;
+    while i < ranges.len() {
+        let (from, mut to) = ranges[i];
+        while i + 1 < ranges.len() && ranges[i + 1].0 <= to {
+            i += 1;
+            to = to.max(ranges[i].1);
+        }
+        out.push_str(&text[done..from]);
+        out.push_str(REMOVED);
+        done = to;
+        i += 1;
     }
+    out.push_str(&text[done..]);
     out
 }
 
@@ -647,11 +691,22 @@ fn refuse(status: StatusCode, msg: &str) -> Response {
 
 const NO_TOKEN: &str =
     "Reports need the node's API token set: without one the node can't tell who sent them.";
-/// The shortest node API token reports work with (the node warns below it): a shorter one could be
-/// guessed from how reports with it in them are taken.
+/// The shortest node API token reports work with, in characters (the node warns below it): a
+/// shorter one could be guessed from how reports with it in them are taken.
 pub const MIN_TOKEN: usize = 16;
 const SHORT_TOKEN: &str =
     "Reports need the node's API token to be at least 16 characters long. Ask the node's owner to set a longer one.";
+const REPORTS_OFF: &str = "Reports are off on this node for now. Its owner can turn them on.";
+
+/// Why reports are off with a short token: the owner learns why, anyone else only that they are.
+fn short_token(c: &Caller) -> &'static str {
+    if c.role == Role::Owner {
+        SHORT_TOKEN
+    } else {
+        REPORTS_OFF
+    }
+}
+
 const NOT_UNDERSTOOD: &str = "The node didn't understand that report. Reload the page and try again.";
 const NOT_SAVED: &str = "The node couldn't save the report. Try again.";
 
@@ -673,8 +728,8 @@ pub async fn send(
     let Some(api_token) = s.token() else {
         return refuse(StatusCode::FORBIDDEN, NO_TOKEN);
     };
-    if api_token.len() < MIN_TOKEN {
-        return refuse(StatusCode::FORBIDDEN, SHORT_TOKEN);
+    if api_token.chars().count() < MIN_TOKEN {
+        return refuse(StatusCode::FORBIDDEN, short_token(&c));
     }
     let Some(token) = header_token(&headers) else {
         return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
@@ -715,6 +770,7 @@ pub async fn send(
     if !r.details.as_ref().is_none_or(Details::valid) {
         return refuse(StatusCode::BAD_REQUEST, NOT_UNDERSTOOD);
     }
+    r.clean = clean(&r.text);
     r.text = match prepare(&r.text, &[api_token, token]) {
         Ok(text) => text,
         Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
@@ -773,7 +829,7 @@ pub async fn mine(
 ) -> Response {
     match s.token() {
         None => return refuse(StatusCode::FORBIDDEN, NO_TOKEN),
-        Some(t) if t.len() < MIN_TOKEN => return refuse(StatusCode::FORBIDDEN, SHORT_TOKEN),
+        Some(t) if t.chars().count() < MIN_TOKEN => return refuse(StatusCode::FORBIDDEN, short_token(&c)),
         Some(_) => {}
     }
     if header_token(&headers).is_none() {
@@ -839,6 +895,7 @@ mod tests {
         NewReport {
             kind: Kind::Problem,
             text: text.into(),
+            clean: text.into(),
             client_id: uuid::Uuid::new_v4().to_string(),
             details: None,
         }
@@ -1007,6 +1064,7 @@ mod tests {
         ));
         let edited = NewReport {
             text: "edited".into(),
+            clean: "edited".into(),
             ..first
         };
         assert!(matches!(
@@ -1066,5 +1124,19 @@ mod tests {
         ));
         assert_eq!(asked.get(), 2);
         assert!(inbox.pending(1_000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_secret_with_a_token_shape_inside_goes_whole() {
+        // An operator-chosen token that contains a node token's shape: none of it stays
+        let cfg = "Hunter2-Hunter2-pmo_abcdefghijklmnopqrstu".to_string();
+        assert_eq!(
+            scrub(&format!("x {cfg} y"), std::slice::from_ref(&cfg)),
+            "x [token removed] y"
+        );
+        assert_eq!(
+            scrub(&format!("{cfg}{cfg}"), std::slice::from_ref(&cfg)),
+            "[token removed]"
+        );
     }
 }

@@ -654,6 +654,63 @@ async fn whether_a_report_is_taken_never_depends_on_a_secret_in_it() {
     assert!(!stored(dir.path()).contains(OWNER));
 }
 
+#[tokio::test]
+async fn the_shortest_token_is_counted_in_characters() {
+    // 6 characters in 18 bytes: short however many bytes it takes. Listeners only hear that
+    // reports are off; the owner learns why
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some("日本語の鍵だ"));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s);
+    let (st, r) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(report("hi"))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    assert!(
+        !r.to_string().contains("16") && !r.to_string().contains("token"),
+        "a listener learns nothing of the token: {r}"
+    );
+    assert_eq!(stored(dir.path()), "[]");
+}
+
+#[tokio::test]
+async fn a_resent_report_never_tells_a_guess_from_the_owners_token() {
+    // Sending the same report id again is compared on what was written, not on what is stored once
+    // tokens are out: a guess at the owner's token gets the same answer, right or wrong
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s);
+    let id = uuid::Uuid::new_v4().to_string();
+    let with = |text: &str| json!({"kind": "problem", "text": text, "client_id": id});
+    let (st, _) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(with("[token removed]")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let wrong = "x".repeat(OWNER.len());
+    let (right_guess, _) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(with(OWNER))).await;
+    let (wrong_guess, _) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(with(&wrong))).await;
+    assert_eq!(right_guess, wrong_guess, "the answer gave the token away");
+    assert_eq!(right_guess, StatusCode::CONFLICT);
+    // The same words again are still the same report
+    let (st, _) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(with("[token removed]")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        inbox(dir.path()).pending(pm_api::feedback::now()).unwrap().len(),
+        1
+    );
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {

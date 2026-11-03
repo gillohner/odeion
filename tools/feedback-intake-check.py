@@ -233,6 +233,35 @@ def fake():
         except FileNotFoundError:
             alive = False
         check(rc == 1 and "Timeout" in err and not alive, f"a child left behind by an exited wrapper is stopped ({rc}, alive={alive})")
+        # An interrupt that lands after the command was reaped never signals its old process group
+        # (its id may belong to someone else by then)
+        import importlib.util
+        import subprocess as sp
+        sys.dont_write_bytecode = True
+        spec = importlib.util.spec_from_file_location("feedback_intake", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+
+        class Late(sp.Popen):
+            def wait(self, timeout=None):
+                code = super().wait(timeout)
+                if not getattr(self, "_late", False):
+                    self._late = True
+                    raise KeyboardInterrupt
+                return code
+
+        signalled = []
+        real_killpg, real_popen = tool.os.killpg, tool.subprocess.Popen
+        tool.os.killpg = lambda pgid, sig: signalled.append(pgid)
+        tool.subprocess.Popen = Late
+        try:
+            tool.run([sys.executable, "-I", "-c", "pass"], 5)
+            interrupted = False
+        except KeyboardInterrupt:
+            interrupted = True
+        finally:
+            tool.os.killpg, tool.subprocess.Popen = real_killpg, real_popen
+        check(interrupted and signalled == [], f"no signal to a reaped command's group ({interrupted}, {signalled})")
         # A link that drops after the fetch: the receipts stop at the first timeout, not one each
         three = [dict(good, id=f"fb_00000000000001{i:02x}", text=f"SYNTHETIC {i}") for i in range(3)]
         with open(state, "w") as f:

@@ -117,15 +117,16 @@ def run(argv, timeout):
             code = p.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             raise Timeout(f"{argv[0]}: TimeoutExpired after {timeout} s") from None
-        stopped = False
     except BaseException:
         # Stop the whole group, even when its first process already exited and a child it left
-        # still holds the output; before reaping it, so its id can't have gone to anyone else
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stopped = True
+        # still holds the output; only while it isn't reaped (`returncode`, never `poll()`, which
+        # would reap it), so its id can't have gone to anyone else
+        if p.returncode is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stopped = True
         raise
     finally:
         sel.close()
