@@ -599,6 +599,27 @@ async fn a_listeners_short_name_is_this_nodes_own() {
     assert!(!people.contains(&unkeyed[..8].to_string()));
 }
 
+#[tokio::test]
+async fn a_short_api_token_pasted_into_a_report_is_taken_out() {
+    // The node takes a short token from its config (with a warning); a report never keeps it
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(node(dir.path(), Some("k3y9z")));
+    let (st, _) = call(
+        &app,
+        Some("k3y9z"),
+        "POST",
+        "/v1/feedback",
+        Some(report("token k3y9z pasted")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED);
+    let kept = stored(dir.path());
+    assert!(
+        !kept.contains("k3y9z") && kept.contains("token [token removed] pasted"),
+        "{kept}"
+    );
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {

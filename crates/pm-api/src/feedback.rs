@@ -338,7 +338,7 @@ impl Inbox {
     }
 
     /// Save a report. `Ok((id, false))` for one sent before with the same `client_id`. `still` says
-    /// whether its sender is still signed in; it is asked last, once the inbox is this write's.
+    /// whether its sender is still signed in; it is asked first, once the inbox is this write's.
     fn add(
         &mut self,
         reporter: &str,
@@ -349,6 +349,11 @@ impl Inbox {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Asked first, once the inbox is this write's: a sender who signed out meanwhile learns
+        // nothing from it (not a retry's id, an edit's 409 or a full window)
+        if !still() {
+            return Err(InboxError::SignedOut);
+        }
         tx.execute(
             "DELETE FROM report WHERE sent_at < ?1 OR (reviewed_at IS NOT NULL AND reviewed_at < ?2)",
             params![now - KEEP, now - KEEP_REVIEWED],
@@ -401,9 +406,6 @@ impl Inbox {
         let size = r.text.len() + details.as_ref().map_or(0, String::len);
         if count as usize >= MAX_REPORTS || bytes as usize + size > MAX_BYTES {
             return Err(InboxError::Full);
-        }
-        if !still() {
-            return Err(InboxError::SignedOut);
         }
         let id = format!("fb_{}", hex::encode(rand::random::<[u8; 8]>()));
         tx.execute(
@@ -583,7 +585,8 @@ fn clean(text: &str) -> String {
 /// token) and anything shaped like one of the node's tokens.
 fn scrub(text: &str, secrets: &[String]) -> String {
     let mut t = text.to_string();
-    for s in secrets.iter().filter(|s| s.len() >= 8) {
+    // Every one, however short: a short API token is a weak one, never a reason to keep it
+    for s in secrets.iter().filter(|s| !s.is_empty()) {
         t = t.replace(s.as_str(), REMOVED);
     }
     let token_char = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
@@ -831,9 +834,11 @@ mod tests {
                 "a node-api-token-123 b pml_abcdefghijklmnop1234 c pmo_short d short",
                 &secrets
             ),
-            "a [token removed] b [token removed] c pmo_short d short"
+            "a [token removed] b [token removed] c pmo_[token removed] d [token removed]"
         );
         assert_eq!(scrub("pmg_ABCDEFGHIJKLMNOPQR!", &[]), "[token removed]!");
+        // Too short for a token's shape, and no secret: stays
+        assert_eq!(scrub("c pmo_tiny d", &[]), "c pmo_tiny d");
         assert_eq!(scrub("ünïcode pml_ stays", &[]), "ünïcode pml_ stays");
         assert_eq!(clean(" a\r\nb\u{1b}[31m\u{2066}c\t "), "a\nb[31mc");
     }
@@ -967,5 +972,48 @@ mod tests {
         assert_eq!(prepare(&text, std::slice::from_ref(&token)), Err(TOO_LONG));
         assert_eq!(prepare(" a\r\nb ", &[]), Ok("a\nb".to_string()));
         assert_eq!(prepare(" \u{7} ", &[]), Err(EMPTY));
+    }
+
+    #[test]
+    fn a_signed_out_sender_learns_nothing_from_the_inbox() {
+        // Checked first in the write: a retry, an edit, a full window all answer "signed out"
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        let first = new("first");
+        inbox.add("p", &first, 1_000, &|| true).unwrap();
+        assert!(matches!(
+            inbox.add("p", &first, 1_001, &|| false),
+            Err(InboxError::SignedOut)
+        ));
+        let edited = NewReport {
+            text: "edited".into(),
+            ..first
+        };
+        assert!(matches!(
+            inbox.add("p", &edited, 1_001, &|| false),
+            Err(InboxError::SignedOut)
+        ));
+        for i in 1..PER_HOUR {
+            inbox
+                .add("p", &new(&format!("n{i}")), 1_000 + i as i64, &|| true)
+                .unwrap();
+        }
+        assert!(matches!(
+            inbox.add("p", &new("over"), 1_100, &|| false),
+            Err(InboxError::SignedOut)
+        ));
+    }
+
+    #[test]
+    fn a_short_token_is_taken_out_too() {
+        let short = "k3y9z".to_string();
+        assert_eq!(
+            prepare("my token k3y9z here", std::slice::from_ref(&short)),
+            Ok("my token [token removed] here".to_string())
+        );
+        assert_eq!(
+            prepare("no secrets", &[String::new()]),
+            Ok("no secrets".to_string())
+        );
     }
 }

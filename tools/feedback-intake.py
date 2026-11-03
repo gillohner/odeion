@@ -97,6 +97,7 @@ def run(argv, timeout):
         raise IntakeError(f"{argv[0]}: {type(e).__name__}") from None
     deadline = time.monotonic() + timeout
     out = bytearray()
+    stopped = False
     sel = selectors.DefaultSelector()
     sel.register(p.stdout, selectors.EVENT_READ)
     try:
@@ -116,13 +117,19 @@ def run(argv, timeout):
             code = p.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             raise Timeout(f"{argv[0]}: TimeoutExpired after {timeout} s") from None
+        stopped = False
+    except BaseException:
+        # Stop the whole group, even when its first process already exited and a child it left
+        # still holds the output; before reaping it, so its id can't have gone to anyone else
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stopped = True
+        raise
     finally:
         sel.close()
-        if p.poll() is None:
-            try:
-                os.killpg(p.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        if stopped:
             p.wait()
         p.stdout.close()
     if code != 0:

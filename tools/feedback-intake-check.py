@@ -63,6 +63,13 @@ with open(state) as f:
     s = json.load(f)
 import time
 if sys.argv[1] == "pending":
+    if s.get("orphan"):
+        # A wrapper that leaves a child holding its output, and exits itself
+        import subprocess
+        g = subprocess.Popen(["sleep", "60"])
+        with open(s["orphan"], "w") as f:
+            f.write(str(g.pid))
+        os._exit(0)
     if s.get("grandchild"):
         import subprocess
         g = subprocess.Popen(["sleep", "60"])
@@ -212,6 +219,20 @@ def fake():
         except FileNotFoundError:
             alive = False
         check(rc == 1 and not alive, f"a stopped command's own children are stopped too ({rc}, alive={alive})")
+        # A wrapper that exits but leaves a child holding the output: the child is stopped too
+        pidfile = os.path.join(work, "orphan.pid")
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[]), "calls": [], "orphan": pidfile}, f)
+        rc, out, err = intake(slow_path, "intake")
+        with open(pidfile) as f:
+            gpid = int(f.read())
+        time.sleep(0.3)
+        try:
+            with open(f"/proc/{gpid}/stat") as f:
+                alive = f.read().split(")")[-1].split()[0] != "Z"
+        except FileNotFoundError:
+            alive = False
+        check(rc == 1 and "Timeout" in err and not alive, f"a child left behind by an exited wrapper is stopped ({rc}, alive={alive})")
         # A link that drops after the fetch: the receipts stop at the first timeout, not one each
         three = [dict(good, id=f"fb_00000000000001{i:02x}", text=f"SYNTHETIC {i}") for i in range(3)]
         with open(state, "w") as f:
