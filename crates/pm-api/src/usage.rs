@@ -1068,7 +1068,7 @@ impl Store {
             }
             // Only free pages (or the journal) are over: give them back first, once
             if count <= limits.max_events && live <= limits.max_store_bytes && !compacted {
-                self.conn.execute_batch("VACUUM").map_err(storage)?;
+                self.vacuum()?;
                 compacted = true;
                 continue;
             }
@@ -1120,9 +1120,18 @@ impl Store {
                 .map_err(storage)?,
         );
         if page_count > 0 && free * 4 > page_count {
-            self.conn.execute_batch("VACUUM").map_err(storage)?;
+            self.vacuum()?;
         }
         Ok(evicted)
+    }
+
+    /// Gives free pages back (it needs room for a copy of the file).
+    fn vacuum(&self) -> Result<(), Refusal> {
+        #[cfg(test)]
+        if FAIL_VACUUM.with(|f| f.get()) {
+            return Err(Refusal::Storage);
+        }
+        self.conn.execute_batch("VACUUM").map_err(storage)
     }
 
     /// Raw events kept and the file's size on disk (all its pages, with its journal or WAL).
@@ -1228,6 +1237,12 @@ impl Store {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: VACUUM fails on this thread (as it does when the disk has no room for its copy).
+    static FAIL_VACUUM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// A stored event: when (unix seconds, to the minute), alias, role, viewport, the event.
 type StoredRow = (u64, String, String, String, Event);
 
@@ -1300,6 +1315,9 @@ pub struct Usage {
     /// Tests: every use of the file fails.
     #[cfg(test)]
     fail_store: std::sync::atomic::AtomicBool,
+    /// Tests: runs inside housekeeping's retries before they write (a race made to happen).
+    #[cfg(test)]
+    retry_pause: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// What a person sees about usage insights (`GET /v1/usage/me`).
@@ -1378,6 +1396,8 @@ impl Usage {
             wake: tokio::sync::Notify::new(),
             #[cfg(test)]
             fail_store: Default::default(),
+            #[cfg(test)]
+            retry_pause: Mutex::new(None),
         }
     }
 
@@ -1608,6 +1628,10 @@ impl Usage {
                 prefs,
             )
         };
+        #[cfg(test)]
+        if let Some(pause) = self.retry_pause.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            pause();
+        }
         for (p, aliases) in cleanups {
             if self.forget_in_file(&p, &aliases).is_ok() {
                 self.lock().cleanup_pending.retain(|(q, _)| q != &p);
@@ -3223,6 +3247,256 @@ mod tests {
         let u = usage(dir.path());
         assert!(!u.status(u.epoch(&Person::Owner), t0).unwrap().enabled);
         assert!(!u.me(u.epoch(&l("a")), &l("a"), t0).unwrap().sharing);
+    }
+
+    /// Kimi K-M1, Claude M1: a removal the file could not take, then the same person invited
+    /// again and stopping: the retried removal never deletes that later Stop, also after a restart.
+    #[test]
+    fn a_retried_removal_never_takes_a_later_stop_of_the_same_person() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        {
+            let u = usage(dir.path());
+            on(&u, t0);
+            let a = open(&u, &l("a"), T1, t0);
+            send(&u, &l("a"), T1, &a, 3, t0).unwrap();
+            u.flush(1_000 * DAY).unwrap();
+            u.fail_store.store(true, Ordering::SeqCst);
+            u.forget_listener("a");
+            u.fail_store.store(false, Ordering::SeqCst);
+            // Invited again, they stop for themselves, and it is saved
+            let me = u.choose(u.epoch(&l("a")), &l("a"), false, None, t0).unwrap();
+            assert!(!me.sharing && me.saved);
+            u.housekeep(t0 + Duration::from_secs(1));
+            assert_eq!(stored(&u), 0, "the old rows are gone");
+            assert!(!u.me(u.epoch(&l("a")), &l("a"), t0).unwrap().sharing);
+        }
+        let u = usage(dir.path());
+        assert!(
+            !u.me(u.epoch(&l("a")), &l("a"), t0).unwrap().sharing,
+            "the later Stop outlives a restart"
+        );
+    }
+
+    /// Kimi K-M2, Claude L2: an On made while housekeeping saves an earlier Off waits for it, so
+    /// the file never ends up with the older Off (a restart keeps the On).
+    #[test]
+    fn a_retried_off_never_overwrites_a_later_on() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        {
+            let u = Arc::new(usage(dir.path()));
+            on(&u, t0);
+            u.fail_store.store(true, Ordering::SeqCst);
+            let off = u.set_enabled(u.epoch(&Person::Owner), false, None, t0).unwrap();
+            assert!(!off.saved);
+            u.fail_store.store(false, Ordering::SeqCst);
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let v = u.clone();
+            let generation = off.generation;
+            let later = std::thread::spawn(move || {
+                rx.recv().unwrap();
+                v.set_enabled(v.epoch(&Person::Owner), true, Some(generation), t0)
+                    .map(|s| s.enabled)
+            });
+            *u.retry_pause.lock().unwrap() = Some(Box::new(move || {
+                tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+            }));
+            u.housekeep(t0 + Duration::from_secs(1));
+            assert_eq!(later.join().unwrap(), Ok(true));
+            assert!(u.status(u.epoch(&Person::Owner), t0).unwrap().enabled);
+        }
+        let u = usage(dir.path());
+        assert!(
+            u.status(u.epoch(&Person::Owner), t0).unwrap().enabled,
+            "the file keeps the later On"
+        );
+    }
+
+    /// Kimi K-L6, Claude L2: a notice read while housekeeping saves an earlier unsaved choice
+    /// waits for it, so the file keeps the later one.
+    #[test]
+    fn a_retried_choice_never_overwrites_a_later_notice() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        {
+            let u = Arc::new(usage(dir.path()));
+            on(&u, t0);
+            u.fail_store.store(true, Ordering::SeqCst);
+            u.choose(u.epoch(&l("a")), &l("a"), false, None, t0).unwrap();
+            u.fail_store.store(false, Ordering::SeqCst);
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let v = u.clone();
+            let later = std::thread::spawn(move || {
+                rx.recv().unwrap();
+                v.notice_seen(v.epoch(&l("a")), &l("a"), NOTICE_VERSION, t0)
+                    .map(|m| m.notice_seen)
+            });
+            *u.retry_pause.lock().unwrap() = Some(Box::new(move || {
+                tx.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(300));
+            }));
+            u.housekeep(t0 + Duration::from_secs(1));
+            assert_eq!(later.join().unwrap(), Ok(NOTICE_VERSION));
+        }
+        let u = usage(dir.path());
+        let me = u.me(u.epoch(&l("a")), &l("a"), t0).unwrap();
+        assert!(!me.sharing);
+        assert_eq!(me.notice_seen, NOTICE_VERSION, "the file keeps the later notice");
+    }
+
+    /// Kimi K-M3, Claude L4: when compaction fails (no room for its copy), the file stops taking
+    /// events instead of growing past the cap, and rows that were written are never counted as
+    /// dropped. Once it compacts again, it is back under the cap and takes events again.
+    #[test]
+    fn a_compaction_that_fails_stops_the_file_growing_and_never_miscounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap: u64 = 256 << 10;
+        let u = small(dir.path(), |l| {
+            l.max_store_bytes = cap;
+            l.per_alias_per_min = 1_000_000;
+            l.per_person_per_min = 1_000_000;
+            l.global_per_min = 1_000_000;
+            l.max_batch = 1_000;
+        });
+        let t0 = Instant::now();
+        on(&u, t0);
+        let a = open(&u, &l("a"), T1, t0);
+        let visit = Event::Visit {
+            view: View::Albums,
+            surface: Surface::Page,
+            ms: Ms::Lt1000,
+            exposed: vec![
+                Control::RowPlay,
+                Control::RowMore,
+                Control::ItemPlay,
+                Control::ItemShuffle,
+                Control::PlayerToggle,
+            ],
+            used: vec![Control::RowPlay],
+            unregistered: 0,
+        };
+        let on_disk = || -> u64 {
+            let file = std::fs::metadata(dir.path().join(FILE)).unwrap().len();
+            let side: u64 = ["-journal", "-wal"]
+                .iter()
+                .filter_map(|x| std::fs::metadata(dir.path().join(format!("{FILE}{x}"))).ok())
+                .map(|m| m.len())
+                .sum();
+            file + side
+        };
+        let batch = |u: &Usage| {
+            let ev = vec![visit.clone(); 200];
+            u.ingest(u.epoch(&l("a")), &l("a"), &a, T1, &ev, 0, t0, 1_000 * DAY)
+                .unwrap();
+        };
+        FAIL_VACUUM.with(|f| f.set(true));
+        for _ in 0..40 {
+            batch(&u);
+            assert!(u.flush(1_000 * DAY).is_ok(), "what was written is no failure");
+            assert!(
+                on_disk() <= cap + cap / 2,
+                "{} bytes on disk, cap {cap}",
+                on_disk()
+            );
+        }
+        let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY).unwrap();
+        assert_eq!(s["dropped"]["queue_full"], 0, "{}", s["dropped"]);
+        FAIL_VACUUM.with(|f| f.set(false));
+        batch(&u);
+        u.flush(1_000 * DAY).unwrap();
+        assert!(on_disk() <= cap, "{} bytes on disk, cap {cap}", on_disk());
+        assert!(stored(&u) > 0);
+    }
+
+    /// Kimi K-L4: two removals of one person the file could not take are one cleanup (the owner's
+    /// status counts people), and one retry takes both.
+    #[test]
+    fn two_removals_of_one_person_are_tried_again_together() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        for _ in 0..2 {
+            let a = open(&u, &l("a"), T1, t0);
+            send(&u, &l("a"), T1, &a, 2, t0).unwrap();
+            u.flush(1_000 * DAY).unwrap();
+            u.fail_store.store(true, Ordering::SeqCst);
+            u.forget_listener("a");
+            u.fail_store.store(false, Ordering::SeqCst);
+        }
+        assert_eq!(stored(&u), 4);
+        let owner = || u.status(u.epoch(&Person::Owner), t0).unwrap().cleanup_pending;
+        assert_eq!(owner(), 1, "one person");
+        u.housekeep(t0 + Duration::from_secs(1));
+        assert_eq!(stored(&u), 0);
+        assert_eq!(owner(), 0);
+    }
+
+    /// Claude L1: a Stop or an Off sent while a Clear happened still applies; only a sign-in that
+    /// ended refuses them. Sharing again still refuses across a Clear.
+    #[test]
+    fn stop_and_off_apply_across_a_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let at_a = u.epoch(&l("a"));
+        u.clear_mine(u.epoch(&l("a")), &l("a"), t0).unwrap();
+        let me = u.choose(at_a, &l("a"), false, None, t0).unwrap();
+        assert!(!me.sharing);
+        let at = u.epoch(&Person::Owner);
+        u.clear_all(u.epoch(&Person::Owner), t0).unwrap();
+        assert!(!u.set_enabled(at, false, None, t0).unwrap().enabled);
+        let at_a = u.epoch(&l("a"));
+        u.clear_mine(u.epoch(&l("a")), &l("a"), t0).unwrap();
+        assert_eq!(
+            u.choose(at_a, &l("a"), true, Some(me.choice), t0).map(|_| ()),
+            Err(Refusal::Cleared)
+        );
+    }
+
+    /// Claude L3: a Stop made while the file can't be read never takes the person's choice
+    /// generation back, so a page that showed an older one never matches again.
+    #[test]
+    fn a_stop_made_while_the_file_cannot_be_read_never_takes_the_choice_back() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        let before = {
+            let u = usage(dir.path());
+            on(&u, t0);
+            let mut choice = 0;
+            for _ in 0..2 {
+                let stop = u.choose(u.epoch(&l("a")), &l("a"), false, None, t0).unwrap();
+                choice = u
+                    .choose(u.epoch(&l("a")), &l("a"), true, Some(stop.choice), t0)
+                    .unwrap()
+                    .choice;
+            }
+            choice
+        };
+        let u = usage(dir.path());
+        u.fail_store.store(true, Ordering::SeqCst);
+        let stop = u.choose(u.epoch(&l("a")), &l("a"), false, None, t0).unwrap();
+        assert!(!stop.sharing && !stop.saved);
+        u.fail_store.store(false, Ordering::SeqCst);
+        for shown in 0..=before {
+            assert!(
+                u.choose(u.epoch(&l("a")), &l("a"), true, Some(shown), t0)
+                    .is_err(),
+                "a page that showed choice {shown} shared again"
+            );
+        }
+        u.housekeep(t0 + Duration::from_secs(1));
+        let me = u.me(u.epoch(&l("a")), &l("a"), t0).unwrap();
+        assert!(!me.sharing && me.saved);
+        assert!(me.choice > before, "{} after {before}", me.choice);
     }
 
     #[test]
