@@ -318,16 +318,19 @@ impl Inbox {
                 })?;
             }
         }
-        let conn = Connection::open(&path)?;
+        let mut conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
-        // An inbox made before the digest column
-        if !conn
+        // An inbox made before the digest column: looked at and changed in one go, so two first
+        // opens at once can't both try to add it
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !tx
             .prepare("SELECT 1 FROM pragma_table_info('report') WHERE name = 'digest'")?
             .exists([])?
         {
-            conn.execute_batch("ALTER TABLE report ADD COLUMN digest TEXT")?;
+            tx.execute_batch("ALTER TABLE report ADD COLUMN digest TEXT")?;
         }
+        tx.commit()?;
         conn.execute(
             "INSERT OR IGNORE INTO meta (k, v) VALUES ('reporter_key', ?1)",
             params![rand::random::<[u8; 32]>().to_vec()],
@@ -343,6 +346,7 @@ impl Inbox {
 
     /// Drop what is past keeping: reviewed reports after 90 days, any after a year.
     pub fn purge(&self, now: i64) -> Result<usize, InboxError> {
+        forget_digests(&self.conn, now)?;
         Ok(self.conn.execute(
             "DELETE FROM report WHERE sent_at < ?1 OR (reviewed_at IS NOT NULL AND reviewed_at < ?2)",
             params![now - KEEP, now - KEEP_REVIEWED],
@@ -376,6 +380,7 @@ impl Inbox {
             "DELETE FROM report WHERE sent_at < ?1 OR (reviewed_at IS NOT NULL AND reviewed_at < ?2)",
             params![now - KEEP, now - KEEP_REVIEWED],
         )?;
+        forget_digests(&tx, now)?;
         let kind = serde_json::to_value(r.kind).expect("serializes");
         let before: Option<(String, Option<String>)> = tx
             .query_row(
@@ -534,12 +539,28 @@ impl Inbox {
             _ => "reviewed_at",
         };
         tx.execute(
-            &format!("UPDATE report SET state = ?1, receipt = ?2, {column} = ?3 WHERE id = ?4"),
+            &format!(
+                "UPDATE report SET state = ?1, receipt = ?2, {column} = ?3, digest = NULL WHERE id = ?4"
+            ),
             params![state.as_str(), reference, now, id],
         )?;
         tx.commit()?;
         Ok(true)
     }
+}
+
+/// How long a report can be sent again after a lost answer and still be told from an edit.
+const RESEND: i64 = DAY;
+
+/// A digest is only for telling a resend from an edit: once a report is received, or a day old,
+/// none is kept, so the inbox holds no lasting check on what was written before tokens came out.
+/// A report sent again after that is a new one (409).
+fn forget_digests(conn: &Connection, now: i64) -> Result<(), InboxError> {
+    conn.execute(
+        "UPDATE report SET digest = NULL WHERE digest IS NOT NULL AND (state != 'saved' OR sent_at < ?1)",
+        params![now - RESEND],
+    )?;
+    Ok(())
 }
 
 fn rank(s: State) -> u8 {
@@ -581,9 +602,6 @@ fn sender(c: &Caller) -> Option<Sender> {
 }
 
 impl Inbox {
-    /// Who sent a report, as the inbox keeps it: the owner, or a listener's key hashed with this
-    /// inbox's own secret. The inbox never holds anyone's key, and its short names can't be matched
-    /// to a public key or to the same person on another node.
     /// What a report says, as written: keyed with the inbox's secret, so it tells nothing by
     /// itself. A report sent again is the same one only when this matches; comparing the stored
     /// text instead (tokens out) would tell a sender whether a guess was a token.
@@ -598,6 +616,9 @@ impl Inbox {
         h.finalize().to_hex().to_string()
     }
 
+    /// Who sent a report, as the inbox keeps it: the owner, or a listener's key hashed with this
+    /// inbox's own secret. The inbox never holds anyone's key, and its short names can't be matched
+    /// to a public key or to the same person on another node.
     fn reporter_of(&self, who: &Sender) -> String {
         match who {
             Sender::Owner => OWNER.into(),
@@ -1138,5 +1159,70 @@ mod tests {
             scrub(&format!("{cfg}{cfg}"), std::slice::from_ref(&cfg)),
             "[token removed]"
         );
+    }
+
+    #[test]
+    fn a_reports_digest_goes_once_it_cannot_be_sent_again() {
+        // It only tells a resend after a lost answer from an edit: gone once received, or after a
+        // day, so the inbox never keeps a check on what was written before the tokens came out
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        let digests = |inbox: &Inbox| -> i64 {
+            inbox
+                .conn
+                .query_row("SELECT COUNT(*) FROM report WHERE digest IS NOT NULL", [], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let t = 2_000_000_000;
+        let first = new("first");
+        let (received, _) = inbox.add("p", &new("second"), t, &|| true).unwrap();
+        inbox.add("p", &first, t, &|| true).unwrap();
+        assert_eq!(digests(&inbox), 2);
+        assert!(inbox.receipt(&received, State::Received, "r1", t + 1).unwrap());
+        assert_eq!(digests(&inbox), 1, "received: no resend to tell apart");
+        inbox.purge(t + DAY + 1).unwrap();
+        assert_eq!(digests(&inbox), 0, "a day on: none kept");
+        assert!(matches!(
+            inbox.add("p", &first, t + DAY + 2, &|| true),
+            Err(InboxError::Changed)
+        ));
+    }
+
+    #[test]
+    fn an_inbox_from_before_the_digest_opens_and_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Connection::open(dir.path().join(FILE)).unwrap();
+        old.execute_batch(
+            "CREATE TABLE report (id TEXT PRIMARY KEY, client_id TEXT NOT NULL, reporter TEXT NOT NULL,
+                kind TEXT NOT NULL, text TEXT NOT NULL, details TEXT, sent_at INTEGER NOT NULL,
+                state TEXT NOT NULL, received_at INTEGER, reviewed_at INTEGER, receipt TEXT,
+                UNIQUE (reporter, client_id));
+             CREATE TABLE meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);
+             INSERT INTO report (id, client_id, reporter, kind, text, sent_at, state)
+                VALUES ('fb_00000000000000aa', 'c-old', 'p', 'problem', 'old', 1000, 'saved');",
+        )
+        .unwrap();
+        drop(old);
+        // Two opens at once: both see the column, neither fails
+        let opened: Vec<_> = (0..2)
+            .map(|_| {
+                let d = dir.path().to_path_buf();
+                std::thread::spawn(move || Inbox::open(&d).map(|_| ()))
+            })
+            .collect();
+        for o in opened {
+            o.join().unwrap().unwrap();
+        }
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        let mut again = new("old");
+        again.client_id = "c-old".into();
+        // A report from before has no digest: sent again it is a new one (409), never a guess check
+        assert!(matches!(
+            inbox.add("p", &again, 2000, &|| true),
+            Err(InboxError::Changed)
+        ));
+        assert!(inbox.add("p", &new("new"), 2000, &|| true).unwrap().1);
     }
 }

@@ -617,6 +617,9 @@ async fn a_node_with_a_short_api_token_takes_no_reports() {
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+        // The owner learns why; a listener only that reports are off
+        let says_why = r["error"].as_str().unwrap().contains("16 characters");
+        assert_eq!(says_why, who == "k3y9z", "{who}: {r}");
         let (st, _) = call(&app, Some(who), "GET", "/v1/feedback/mine", None).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
     }
@@ -667,6 +670,12 @@ async fn the_shortest_token_is_counted_in_characters() {
     assert!(
         !r.to_string().contains("16") && !r.to_string().contains("token"),
         "a listener learns nothing of the token: {r}"
+    );
+    let (st, r) = call(&app, Some(&ann), "GET", "/v1/feedback/mine", None).await;
+    assert_eq!(
+        st,
+        StatusCode::FORBIDDEN,
+        "counted in characters on both routes: {r}"
     );
     assert_eq!(stored(dir.path()), "[]");
 }
