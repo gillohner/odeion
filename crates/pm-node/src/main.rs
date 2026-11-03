@@ -115,6 +115,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DiscoverCmd,
     },
+    /// Usage insights, read from this node's data folder (never sent anywhere).
+    Usage {
+        #[command(subcommand)]
+        cmd: UsageCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum UsageCmd {
+    /// Aggregates only: counts per page, control, outcome and friction, as JSON.
+    Summary,
+    /// Raw events with per-export session names and the summary, as JSON.
+    Export,
 }
 
 #[derive(Subcommand)]
@@ -691,6 +704,20 @@ async fn main() -> anyhow::Result<()> {
                     social::discover_friends(&pc, &viewer, limit).await?
                 }
             }
+        }
+        Cmd::Usage { cmd } => {
+            // Read-only: the running node keeps writing; this never changes the file
+            let dir = cfg
+                .db_path()
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let out = match cmd {
+                UsageCmd::Summary => pm_api::usage::summary_of_folder(&dir, node_version()),
+                UsageCmd::Export => pm_api::usage::export_of_folder(&dir, node_version()),
+            }
+            .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
     }
     Ok(())

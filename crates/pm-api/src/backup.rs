@@ -640,6 +640,10 @@ async fn restore_locked(
             .collect();
         Ok(())
     })();
+    // People's tokens and the owner's sessions are the restored library's now: usage insights
+    // let in before end, and nothing let in with an old credential changes anything (usage.rs).
+    // Their file is not in the backup and stays as it is (choices included)
+    s.usage.revoke_all();
     remove_db(&staged);
     done?;
     s.reload_sources_off();
