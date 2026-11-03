@@ -2935,6 +2935,129 @@ mod tests {
         assert!(!st.enabled, "a later read never turns it back on");
     }
 
+    /// Kimi K3: the cap holds for the file as it is on disk (free pages and journal included),
+    /// not only for the pages in use.
+    #[test]
+    fn the_size_cap_holds_for_the_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap: u64 = 256 << 10;
+        let u = small(dir.path(), |l| {
+            l.max_store_bytes = cap;
+            l.per_alias_per_min = 1_000_000;
+            l.per_person_per_min = 1_000_000;
+            l.global_per_min = 1_000_000;
+            l.max_batch = 1_000;
+        });
+        let t0 = Instant::now();
+        on(&u, t0);
+        let a = open(&u, &l("a"), T1, t0);
+        let visit = Event::Visit {
+            view: View::Albums,
+            surface: Surface::Page,
+            ms: Ms::Lt1000,
+            exposed: vec![
+                Control::RowPlay,
+                Control::RowMore,
+                Control::ItemPlay,
+                Control::ItemShuffle,
+                Control::PlayerToggle,
+            ],
+            used: vec![Control::RowPlay],
+            unregistered: 0,
+        };
+        for _ in 0..40 {
+            let ev = vec![visit.clone(); 200];
+            u.ingest(u.epoch(&l("a")), &l("a"), &a, T1, &ev, 0, t0, 1_000 * DAY)
+                .unwrap();
+            u.flush(1_000 * DAY).unwrap();
+            let file = std::fs::metadata(dir.path().join(FILE)).unwrap().len();
+            let side: u64 = ["-journal", "-wal"]
+                .iter()
+                .filter_map(|x| std::fs::metadata(dir.path().join(format!("{FILE}{x}"))).ok())
+                .map(|m| m.len())
+                .sum();
+            assert!(
+                file + side <= cap,
+                "{} bytes on disk over a cap of {cap}",
+                file + side
+            );
+        }
+    }
+
+    /// Kimi K4: removing a listener while the file can't be written is not forgotten: it is
+    /// tried again until their linked rows and their choice are gone.
+    #[test]
+    fn a_removal_the_file_could_not_take_is_tried_again() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let a = open(&u, &l("a"), T1, t0);
+        send(&u, &l("a"), T1, &a, 3, t0).unwrap();
+        u.flush(1_000 * DAY).unwrap();
+        u.choose(u.epoch(&l("a")), &l("a"), false, None, t0).unwrap();
+        u.fail_store.store(true, Ordering::SeqCst);
+        u.forget_listener("a");
+        u.fail_store.store(false, Ordering::SeqCst);
+        assert_eq!(stored(&u), 3, "not yet: the file failed");
+        u.housekeep(t0 + Duration::from_secs(1));
+        assert_eq!(stored(&u), 0, "tried again: their linked rows are gone");
+        let pref = u.with_store(false, |s| s.pref(&l("a"))).unwrap().unwrap();
+        assert!(!pref.stopped && pref.choice == 0, "and their stored choice");
+    }
+
+    /// C1: an Off made before the file could be read never makes the switch's generation go back,
+    /// so a page from before can't match a later one.
+    #[test]
+    fn an_off_before_the_file_is_read_never_takes_the_generation_back() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        let before = {
+            let u = usage(dir.path());
+            for _ in 0..3 {
+                on(&u, t0);
+                u.set_enabled(u.epoch(&Person::Owner), false, None, t0).unwrap();
+            }
+            on(&u, t0);
+            u.status(u.epoch(&Person::Owner), t0).unwrap().generation
+        };
+        let u = usage(dir.path());
+        u.fail_store.store(true, Ordering::SeqCst);
+        u.set_enabled(u.epoch(&Person::Owner), false, None, t0).unwrap();
+        u.fail_store.store(false, Ordering::SeqCst);
+        let st = u.status(u.epoch(&Person::Owner), t0).unwrap();
+        assert!(!st.enabled);
+        assert!(st.generation > before, "{} after {before}", st.generation);
+    }
+
+    /// C3: an Off or a Stop the file couldn't take says so until it is saved, and is saved once
+    /// the file works again (so it also holds after a restart).
+    #[test]
+    fn an_unsaved_off_or_stop_says_so_and_is_saved_later() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        {
+            let u = usage(dir.path());
+            on(&u, t0);
+            u.fail_store.store(true, Ordering::SeqCst);
+            u.set_enabled(u.epoch(&Person::Owner), false, None, t0).unwrap();
+            u.choose(u.epoch(&l("a")), &l("a"), false, None, t0).unwrap();
+            u.fail_store.store(false, Ordering::SeqCst);
+            assert!(!u.status(u.epoch(&Person::Owner), t0).unwrap().saved);
+            assert!(!u.me(u.epoch(&l("a")), &l("a"), t0).unwrap().saved);
+            u.housekeep(t0 + Duration::from_secs(1));
+            assert!(u.status(u.epoch(&Person::Owner), t0).unwrap().saved);
+            assert!(u.me(u.epoch(&l("a")), &l("a"), t0).unwrap().saved);
+        }
+        // After a restart both still hold
+        let u = usage(dir.path());
+        assert!(!u.status(u.epoch(&Person::Owner), t0).unwrap().enabled);
+        assert!(!u.me(u.epoch(&l("a")), &l("a"), t0).unwrap().sharing);
+    }
+
     #[test]
     fn the_identity_is_swapped_while_usage_is_held() {
         let dir = tempfile::tempdir().unwrap();

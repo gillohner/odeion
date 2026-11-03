@@ -945,3 +945,150 @@ async fn signing_out_one_device_ends_a_batch_on_its_way_from_another() {
         StatusCode::NO_CONTENT
     );
 }
+
+/// Kimi K1: a batch whose body was on its way while the person pressed Clear mine (or the owner
+/// Clear all) never lands after the Clear.
+#[tokio::test]
+async fn a_batch_on_its_way_through_a_clear_never_lands_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let (l1, l2) = listeners(&s);
+    let app = router(s);
+    switch(&app, true).await;
+    let a1 = open(&app, &l1).await;
+    let a2 = open(&app, &l2).await;
+    // Clear mine
+    let mut late = stalled(
+        &app,
+        &l1,
+        "POST",
+        "/v1/usage/events",
+        json!({"alias": a1, "events": [nav("albums")]}),
+    );
+    late.started().await;
+    let (st, _) = call(&app, &l1, "POST", "/v1/usage/me/clear", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, out) = late.finish().await;
+    assert_eq!(st, StatusCode::CONFLICT, "let in before Clear mine: {out}");
+    assert_eq!(by_role(&export(&app).await), (0, 0));
+    // Clear all, for someone else's batch on its way
+    let mut late = stalled(
+        &app,
+        &l2,
+        "POST",
+        "/v1/usage/events",
+        json!({"alias": a2, "events": [nav("albums")]}),
+    );
+    late.started().await;
+    let (st, _) = call(&app, OWNER, "POST", "/v1/node/usage/clear", None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    let (st, out) = late.finish().await;
+    assert_eq!(st, StatusCode::CONFLICT, "let in before Clear all: {out}");
+    assert_eq!(by_role(&export(&app).await), (0, 0));
+    // Afterwards, sending works again
+    assert_eq!(
+        send(&app, &l1, &a1, json!([nav("home")])).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+/// Kimi K2: export names are fresh for every export, never the order browsers arrived in.
+#[tokio::test]
+async fn export_names_are_fresh_for_every_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let (l1, _) = listeners(&s);
+    let app = router(s);
+    switch(&app, true).await;
+    // Twelve page loads, each with its own view so the export can be read back (8 aliases a
+    // person at most: each is closed after use)
+    let views = [
+        "albums",
+        "artists",
+        "tracks",
+        "genres",
+        "playlists",
+        "favourites",
+        "radio",
+        "sources",
+        "queue",
+        "zones",
+        "settings",
+        "search",
+    ];
+    for view in views {
+        let a = open(&app, &l1).await;
+        assert_eq!(
+            send(&app, &l1, &a, json!([nav(view)])).await.0,
+            StatusCode::NO_CONTENT
+        );
+        let (st, _) = call(
+            &app,
+            &l1,
+            "POST",
+            "/v1/usage/sessions/close",
+            Some(json!({"alias": a})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+    }
+    // view → the name its page load got in one export
+    let mapping = |x: &Value| -> std::collections::BTreeMap<String, String> {
+        x["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["view"].as_str().unwrap().to_string(),
+                    e["session"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let arrival: std::collections::BTreeMap<String, String> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.to_string(), format!("s{}", i + 1)))
+        .collect();
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        seen.push(mapping(&export(&app).await));
+    }
+    assert_eq!(seen[0].len(), 12);
+    assert!(
+        seen.iter().any(|m| *m != seen[0]),
+        "names are drawn afresh for each export"
+    );
+    assert!(
+        seen.iter().any(|m| *m != arrival),
+        "names don't follow the order browsers arrived in"
+    );
+}
+
+/// C4: the close route takes the closed schema only and refuses big bodies, never echoing.
+#[tokio::test]
+async fn closing_takes_only_an_alias_and_never_echoes() {
+    const SECRET: &str = "SECRET-CANARY-c105e";
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let (l1, _) = listeners(&s);
+    let app = router(s);
+    switch(&app, true).await;
+    let alias = open(&app, &l1).await;
+    for b in [
+        format!(r#"{{"alias":"{alias}","x":"{SECRET}"}}"#),
+        format!(r#"{{"alias":"{SECRET}"}}"#),
+        format!("{SECRET} not json"),
+        format!(r#"{{"alias":"{alias}","pad":"{}{SECRET}"}}"#, "x".repeat(2 << 10)),
+    ] {
+        let (st, answer) = raw(&app, &l1, "POST", "/v1/usage/sessions/close", b).await;
+        assert!(st.is_client_error(), "{st}");
+        assert!(!answer.contains(SECRET));
+    }
+    assert_eq!(
+        send(&app, &l1, &alias, json!([nav("home")])).await.0,
+        StatusCode::NO_CONTENT,
+        "still open"
+    );
+}
