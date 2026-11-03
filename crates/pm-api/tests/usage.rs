@@ -262,7 +262,14 @@ async fn everyone_signed_in_takes_part_and_nobody_reaches_anyone_elses() {
         send(&app, &l2, &a_l1, json!([nav("home")])).await.0,
         StatusCode::GONE
     );
-    let (st, _) = call(&app, &l2, "DELETE", &format!("/v1/usage/sessions/{a_l1}"), None).await;
+    let (st, _) = call(
+        &app,
+        &l2,
+        "POST",
+        "/v1/usage/sessions/close",
+        Some(json!({"alias": a_l1})),
+    )
+    .await;
     assert_eq!(st, StatusCode::NO_CONTENT, "a fixed answer either way");
     assert_eq!(
         send(&app, &l1, &a_l1, json!([nav("home")])).await.0,
@@ -756,7 +763,7 @@ async fn a_node_without_a_token_refuses_every_usage_route() {
                 ("POST", "/v1/usage/me/clear"),
                 ("POST", "/v1/usage/me/notice"),
                 ("POST", "/v1/usage/sessions"),
-                ("DELETE", "/v1/usage/sessions/0123456789abcdef"),
+                ("POST", "/v1/usage/sessions/close"),
                 ("POST", "/v1/usage/events"),
                 ("GET", "/v1/node/usage"),
                 ("PUT", "/v1/node/usage"),
@@ -904,4 +911,37 @@ async fn the_summary_pairs_use_with_exposure_and_never_calls_anything_unused() {
         .as_str()
         .unwrap()
         .contains("not a dislike"));
+}
+
+/// T6: a listener signing out on one device ends what their other device sent on its way. That
+/// device's token still works, so only the person's epoch can refuse it (this pins the sign-out
+/// hook in accounts.rs).
+#[tokio::test]
+async fn signing_out_one_device_ends_a_batch_on_its_way_from_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let (phone, _) = listeners(&s);
+    let laptop = pm_api::accounts::mint(&s, KEY).unwrap();
+    let app = router(s);
+    switch(&app, true).await;
+    let alias = open(&app, &laptop).await;
+    let mut late = stalled(
+        &app,
+        &laptop,
+        "POST",
+        "/v1/usage/events",
+        json!({"alias": alias, "events": [nav("albums")]}),
+    );
+    late.started().await;
+    let (st, _) = call(&app, &phone, "DELETE", "/v1/me/token", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, out) = late.finish().await;
+    assert_eq!(st, StatusCode::CONFLICT, "the laptop's batch on its way: {out}");
+    assert_eq!(by_role(&export(&app).await), (0, 0));
+    // The laptop itself still works: a new alias takes part
+    let fresh = open(&app, &laptop).await;
+    assert_eq!(
+        send(&app, &laptop, &fresh, json!([nav("home")])).await.0,
+        StatusCode::NO_CONTENT
+    );
 }

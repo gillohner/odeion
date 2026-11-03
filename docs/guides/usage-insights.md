@@ -31,9 +31,11 @@ In **Settings › You › Privacy › Usage insights**, and from the help menu:
 - **Stop for me** applies at once, on every browser you are signed in with, even if the node can't
   save it right then (it says so, and the Stop holds until the node restarts). What your browser
   sent and the node had not written yet is not written. You can turn it back on there.
-- **Clear mine** deletes what is still linked to you: the events of your open browsers and of those
-  closed within the last day. Older events are no longer linked to anyone (see below) and go when
-  they expire.
+- **Clear mine** deletes the raw events still linked to you: those of your open browsers and of
+  up to 200 closed within the last day. Older events are no longer linked to anyone (see below)
+  and go when they expire. The daily counts (how many pages, buttons and page loads a day, with no
+  alias) are not linked to anyone and stay their 90 days, also after Clear mine or being removed
+  from the node. On a node with one listener, those counts are mostly that person's.
 
 Stop and Clear are separate: Stop does not delete, and Clear does not stop.
 
@@ -102,4 +104,8 @@ Nothing is sent anywhere by itself. There is no third-party service.
 - Shown and not used is not a dislike. A use rate needs at least 30 visits that showed the button,
   from at least 5 browsers; below that the summary says `insufficient`.
 - Trouble signals show where to look, not why.
+- One very busy person can fill much of the raw-event storage and weigh heavily in the summary.
+  Read the per-alias counts next to the rates.
+- In a download, events are ordered by time and then by browser, never by when they arrived, so
+  the order says nothing finer than the minute.
 - Usage insights can't replace asking people. Use the feedback entry (the "?" button) for that.

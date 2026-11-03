@@ -722,7 +722,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/usage/me/notice", post(usage::notice))
         .route("/usage/me/clear", post(usage::clear_mine))
         .route("/usage/sessions", post(usage::open))
-        .route("/usage/sessions/{id}", delete(usage::close))
+        .route("/usage/sessions/close", post(usage::close))
         .route("/usage/events", post(usage::ingest))
         .route("/auth/pubky/renewal", post(login_renewal))
         .route("/me/listens", get(listens::list).delete(listens::delete_all))

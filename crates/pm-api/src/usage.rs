@@ -36,7 +36,7 @@ use crate::accounts::{Caller, Role};
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -561,6 +561,12 @@ struct Choice {
     /// The choice generation the page showed (`Me::choice`); needed to share again.
     #[serde(default)]
     choice: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Close {
+    alias: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1662,6 +1668,9 @@ impl Usage {
             let was_on = inner.node_on;
             inner.node_on = false;
             inner.node_generation = generation;
+            // A later read of the file never turns it back on (it may say on, if this Off could
+            // not be saved): until a restart, memory decides
+            inner.loaded = true;
             Self::end_aliases(&mut inner, |_| true, now);
             saved = self
                 .with_store(was_on, |s| {
@@ -2285,8 +2294,12 @@ fn export_of(s: &Store, limits: &Limits, app_version: &str, unix: u64) -> Result
             o.insert("at".into(), serde_json::json!(at));
             o.insert("session".into(), serde_json::json!(n));
         }
-        events.push(v);
+        events.push((at, n, v));
     }
+    // By time, then session: never the order they arrived in within a minute (it would tell
+    // apart times finer than the minute kept)
+    events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let events: Vec<serde_json::Value> = events.into_iter().map(|(_, _, v)| v).collect();
     let sessions: Vec<_> = sessions
         .into_iter()
         .map(|(id, (role, viewport, n))| serde_json::json!({"id": id, "role": role, "viewport": viewport, "events": n}))
@@ -2524,19 +2537,23 @@ pub(crate) async fn open(
     })))
 }
 
-/// `DELETE /v1/usage/sessions/{alias}`: this page load is leaving.
+/// `POST /v1/usage/sessions/close {"alias"}`: this page load is leaving. The alias goes in the
+/// body, never the address, so no proxy or access log keeps it next to an IP.
 pub(crate) async fn close(
     State(s): State<Arc<NodeState>>,
     Extension(c): Extension<Caller>,
     headers: HeaderMap,
     Query(query): Token,
-    Path(id): Path<String>,
+    body: Body,
 ) -> Result<StatusCode, ApiError> {
-    let (p, at, token) = let_in(&s, &c, &headers, &query)?;
-    if !valid_alias(&id) {
+    let (p, at, _) = let_in(&s, &c, &headers, &query)?;
+    let body = read(body, MAX_SMALL_BODY).await?;
+    let token = still(&s, &p, &headers, &query)?;
+    let c: Close = parse(&body)?;
+    if !valid_alias(&c.alias) {
         return Err(Refusal::BadAlias.into());
     }
-    s.usage.close(at, &p, &id, &token, Instant::now())?;
+    s.usage.close(at, &p, &c.alias, &token, Instant::now())?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2896,6 +2913,26 @@ mod tests {
                 .map(|_| ()),
             Err(Refusal::Storage)
         );
+    }
+
+    #[test]
+    fn an_off_made_while_the_file_cannot_be_read_holds_until_a_restart() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = Instant::now();
+        {
+            let u = usage(dir.path());
+            on(&u, t0);
+        }
+        // The node starts again; its file can't be read yet
+        let u = usage(dir.path());
+        u.fail_store.store(true, Ordering::SeqCst);
+        let st = u.set_enabled(u.epoch(&Person::Owner), false, None, t0).unwrap();
+        assert!(!st.enabled && !st.saved);
+        // The file reads again (it still says on): Off holds
+        u.fail_store.store(false, Ordering::SeqCst);
+        let st = u.status(u.epoch(&Person::Owner), t0).unwrap();
+        assert!(!st.enabled, "a later read never turns it back on");
     }
 
     #[test]
