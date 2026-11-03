@@ -718,22 +718,9 @@ impl StreamingService for Spotify {
 
     async fn artist(&self, s: &NodeState, id: &str) -> Result<SourceArtist, ApiError> {
         let a = valid_id(id.strip_prefix("artist:").unwrap_or(id))?;
-        let (p1, p2, q2) = (
-            format!("/artists/{a}"),
-            format!("/artists/{a}/albums"),
-            [
-                ("include_groups", "album,single".to_string()),
-                ("limit", "50".to_string()),
-            ],
-        );
-        let (ar, albums) = tokio::join!(get_json(s, &p1, &[]), get_json(s, &p2, &q2));
-        let ar = ar?;
+        let ar = get_json(s, &format!("/artists/{a}"), &[]).await?;
         let name = ar["name"].as_str().unwrap_or("").to_string();
-        let mut albums: Vec<SourceHit> = albums?["items"]
-            .as_array()
-            .map(|l| l.iter().filter_map(album_hit).collect())
-            .unwrap_or_default();
-        albums.sort_by_key(|x| std::cmp::Reverse(x.year));
+        let (albums, catalogue) = artist_catalogue(s, a).await;
         Ok(SourceArtist {
             source: SOURCE_ID.into(),
             id: format!("artist:{a}"),
@@ -742,8 +729,111 @@ impl StreamingService for Spotify {
             url: spotify_url("artist", a),
             albums,
             library_artist_id: None,
+            catalogue: Some(catalogue),
         })
     }
+}
+
+/// An artist's albums and singles on Spotify (up to [`crate::releases::MAX_RELEASES`]): pages
+/// of 10 (Get Artist's Albums allows `limit` 1–10) followed by `next` until Spotify's `total`,
+/// each with its `album_type`. Only the groups asked for: `include_groups=album,single` (the
+/// artist's compilations and appearances are not fetched, and Spotify's `total` counts only
+/// these). Complete only when the last page was reached with every row of Spotify's `total`. A
+/// page that fails, one with nothing new while there is more, a `next` link off this artist's
+/// list or a list ending short of its `total` ends the fetch with what arrived and says why.
+async fn artist_catalogue(s: &NodeState, a: &str) -> (Vec<ArtistRelease>, Catalogue) {
+    let max = crate::releases::MAX_RELEASES;
+    let mut cat = Catalogue {
+        source: SOURCE_ID.into(),
+        ..Default::default()
+    };
+    let list = format!("/artists/{a}/albums");
+    let mut out: Vec<ArtistRelease> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = 0u64;
+    let mut next: Option<String> = None;
+    let mut reached_end = false;
+    for page_no in 0..crate::releases::max_pages(10) {
+        let page = if page_no == 0 {
+            get_json(
+                s,
+                &list,
+                &[
+                    ("include_groups", "album,single".to_string()),
+                    ("limit", "10".to_string()),
+                ],
+            )
+            .await
+        } else {
+            // Checked before the token is attached
+            match crate::releases::checked_next(&api_base(s), &next.take().unwrap_or_default(), &list) {
+                Ok(u) => get_json(s, &u, &[]).await,
+                Err(e) => {
+                    cat.error = Some(format!("Spotify: {e}"));
+                    break;
+                }
+            }
+        };
+        let page = match page {
+            Ok(p) => p,
+            Err(e) => {
+                cat.error = Some(e.message);
+                break;
+            }
+        };
+        if let Some(t) = page["total"].as_u64() {
+            cat.total = Some(t);
+        }
+        let items = page["items"].as_array().cloned().unwrap_or_default();
+        rows += items.len() as u64;
+        let mut fresh = 0;
+        for x in &items {
+            // Spotify sends a null for an album the account can no longer see
+            let Some(hit) = album_hit(x) else { continue };
+            if !seen.insert(hit.id.clone()) {
+                continue;
+            }
+            fresh += 1;
+            if out.len() == max {
+                cat.truncated = true;
+                break;
+            }
+            out.push(ArtistRelease {
+                hit,
+                release: crate::releases::spotify(x),
+            });
+        }
+        next = page["next"].as_str().map(str::to_string);
+        if cat.truncated {
+            break;
+        }
+        if next.is_none() {
+            reached_end = true;
+            break;
+        }
+        if fresh == 0 {
+            cat.error = Some(format!(
+                "Spotify's page {} brought nothing new but said there was more",
+                page_no + 1
+            ));
+            break;
+        }
+        if out.len() == max {
+            cat.truncated = true;
+            break;
+        }
+    }
+    if !reached_end && cat.error.is_none() {
+        cat.truncated = true;
+    }
+    if reached_end && cat.error.is_none() {
+        if let Some(t) = cat.total.filter(|t| rows < *t) {
+            cat.error = Some(format!("Spotify listed {rows} of its {t} releases"));
+        }
+    }
+    cat.complete = cat.error.is_none() && !cat.truncated && reached_end;
+    crate::releases::sort_releases(&mut out);
+    (out, cat)
 }
 
 // ---- sign-in ----

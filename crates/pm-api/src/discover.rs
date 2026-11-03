@@ -847,15 +847,19 @@ pub(crate) async fn isrc_versions_for(s: &NodeState, isrc: &str, skip: &[&str]) 
 
 /// An album's tracklist (a release, or the first release of a release
 /// group) or an artist's albums, from MusicBrainz.
-async fn musicbrainz_contents(s: &NodeState, kind: &str, mbid: &str) -> (Vec<ItemTrack>, Vec<ItemAlbum>) {
+pub(crate) async fn musicbrainz_contents(
+    s: &NodeState,
+    kind: &str,
+    mbid: &str,
+) -> (Vec<ItemTrack>, Vec<ItemAlbum>, Option<Catalogue>) {
     let contact = s.contact();
     if contact.is_empty() || pm_model::Mbid::parse(mbid).is_err() {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), None);
     }
     let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
     cfg.base_url = s.mb_base.read().expect("mb lock").clone();
     let Ok(mb) = pm_library::musicbrainz::MusicBrainzClient::new(cfg) else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), None);
     };
     let ms = |v: &serde_json::Value| v.as_u64();
     match kind {
@@ -893,7 +897,7 @@ async fn musicbrainz_contents(s: &NodeState, kind: &str, mbid: &str) -> (Vec<Ite
                 }
             }
             let Some(rel) = rel else {
-                return (Vec::new(), Vec::new());
+                return (Vec::new(), Vec::new(), None);
             };
             let credit = |v: &serde_json::Value| {
                 v["artist-credit"].as_array().map(|a| {
@@ -932,31 +936,60 @@ async fn musicbrainz_contents(s: &NodeState, kind: &str, mbid: &str) -> (Vec<Ite
                     }
                 })
                 .collect();
-            (tracks, Vec::new())
+            (tracks, Vec::new(), None)
         }
         "artist" => {
-            let Some(g) = mb
-                .get_json(
-                    "release-group",
-                    &[("artist", mbid), ("type", "album"), ("limit", "100")],
-                )
-                .await
-                .ok()
-                .flatten()
-            else {
-                return (Vec::new(), Vec::new());
+            // Every release group of every type, 100 a page until MusicBrainz's count (up to
+            // MAX_RELEASES, and a bounded number of pages), each typed by its primary type: the
+            // page sorts them into sections. Without a count, the first short page is the end.
+            let max = crate::releases::MAX_RELEASES;
+            let mut cat = Catalogue {
+                source: "musicbrainz".into(),
+                ..Default::default()
             };
-            let mut albums: Vec<ItemAlbum> = g["release-groups"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|x| x["secondary-types"].as_array().is_none_or(|a| a.is_empty()))
-                .filter_map(|x| {
-                    let id = x["id"].as_str()?;
+            let mut albums: Vec<ItemAlbum> = Vec::new();
+            let mut offset = 0usize;
+            let mut reached_end = false;
+            for page_no in 0..crate::releases::max_pages(100) {
+                let off = offset.to_string();
+                let g = match mb
+                    .get_json(
+                        "release-group",
+                        &[("artist", mbid), ("limit", "100"), ("offset", off.as_str())],
+                    )
+                    .await
+                {
+                    Ok(Some(g)) => g,
+                    // No such artist on MusicBrainz: nothing to list
+                    Ok(None) if page_no == 0 => return (Vec::new(), Vec::new(), None),
+                    Ok(None) => {
+                        cat.error = Some("MusicBrainz stopped listing the release groups".into());
+                        break;
+                    }
+                    // Said, not shown as "no releases"
+                    Err(e) => {
+                        cat.error = Some(format!("MusicBrainz: {e}"));
+                        break;
+                    }
+                };
+                cat.total = g["release-group-count"].as_u64().or(cat.total);
+                let groups = g["release-groups"].as_array().cloned().unwrap_or_default();
+                offset += groups.len();
+                for x in &groups {
+                    if albums.len() == max {
+                        cat.truncated = true;
+                        break;
+                    }
+                    let (Some(id), Some(title)) = (x["id"].as_str(), x["title"].as_str()) else {
+                        continue;
+                    };
                     let page = format!("https://musicbrainz.org/release-group/{id}");
-                    Some(ItemAlbum {
+                    if albums.iter().any(|a| a.page == page) {
+                        continue;
+                    }
+                    albums.push(ItemAlbum {
                         id: page_id(&page),
-                        title: x["title"].as_str()?.to_string(),
+                        title: title.to_string(),
                         year: x["first-release-date"]
                             .as_str()
                             .and_then(|d| d.get(..4))
@@ -965,13 +998,40 @@ async fn musicbrainz_contents(s: &NodeState, kind: &str, mbid: &str) -> (Vec<Ite
                             "https://coverartarchive.org/release-group/{id}/front-250"
                         )),
                         page,
-                    })
-                })
-                .collect();
-            albums.sort_by_key(|a| std::cmp::Reverse(a.year));
-            (Vec::new(), albums)
+                        release: crate::releases::musicbrainz(x),
+                    });
+                }
+                if cat.truncated {
+                    break;
+                }
+                let more = match cat.total {
+                    Some(t) => (offset as u64) < t,
+                    None => groups.len() >= 100,
+                };
+                if !more {
+                    reached_end = true;
+                    break;
+                }
+                if groups.is_empty() {
+                    cat.error = Some(format!(
+                        "MusicBrainz listed {offset} of its {} release groups",
+                        cat.total.unwrap_or(0)
+                    ));
+                    break;
+                }
+                if albums.len() == max {
+                    cat.truncated = true;
+                    break;
+                }
+            }
+            if !reached_end && cat.error.is_none() {
+                cat.truncated = true;
+            }
+            crate::releases::sort_albums(&mut albums);
+            cat.complete = cat.error.is_none() && !cat.truncated && reached_end;
+            (Vec::new(), albums, Some(cat))
         }
-        _ => (Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), None),
     }
 }
 
@@ -1140,6 +1200,12 @@ pub(crate) fn contents_prefix_of(tag: &str) -> String {
 }
 
 pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
+    load_external_with(s, uri, false).await
+}
+
+/// [`load_external`]; `refresh` (the page's Retry) skips what is cached and fetches again (never
+/// twice at once: while a fetch for the link is on its way, the page waits for that one).
+pub(crate) async fn load_external_with(s: &Arc<NodeState>, uri: &str, refresh: bool) -> External {
     let uri = uri.trim().to_string();
     // Each person's apart: what plays in full (their own sign-ins) differs
     let who = crate::accounts::asking();
@@ -1154,9 +1220,23 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             .ok()
             .flatten()
             .and_then(|j| serde_json::from_str::<(i64, ItemContents)>(&j).ok())
-            // Kept a day (stored in the library, so it survives restarts): a cold page took 2.3 s
-            .filter(|(at, c)| pm_library::db::now_unix() - at < 24 * 3600 && !c.tracks.is_empty())
+            // Kept a day (stored in the library, so it survives restarts): a cold page took 2.3 s.
+            // A list that failed or stopped part-way is kept only briefly: polls of the page see
+            // it (a slow fetch finishes after the page has answered "pending"), a later look
+            // fetches again. An artist's releases kept before they carried their types (no
+            // `catalogue`) are fetched again rather than shown untyped and cut off.
+            .filter(|(at, c)| {
+                let failed = c.catalogue.as_ref().is_some_and(|k| k.error.is_some());
+                let age = pm_library::db::now_unix() - at;
+                (if failed {
+                    age < ERROR_TTL_SECS
+                } else {
+                    age < 24 * 3600
+                }) && (!c.tracks.is_empty() || (c.kind == "artist" && (!c.albums.is_empty() || failed)))
+                    && !(c.kind == "artist" && !c.albums.is_empty() && c.catalogue.is_none())
+            })
             .map(|(_, c)| c)
+            .filter(|_| !refresh)
     };
     let card = crate::pinakes_reader::card(s, &uri).await;
     let reading = matches!(card, crate::pinakes_reader::Card::Reading(_));
@@ -1191,6 +1271,13 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
         connect: res.connect.clone(),
         ..Default::default()
     };
+    // A failed list isn't shown while a new fetch of it is on its way (after Retry): the page
+    // waits for the new answer instead
+    let flight = format!("{}|{uri}", who.tag());
+    let cached = cached.filter(|c| {
+        c.catalogue.as_ref().is_none_or(|k| k.error.is_none())
+            || !in_flight().lock().expect("in flight").contains(&flight)
+    });
     if let Some(c) = cached {
         return External {
             it,
@@ -1206,7 +1293,6 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     // has ("pending") and the fetch goes on in the background, filling the cache for the next
     // look.
     // One fetch per link at a time: a page asked again while its list is on the way answers at once
-    let flight = format!("{}|{uri}", who.tag());
     let fresh = in_flight().lock().expect("in flight").insert(flight.clone());
     let task = fresh.then(|| {
         let (s, uri, it, r, acc, cache_key) = (
@@ -1263,6 +1349,10 @@ fn in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
 
 /// How long a page waits for a service's tracks and albums before answering without them.
 pub(crate) const CONTENTS_BUDGET: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// How long a list that failed or stopped part-way is kept: long enough for the page's polls to
+/// get it, short enough that a later look fetches again (a complete list is kept a day).
+pub(crate) const ERROR_TTL_SECS: i64 = 120;
 
 #[allow(clippy::too_many_arguments)]
 async fn fetch_contents(
@@ -1368,18 +1458,38 @@ async fn fetch_contents(
                         };
                         let artist_id = format!("artist:{}", l.id);
                         let (art, top) = tokio::join!(svc.artist(s, &artist_id), top_f);
-                        if let Ok(a) = art {
-                            out.albums = a
-                                .albums
-                                .iter()
-                                .map(|h| ItemAlbum {
-                                    id: page_id(&h.url),
-                                    title: h.title.clone(),
-                                    year: h.year,
-                                    image: h.image.clone(),
-                                    page: h.url.clone(),
-                                })
-                                .collect();
+                        match art {
+                            Ok(a) => {
+                                out.albums = a
+                                    .albums
+                                    .iter()
+                                    .map(|r| ItemAlbum {
+                                        id: page_id(&r.hit.url),
+                                        title: r.hit.title.clone(),
+                                        year: r.hit.year,
+                                        image: r.hit.image.clone(),
+                                        page: r.hit.url.clone(),
+                                        release: r.release.clone(),
+                                    })
+                                    .collect();
+                                // A service that doesn't say how much it listed isn't taken
+                                // for having listed everything
+                                out.catalogue = Some(a.catalogue.unwrap_or_else(|| Catalogue {
+                                    source: l.service.to_string(),
+                                    complete: false,
+                                    ..Default::default()
+                                }));
+                            }
+                            // Said, not hidden as "no releases": the page offers to try again
+                            Err(e) if out.albums.is_empty() => {
+                                out.catalogue = Some(Catalogue {
+                                    source: l.service.to_string(),
+                                    complete: false,
+                                    error: Some(e.message),
+                                    ..Default::default()
+                                });
+                            }
+                            Err(_) => {}
                         }
                         out.tracks = top
                             .unwrap_or_default()
@@ -1411,10 +1521,16 @@ async fn fetch_contents(
     // they play once a connected service has them.
     if out.tracks.is_empty() && out.albums.is_empty() {
         if let Some(mbid) = r.and_then(|r| r.mbid()) {
-            let (t, a) = musicbrainz_contents(s, &it.kind, &mbid).await;
+            let (t, a, cat) = musicbrainz_contents(s, &it.kind, &mbid).await;
             out.tracks = t;
             out.albums = a;
+            if cat.is_some() {
+                out.catalogue = cat;
+            }
         }
+    }
+    if out.kind == "artist" {
+        crate::releases::sort_albums(&mut out.albums);
     }
     for t in &mut out.tracks {
         if t.id.is_none() {
@@ -1422,7 +1538,10 @@ async fn fetch_contents(
         }
     }
     out.total_ms = out.tracks.iter().filter_map(|t| t.duration_ms).sum();
-    if !out.tracks.is_empty() || !out.albums.is_empty() {
+    // Kept, a failed or partial list too (the cache read keeps that one only for
+    // ERROR_TTL_SECS): a page polled after its budget gets the answer, not a new crawl
+    let failed = out.catalogue.as_ref().is_some_and(|c| c.error.is_some());
+    if !out.tracks.is_empty() || !out.albums.is_empty() || failed {
         let lib = s.library.lock().expect("library poisoned");
         let _ = lib.set_setting(
             cache_key,

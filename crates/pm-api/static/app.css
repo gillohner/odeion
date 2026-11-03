@@ -1560,3 +1560,18 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 /* The account button: on every shell (Log out is always one tap away) */
 .me-btn.has-face { padding: 0; overflow: hidden; }
 .me-btn .face { width: 100%; height: 100%; border-radius: 50%; }
+
+/* An artist's releases: Albums, EPs & singles, Other releases, each with View all (app.js REL_SECTIONS) */
+.relsecs { display: block; }
+.relsec + .relsec { margin-top: 28px; }
+.relhead { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.relcount { font-variant-numeric: tabular-nums; }
+.section-head .relall { min-height: 32px; padding: 6px 2px; }
+.relnote { margin: 0 0 14px; }
+.relnote .btn { margin-left: 6px; }
+.relnote .spin { display: inline-block; vertical-align: -2px; margin-right: 6px; }
+.relempty { margin: 0; }
+.relskel { height: 12px; width: 70%; margin-top: 8px; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; margin: 20px 0 8px; }
+.pageinfo { text-align: center; }
+.relsecs .art.skeleton { aspect-ratio: 1; }

@@ -6,6 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Artist pages: Albums, EPs & singles, Other releases.** An artist's releases are sorted by the type the service gives each one (TIDAL's `albumType`, Spotify's `album_type`, Deezer's `record_type`, MusicBrainz's primary type), never by a title or a track count; a compilation, or a release with no type or a type the page doesn't know, is under Other releases. Each section counts its own, is newest first and has View all: a paged grid with its own address and Back to the artist. Before, a TIDAL artist showed one "Albums" grid cut at 60 that mixed in every single and remix (owner's report).
+  - The whole catalogue is fetched, page by page, up to 500 releases and a bounded number of calls: TIDAL every page of the artist's albums, Spotify its albums and singles 10 a page (its documented limit; the node asked for 50), Deezer and MusicBrainz past their first page. Qobuz lists one page of 50 and says when it has more.
+  - Honest about what arrived: a list is complete only when the service's last page was reached with everything it counted; a failed page, a page with nothing new, a list short of its own total, releases TIDAL lists without details, or a `next` link pointing anywhere but the same artist's list on the same service (never followed, so no sign-in goes elsewhere) show what arrived, say why and offer Retry; a list cut at 500 says the service lists more. A failed list is kept two minutes, so the page shows it even when the fetch outlasted its wait, without asking the service again; Retry asks again.
+  - Releases are told apart only by the service's id: editions, explicit and clean versions and remixes with the same title all stay. MusicBrainz's secondary types (Live, Remix…) are kept and shown on the tile.
+  - TIDAL's "try again after" waits inside a request are capped at 5 s.
+  - `GET /v1/item/artist/{id}` and `GET /v1/sources/{source}/artists/{id}`: each release gains `release_type`, `released`, `compilation` and `secondary_types`; the answer gains `catalogue` (`complete`, `truncated`, `total`, `error`); the item page takes `?refresh=1`.
+
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.

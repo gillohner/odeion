@@ -573,21 +573,58 @@ impl StreamingService for Qobuz {
             ],
         )
         .await?;
+        let (albums, catalogue) = artist_releases(&a);
         Ok(SourceArtist {
             source: SOURCE_ID.into(),
             id: format!("artist:{aid}"),
             name: a["name"].as_str().unwrap_or_default().to_string(),
             image: image_of(&a),
             url: page_url("artist", &aid),
-            albums: a["albums"]["items"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(album_hit)
-                .collect(),
+            albums,
             library_artist_id: None,
+            catalogue: Some(catalogue),
         })
     }
+}
+
+/// An artist's releases from one `artist/get` answer (one page of 50: the unofficial API's paging
+/// here is not documented, so no more is asked). Honest about what the page holds against Qobuz's
+/// own count: more listed than arrived is `truncated`; no count, or rows the node can't use
+/// (no id or title), make the list incomplete with the reason; nothing is counted after filtering.
+pub(crate) fn artist_releases(a: &Value) -> (Vec<ArtistRelease>, Catalogue) {
+    let items = a["albums"]["items"].as_array().cloned().unwrap_or_default();
+    let mut albums: Vec<ArtistRelease> = items
+        .iter()
+        .filter_map(|x| {
+            Some(ArtistRelease {
+                hit: album_hit(x)?,
+                release: crate::releases::qobuz(x),
+            })
+        })
+        .collect();
+    let unusable = items.len() - albums.len();
+    crate::releases::dedupe(&mut albums);
+    crate::releases::sort_releases(&mut albums);
+    let total = a["albums"]["total"].as_u64();
+    let truncated = total.is_some_and(|t| t > items.len() as u64);
+    let error = if unusable > 0 {
+        Some(format!(
+            "Qobuz sent {} without an id or title",
+            crate::plural(unusable as u64, "release")
+        ))
+    } else if total.is_none() {
+        Some("Qobuz didn't say how many releases the artist has".to_string())
+    } else {
+        None
+    };
+    let catalogue = Catalogue {
+        source: SOURCE_ID.into(),
+        complete: error.is_none() && !truncated,
+        truncated,
+        total,
+        error,
+    };
+    (albums, catalogue)
 }
 
 // ---- status, settings, sign-in ---------------------------------------------------------------------

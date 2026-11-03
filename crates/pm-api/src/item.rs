@@ -4,7 +4,7 @@
 //! hero, songs (and albums for artists), versions, On Pubky, About, plus the
 //! playback answer and the target that tags, ratings and bookmarks attach to.
 
-use crate::discover::{load_external, page_id, url_of_page};
+use crate::discover::{page_id, url_of_page};
 use crate::state::NodeState;
 use crate::types::*;
 use crate::{ApiError, ApiResult};
@@ -26,7 +26,8 @@ pub(crate) async fn page(
         return Err(ApiError::bad_request("kind is song, album or artist"));
     }
     let lang = crate::about::language(q.lang.as_deref(), &headers);
-    let mut pg = raw_page(&s, &kind, &id, &lang).await?;
+    let refresh = q.refresh == Some(1);
+    let mut pg = raw_page(&s, &kind, &id, &lang, refresh).await?;
     // A generic id (`isrc-…`, `mb-…`) is the item's global page: platform-neutral, every source
     // a row (the library's copy too), tags on the item's own id (STEWARD-UX-INSTANCES item 8)
     if id.starts_with("isrc-") || id.starts_with("mb-") {
@@ -34,7 +35,7 @@ pub(crate) async fn page(
         // What the generic page lacks (cover, album, title) comes from the best source
         if pg.image.is_none() || pg.title.is_none() || (kind == "song" && pg.album.is_none()) {
             if let Some((pid, url)) = best_instance(&s, &pg).filter(|(pid, _)| !pid.starts_with("lib-")) {
-                let inst = external(&s, &kind, &pid, &url).await;
+                let inst = external(&s, &kind, &pid, &url, refresh).await;
                 pg.image = pg.image.take().or(inst.image);
                 pg.title = pg.title.take().or(inst.title);
                 pg.artist = pg.artist.take().or(inst.artist);
@@ -44,6 +45,8 @@ pub(crate) async fn page(
                 pg.year = pg.year.or(inst.year);
                 if pg.albums.is_empty() {
                     pg.albums = inst.albums;
+                    // The instance's account, else what the page already knew (an error, kept)
+                    pg.catalogue = inst.catalogue.or(pg.catalogue.take());
                 }
                 pg.versions.extend(inst.versions);
             }
@@ -71,7 +74,7 @@ pub(crate) async fn page(
             if let Some(isrc) = isrc {
                 let generic = format!("isrc-{isrc}");
                 pg.song_uri = url_of_page("song", &generic);
-                if let Ok(g) = raw_page(&s, &kind, &generic, &lang).await {
+                if let Ok(g) = raw_page(&s, &kind, &generic, &lang, false).await {
                     if let Some(n) = g.id.strip_prefix("lib-") {
                         pg.versions.push(Version {
                             page: None,
@@ -139,6 +142,7 @@ pub(crate) async fn page(
                     year,
                     image,
                     page: url,
+                    release: Default::default(),
                 });
                 break;
             }
@@ -155,9 +159,18 @@ pub(crate) async fn page(
 pub(crate) struct LangQuery {
     #[serde(default)]
     pub lang: Option<String>,
+    /// `1`: the page's Retry: fetch the service's lists again instead of what is cached.
+    #[serde(default)]
+    pub refresh: Option<u8>,
 }
 
-async fn raw_page(s: &Arc<NodeState>, kind: &str, id: &str, lang: &str) -> Result<ItemPage, ApiError> {
+async fn raw_page(
+    s: &Arc<NodeState>,
+    kind: &str,
+    id: &str,
+    lang: &str,
+    refresh: bool,
+) -> Result<ItemPage, ApiError> {
     if let Some(n) = id.strip_prefix("lib-") {
         let n: i64 = n
             .parse()
@@ -189,7 +202,7 @@ async fn raw_page(s: &Arc<NodeState>, kind: &str, id: &str, lang: &str) -> Resul
             }
         }
     }
-    Ok(external(s, kind, id, &url).await)
+    Ok(external(s, kind, id, &url, refresh).await)
 }
 
 /// The ISRC of a service's track (kept once known: it does not change).
@@ -541,7 +554,7 @@ pub(crate) async fn page_extras(
         }?
     } else {
         let url = url_of_page(&kind, &id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
-        external(&s, &kind, &id, &url).await
+        external(&s, &kind, &id, &url, false).await
     };
     let mut pg = pg;
     // Library reads (up to a few hundred songs): off the async workers
@@ -968,6 +981,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
                 year: a.year,
                 image: a.id.map(cover),
                 page: String::new(),
+                release: Default::default(),
             })
         })
         .into_iter()
@@ -1005,6 +1019,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         total_ms: t.duration_ms.unwrap_or(0),
         songs: vec![row],
         albums,
+        catalogue: None,
         open_on: open_on(&versions),
         versions,
         also_on: Vec::new(),
@@ -1137,6 +1152,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         total_ms: songs.iter().filter_map(|t| t.duration_ms).sum(),
         songs,
         albums: Vec::new(),
+        catalogue: None,
         open_on: open_on(&versions),
         versions,
         also_on: Vec::new(),
@@ -1269,18 +1285,25 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
         pending: false,
         total_ms: songs.iter().filter_map(|t| t.duration_ms).sum(),
         songs,
-        albums: albums
-            .iter()
-            .filter_map(|al| {
-                Some(ItemAlbum {
-                    id: format!("lib-{}", al.id?),
-                    title: al.title.clone(),
-                    year: al.year,
-                    image: al.id.map(cover),
-                    page: String::new(),
+        // Newest first; the library keeps no release type, so these are untyped ("Releases")
+        albums: {
+            let mut v: Vec<ItemAlbum> = albums
+                .iter()
+                .filter_map(|al| {
+                    Some(ItemAlbum {
+                        id: format!("lib-{}", al.id?),
+                        title: al.title.clone(),
+                        year: al.year,
+                        image: al.id.map(cover),
+                        page: String::new(),
+                        release: Default::default(),
+                    })
                 })
-            })
-            .collect(),
+                .collect();
+            crate::releases::sort_albums(&mut v);
+            v
+        },
+        catalogue: None,
         // MusicBrainz's and Pinakes' links become sources: "Also on" and "Open on"
         versions: info.iter().flat_map(|i| i.links.iter().cloned()).collect(),
         also_on: Vec::new(),
@@ -1302,8 +1325,8 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
     })
 }
 
-async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPage {
-    let ext = load_external(s, url).await;
+async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str, refresh: bool) -> ItemPage {
+    let ext = crate::discover::load_external_with(s, url, refresh).await;
     let it = &ext.it;
     let mut versions = Vec::new();
     if let Some(t) = &it.in_library {
@@ -1459,6 +1482,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
             c.tracks
         },
         albums: c.albums,
+        catalogue: c.catalogue,
         open_on: open_on(&versions),
         versions,
         also_on: Vec::new(),
