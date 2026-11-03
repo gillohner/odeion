@@ -426,6 +426,8 @@ jobs:
           mkdir -p /tmp/tl/data /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
+          node $GITHUB_WORKSPACE/tools/ui-browser-library.js $GITHUB_WORKSPACE /tmp/pm/library-playback-shots
+          node $GITHUB_WORKSPACE/tools/ui-artist-links.js $GITHUB_WORKSPACE /tmp/pm/artist-link-shots
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
           (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \
             nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
