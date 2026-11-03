@@ -414,6 +414,8 @@ jobs:
             nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:7791/v1/info >/dev/null && break; sleep 1; done
           node $GITHUB_WORKSPACE/tools/ui-tidal-login.js http://127.0.0.1:7791 7811
+      - name: opt-in local diagnostics in the browser (synthetic, no node)
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-diagnostics.js $GITHUB_WORKSPACE /tmp/diag-shots
       - if: failure()
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true
 

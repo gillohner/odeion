@@ -640,6 +640,9 @@ async fn restore_locked(
             .collect();
         Ok(())
     })();
+    // The owner's browser sessions are the restored library's now: those made here ended, so
+    // diagnostics started with them end and a request let in with one changes nothing
+    s.diagnostics.revoke_all();
     remove_db(&staged);
     done?;
     s.reload_sources_off();

@@ -130,6 +130,12 @@ Wikipedia and the Pubky music index ask every app for one.
 The app isn't signed. macOS: right-click › **Open**, or **System Settings › Privacy &
 Security › Open Anyway**. Windows: **More info › Run anyway**.
 
+## A page is slow or fails, and you want to know where
+
+Turn on [local diagnostics](local-diagnostics.md) for a while: they record, in your own browser
+only, which pages are slow or fail and how. You can download the result to look at or attach to an
+issue. They are off by default and stay on your node.
+
 ## Still stuck
 
 Open an issue on [GitHub](https://github.com/gillohner/pubky-music-node/issues) with how you

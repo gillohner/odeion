@@ -41,6 +41,7 @@ pub mod comments;
 pub mod dash;
 pub mod deezer;
 pub mod devices;
+pub mod diagnostics;
 pub mod discover;
 pub mod downloads;
 pub mod drives;
@@ -222,6 +223,17 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/node/apps/{id}", put(apps::put))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/token", post(access_token::replace))
+        // Opt-in local diagnostics: owner only, with the API token (diagnostics.rs; listeners are
+        // refused under /node too). The handlers read bodies themselves, within their own limits
+        .route(
+            "/node/diagnostics",
+            get(diagnostics::status).put(diagnostics::set_gate),
+        )
+        .route("/node/diagnostics/sessions", post(diagnostics::start))
+        .route("/node/diagnostics/sessions/{id}", delete(diagnostics::stop))
+        .route("/node/diagnostics/events", post(diagnostics::ingest))
+        .route("/node/diagnostics/clear", post(diagnostics::clear))
+        .route("/node/diagnostics/export", get(diagnostics::export))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
         .route("/outputs", get(outputs))

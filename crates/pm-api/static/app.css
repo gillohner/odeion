@@ -1560,3 +1560,15 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 /* The account button: on every shell (Log out is always one tap away) */
 .me-btn.has-face { padding: 0; overflow: hidden; }
 .me-btn .face { width: 100%; height: 100%; border-radius: 50%; }
+
+/* Opt-in diagnostics (app.js diagBadge): visible for as long as this browser records. A row of
+   its own at the top of the page column, on every screen, so it never covers the page's first
+   row (an error notice, say), the top bar or the player */
+.diagbar { flex: none; box-sizing: border-box; height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 13px; }
+.diagbar .diagtext { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Now playing (a fixed overlay over the page) opens below the bar while it is there */
+body.diag-recording .overlay { top: 40px; }
+.diagbar .btn { min-height: 32px; }
+.diagdot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: #e5484d; }
+.diaglist { margin: 6px 0 8px; padding-left: 20px; }
+.diaglist li + li { margin-top: 2px; }

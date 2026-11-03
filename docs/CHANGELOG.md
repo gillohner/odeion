@@ -6,6 +6,21 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Local diagnostics, opt-in and owner only** ([guide](guides/local-diagnostics.md)). The owner
+  can let this node record, for one browser at a time after pressing Start, which pages they
+  open, how long those pages and their reads take and how they end, and the class of a script
+  error that breaks a page. Everything stays in the node's memory (at most 72 hours,
+  50,000 events or 50 MiB) until the owner downloads it by hand.
+  - **Off and limited.** Off by default and after every restart, the switch turns itself off
+    after 24 hours, and a browser's session after an hour.
+  - **What is recorded.** Only pages the owner opens themselves, never what other people's
+    activity redraws, and nothing from listeners or guests.
+  - **Sign-in.** Unavailable on a node without an API token. Requests are checked against the
+    owner's current sign-in, so a Log out or a new token mid-request changes nothing. A Start
+    from before the switch went off and on again is refused.
+  - **Visible.** A bar at the top of the page shows recording, with Stop. It never covers the
+    page or Now playing.
+
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.

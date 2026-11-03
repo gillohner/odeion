@@ -176,20 +176,225 @@
     if (/error sending request|connection refused|dns error|could not resolve/i.test(text)) return `Couldn't reach ${who === 'The service' ? 'the service' : who}; check the node's internet connection.`;
     return text;
   };
-  const api = async (method, path, body) => {
+  // ---- Opt-in local diagnostics (diagnostics.rs; docs/guides/local-diagnostics.md) ----
+  // Only after this browser's own Start, and only for pages the owner opens (setView): the page,
+  // how long it and the reads it makes while loading take and how they end, and the class of a
+  // script error that breaks it. Each navigation gets its own context { gen, sid, token }; a page
+  // drawn again by an event from the node (someone else playing, a library change) has none, so
+  // nothing anyone else does is recorded. Nothing is kept while this browser isn't recording, and
+  // a completion counts only if the session it started in is still the one recording.
+  const DIAG_VIEWS = new Set(['add-music', 'albums', 'artists', 'dashboard', 'downloads', 'favourites', 'genre', 'genres', 'home', 'home-section', 'identify', 'item', 'library', 'person', 'playlist', 'playlists', 'queue', 'radio', 'search', 'settings', 'shared', 'smart', 'smart-edit', 'source-artist', 'source-item', 'sources', 'tag', 'tracks', 'zones']);
+  // The reads a page makes while it loads, by route (never by what is in the address): GET only,
+  // matched on the path without its query; anything else is not recorded
+  const DIAG_ROUTES = [
+    ['library', /^\/library\/(tracks|genres|artists|home|stats|suggestions|hidden|folders|drives|webdav)$/],
+    ['library', /^\/library\/(tracks|genres)\/[^/]+$/],
+    ['library', /^\/library\/artists\/[^/]+\/similar$/],
+    ['search', /^\/library\/search$/],
+    ['item', /^\/item\/[^/]+\/[^/]+(\/extras)?$/],
+    ['playlists', /^\/(playlists|smart)$/],
+    ['playlists', /^\/playlists\/[^/]+(\/play-from)?$/],
+    ['playlists', /^\/smart\/[^/]+\/tracks$/],
+    ['shared', /^\/shared\/resolve$/],
+    ['shared', /^\/shared\/[^/]+\/playlists(\/[^/]+)?$/],
+    ['sources', /^\/(sources|play-order)$/],
+    ['sources', /^\/sources\/[a-z]+\/(items|artists)\/[^/]+$/],
+    ['sources', /^\/sources\/[a-z]+\/(signin|status|server|playlists|collection|likes|downloads|devices|soloist|librespot|unofficial)$/],
+    ['zones', /^\/zones\/[^/]+(\/dsp)?$/],
+    ['outputs', /^\/outputs(\/discovery)?$/],
+    ['node', /^\/(info|node|node\/settings|node\/apps|storage|backup\/schedule|remote\/tunnel|homeserver\/bundled|pubky|offline)$/],
+    ['home', /^\/home\/(layout|tag|location)$/],
+    ['me', /^\/me\/prefs$/],
+    ['people', /^\/(people|people\/zones|party)$/],
+    ['people', /^\/profiles\/[^/]+$/],
+    ['radio', /^\/radio\/(search|stations)$/],
+    ['tags', /^\/(tags|reviews)$/],
+    ['favourites', /^\/favourites$/],
+    ['listenbrainz', /^\/listenbrainz(\/recommendations|\/playlists)?$/],
+  ];
+  const DIAG_ERRORS = { TypeError: 'type_error', ReferenceError: 'reference_error', RangeError: 'range_error', SyntaxError: 'syntax_error' };
+  const DIAG_TTL_MS = 3600 * 1000; // never longer, whatever the node says
+  const DIAG_FLUSH_MS = 10000; const DIAG_SEND_MS = 8000; const DIAG_START_MS = 15000;
+  const DIAG_OK = Object.freeze({ outcome: 'ok' });
+  // sid/token/nodeGen: this browser's session; gen: bumped by every Start and end, so whatever
+  // started under an older one is not ours; deadline: performance.now() when it ends here
+  const diag = { sid: null, token: null, nodeGen: null, gen: 0, deadline: 0, queue: [], dropped: 0, timer: null, expiry: null, ticks: 0, minute: 0, sent: 0, inflight: null, starting: null, look: 0, looking: null };
+  const diagMs = (ms) => (ms < 100 ? 'lt100' : ms < 300 ? 'lt300' : ms < 1000 ? 'lt1000' : ms < 3000 ? 'lt3000' : ms < 10000 ? 'lt10000' : 'ge10000');
+  const diagView = (v) => (DIAG_VIEWS.has(v) ? v.replace(/-/g, '_') : null);
+  const diagOutcome = (status) => (status === 401 || status === 403 ? 'refused' : status >= 500 ? 'http_5xx' : status >= 400 ? 'http_4xx' : 'ok');
+  const diagArea = (method, path) => {
+    if (method !== 'GET') return null;
+    const p = String(path).split(/[?#]/)[0];
+    if (p.startsWith('/node/diagnostics')) return null;
+    for (const [area, re] of DIAG_ROUTES) if (re.test(p)) return area;
+    return null;
+  };
+  const diagFetch = (method, path, body, token = diag.token, { signal, keepalive } = {}) => fetch('/v1/node/diagnostics' + path, { method, signal, keepalive, headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  // Recording now: a session, for the account signed in, before its deadline (a monotonic clock:
+  // offline or with timers held back, nothing is taken past it)
+  const diagLive = () => !!diag.sid && diag.token === state.token && performance.now() < diag.deadline;
+  // One explicit navigation's context, or none (then nothing about it is recorded)
+  const diagContext = () => {
+    if (diagLive()) return { gen: diag.gen, sid: diag.sid, token: diag.token, open: true };
+    if (diag.sid) diagEnd(diag.token === state.token); // its hour is up, or another account: over
+    return undefined;
+  };
+  const diagCurrent = (ctx) => !!ctx && ctx.gen === diag.gen && ctx.sid === diag.sid && ctx.token === diag.token && diagLive();
+  const diagRecord = (ctx, ev) => {
+    if (!diagCurrent(ctx)) { if (diag.sid && !diagLive()) diagEnd(diag.token === state.token); return; }
+    // Within the node's 120 a minute and a small queue; the rest is counted as dropped, not kept
+    const m = Math.floor(performance.now() / 60000); if (m !== diag.minute) { diag.minute = m; diag.sent = 0; }
+    if (diag.sent >= 110 || diag.queue.length >= 64) { diag.dropped = Math.min(diag.dropped + 1, 65535); return; }
+    diag.sent += 1; diag.queue.push(ev);
+  };
+  // A page's outcome from what it threw: a finite name, the error itself is not kept
+  const diagFailure = (e) => {
+    const status = e && typeof e.status === 'number' ? e.status : 0;
+    if (status) return { outcome: diagOutcome(status) };
+    const msg = e && typeof e.message === 'string' ? e.message : '';
+    if (msg === "Can't reach the node.") return { outcome: 'unreachable' };
+    if (msg === 'Log in to use the node.') return { outcome: 'refused' };
+    const name = e && typeof e.name === 'string' ? e.name : '';
+    return { outcome: 'failed', class: Object.prototype.hasOwnProperty.call(DIAG_ERRORS, name) ? DIAG_ERRORS[name] : 'other' };
+  };
+  // An api() for one page's drawing: its reads count while the page loads, later clicks and polls don't
+  const apiFor = (ctx) => (method, path, body) => api(method, path, body, ctx && ctx.open ? ctx : undefined);
+  // The indicator: a row of its own at the top of the page column on every screen, so it never
+  // covers the page; Now playing opens below it (app.css `body.diag-recording`)
+  const diagBadge = () => {
+    let b = document.getElementById('diagbadge');
+    document.body.classList.toggle('diag-recording', !!diag.sid);
+    if (!diag.sid) { if (b) b.remove(); return; }
+    if (!b) { b = document.createElement('div'); b.id = 'diagbadge'; b.className = 'diagbar'; b.setAttribute('role', 'status'); main.parentElement.prepend(b); }
+    b.innerHTML = '<span class="diagdot" aria-hidden="true"></span><span class="diagtext">Recording diagnostics in this browser</span><button class="btn ghost sm" id="diagstop">Stop</button>';
+    b.querySelector('#diagstop').onclick = () => diagEnd(true);
+  };
+  // The end of this browser's session (Stop, Off, expiry, Log out, another token): what is queued
+  // goes, a send on its way is cancelled, a Start on its way is ended when it answers. `tell` asks
+  // the node to end it too (Log out and token changes end it there anyway)
+  const diagEnd = (tell) => {
+    const { sid, token } = diag;
+    // (a Start on its way is now of an older gen: when it answers, its session is ended)
+    Object.assign(diag, { gen: diag.gen + 1, sid: null, token: null, nodeGen: null, deadline: 0, queue: [], dropped: 0, starting: null });
+    clearInterval(diag.timer); clearTimeout(diag.expiry); diag.timer = null; diag.expiry = null;
+    if (diag.inflight) { diag.inflight.abort(); diag.inflight = null; }
+    if (tell && sid && token) diagFetch('DELETE', `/sessions/${sid}`, undefined, token, { keepalive: true }).catch(() => {});
+    diagBadge();
+    if (document.getElementById('diagbox')) loadDiag();
+  };
+  // One send at a time, each with a time limit; a send that fails is not repeated
+  const diagFlush = async () => {
+    if (!diag.sid || diag.inflight) return;
+    if (!diagLive()) { diagEnd(diag.token === state.token); return; }
+    const { gen, sid } = diag; diag.ticks += 1;
+    let events = null; let dropped = 0; let r = null; let st = null;
+    const ctrl = new AbortController(); const limit = setTimeout(() => ctrl.abort(), DIAG_SEND_MS);
+    diag.inflight = ctrl;
+    try {
+      if (diag.queue.length) {
+        events = diag.queue.splice(0, 32); dropped = diag.dropped; diag.dropped = 0;
+        r = await diagFetch('POST', '/events', { session: sid, events, dropped }, undefined, { signal: ctrl.signal });
+      } else if (diag.ticks % 3 === 0) {
+        r = await diagFetch('GET', '', undefined, undefined, { signal: ctrl.signal });
+        if (r.ok) st = await r.json();
+      }
+    } catch { r = null; } finally { clearTimeout(limit); if (diag.inflight === ctrl) diag.inflight = null; }
+    if (gen !== diag.gen) return; // ended or started again meanwhile: this answer is not ours
+    if (st) { if (!st.enabled || st.generation !== diag.nodeGen) diagEnd(false); return; }
+    // No answer: those events and the drops they carried are lost. Refused for the rates (429):
+    // the node counted the events itself, so only the earlier drops are reported again
+    if (events && !r) diag.dropped = Math.min(diag.dropped + dropped + events.length, 65535);
+    else if (events && r.status === 429) diag.dropped = Math.min(diag.dropped + dropped, 65535);
+    if (r && !r.ok && r.status !== 429) diagEnd(false); // switched off, expired or refused: stop here
+  };
+  // Start, for the generation the page showed when it was pressed
+  const diagStart = async (shown) => {
+    const shell = document.documentElement.dataset.shell;
+    const viewport = shell === 'phone' || shell === 'tablet' ? shell : 'desktop';
+    const token = state.token; const gen = ++diag.gen; const t0 = performance.now();
+    const ctrl = new AbortController(); const limit = setTimeout(() => ctrl.abort(), DIAG_START_MS);
+    diag.starting = { gen, shown };
+    let r; let j = {};
+    try { r = await diagFetch('POST', '/sessions', { viewport, generation: shown }, token, { signal: ctrl.signal }); j = await r.json().catch(() => ({})); }
+    catch { throw new Error('Diagnostics could not start: the node did not answer.'); }
+    finally { clearTimeout(limit); if (diag.starting && diag.starting.gen === gen) diag.starting = null; }
+    const sid = typeof j.session === 'string' && /^[0-9a-f]{16}$/.test(j.session) ? j.session : null;
+    if (!r.ok || !sid) throw new Error(j.error || 'Diagnostics could not start.');
+    // Stopped, switched off, logged out or another token meanwhile: end the one the node just made
+    if (gen !== diag.gen || token !== state.token) { diagFetch('DELETE', `/sessions/${sid}`, undefined, token).catch(() => {}); return false; }
+    const ttl = Math.min(DIAG_TTL_MS, Math.max(0, Number(j.expires_in_s) || 0) * 1000);
+    Object.assign(diag, { sid, token, nodeGen: shown, deadline: t0 + ttl, queue: [], dropped: 0, ticks: 0 });
+    diag.timer = setInterval(diagFlush, DIAG_FLUSH_MS);
+    diag.expiry = setTimeout(() => { if (diag.sid === sid) diagEnd(true); }, ttl);
+    const v = diagView(state.view); if (v) diagRecord(diagContext(), { kind: 'nav', view: v });
+    diagBadge();
+    return true;
+  };
+  // Leaving the page ends this browser's session at the node too (it would end in an hour anyway)
+  window.addEventListener('pagehide', () => { if (diag.sid) diagEnd(true); });
+  // What Settings shows: a switch that names the state it was shown, and Start for the same
+  const diagNotice = (st) => {
+    const L = st.limits; const n = (x) => Number(x).toLocaleString('en');
+    return `<div class="set-row set-block"><div class="set-label"><div class="set-name">What diagnostics are for, and what Start records</div><p class="set-help">Diagnostics help you find slow pages, failed requests and pages that break in your own use of Odeion, so you can decide what to improve or report. They show what happened, not why, and change nothing by themselves. Everything stays on this node: nothing is sent anywhere unless you download a file and share it yourself.</p>`
+      + `<div class="set-help">Start records, in this browser only, for at most ${L.session_minutes} minutes (less if this page reloads, you log out or the account changes):<ul class="diaglist">`
+      + '<li>which kind of page you open (Albums, Search, Settings…), never what is on it or in its address</li>'
+      + '<li>how long that page and the reads it makes while loading take, and whether they fail</li>'
+      + '<li>the class of a script error that breaks the page (Type error…), never its message</li>'
+      + '<li>whether this is a phone, tablet or desktop, and the app version</li></ul>'
+      + `Never anything you type or search, titles, names, addresses, keys, what plays, or what anyone else does: listeners and guests are not recorded. Events are kept only in this node’s memory: at most ${n(L.max_events)} events or ${Math.round(L.max_bytes / 1048576)} MiB (the oldest go first), for ${L.retention_hours} hours, removed within ${Math.max(1, Math.round(L.cleanup_seconds / 60))} minute${L.cleanup_seconds > 90 ? 's' : ''} after that, and all gone after a restart.</div></div></div>`;
+  };
+  // Settings › About › Diagnostics (the owner's)
+  // One look at a time (a newer one cancels the one on its way), each with a time limit
+  const diagTimed = (ms) => { const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), ms); return { ctrl, signal: ctrl.signal, done: () => clearTimeout(t) }; };
+  const loadDiag = async () => {
+    const box = document.getElementById('diagbox'); if (!box) return;
+    const look = ++diag.look; if (diag.looking) diag.looking.abort();
+    const t = diagTimed(DIAG_SEND_MS); diag.looking = t.ctrl;
+    let st = null; try { const r = await diagFetch('GET', '', undefined, state.token, { signal: t.signal }); if (r.ok) st = await r.json(); } catch { /* shown as unavailable */ } finally { t.done(); if (diag.looking === t.ctrl) diag.looking = null; }
+    if (look !== diag.look || !box.isConnected || document.getElementById('diagbox') !== box) return; // a newer look, or another page
+    if (!st) { box.innerHTML = '<p class="set-help">Diagnostics are not available right now (they need the node’s API token and the owner’s sign-in).</p>'; return; }
+    // Switched off or on again elsewhere: this browser's session (or its Start on the way) is over
+    if ((diag.sid && (!st.enabled || st.generation !== diag.nodeGen)) || (diag.starting && (!st.enabled || st.generation !== diag.starting.shown))) { diagEnd(false); return; }
+    const hours = st.expires_in_s != null ? Math.max(1, Math.round(st.expires_in_s / 3600)) : 0;
+    const lost = st.dropped ? st.dropped.evicted + st.dropped.rate_limited + st.dropped.by_browsers : 0;
+    box.innerHTML = diagNotice(st)
+      + `<div class="set-row"><div class="set-label"><div class="set-name">Allow diagnostics on this node</div><p class="set-help">Off by default, and off again by itself after ${st.limits.node_switch_hours} hours or a restart. Allowing them records nothing: each of your browsers starts its own session.${st.enabled ? ` Turns off in about ${hours} h.` : ''}</p></div><div class="set-ctl"><input type="checkbox" class="switch" id="diaggate" aria-label="Allow diagnostics on this node" ${st.enabled ? 'checked' : ''}></div></div>`
+      + `<div class="set-row"><div class="set-label"><div class="set-name">This browser</div><p class="set-help">${diag.sid ? 'Recording now: the bar at the top of the page says so, with Stop.' : st.enabled ? 'Not recording. Back and Forward count as opening a page.' : 'Allow diagnostics on this node first.'}</p></div><div class="set-ctl">${diag.sid ? '<button class="btn" id="diagstop2">Stop diagnostics</button>' : `<button class="btn primary" id="diagstart" ${st.enabled ? '' : 'disabled'}>Start diagnostics for this session</button>`}</div></div>`
+      + `<div class="set-row"><div class="set-label"><div class="set-name">Recorded</div><p class="set-help">${st.events} event${st.events === 1 ? '' : 's'}${lost ? ` (${lost} more dropped at the limits)` : ''}. Download saves them as a file for you to check and share by hand. Clear deletes them now; turning diagnostics off only stops new ones. A browser still recording adds new events after Clear: stop it first.</p></div><div class="set-ctl"><button class="btn" id="diagdl" ${st.events ? '' : 'disabled'}>Download</button> <button class="btn ghost" id="diagclear" ${st.events ? '' : 'disabled'}>Clear</button></div></div>`;
+    const sw = document.getElementById('diaggate');
+    // The controls send one request each at a time, with a time limit
+    const control = async (el, method, p, body) => { el.disabled = true; const t = diagTimed(DIAG_SEND_MS); try { return await diagFetch(method, p, body, state.token, { signal: t.signal }); } catch { throw new Error('The node did not answer.'); } finally { t.done(); } };
+    sw.onchange = async () => { const on = sw.checked; try { const r = await control(sw, 'PUT', '', { enabled: on, generation: st.generation }); if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Not changed.'); if (!on && (diag.sid || diag.starting)) diagEnd(false); } catch (e) { toast(e.message, 'error'); } loadDiag(); };
+    const go = document.getElementById('diagstart'); if (go) go.onclick = async () => { go.disabled = true; try { if (await diagStart(st.generation)) toast('Diagnostics recording in this browser'); } catch (e) { toast(e.message, 'error'); } loadDiag(); };
+    const halt = document.getElementById('diagstop2'); if (halt) halt.onclick = () => diagEnd(true);
+    const clr = document.getElementById('diagclear'); clr.onclick = async () => { try { const r = await control(clr, 'POST', '/clear'); if (!r.ok) throw new Error('Not cleared.'); toast('Diagnostics cleared'); } catch (e) { toast(e.message, 'error'); } loadDiag(); };
+    const dl = document.getElementById('diagdl'); dl.onclick = async () => {
+      try {
+        const r = await control(dl, 'GET', '/export'); if (!r.ok) throw new Error('Download failed.');
+        const url = URL.createObjectURL(await r.blob()); const a = document.createElement('a'); a.href = url; a.download = 'odeion-diagnostics.json'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) { toast(e.message, 'error'); }
+      dl.disabled = false;
+    };
+  };
+  // `ctx`: a page's diagnostics context (apiFor); without one nothing about the request is recorded
+  const api = async (method, path, body, ctx) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
     let r; const sent = state.token;
+    const dArea = ctx ? diagArea(method, path) : null;
+    const dt0 = dArea && diagCurrent(ctx) ? performance.now() : null;
+    const dEnd = (outcome) => { if (dt0 != null) diagRecord(ctx, { kind: 'api', area: dArea, outcome, ms: diagMs(performance.now() - dt0) }); };
     try {
       r = await fetch('/v1' + path, {
         method,
         headers: { 'content-type': 'application/json', ...(sent ? { authorization: 'Bearer ' + sent } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-    } catch { linkHint(); throw new Error("Can't reach the node."); }
+    } catch { dEnd('unreachable'); linkHint(); throw new Error("Can't reach the node."); }
+    dEnd(diagOutcome(r.status));
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     const text = await r.text();
@@ -1091,6 +1296,8 @@
   // The auth middleware's answer to a missing or wrong token (lib.rs `auth`)
   const NODE_REFUSED = 'missing or wrong bearer token';
   const forgetAccount = () => {
+    // This browser's diagnostics end, at the node too (with the token they started with)
+    if (diag.sid || diag.starting) diagEnd(true);
     const mine = state.token; state.token = '';
     try {
       // Another tab may have logged in again meanwhile: its token stays
@@ -3174,6 +3381,9 @@
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
+    // Diagnostics: this navigation and the page it opens, if this browser is recording
+    const dctx = diagContext();
+    if (dctx) { const dv = diagView(v); if (dv) diagRecord(dctx, { kind: 'nav', view: dv }); }
     // Sources has a rail button of its own on tablets: the Library button doesn't open it there
     if (LIB_TOP.some(([k]) => k === v) && !(v === 'sources' && shellMode() === 'tablet')) state.lastLib = v;
     markTabs(v);
@@ -3181,7 +3391,7 @@
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
-    return render();
+    return render(dctx);
   };
   window.addEventListener('popstate', async (e) => {
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
@@ -4468,7 +4678,20 @@
   };
 
   // ---- render --------------------------------------------------------------
-  const render = async () => {
+  // A view's drawing. `ctx`: a navigation's diagnostics context (setView); a page drawn again for
+  // any other reason (a click on it, an event from the node) has none and is not recorded
+  const render = async (ctx) => {
+    if (!ctx) { await renderView(); return; }
+    const view = diagView(state.view); const t0 = performance.now();
+    const done = (await renderView(ctx)) || DIAG_OK;
+    if (!view) return;
+    diagRecord(ctx, { kind: 'load', view, outcome: done.outcome, ms: diagMs(performance.now() - t0) });
+    if (done.class) diagRecord(ctx, { kind: 'exception', class: done.class });
+  };
+  // Returns how it ended for diagnostics, a finite outcome (never the error)
+  const renderView = async (ctx) => {
+    // The reads this page makes while it loads count for diagnostics (helpers outside don't)
+    const api = apiFor(ctx);
     // The search box is a combobox over the results page only
     if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); }
     const v = state.view;
@@ -5968,6 +6191,7 @@
               + (ns.token_replaceable
                 ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you invited stay logged in.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
                 : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
+            + group('Diagnostics', '<div id="diagbox"><div class="skeleton" style="height:96px"></div></div>')
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));
           // You › Home: whose layout applies; edit it on Home itself
@@ -6077,6 +6301,7 @@
               const r = await api('POST', '/node/token');
               // Every later call (and a reconnect of the event socket) uses it
               // The old token and every Pubky Ring browser session end: this browser takes the new token
+              if (diag.sid || diag.starting) diagEnd(false); // the node ended its diagnostics with the old token
               state.token = r.token; try { localStorage.setItem('pm.token', r.token); } catch { /* this tab keeps it */ }
               $('#tokenout').innerHTML = `<p class="small" style="margin-top:10px">The new token, shown only now. Copy it to your apps; the page then reloads, so its streams and covers use it too.</p><div class="toolbar"><code class="path">${esc(r.token)}</code><button class="btn sm primary" id="tokendone">Copy and reload</button></div>`;
               $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
@@ -6302,7 +6527,7 @@
           const pl = $('#pklogin'); if (pl) pl.onclick = () => ringFlow('/pubky/login', '');
           const hc = $('#pkhscreate'); if (hc) hc.onclick = () => ringFlow('/homeserver/bundled/owner-signup', ': it creates your account on this node\u2019s homeserver');
           if (state.autoCreate && hc) { state.autoCreate = false; hc.click(); hc.scrollIntoView({ block: 'center' }); }
-          loadPeople(); loadRemote();
+          loadPeople(); loadRemote(); loadDiag();
           if (state.autoResign && pl) { state.autoResign = false; pl.click(); pl.scrollIntoView({ block: 'center' }); }
           break;
         }
@@ -6319,7 +6544,11 @@
       bindTrackRows(main, lists);
     } catch (e) {
       main.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`;
+      return ctx ? diagFailure(e) : undefined;
+    } finally {
+      if (ctx) ctx.open = false; // later clicks and polls on this page are not its loading
     }
+    return DIAG_OK;
   };
 
   // ---- connection + events -------------------------------------------------

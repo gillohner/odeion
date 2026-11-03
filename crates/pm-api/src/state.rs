@@ -132,6 +132,9 @@ pub struct NodeState {
     /// Optional bearer token; `None` = no auth (bind to localhost only). Read with
     /// [`NodeState::token`]; only [`crate::access_token`] changes it.
     pub(crate) token: std::sync::RwLock<Option<String>>,
+    /// Opt-in local diagnostics (diagnostics.rs): memory only, so a restart starts Off; a task
+    /// holding it weakly ends what has run out while the node is idle.
+    pub(crate) diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// The file the token came from when the node made it itself (`<data_dir>/api-token`), so the
     /// owner may replace it; `None` when it is set in the config or there is none.
     token_file: std::sync::OnceLock<PathBuf>,
@@ -409,6 +412,7 @@ impl NodeState {
             zones: Zones::new(sources.clone()),
             sources,
             token: std::sync::RwLock::new(settings.token),
+            diagnostics: crate::diagnostics::Diagnostics::housekept(),
             token_file: std::sync::OnceLock::new(),
             token_changed: tokio::sync::watch::channel(0).0,
             subsonic_user: settings.subsonic_user,
@@ -1527,7 +1531,13 @@ impl NodeState {
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
         let derived = sync.as_ref().map(|s| profile_url(s.z32()));
         let z32 = sync.as_ref().map(|s| s.z32().to_string());
-        *self.sync.lock().expect("sync lock") = sync;
+        // Diagnostics (diagnostics.rs) end and nothing let in before changes anything: whichever
+        // identity, also none, and whatever the cleanup below does. Swapped under their lock, so no
+        // diagnostics change is in progress across it; the old handle is dropped after
+        let old = self
+            .diagnostics
+            .revoke_all_across(|| std::mem::replace(&mut *self.sync.lock().expect("sync lock"), sync));
+        drop(old);
         // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
         // After the swap: a session minted meanwhile was checked against the identity then
         if let Some(z32) = z32 {

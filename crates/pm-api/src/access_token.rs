@@ -57,6 +57,8 @@ pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
         )
     })?;
     *s.token.write().expect("token lock") = Some(token.clone());
+    // Diagnostics let in with the old token change nothing from now on (diagnostics.rs)
+    s.diagnostics.revoke_all();
     // Event sockets opened with the old token end now
     s.token_changed.send_modify(|n| *n += 1);
     tracing::info!("API token replaced by the owner; the old one no longer works");

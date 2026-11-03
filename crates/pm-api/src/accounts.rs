@@ -343,18 +343,31 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 /// A new browser session for the owner (key `key`), from a Pubky Ring sign-in: returned once,
 /// the node keeps its hash. At most 20; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
-    let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
     let key = key.trim_start_matches("pubky").to_string();
+    // Still the node's identity, checked under the same hold as the cleanup when it takes on
+    // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
+    mint_owner_if(s, &key, || {
+        s.sync_handle()
+            .is_some_and(|h| h.z32().trim_start_matches("pubky") == key)
+    })
+}
+
+/// [`mint_owner`], asking `current` whether `key` is the node's identity (tests load none).
+pub(crate) fn mint_owner_if(
+    s: &NodeState,
+    key: &str,
+    current: impl Fn() -> bool,
+) -> Result<String, ApiError> {
+    let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
+    let key = key.to_string();
     let lib = s.library.lock().expect("library poisoned");
+    let mut evicted = false;
     let made = update_in(&lib, OWNER_SESSIONS, |all| {
-        // Still the node's identity, checked under the same hold as the cleanup when it takes on
-        // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
-        let current = s
-            .sync_handle()
-            .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
+        let current = current();
         if current {
             if all.len() >= 20 {
                 all.remove(0);
+                evicted = true;
             }
             all.push(PersonToken {
                 hash: hash(&token),
@@ -363,11 +376,21 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
             });
         }
         current
-    })?;
-    if made {
-        lib.set_setting(OWNER_SESSIONS_TOKEN, &token_mark(s))?;
-    }
+    });
+    let made = match made {
+        Ok(true) => lib
+            .set_setting(OWNER_SESSIONS_TOKEN, &token_mark(s))
+            .map(|_| true)
+            .map_err(ApiError::from),
+        other => other,
+    };
     drop(lib);
+    // The oldest session ended: like any owner credential ending, its diagnostics end and a
+    // request let in with it changes nothing (diagnostics.rs), also when a write failed after
+    if evicted {
+        s.diagnostics.revoke_all();
+    }
+    let made = made?;
     if !made {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -394,18 +417,32 @@ fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
 /// browser sessions of any other identity end, so none can come back later.
 pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
     let owner = owner.trim_start_matches("pubky");
-    update(s, OWNER_SESSIONS, |all| all.retain(|t| t.key == owner))
+    let ended = update(s, OWNER_SESSIONS, |all| {
+        let before = all.len();
+        all.retain(|t| t.key == owner);
+        all.len() < before
+    })?;
+    // Diagnostics started with one of them end too, and a request let in with one changes nothing
+    if ended {
+        s.diagnostics.revoke_all();
+    }
+    Ok(())
 }
 
 /// Ends one owner's browser session (Log out); whether it was open. Also while the node has no
 /// identity loaded, when the session is otherwise refused: Log out must still work then.
 pub fn end_owner_session(s: &NodeState, token: &str) -> Result<bool, ApiError> {
     let h = hash(token);
-    update(s, OWNER_SESSIONS, |all| {
+    let ended = update(s, OWNER_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.hash != h);
         all.len() < before
-    })
+    })?;
+    // Its diagnostics end too, and a request let in with it changes nothing (diagnostics.rs)
+    if ended {
+        s.diagnostics.revoke(token);
+    }
+    Ok(ended)
 }
 
 /// At start: the API token differs from the one the owner's browser sessions were made under (it
@@ -426,12 +463,18 @@ pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
     if was.as_deref() != Some(mark.as_str()) {
         lib.set_setting(OWNER_SESSIONS_TOKEN, &mark)?;
     }
+    drop(lib);
+    if ended {
+        s.diagnostics.revoke_all();
+    }
     Ok(ended)
 }
 
 /// Ends every browser session of the owner (a new API token: the answer to a leak).
 pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
-    update(s, OWNER_SESSIONS, Vec::clear)
+    update(s, OWNER_SESSIONS, Vec::clear)?;
+    s.diagnostics.revoke_all();
+    Ok(())
 }
 
 /// Whose token this is, when it is a listener's that still has music access.
