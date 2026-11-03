@@ -706,6 +706,9 @@ impl Person {
 pub struct Epoch {
     all: u64,
     person: u64,
+    /// Clear all and this person's Clear mine, as they were.
+    clear_all: u64,
+    clear_person: u64,
 }
 
 struct Alias {
@@ -784,6 +787,17 @@ struct Inner {
     pending_dropped: Dropped,
     /// Daily session counts waiting for the writer (role, viewport).
     pending_opens: Vec<(u64, &'static str, Viewport)>,
+    /// Bumped by Clear all: nothing let in before it lands after it.
+    clear_all: u64,
+    /// Bumped by a person's Clear mine.
+    clears: HashMap<Person, u64>,
+    /// The owner's Off could not be saved: it holds in memory, a later read of the file never
+    /// turns it back on, and it is saved as soon as the file takes it.
+    forced_off: bool,
+    /// People whose Stop (or other choice) could not be saved yet.
+    unsaved_prefs: BTreeSet<Person>,
+    /// Removed people whose rows and choice the file could not delete yet: (person, aliases).
+    cleanup_pending: Vec<(Person, Vec<String>)>,
 }
 
 /// Why something was refused (each a fixed answer, never the input).
@@ -794,6 +808,8 @@ pub enum Refusal {
     Stale,
     /// A credential of this person (or everyone's) ended while this was on its way.
     Revoked,
+    /// Clear mine or Clear all happened while this was on its way.
+    Cleared,
     Gone,
     /// This person stopped usage insights for themselves.
     Stopped,
@@ -820,6 +836,10 @@ impl From<Refusal> for ApiError {
                 StatusCode::CONFLICT,
                 "a sign-in ended while this was sent; nothing was changed",
             ),
+            Refusal::Cleared => (
+                StatusCode::CONFLICT,
+                "usage insights were cleared while this was sent; nothing was changed",
+            ),
             Refusal::Gone => (StatusCode::GONE, "this usage alias has ended"),
             Refusal::Stopped => (StatusCode::CONFLICT, "you stopped usage insights for yourself"),
             Refusal::TooMany => (StatusCode::TOO_MANY_REQUESTS, "too many browsers at once"),
@@ -844,6 +864,8 @@ struct Store {
     conn: rusqlite::Connection,
     /// Keys the people's hashes, so they mean nothing outside this file.
     salt: [u8; 32],
+    /// The file (its size on disk, with its journal or WAL, is what the cap holds).
+    path: PathBuf,
 }
 
 const SCHEMA_SQL: &str = "
@@ -891,7 +913,11 @@ impl Store {
                 salt
             }
         };
-        Ok(Some(Store { conn, salt }))
+        Ok(Some(Store {
+            conn,
+            salt,
+            path: path.to_path_buf(),
+        }))
     }
 
     /// Opens the file read-only (the `pm-node usage` commands).
@@ -904,7 +930,11 @@ impl Store {
         let salt = get_meta(&conn, "salt")?
             .and_then(|h| decode32(&h))
             .unwrap_or([0; 32]);
-        Ok(Some(Store { conn, salt }))
+        Ok(Some(Store {
+            conn,
+            salt,
+            path: path.to_path_buf(),
+        }))
     }
 
     fn person_id(&self, p: &Person) -> Vec<u8> {
@@ -1030,10 +1060,17 @@ impl Store {
             .execute("DELETE FROM daily WHERE day < ?1", [agg_from as i64])
             .map_err(storage)?;
         let mut evicted = 0u64;
+        let mut compacted = false;
         loop {
-            let (count, bytes) = self.size()?;
-            if count <= limits.max_events && bytes <= limits.max_store_bytes {
+            let (count, live, on_disk) = self.sizes()?;
+            if count <= limits.max_events && on_disk <= limits.max_store_bytes {
                 break;
+            }
+            // Only free pages (or the journal) are over: give them back first, once
+            if count <= limits.max_events && live <= limits.max_store_bytes && !compacted {
+                self.conn.execute_batch("VACUUM").map_err(storage)?;
+                compacted = true;
+                continue;
             }
             let oldest: Option<i64> = self
                 .conn
@@ -1062,6 +1099,7 @@ impl Store {
                 break;
             }
             evicted += gone as u64;
+            compacted = false;
         }
         if evicted > 0 {
             self.conn
@@ -1087,8 +1125,14 @@ impl Store {
         Ok(evicted)
     }
 
-    /// Raw events kept and the bytes of the file's pages in use.
+    /// Raw events kept and the file's size on disk (all its pages, with its journal or WAL).
     fn size(&self) -> Result<(u64, u64), Refusal> {
+        let (count, _, on_disk) = self.sizes()?;
+        Ok((count, on_disk))
+    }
+
+    /// Raw events kept, the bytes of the pages in use, and the size on disk.
+    fn sizes(&self) -> Result<(u64, u64, u64), Refusal> {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM event", [], |r| r.get(0))
@@ -1105,7 +1149,20 @@ impl Store {
             .conn
             .query_row("PRAGMA page_size", [], |r| r.get(0))
             .map_err(storage)?;
-        Ok((count as u64, ((pages - free).max(0) * size) as u64))
+        let side: u64 = ["-journal", "-wal"]
+            .iter()
+            .filter_map(|x| {
+                let mut name = self.path.clone().into_os_string();
+                name.push(x);
+                std::fs::metadata(PathBuf::from(name)).ok()
+            })
+            .map(|m| m.len())
+            .sum();
+        Ok((
+            count as u64,
+            ((pages - free).max(0) * size) as u64,
+            (pages.max(0) * size) as u64 + side,
+        ))
     }
 
     fn clear_aliases(&self, aliases: &[String]) -> Result<u64, Refusal> {
@@ -1268,8 +1325,10 @@ pub struct Me {
 #[derive(Debug, Serialize)]
 pub struct Status {
     pub enabled: bool,
-    /// Whether the last change was saved in the file (it applies in memory either way).
+    /// Whether the switch as it is now is saved in the file (an Off applies in memory either way).
     pub saved: bool,
+    /// Removed people whose rows the file could not delete yet (tried again until it can).
+    pub cleanup_pending: usize,
     pub generation: u64,
     pub aliases: usize,
     pub waiting: usize,
@@ -1415,8 +1474,15 @@ impl Usage {
             ))
         })?;
         if let Some((on, generation)) = meta {
-            inner.node_on = on;
-            inner.node_generation = generation;
+            if inner.forced_off {
+                // An Off made before the file could be read: it stays off, with a generation
+                // past both, so no page from before matches
+                inner.node_on = false;
+                inner.node_generation = (generation + 1).max(inner.node_generation);
+            } else {
+                inner.node_on = on;
+                inner.node_generation = generation;
+            }
         }
         inner.loaded = true;
         Ok(())
@@ -1434,6 +1500,7 @@ impl Usage {
     fn save_pref(&self, inner: &mut Inner, p: &Person, pref: Pref) -> Result<(), Refusal> {
         self.with_store(true, |s| s.set_pref(p, pref))?;
         inner.prefs.insert(p.clone(), pref);
+        inner.unsaved_prefs.remove(p);
         Ok(())
     }
 
@@ -1445,6 +1512,8 @@ impl Usage {
         Epoch {
             all: inner.all_epoch,
             person: inner.epochs.get(p).copied().unwrap_or(0),
+            clear_all: inner.clear_all,
+            clear_person: inner.clears.get(p).copied().unwrap_or(0),
         }
     }
 
@@ -1502,12 +1571,68 @@ impl Usage {
             inner.pending.retain(|r| !theirs.contains(&r.alias));
             inner.ended.retain(|_, (q, _)| q != &p);
             inner.prefs.remove(&p);
+            inner.unsaved_prefs.remove(&p);
             theirs.into_iter().collect()
         };
-        let _ = self.with_store(false, |s| {
-            s.clear_aliases(&theirs)?;
-            s.forget_pref(&p)
-        });
+        if self.forget_in_file(&p, &theirs).is_err() {
+            // Not forgotten: tried again by housekeeping until it is (the owner's status counts
+            // it). A restart before that leaves the rows linked to no one, until retention
+            tracing::warn!("usage insights: a removed person's rows could not be deleted yet; trying again");
+            self.lock().cleanup_pending.push((p, theirs));
+        }
+    }
+
+    fn forget_in_file(&self, p: &Person, aliases: &[String]) -> Result<(), Refusal> {
+        self.with_store(false, |s| {
+            s.clear_aliases(aliases)?;
+            s.forget_pref(p)
+        })
+        .map(|_| ())
+    }
+
+    /// Saves what could not be saved before, and deletes what a removal could not delete: an
+    /// Off, people's choices, removed people's rows. Each stays on its list until it succeeds.
+    fn retry_unsaved(&self) {
+        let _w = self.writing.lock().unwrap_or_else(|e| e.into_inner());
+        let (cleanups, forced, generation, prefs) = {
+            let inner = self.lock();
+            let prefs: Vec<(Person, Pref)> = inner
+                .unsaved_prefs
+                .iter()
+                .filter_map(|p| inner.prefs.get(p).map(|pref| (p.clone(), *pref)))
+                .collect();
+            (
+                inner.cleanup_pending.clone(),
+                inner.forced_off && inner.loaded,
+                inner.node_generation,
+                prefs,
+            )
+        };
+        for (p, aliases) in cleanups {
+            if self.forget_in_file(&p, &aliases).is_ok() {
+                self.lock().cleanup_pending.retain(|(q, _)| q != &p);
+            }
+        }
+        if forced {
+            let saved = self.with_store(false, |s| {
+                set_meta(&s.conn, "on", "0")?;
+                set_meta(&s.conn, "generation", &generation.to_string())
+            });
+            if saved.is_ok() {
+                let mut inner = self.lock();
+                if inner.node_generation == generation {
+                    inner.forced_off = false;
+                }
+            }
+        }
+        for (p, pref) in prefs {
+            if self.with_store(true, |s| s.set_pref(&p, pref)).is_ok() {
+                let mut inner = self.lock();
+                if inner.prefs.get(&p).is_some_and(|now| now.choice == pref.choice) {
+                    inner.unsaved_prefs.remove(&p);
+                }
+            }
+        }
     }
 
     fn end_aliases(inner: &mut Inner, which: impl Fn(&Alias) -> bool, now: Instant) {
@@ -1564,9 +1689,7 @@ impl Usage {
         now: Instant,
     ) -> Result<std::sync::MutexGuard<'_, Inner>, Refusal> {
         let mut inner = self.lock();
-        if inner.all_epoch != at.all || inner.epochs.get(p).copied().unwrap_or(0) != at.person {
-            return Err(Refusal::Revoked);
-        }
+        Self::check(&inner, at, p)?;
         self.expire(&mut inner, now);
         self.load(&mut inner)?;
         Ok(inner)
@@ -1582,15 +1705,25 @@ impl Usage {
         always: bool,
     ) -> Result<std::sync::MutexGuard<'_, Inner>, Refusal> {
         let mut inner = self.lock();
-        if inner.all_epoch != at.all || inner.epochs.get(p).copied().unwrap_or(0) != at.person {
-            return Err(Refusal::Revoked);
-        }
+        Self::check(&inner, at, p)?;
         self.expire(&mut inner, now);
         match self.load(&mut inner) {
             Ok(()) => Ok(inner),
             Err(_) if always => Ok(inner),
             Err(e) => Err(e),
         }
+    }
+
+    /// Whether nothing that refuses a request let in at `at` happened since: a credential of `p`
+    /// or everyone's ended, or Clear mine or Clear all.
+    fn check(inner: &Inner, at: Epoch, p: &Person) -> Result<(), Refusal> {
+        if inner.all_epoch != at.all || inner.epochs.get(p).copied().unwrap_or(0) != at.person {
+            return Err(Refusal::Revoked);
+        }
+        if inner.clear_all != at.clear_all || inner.clears.get(p).copied().unwrap_or(0) != at.clear_person {
+            return Err(Refusal::Cleared);
+        }
+        Ok(())
     }
 
     /// Ends aliases past their time, forgets old bindings, ends rate windows.
@@ -1620,13 +1753,19 @@ impl Usage {
 
     /// What the memory housekeeping does.
     pub fn housekeep(&self, now: Instant) {
-        let mut inner = self.lock();
-        self.expire(&mut inner, now);
+        {
+            let mut inner = self.lock();
+            self.expire(&mut inner, now);
+            // An Off made before the file could be read is merged in once it can
+            let _ = self.load(&mut inner);
+        }
+        self.retry_unsaved();
     }
 
     // ---- the switch and people's choices ----
 
     fn status_of(&self, inner: &Inner, saved: bool) -> Result<Status, Refusal> {
+        let saved = saved && !inner.forced_off;
         // The file's size is informative only: a status never fails for it
         let (events, bytes) = self
             .with_store(false, |s| s.size())
@@ -1636,6 +1775,7 @@ impl Usage {
         Ok(Status {
             enabled: inner.node_on,
             saved,
+            cleanup_pending: inner.cleanup_pending.len(),
             generation: inner.node_generation,
             aliases: inner.aliases.len(),
             waiting: inner.pending.len(),
@@ -1648,7 +1788,8 @@ impl Usage {
 
     pub fn status(&self, at: Epoch, now: Instant) -> Result<Status, Refusal> {
         let inner = self.guard(at, &Person::Owner, now)?;
-        self.status_of(&inner, true)
+        let saved = !inner.forced_off;
+        self.status_of(&inner, saved)
     }
 
     /// The owner's switch. Off always applies at once (in memory, then saved; `saved` says whether
@@ -1666,18 +1807,21 @@ impl Usage {
         if !on {
             let generation = inner.node_generation + 1;
             let was_on = inner.node_on;
+            let loaded = inner.loaded;
             inner.node_on = false;
             inner.node_generation = generation;
-            // A later read of the file never turns it back on (it may say on, if this Off could
-            // not be saved): until a restart, memory decides
-            inner.loaded = true;
             Self::end_aliases(&mut inner, |_| true, now);
-            saved = self
-                .with_store(was_on, |s| {
-                    set_meta(&s.conn, "on", "0")?;
-                    set_meta(&s.conn, "generation", &generation.to_string())
-                })
-                .is_ok();
+            // Saved only when the file was read first (else its generation is not known yet);
+            // otherwise it is forced off: a later read never turns it back on, and housekeeping
+            // saves it with a generation past the file's
+            saved = loaded
+                && self
+                    .with_store(was_on, |s| {
+                        set_meta(&s.conn, "on", "0")?;
+                        set_meta(&s.conn, "generation", &generation.to_string())
+                    })
+                    .is_ok();
+            inner.forced_off = !saved;
         } else if shown != Some(inner.node_generation) {
             return Err(Refusal::Stale);
         } else if !inner.node_on {
@@ -1689,6 +1833,7 @@ impl Usage {
             })?;
             inner.node_on = true;
             inner.node_generation = generation;
+            inner.forced_off = false;
         }
         self.status_of(&inner, saved)
     }
@@ -1696,13 +1841,13 @@ impl Usage {
     pub fn me(&self, at: Epoch, p: &Person, now: Instant) -> Result<Me, Refusal> {
         let mut inner = self.guard(at, p, now)?;
         let pref = self.pref_of(&mut inner, p)?;
-        Ok(self.me_of(&inner, p, pref, true))
+        Ok(self.me_of(&inner, p, pref))
     }
 
-    fn me_of(&self, inner: &Inner, p: &Person, pref: Pref, saved: bool) -> Me {
+    fn me_of(&self, inner: &Inner, p: &Person, pref: Pref) -> Me {
         Me {
             schema: SCHEMA,
-            saved,
+            saved: !inner.unsaved_prefs.contains(p),
             node_on: inner.node_on,
             generation: inner.node_generation,
             sharing: !pref.stopped,
@@ -1734,7 +1879,6 @@ impl Usage {
             Err(_) if !share => inner.prefs.get(p).copied().unwrap_or_default(),
             Err(e) => return Err(e),
         };
-        let mut saved = true;
         if !share {
             pref.stopped = true;
             pref.choice += 1;
@@ -1748,7 +1892,10 @@ impl Usage {
                 .collect();
             // What their browsers sent and the writer has not written yet is not written
             inner.pending.retain(|r| !ended.contains(&r.alias));
-            saved = self.save_pref(&mut inner, p, pref).is_ok();
+            if self.save_pref(&mut inner, p, pref).is_err() {
+                // It applies in memory either way; housekeeping saves it when the file takes it
+                inner.unsaved_prefs.insert(p.clone());
+            }
         } else if shown != Some(pref.choice) {
             return Err(Refusal::Stale);
         } else if pref.stopped {
@@ -1757,7 +1904,7 @@ impl Usage {
             // Sharing again only once it is saved
             self.save_pref(&mut inner, p, pref)?;
         }
-        Ok(self.me_of(&inner, p, pref, saved))
+        Ok(self.me_of(&inner, p, pref))
     }
 
     /// The person has read this wording of the notice.
@@ -1771,7 +1918,7 @@ impl Usage {
             pref.notice_seen = version;
             self.save_pref(&mut inner, p, pref)?;
         }
-        Ok(self.me_of(&inner, p, pref, true))
+        Ok(self.me_of(&inner, p, pref))
     }
 
     // ---- aliases and events ----
@@ -2036,6 +2183,8 @@ impl Usage {
                     .map(|(id, _)| id.clone()),
             );
             inner.pending.retain(|r| !mine.contains(&r.alias));
+            // Nothing of theirs let in before this lands after it
+            *inner.clears.entry(p.clone()).or_default() += 1;
             mine.into_iter().collect()
         };
         Ok(self.with_store(false, |s| s.clear_aliases(&mine))?.unwrap_or(0))
@@ -2049,6 +2198,8 @@ impl Usage {
             inner.pending.clear();
             inner.pending_opens.clear();
             inner.pending_dropped = Dropped::default();
+            // Nothing anyone's browser had on its way lands after this
+            inner.clear_all += 1;
         }
         self.with_store(false, |s| s.clear_all())?;
         Ok(())
@@ -2279,12 +2430,28 @@ fn summarize(s: &Store, limits: &Limits, app_version: &str, unix: u64) -> Result
 /// Raw events, each alias renamed `s1`, `s2`… for this export only, with the summary.
 fn export_of(s: &Store, limits: &Limits, app_version: &str, unix: u64) -> Result<serde_json::Value, Refusal> {
     let summary = summarize(s, limits, app_version, unix)?;
-    let mut names: HashMap<String, String> = HashMap::new();
+    // Names drawn afresh for every export: shuffled, never the order browsers arrived in, and
+    // never the same across exports
+    let rows = s.rows()?;
+    let mut aliases: Vec<&String> = rows
+        .iter()
+        .map(|r| &r.1)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    {
+        use rand::seq::SliceRandom;
+        aliases.shuffle(&mut rand::thread_rng());
+    }
+    let names: HashMap<String, String> = aliases
+        .into_iter()
+        .enumerate()
+        .map(|(i, a)| (a.clone(), format!("s{}", i + 1)))
+        .collect();
     let mut sessions: BTreeMap<String, (String, String, u64)> = BTreeMap::new();
     let mut events = Vec::new();
-    for (at, alias, role, viewport, e) in s.rows()? {
-        let next = names.len() + 1;
-        let n = names.entry(alias).or_insert_with(|| format!("s{next}")).clone();
+    for (at, alias, role, viewport, e) in rows.iter().cloned() {
+        let n = names[&alias].clone();
         sessions
             .entry(n.clone())
             .or_insert_with(|| (role.clone(), viewport.clone(), 0))
@@ -2296,8 +2463,8 @@ fn export_of(s: &Store, limits: &Limits, app_version: &str, unix: u64) -> Result
         }
         events.push((at, n, v));
     }
-    // By time, then session: never the order they arrived in within a minute (it would tell
-    // apart times finer than the minute kept)
+    // By time, then the drawn name: never the order they arrived in within a minute; each
+    // browser's own events keep their order (the sort is stable)
     events.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let events: Vec<serde_json::Value> = events.into_iter().map(|(_, _, v)| v).collect();
     let sessions: Vec<_> = sessions
