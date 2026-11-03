@@ -6,14 +6,17 @@
 //
 // The page mounts it once: PM_FEEDBACK.mount(hostElement, { token, view, shell, version }), each
 // a function returning the current value (the bearer token, the page's view name, phone, tablet
-// or desktop, the app version).
+// or desktop, the app version), and calls PM_FEEDBACK.reset() on sign-out and account switch. A
+// draft belongs to the sign-in that wrote it either way.
 (() => {
   'use strict';
   const KINDS = [['problem', 'Problem'], ['idea', 'Idea'], ['question', 'Question']];
   const STATES = { saved: 'Saved on the node', received: 'Received for review', reviewed: 'Reviewed' };
   const MAX = 4000;
   let opts = null;
-  let draft = null; // { kind, text, details, client_id }: kept until it is saved
+  let draft = null; // { who, kind, text, withDetails, client_id }: kept until saved, for the sign-in that wrote it
+  const dialogs = new Set(); // the open dialogs' close functions
+  const who = () => (opts && opts.token && opts.token()) || '';
   let helpBtn = null;
   let closeMenu = null; // the open Help menu's close
 
@@ -67,7 +70,8 @@
 
   const openDialog = (d, onClose) => {
     document.body.appendChild(d);
-    const close = () => { if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (onClose) onClose(); if (helpBtn) helpBtn.focus(); };
+    const close = () => { dialogs.delete(close); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (onClose) onClose(); if (helpBtn) helpBtn.focus(); };
+    dialogs.add(close);
     d.addEventListener('cancel', (e) => { e.preventDefault(); close(); });
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     return close;
@@ -95,7 +99,9 @@
   };
 
   const report = () => {
-    if (!draft) draft = { kind: 'problem', text: '', withDetails: false, client_id: uuid() };
+    // A draft is its writer's: after a sign-out or with someone else signed in, it's gone
+    if (draft && draft.who !== who()) draft = null;
+    if (!draft) draft = { who: who(), kind: 'problem', text: '', withDetails: false, client_id: uuid() };
     const status = h('p', { class: 'fb-status', role: 'status', 'aria-live': 'polite' });
     const error = h('p', { class: 'field-err fb-error', role: 'alert' });
     const text = h('textarea', { class: 'input fb-text', id: 'fb-text', rows: '6', maxlength: String(MAX), required: true,
@@ -118,7 +124,7 @@
     const d = h('dialog', { class: 'dialog fb-dialog', 'aria-labelledby': 'fb-title' },
       h('h2', { id: 'fb-title', text: 'Report a problem' }),
       h('p', { class: 'muted fb-share', id: 'fb-share',
-        text: 'Saved privately on this node for its owner. Not public. Only what you write here is sent, and the details below if you tick them: no logs, screenshots or library.' }),
+        text: "Saved privately on this node. Not public. The node's owner, and the tools they use to look after it, read reports and can tell who sent them. Only what you write here is sent, and the details below if you tick them: no logs, screenshots or library." }),
       kinds,
       h('label', { class: 'field fb-field', for: 'fb-text' }, h('span', { text: 'Description' }), text),
       count,
@@ -132,6 +138,12 @@
     send.addEventListener('click', async () => {
       error.textContent = '';
       if (!text.value.trim()) { error.textContent = 'Describe the problem first.'; text.focus(); return; }
+      if (draft.who !== who()) {
+        draft = { who: who(), kind: 'problem', text: '', withDetails: false, client_id: uuid() };
+        text.value = ''; counted();
+        error.textContent = 'Someone else is signed in now, so that report was cleared.';
+        return;
+      }
       const body = { kind: draft.kind, text: text.value, client_id: draft.client_id };
       if (draft.withDetails) body.details = details();
       send.disabled = true; send.textContent = 'Sending…'; status.textContent = 'Sending…';
@@ -153,7 +165,8 @@
       else if (r.status === 429) {
         const min = Math.max(1, Math.ceil((+r.retryAfter || 60) / 60));
         error.textContent = `That's a lot of reports at once. Your report is kept here: try again in ${min} minute${min === 1 ? '' : 's'}.`;
-      } else if (r.status === 401) error.textContent = 'Your sign-in has ended. Sign in again, then send: your report is kept here until you close the page.';
+      } else if (r.status === 401) error.textContent = "Your sign-in has ended. Sign in again to send a report; this text isn't kept once you close this window.";
+      else if (r.status === 409) { draft.client_id = uuid(); error.textContent = (r.json && r.json.error) || 'Your first version was already saved. Send again to save this one as a new report.'; }
       else error.textContent = (r.json && r.json.error) || "The node couldn't save the report. Try again.";
     });
     text.focus();
@@ -168,8 +181,11 @@
     const close = openDialog(d);
     done.addEventListener('click', close);
     done.focus();
+    const asked = who();
     let r;
     try { r = await request('GET', '/feedback/mine'); } catch (e) { r = null; }
+    // Asked for someone who has signed out since, or closed: never shown to whoever is here now
+    if (asked !== who() || !d.isConnected) return;
     if (!r || r.status !== 200 || !Array.isArray(r.json)) { note.textContent = (r && r.json && r.json.error) || "Couldn't reach the node. Try again."; return; }
     note.textContent = r.json.length ? '' : "You haven't sent a report yet.";
     for (const it of r.json) {
@@ -193,5 +209,7 @@
     },
     report: () => report(),
     mine: () => mine(),
+    // The page calls this on sign-out and when someone else signs in: drafts and open dialogs go
+    reset() { draft = null; if (closeMenu) closeMenu(); for (const close of [...dialogs]) close(); },
   };
 })();

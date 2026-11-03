@@ -353,18 +353,12 @@ async fn tokens_pasted_into_a_report_are_not_kept_or_logged() {
     let s = node(dir.path(), Some(OWNER));
     let ann = pm_api::accounts::mint(&s, ANN).unwrap();
     let app = router(s);
-    // The node's log from here on: sending and refusing reports
-    let logs = Logs::default();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(logs.clone())
-            .finish(),
-    );
+    // The node's log (every test's, so only this test's own canaries are looked for)
+    let logs = logs();
     let text = format!(
         "my token {ann} and the node's {OWNER}, a session pmo_AbCdEfGhIjKlMnOpQrStUv and a guest pmg_ZyXwVuTsRqPoNmLkJiHg end"
     );
-    let (st, _) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(report(&text))).await;
+    let (st, saved) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(report(&text))).await;
     assert_eq!(st, StatusCode::CREATED);
     let kept = stored(dir.path());
     for secret in [
@@ -389,6 +383,8 @@ async fn tokens_pasted_into_a_report_are_not_kept_or_logged() {
     )
     .await;
     let log = logs.text();
+    let id = saved["id"].as_str().unwrap();
+    assert!(log.contains(id), "the log was captured: {id} not in it");
     for secret in [ann.as_str(), OWNER, "LOGCANARY", "my token", ANN] {
         assert!(!log.contains(secret), "{secret} in the log: {log}");
     }
@@ -401,15 +397,18 @@ async fn a_sign_out_while_a_report_is_on_its_way_saves_nothing() {
     let ann = pm_api::accounts::mint(&s, ANN).unwrap();
     let app = router(s.clone());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, std::io::Error>>(1);
-    let stream = tokio_stream_from(rx);
+    let asked = Arc::new(tokio::sync::Notify::new());
+    let stream = tokio_stream_from(rx, asked.clone());
     let req = Request::post("/v1/feedback")
         .header("authorization", format!("Bearer {ann}"))
         .header("content-type", "application/json")
         .body(Body::from_stream(stream))
         .unwrap();
     let pending = tokio::spawn(send_owned(app.clone(), req));
-    // The request is past the token check and waits for its body
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The request is past the token check: the handler is reading its body
+    tokio::time::timeout(std::time::Duration::from_secs(10), asked.notified())
+        .await
+        .expect("the handler asks for the body");
     assert!(!pending.is_finished());
     pm_api::accounts::sign_out_everywhere(&s, ANN).unwrap();
     assert!(
@@ -466,16 +465,150 @@ async fn the_operator_records_receipts_that_the_reporter_sees() {
         .is_err());
 }
 
+#[tokio::test]
+async fn the_token_goes_in_the_header_never_the_address() {
+    // A token in the address ends up in proxy logs and the browser's history
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(node(dir.path(), Some(OWNER)));
+    let (st, _) = call(
+        &app,
+        None,
+        "POST",
+        &format!("/v1/feedback?token={OWNER}"),
+        Some(report("hi")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = call(
+        &app,
+        None,
+        "GET",
+        &format!("/v1/feedback/mine?token={OWNER}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(stored(dir.path()), "[]");
+}
+
+#[tokio::test]
+async fn an_edited_retry_is_not_taken_for_the_first_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(node(dir.path(), Some(OWNER)));
+    let first = report("First version");
+    let (st, _) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(first.clone())).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let mut edited = first;
+    edited["text"] = json!("Edited after the answer was lost");
+    let (st, r) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(edited)).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    let texts: Vec<String> = inbox(dir.path())
+        .pending(pm_api::feedback::now())
+        .unwrap()
+        .into_iter()
+        .map(|p| p.text)
+        .collect();
+    assert_eq!(texts, ["First version"]);
+}
+
+#[tokio::test]
+async fn a_full_inbox_says_so_and_reports_already_taken_in_leave_room() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = router(node(dir.path(), Some(OWNER)));
+    inbox(dir.path());
+    let db = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    let old = pm_api::feedback::now() - 2 * 86_400;
+    for i in 0..pm_api::feedback::MAX_REPORTS {
+        db.execute(
+            "INSERT INTO report (id, client_id, reporter, kind, text, sent_at, state)
+             VALUES (?1, ?1, 'x', 'problem', 'x', ?2, 'saved')",
+            rusqlite::params![format!("fb_{i:016x}"), old],
+        )
+        .unwrap();
+    }
+    let (st, r) = call(
+        &app,
+        Some(OWNER),
+        "POST",
+        "/v1/feedback",
+        Some(report("one more")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{r}");
+    // Taken in by the operator: no longer waiting in the inbox
+    db.execute("UPDATE report SET state = 'received', received_at = ?1", [old])
+        .unwrap();
+    let (st, r) = call(
+        &app,
+        Some(OWNER),
+        "POST",
+        "/v1/feedback",
+        Some(report("one more")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+}
+
+#[tokio::test]
+async fn reports_are_never_in_a_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let app = router(s.clone());
+    let canary = "BACKUP-CANARY-report-text";
+    let (st, _) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(report(canary))).await;
+    assert_eq!(st, StatusCode::CREATED);
+    let (zip, _) = pm_api::backup::make(&s, None).unwrap();
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip)).unwrap();
+    assert!(!archive.is_empty());
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut bytes).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains(canary),
+            "{} holds a report",
+            f.name()
+        );
+    }
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {
     send(&app, req).await
 }
 
+/// A body that arrives when the test sends it; `asked` is notified the first time it is read.
 fn tokio_stream_from(
     mut rx: tokio::sync::mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    asked: Arc<tokio::sync::Notify>,
 ) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> {
-    futures_util::stream::poll_fn(move |cx| rx.poll_recv(cx))
+    let mut first = true;
+    futures_util::stream::poll_fn(move |cx| {
+        if std::mem::take(&mut first) {
+            asked.notify_one();
+        }
+        rx.poll_recv(cx)
+    })
+}
+
+/// The node's log for this test binary: one global subscriber, set once. A subscriber set for one
+/// thread misses events whose callsite another test's thread registered first.
+fn logs() -> Logs {
+    static LOGS: std::sync::OnceLock<Logs> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = Logs::default();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_ansi(false)
+                .with_writer(logs.clone())
+                .finish(),
+        )
+        .expect("one global subscriber");
+        logs
+    })
+    .clone()
 }
 
 /// The node's log, kept for the test to read.

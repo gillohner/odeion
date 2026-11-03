@@ -27,7 +27,7 @@ const HOST = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 <body><header class="topbar" id="top" style="display:flex;justify-content:flex-end;padding:8px 16px"></header><main><p>Test page</p></main>
 <script src="/feedback.js"></script>
 <script src="/__fb-mount.js"></script></body></html>`;
-const MOUNT = `PM_FEEDBACK.mount(document.getElementById('top'), { token: () => ${JSON.stringify(TOKEN)}, view: () => 'queue',
+const MOUNT = `PM_FEEDBACK.mount(document.getElementById('top'), { token: () => window.__fbToken || ${JSON.stringify(TOKEN)}, view: () => 'queue',
   shell: () => document.documentElement.clientWidth < 600 ? 'phone' : document.documentElement.clientWidth < 1024 ? 'tablet' : 'desktop', version: () => '0.2.3' });`;
 let passed = 0;
 const ok = (cond, what) => { assert.ok(cond, what); passed += 1; console.log(`ok ${what}`); };
@@ -74,6 +74,7 @@ const afterIntake = async (browser) => {
         if (next === 'abort') { next = null; return r.abort('connectionreset'); }
         if (next === 429) { next = null; return r.fulfill({ status: 429, headers: { 'retry-after': '120' }, json: { error: 'too many' } }); }
         if (next === 507) { next = null; return r.fulfill({ status: 507, json: { error: "The node's report inbox is full. Tell the node's owner." } }); }
+        if (next === 409) { next = null; return r.fulfill({ status: 409, json: { error: 'This report was already saved as you first wrote it. Send again to save this version as a new report.' } }); }
         if (!MOCK) return r.continue();
         const same = reports.find((x) => x.client_id === body.client_id);
         if (same) return r.fulfill({ status: 200, json: { id: same.id, state: 'saved' } });
@@ -159,6 +160,43 @@ const afterIntake = async (browser) => {
       if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `feedback-${width}-mine.png`) });
       await page.keyboard.press('Escape');
       ok(await page.getByRole('dialog').count() === 0 && await help.evaluate((el) => el === document.activeElement), `${w} Escape closes My reports, focus back on ?`);
+      if (MOCK) {
+        // A draft is its writer's (a shared tablet): someone else signing in never sees or sends it
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        let dlg = page.getByRole('dialog', { name: 'Report a problem' });
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('ANN-DRAFT private words');
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => { window.__fbToken = 'ben-token'; });
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        dlg = page.getByRole('dialog', { name: 'Report a problem' });
+        ok(await dlg.getByRole('textbox', { name: 'Description' }).inputValue() === '', `${w} another sign-in starts with an empty report`);
+        // Signed in as someone else while the dialog is open: nothing is sent
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('BEN words');
+        await page.evaluate(() => { window.__fbToken = 'cleo-token'; });
+        const before = posts.length;
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await dlg.getByRole('alert').filter({ hasText: 'Someone else is signed in now' }).waitFor();
+        ok(posts.length === before && await dlg.getByRole('textbox', { name: 'Description' }).inputValue() === '', `${w} a report is never sent under someone else's sign-in`);
+        // An edit after a lost answer: told so, and sent again as a new report
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('CLEO first');
+        next = 409;
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await dlg.getByRole('alert').filter({ hasText: 'already saved as you first wrote it' }).waitFor();
+        const firstId = posts[posts.length - 1].body.client_id;
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await page.getByRole('dialog', { name: 'Report saved' }).waitFor();
+        ok(posts[posts.length - 1].body.client_id !== firstId && !posts.some((p) => p.body.text.includes('ANN-DRAFT')), `${w} after "already saved" the edit goes as a new report, and no one else's draft went`);
+        // reset() on sign-out: open dialogs and the draft go
+        await page.keyboard.press('Escape');
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        await page.getByRole('dialog', { name: 'Report a problem' }).getByRole('textbox', { name: 'Description' }).fill('kept until reset');
+        await page.evaluate(() => window.PM_FEEDBACK.reset());
+        ok(await page.getByRole('dialog').count() === 0, `${w} reset closes the dialog`);
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        ok(await page.getByRole('dialog', { name: 'Report a problem' }).getByRole('textbox', { name: 'Description' }).inputValue() === '', `${w} reset drops the draft`);
+        await page.keyboard.press('Escape');
+        await page.evaluate(() => { delete window.__fbToken; });
+      }
       ok(errors.length === 0, `${w} no page errors ${errors.join('; ')}`);
       await ctx.close();
     }

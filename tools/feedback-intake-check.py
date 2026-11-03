@@ -106,7 +106,9 @@ def fake():
         rc, out, err = intake(cfg_path, "intake")
         check(rc == 0, f"intake runs ({rc} {err.strip()})")
         counts = json.loads(out or "{}")
-        check(counts == {"new": 1, "again": 0, "received": 0, "invalid": len(bad), "receipt_failed": 1},
+        stuck = counts.pop("invalid_ids", None)
+        check(stuck == [good["id"]], f"malformed reports with a good id are named by it: {stuck}")
+        check(counts == {"new": 1, "again": 0, "received": 0, "invalid": len(bad), "receipt_failed": 1, "store_failed": 0},
               f"one report kept, every malformed one refused: {counts}")
         check(CANARY not in out + err and "line two" not in out + err, "no report text in the output")
         check(mode(cfg["dir"]) == 0o700, f"the intake folder is private ({oct(mode(cfg['dir']))})")
@@ -117,7 +119,7 @@ def fake():
         check(k["report"]["text"] == good["text"] and k["report"]["details"] == good["details"],
               "the text and the chosen details are kept exactly")
         check(k["warning"].startswith("UNTRUSTED USER TEXT"), "the kept report is marked untrusted")
-        check(sorted(os.listdir(cfg["dir"])) == [good["id"] + ".json"], "nothing else is kept")
+        check(sorted(os.listdir(cfg["dir"])) == [".lock", good["id"] + ".json"], "nothing else is kept")
 
         with open(state) as f:
             s = json.load(f)
@@ -143,6 +145,44 @@ def fake():
         check(rc == 0 and json.loads(out) == {"reviewed": 1}, f"reviewed ({rc} {err.strip()})")
         rc, out, err = intake(cfg_path, "reviewed", "fb_0123; id")
         check(rc == 1 and "fb_0123" not in err, "a malformed id for review is refused without echo")
+
+        # A broken copy (a crash or a full disk mid-write) is repaired before any receipt
+        other = dict(good, id="fb_00000000000000ff", text="SYNTHETIC second report")
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[other]), "calls": [], "receipt_status": 0}, f)
+        broken = os.path.join(cfg["dir"], other["id"] + ".json")
+        os.mkdir(broken)  # where the copy goes can't take one: it can't be written
+        rc, out, err = intake(cfg_path, "intake")
+        os.rmdir(broken)
+        with open(state) as f:
+            calls = json.load(f)["calls"]
+        check(rc == 0 and json.loads(out or "{}").get("store_failed") == 1, f"a copy that can't be written is counted ({rc} {out.strip()})")
+        check(calls == [], "no receipt for a report without a good copy")
+        with open(broken, "w") as f:
+            f.write('{"warning": "UNTRUSTED')  # cut off mid-write
+        os.chmod(broken, 0o600)
+        rc, out, err = intake(cfg_path, "intake")
+        with open(broken, encoding="utf-8") as f:
+            repaired = json.load(f)["report"]
+        with open(state) as f:
+            calls = json.load(f)["calls"]
+        check(rc == 0 and repaired == other and len(calls) == 1, f"the copy is repaired, then received ({rc} {out.strip()})")
+        check(mode(broken) == 0o600 and not [n for n in os.listdir(cfg["dir"]) if ".tmp" in n], "the repaired copy is private, no temp files left")
+
+        # One intake at a time
+        import fcntl
+        with open(os.path.join(cfg["dir"], ".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            rc, out, err = intake(cfg_path, "intake")
+        check(rc == 1 and "another intake" in err, "a second intake at once waits its turn")
+
+        # A report the tool can't take is named by id (never by text), so it doesn't sit unseen
+        stuck = dict(good, id="fb_00000000000000ee", text="y" * 4001)
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[stuck]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = intake(cfg_path, "intake")
+        res = json.loads(out or "{}")
+        check(res.get("invalid_ids") == [stuck["id"]] and "yyyy" not in out + err, f"a stuck report is named by id: {res}")
 
         # A fetch command that fails or prints something else
         with open(state, "w") as f:

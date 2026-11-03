@@ -13,7 +13,7 @@
 use crate::accounts::{Caller, Role};
 use crate::state::NodeState;
 use crate::ApiError;
-use axum::extract::{Query, State as AxState};
+use axum::extract::State as AxState;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
@@ -21,7 +21,6 @@ use futures_util::StreamExt;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -211,6 +210,10 @@ pub enum InboxError {
     /// Too many reports: try again in this many seconds.
     Wait(i64),
     Full,
+    /// The sender's sign-in ended before the report was written.
+    SignedOut,
+    /// The same report id came again with other words: the first version is the one kept.
+    Changed,
     /// A receipt that can't be: a state going back, a malformed reference.
     Invalid(&'static str),
     Store(String),
@@ -221,6 +224,8 @@ impl std::fmt::Display for InboxError {
         match self {
             InboxError::Wait(s) => write!(f, "too many reports; try again in {s} s"),
             InboxError::Full => f.write_str("the inbox is full"),
+            InboxError::SignedOut => f.write_str("the sender's sign-in ended"),
+            InboxError::Changed => f.write_str("that report was already saved with other words"),
             InboxError::Invalid(why) => f.write_str(why),
             InboxError::Store(e) => write!(f, "inbox: {e}"),
         }
@@ -271,6 +276,15 @@ pub struct Inbox {
 }
 
 impl Inbox {
+    /// Open the inbox in `dir` if the node has made one: the operator's commands never make it
+    /// (made by another user, it would lock the node out of its own inbox).
+    pub fn open_existing(dir: &Path) -> Result<Option<Inbox>, InboxError> {
+        if !dir.join(FILE).exists() {
+            return Ok(None);
+        }
+        Inbox::open(dir).map(Some)
+    }
+
     /// Open (or make) the inbox in `dir`.
     pub fn open(dir: &Path) -> Result<Inbox, InboxError> {
         std::fs::create_dir_all(dir)?;
@@ -289,7 +303,13 @@ impl Inbox {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e.into()),
             }
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            if std::fs::metadata(&path)?.permissions().mode() & 0o777 != 0o600 {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+                    InboxError::Store(format!(
+                        "{FILE} can't be made private ({e}): it belongs to another user; run as the node's user"
+                    ))
+                })?;
+            }
         }
         let conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -305,8 +325,15 @@ impl Inbox {
         )?)
     }
 
-    /// Save a report. `Ok((id, false))` for one sent before with the same `client_id`.
-    fn add(&mut self, reporter: &str, r: &NewReport, now: i64) -> Result<(String, bool), InboxError> {
+    /// Save a report. `Ok((id, false))` for one sent before with the same `client_id`. `still` says
+    /// whether its sender is still signed in; it is asked last, once the inbox is this write's.
+    fn add(
+        &mut self,
+        reporter: &str,
+        r: &NewReport,
+        now: i64,
+        still: &dyn Fn() -> bool,
+    ) -> Result<(String, bool), InboxError> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -314,14 +341,24 @@ impl Inbox {
             "DELETE FROM report WHERE sent_at < ?1 OR (reviewed_at IS NOT NULL AND reviewed_at < ?2)",
             params![now - KEEP, now - KEEP_REVIEWED],
         )?;
-        let before: Option<String> = tx
+        let details = r
+            .details
+            .as_ref()
+            .filter(|d| **d != Details::default())
+            .map(|d| serde_json::to_string(d).expect("serializes"));
+        let kind = serde_json::to_value(r.kind).expect("serializes");
+        let before: Option<(String, String, String, Option<String>)> = tx
             .query_row(
-                "SELECT id FROM report WHERE reporter = ?1 AND client_id = ?2",
+                "SELECT id, kind, text, details FROM report WHERE reporter = ?1 AND client_id = ?2",
                 params![reporter, r.client_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        if let Some(id) = before {
+        if let Some((id, k, text, d)) = before {
+            // Sent again after a lost answer: the same report, or an edit that would be lost
+            if kind.as_str() != Some(k.as_str()) || text != r.text || d != details {
+                return Err(InboxError::Changed);
+            }
             return Ok((id, false));
         }
         // A full window (one person's hour or day, the node's day) frees a place when its oldest
@@ -342,13 +379,10 @@ impl Inbox {
                 return Err(InboxError::Wait((times[times.len() - max] + window - now).max(1)));
             }
         }
-        let details = r
-            .details
-            .as_ref()
-            .filter(|d| **d != Details::default())
-            .map(|d| serde_json::to_string(d).expect("serializes"));
+        // What waits for the operator; what they took in is safe with them and leaves room
         let (count, bytes): (i64, i64) = tx.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(text AS BLOB)) + COALESCE(LENGTH(details), 0)), 0) FROM report",
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(text AS BLOB)) + COALESCE(LENGTH(details), 0)), 0)
+             FROM report WHERE state = 'saved'",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -356,19 +390,14 @@ impl Inbox {
         if count as usize >= MAX_REPORTS || bytes as usize + size > MAX_BYTES {
             return Err(InboxError::Full);
         }
+        if !still() {
+            return Err(InboxError::SignedOut);
+        }
         let id = format!("fb_{}", hex::encode(rand::random::<[u8; 8]>()));
         tx.execute(
             "INSERT INTO report (id, client_id, reporter, kind, text, details, sent_at, state)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'saved')",
-            params![
-                id,
-                r.client_id,
-                reporter,
-                serde_json::to_value(r.kind).expect("serializes").as_str(),
-                r.text,
-                details,
-                now
-            ],
+            params![id, r.client_id, reporter, kind.as_str(), r.text, details, now],
         )?;
         tx.commit()?;
         Ok((id, true))
@@ -423,7 +452,7 @@ impl Inbox {
     /// Record that the operator received or reviewed report `id`, under their own `reference`
     /// (1–64 of `A-Z a-z 0-9 . _ -`). `Ok(false)`: no such report. A state never goes back; the
     /// same receipt again is fine.
-    pub fn receipt(&self, id: &str, state: State, reference: &str, now: i64) -> Result<bool, InboxError> {
+    pub fn receipt(&mut self, id: &str, state: State, reference: &str, now: i64) -> Result<bool, InboxError> {
         if !valid_id(id) {
             return Ok(false);
         }
@@ -439,8 +468,11 @@ impl Inbox {
         if state == State::Saved {
             return Err(InboxError::Invalid("a receipt says received or reviewed"));
         }
-        let now_state: Option<(String, Option<String>)> = self
+        // Read and write in one go: two receipts at once never take a state back
+        let tx = self
             .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now_state: Option<(String, Option<String>)> = tx
             .query_row(
                 "SELECT state, receipt FROM report WHERE id = ?1",
                 params![id],
@@ -461,10 +493,11 @@ impl Inbox {
             State::Received => "received_at",
             _ => "reviewed_at",
         };
-        self.conn.execute(
+        tx.execute(
             &format!("UPDATE report SET state = ?1, receipt = ?2, {column} = ?3 WHERE id = ?4"),
             params![state.as_str(), reference, now, id],
         )?;
+        tx.commit()?;
         Ok(true)
     }
 }
@@ -546,6 +579,31 @@ fn scrub(text: &str, secrets: &[String]) -> String {
     out
 }
 
+const EMPTY: &str = "Describe the problem first.";
+const TOO_LONG: &str = "That report is too long: at most 4000 characters.";
+
+/// A report's text as it is kept, or why it can't be: cleaned, tokens taken out, then measured.
+fn prepare(raw: &str, secrets: &[String]) -> Result<String, &'static str> {
+    let text = scrub(&clean(raw), secrets);
+    match text.chars().count() {
+        0 => Err(EMPTY),
+        n if n > MAX_TEXT => Err(TOO_LONG),
+        _ => Ok(text),
+    }
+}
+
+/// The bearer token from the `Authorization` header only: a token in the address ends up in
+/// proxy logs and the browser's history, so reports never take one from there.
+fn header_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)
+}
+
+const IN_THE_HEADER: &str = "Send the token in the Authorization header.";
+
 fn refuse(status: StatusCode, msg: &str) -> Response {
     ApiError::new(status, msg).into_response()
 }
@@ -567,12 +625,14 @@ pub async fn send(
     AxState(s): AxState<Arc<NodeState>>,
     Extension(c): Extension<Caller>,
     headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
     req: axum::extract::Request,
 ) -> Response {
     // Without a token every caller is the owner: no telling who sent a report
     let Some(api_token) = s.token() else {
         return refuse(StatusCode::FORBIDDEN, NO_TOKEN);
+    };
+    let Some(token) = header_token(&headers) else {
+        return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
     };
     let Some(who) = reporter(&c) else {
         return refuse(StatusCode::FORBIDDEN, "Only the node's people send reports.");
@@ -592,9 +652,12 @@ pub async fn send(
         }
         bytes.extend_from_slice(&chunk);
     }
-    // Still signed in as the same person once the body is here
-    let token = crate::bearer(&headers, &query);
-    if crate::accounts::caller(&s, token.as_deref()).as_ref() != Some(&c) {
+    // Still signed in as the same person once the body is here (and again at the write)
+    let signed_in = {
+        let (s, token, c) = (s.clone(), token.clone(), c.clone());
+        move || crate::accounts::caller(&s, Some(&token)).as_ref() == Some(&c)
+    };
+    if !signed_in() {
         return refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
     }
     let Ok(mut r) = serde_json::from_slice::<NewReport>(&bytes) else {
@@ -607,21 +670,13 @@ pub async fn send(
     if !r.details.as_ref().is_none_or(Details::valid) {
         return refuse(StatusCode::BAD_REQUEST, NOT_UNDERSTOOD);
     }
-    let text = clean(&r.text);
-    let chars = text.chars().count();
-    if chars == 0 {
-        return refuse(StatusCode::BAD_REQUEST, "Describe the problem first.");
-    }
-    if chars > MAX_TEXT {
-        return refuse(
-            StatusCode::BAD_REQUEST,
-            "That report is too long: at most 4000 characters.",
-        );
-    }
-    let secrets: Vec<String> = [Some(api_token), token].into_iter().flatten().collect();
-    r.text = scrub(&text, &secrets);
+    r.text = match prepare(&r.text, &[api_token, token]) {
+        Ok(text) => text,
+        Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
+    };
     let dir = s.data_dir();
-    let saved = tokio::task::spawn_blocking(move || Inbox::open(&dir)?.add(&who, &r, now())).await;
+    let saved =
+        tokio::task::spawn_blocking(move || Inbox::open(&dir)?.add(&who, &r, now(), &signed_in)).await;
     match saved {
         Ok(Ok((id, new))) => {
             tracing::info!(%id, new, "feedback: report saved");
@@ -644,6 +699,11 @@ pub async fn send(
                 .insert(header::RETRY_AFTER, secs.to_string().parse().expect("digits"));
             resp
         }
+        Ok(Err(InboxError::SignedOut)) => refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token"),
+        Ok(Err(InboxError::Changed)) => refuse(
+            StatusCode::CONFLICT,
+            "This report was already saved as you first wrote it. Send again to save this version as a new report.",
+        ),
         Ok(Err(InboxError::Full)) => refuse(
             StatusCode::INSUFFICIENT_STORAGE,
             "The node's report inbox is full. Tell the node's owner.",
@@ -657,19 +717,24 @@ pub async fn send(
 }
 
 /// `GET /v1/feedback/mine`: the caller's own reports and where each is.
-pub async fn mine(AxState(s): AxState<Arc<NodeState>>, Extension(c): Extension<Caller>) -> Response {
+pub async fn mine(
+    AxState(s): AxState<Arc<NodeState>>,
+    Extension(c): Extension<Caller>,
+    headers: HeaderMap,
+) -> Response {
     if s.token().is_none() {
         return refuse(StatusCode::FORBIDDEN, NO_TOKEN);
+    }
+    if header_token(&headers).is_none() {
+        return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
     }
     let Some(who) = reporter(&c) else {
         return refuse(StatusCode::FORBIDDEN, "Only the node's people send reports.");
     };
     let dir = s.data_dir();
-    match tokio::task::spawn_blocking(move || {
-        if !dir.join(FILE).exists() {
-            return Ok(Vec::new());
-        }
-        Inbox::open(&dir)?.mine(&who)
+    match tokio::task::spawn_blocking(move || match Inbox::open_existing(&dir)? {
+        Some(inbox) => inbox.mine(&who),
+        None => Ok(Vec::new()),
     })
     .await
     {
@@ -696,17 +761,19 @@ pub fn start_housekeeping(s: &Arc<NodeState>) {
         loop {
             tick.tick().await;
             let dir = dir.clone();
-            let _ = tokio::task::spawn_blocking(move || housekeeping(&dir, now())).await;
+            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || housekeeping(&dir, now())).await {
+                tracing::warn!("feedback: expired reports not removed: {e}");
+            }
         }
     });
 }
 
 /// One round of [`start_housekeeping`]: nothing to do (and no inbox made) without one.
 pub fn housekeeping(dir: &Path, now: i64) -> Result<usize, InboxError> {
-    if !dir.join(FILE).exists() {
+    let Some(inbox) = Inbox::open_existing(dir)? else {
         return Ok(0);
-    }
-    let n = Inbox::open(dir)?.purge(now)?;
+    };
+    let n = inbox.purge(now)?;
     if n > 0 {
         tracing::info!(n, "feedback: expired reports removed");
     }
@@ -748,9 +815,11 @@ mod tests {
         assert!(!dir.path().join(FILE).exists(), "no inbox made for nothing");
         let mut inbox = Inbox::open(dir.path()).unwrap();
         let t0 = 1_000_000_000;
-        let (old, _) = inbox.add("a", &new("old"), t0).unwrap();
-        let (reviewed, _) = inbox.add("b", &new("reviewed"), t0 + 300 * DAY).unwrap();
-        let (fresh, _) = inbox.add("c", &new("fresh"), t0 + 300 * DAY).unwrap();
+        let (old, _) = inbox.add("a", &new("old"), t0, &|| true).unwrap();
+        let (reviewed, _) = inbox
+            .add("b", &new("reviewed"), t0 + 300 * DAY, &|| true)
+            .unwrap();
+        let (fresh, _) = inbox.add("c", &new("fresh"), t0 + 300 * DAY, &|| true).unwrap();
         assert!(inbox
             .receipt(&reviewed, State::Reviewed, "r1", t0 + 301 * DAY)
             .unwrap());
@@ -787,7 +856,7 @@ mod tests {
                 .unwrap();
         }
         assert!(matches!(
-            inbox.add("y", &new("one more"), t),
+            inbox.add("y", &new("one more"), t, &|| true),
             Err(InboxError::Full)
         ));
         assert_eq!(inbox.pending(t).unwrap().len(), MAX_REPORTS);
@@ -803,10 +872,10 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            inbox.add("y", &new("eleven chars"), t),
+            inbox.add("y", &new("eleven chars"), t, &|| true),
             Err(InboxError::Full)
         ));
-        assert!(inbox.add("y", &new("ten chars!"), t).is_ok());
+        assert!(inbox.add("y", &new("ten chars!"), t, &|| true).is_ok());
     }
 
     #[test]
@@ -817,10 +886,10 @@ mod tests {
         for i in 0..NODE_PER_DAY {
             // Many people, spread over the day: no one's own limit applies
             inbox
-                .add(&format!("p{i}"), &new("x"), t - DAY + 1 + i as i64 * 60)
+                .add(&format!("p{i}"), &new("x"), t - DAY + 1 + i as i64 * 60, &|| true)
                 .unwrap();
         }
-        match inbox.add("someone-new", &new("x"), t) {
+        match inbox.add("someone-new", &new("x"), t, &|| true) {
             Err(InboxError::Wait(s)) => assert_eq!(s, 1, "the oldest leaves the day in a second"),
             other => panic!("{other:?}"),
         }
@@ -828,8 +897,45 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut inbox = Inbox::open(dir.path()).unwrap();
         for i in 0..PER_DAY {
-            inbox.add("p", &new("x"), t - DAY + 1 + i as i64 * HOUR).unwrap();
+            inbox
+                .add("p", &new("x"), t - DAY + 1 + i as i64 * HOUR, &|| true)
+                .unwrap();
         }
-        assert!(matches!(inbox.add("p", &new("x"), t), Err(InboxError::Wait(_))));
+        assert!(matches!(
+            inbox.add("p", &new("x"), t, &|| true),
+            Err(InboxError::Wait(_))
+        ));
+    }
+
+    #[test]
+    fn a_sign_out_just_before_the_write_saves_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        // Checked again inside the write, after any wait for the inbox's lock
+        assert!(matches!(
+            inbox.add("p", &new("late"), 1_000, &|| false),
+            Err(InboxError::SignedOut)
+        ));
+        assert!(inbox.pending(1_000).unwrap().is_empty());
+        assert!(inbox.add("p", &new("in time"), 1_000, &|| true).is_ok());
+    }
+
+    #[test]
+    fn the_operator_never_makes_an_inbox() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Inbox::open_existing(dir.path()).unwrap().is_none());
+        assert!(!dir.path().join(FILE).exists(), "no inbox made by reading");
+        Inbox::open(dir.path()).unwrap();
+        assert!(Inbox::open_existing(dir.path()).unwrap().is_some());
+    }
+
+    #[test]
+    fn the_length_counts_once_tokens_are_taken_out() {
+        let token = "abcdefghij".to_string(); // 10 characters, 15 once taken out
+        let text = format!("{token} ").repeat(MAX_TEXT / 11);
+        assert!(text.trim().chars().count() <= MAX_TEXT);
+        assert_eq!(prepare(&text, std::slice::from_ref(&token)), Err(TOO_LONG));
+        assert_eq!(prepare(" a\r\nb ", &[]), Ok("a\nb".to_string()));
+        assert_eq!(prepare(" \u{7} ", &[]), Err(EMPTY));
     }
 }
