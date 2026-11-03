@@ -47,7 +47,10 @@ async function create(browser, width, opts={}) {
   if(v==='/storage') return json(r,{homeserver:{mode:'none'}});
   if(v==='/smart/preview') return json(r,{tracks:[],matched:0});
   if(v==='/offline/downloads') return json(r,{tracks:state.tracks||[track],playlists:[{id:'c1',name:summary.name,track_ids:[1],total:1}],favourites:{track_ids:[1]}});
-  if(v==='/search') return r.fulfill({contentType:'application/x-ndjson',body:JSON.stringify({source:'library',status:'ok',hits:[],counts:{}})+'\n'});
+  if(/^\/library\/albums\/\d+\/cover$/.test(v)) return r.fulfill({status:404,body:''}); // no artwork kept
+  // pm-offline's GET /v1/offline answer (crates/pm-offline/src/server.rs).
+  if(v==='/offline') return json(r,{offline:true,device_id:'fixture-device',synced_at:null,bytes:0,queued:0,tracks:state.tracks||[track],albums:[{...track.album,track_ids:[1],cover:false}],playlists:[{id:'c1',name:summary.name,track_ids:[1],total:1}],favourites:{track_ids:[1]}});
+  if(v==='/search') return r.fulfill({contentType:'application/x-ndjson',body:JSON.stringify({source:'library',status:'ok',hits:state.searchHits||[],counts:[]})+'\n'});
   if(v==='/discover/play') return json(r,{uri:SONG,title:track.title,artist:'Sefa, Dr. Peacock',track_id:1});
   state.unhandled.push(v);return json(r,{error:'Fixture endpoint unavailable'},404);
  });

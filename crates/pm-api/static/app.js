@@ -176,7 +176,7 @@
     if (/error sending request|connection refused|dns error|could not resolve/i.test(text)) return `Couldn't reach ${who === 'The service' ? 'the service' : who}; check the node's internet connection.`;
     return text;
   };
-  const api = async (method, path, body) => {
+  const api = async (method, path, body, opts = {}) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
@@ -188,8 +188,9 @@
         method,
         headers: { 'content-type': 'application/json', ...(sent ? { authorization: 'Bearer ' + sent } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
+        signal: opts.signal,
       });
-    } catch { linkHint(); throw new Error("Can't reach the node."); }
+    } catch (e) { if (opts.signal && opts.signal.aborted) throw e; linkHint(); throw new Error("Can't reach the node."); }
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     const text = await r.text();
@@ -1891,14 +1892,29 @@
     try {
       if (isBrowser()) {
         // The list's Play shortcut uses the same resolved sources as the detail
-        // page: d.tracks alone omits all service-only entries.
-        const [d, pf] = await Promise.all([api('GET', `/playlists/${id}`), api('GET', `/playlists/${encodeURIComponent(id)}/play-from`)]);
-        const songs = pf.items.flatMap((r, k) => !r.plays_from || ['link', 'post'].includes(d.entries && d.entries[k] && d.entries[k].kind) ? [] : [{
-          uri: r.stream_uri || r.uri, track_id: r.plays_from.service === 'library' ? (r.track_id ?? (d.tracks[k] && d.tracks[k].id)) : null,
-          title: r.title, artist: r.artist, album: r.album, duration_ms: r.duration_ms, image: r.image,
-        }]);
+        // page: d.tracks alone omits all service-only entries. Only a library song or a
+        // stream plays here: a pick with neither (Spotify Connect plays on Spotify's own
+        // devices) has just its canonical page, which is never audio, so it is left out and
+        // said so. Every other row keeps its place, duplicates included.
+        const slow = setTimeout(() => toast('Finding where these songs play…'), 800);
+        let d, pf;
+        try { [d, pf] = await Promise.all([api('GET', `/playlists/${id}`), api('GET', `/playlists/${encodeURIComponent(id)}/play-from`)]); } finally { clearTimeout(slow); }
+        rememberTracks(d.tracks); rememberTracks(d.local_tracks);
+        const elsewhere = new Map();
+        const songs = pf.items.flatMap((r, k) => {
+          if (!r.plays_from || ['link', 'post'].includes(d.entries && d.entries[k] && d.entries[k].kind)) return [];
+          const lib = r.plays_from.service === 'library'; const t = lib ? d.tracks[k] : null;
+          const song = { uri: r.stream_uri || null, track_id: lib ? (r.track_id ?? (t && t.id)) : null, artists: t ? t.artists : undefined, title: r.title, artist: r.artist, album: r.album, duration_ms: r.duration_ms, image: r.image };
+          if (song.track_id != null || song.uri) return [song];
+          const svc = r.plays_from.service; const name = `${SERVICE_NAMES[svc] || srcName(svc)}${r.plays_from.mode === 'connect' ? ' Connect' : ''}`;
+          elsewhere.set(name, (elsewhere.get(name) || 0) + 1); return [];
+        });
         const local = (d.local_tracks || []).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms }));
-        return playSongs([...songs, ...local]);
+        const left = [...elsewhere].map(([name, n]) => `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} only through ${name}`).join('; ');
+        if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
+        await playSongs([...songs, ...local]);
+        if (left) toast(`${left}; left out of this browser's queue`);
+        return;
       }
       startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
       const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
@@ -2336,7 +2352,9 @@
   };
   const artistLinksHtml = (it) => {
     const credits = artistCredits(it); const tid = it.track_id ?? trackIdOf(it);
-    return `<span${tid != null ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}">${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
+    // Only a library song whose row carries no structured artists is read again (hydrateArtistCredits)
+    const flat = tid != null && !Array.isArray(it.artists) && !Array.isArray((state.trackCache.get('track:' + tid) || {}).artists);
+    return `<span${flat ? ` data-credit-track="${esc(tid)}"` : ''}>${credits.map((a, i) => `<a class="lnk" data-artist-credit="${esc(a.name)}"${a.id ? ` data-credit-id="${esc(a.id)}"` : ''} href="${esc(a.id ? '/artist/' + encodeURIComponent(a.id) : '/search?q=' + encodeURIComponent(a.name))}" title="Open ${esc(a.name)}">${esc(a.name)}</a>${i < credits.length - 1 ? esc(a.join) : ''}`).join('')}</span>`;
   };
   document.addEventListener('click', (e) => {
     const a = e.target.closest && e.target.closest('[data-artist-credit]');
@@ -2347,25 +2365,53 @@
     else { search.value = a.dataset.artistCredit; setView('search', { q: a.dataset.artistCredit, in: 'everywhere' }); }
   }, true);
   // Some older item-page responses carry only the flattened credit plus track_id.
-  // Hydrate from the node's existing track API, never from an enrichment service.
-  // Two reads at a time globally; reuse the normal track cache and coalesce reads.
-  const artistReadQueue = []; const artistReads = new Set(); let artistReading = 0;
+  // Hydrate from the node's existing track API, never from an enrichment service. Rows
+  // rendered from structured credits are never read. Bounded: two reads at a time, at most
+  // ARTIST_READS distinct songs per page visit, each given up after ARTIST_READ_MS; leaving
+  // the page drops the queue and aborts reads in flight. A transient failure (5xx, timeout,
+  // network) retries with backoff, ARTIST_TRIES in all; any other refusal keeps the safe
+  // unsplit search link. Coming back to the page starts afresh.
+  const ARTIST_READS = 48; const ARTIST_READ_MS = 6000; const ARTIST_TRIES = 3;
+  const hyd = { queue: [], seen: new Map(), active: new Set(), reading: 0, gen: 0 };
+  const creditEls = (id) => $$(`[data-credit-track="${id}"]`);
+  const cancelArtistReads = () => {
+    hyd.gen++; hyd.queue.length = 0;
+    for (const s of hyd.seen.values()) clearTimeout(s.retry);
+    hyd.seen.clear();
+    for (const c of hyd.active) c.abort();
+  };
+  const showCredits = (id, t) => creditEls(id).forEach((el) => {
+    const focused = el.contains(document.activeElement);
+    el.insertAdjacentHTML('afterend', artistLinksHtml({ track_id: Number(id), artists: t.artists }));
+    const fresh = el.nextElementSibling; el.remove();
+    if (focused && fresh) { const a = $('[data-artist-credit]', fresh); if (a) a.focus(); }
+  });
+  const pumpCredits = () => {
+    while (hyd.reading < 2 && hyd.queue.length) {
+      const id = hyd.queue.shift(); const s = hyd.seen.get(id);
+      if (!s) continue;
+      if (!creditEls(id).length) { hyd.seen.delete(id); continue; } // no longer on screen
+      const gen = hyd.gen; const ctrl = new AbortController(); let late = false;
+      const timer = setTimeout(() => { late = true; ctrl.abort(); }, ARTIST_READ_MS);
+      hyd.reading++; hyd.active.add(ctrl); s.tries++;
+      api('GET', `/library/tracks/${id}`, undefined, { signal: ctrl.signal }).then((t) => {
+        rememberTracks([t]);
+        if (Array.isArray(t.artists) && t.artists.length) showCredits(id, t);
+      }).catch((e) => {
+        if (gen !== hyd.gen || (ctrl.signal.aborted && !late)) return; // left the page: not a failure
+        const transient = late || !e.status || e.status >= 500 || e.status === 408 || e.status === 429;
+        if (!transient || s.tries >= ARTIST_TRIES) return; // keep the unsplit search link
+        s.retry = setTimeout(() => { if (gen === hyd.gen) { hyd.queue.push(id); pumpCredits(); } }, 1000 * 2 ** (s.tries - 1));
+      }).finally(() => { clearTimeout(timer); hyd.reading--; hyd.active.delete(ctrl); pumpCredits(); });
+    }
+  };
   const hydrateArtistCredits = (root) => {
     $$('[data-credit-track]', root).forEach((el) => {
       const id = el.dataset.creditTrack;
-      if (!/^\d+$/.test(id) || artistReads.has(id) || (state.trackCache.get('track:' + id) || {}).artists) return;
-      artistReads.add(id); artistReadQueue.push(id);
+      if (!/^\d+$/.test(id) || hyd.seen.has(id) || hyd.seen.size >= ARTIST_READS || (state.trackCache.get('track:' + id) || {}).artists) return;
+      hyd.seen.set(id, { tries: 0 }); hyd.queue.push(id);
     });
-    const pump = () => {
-      while (artistReading < 2 && artistReadQueue.length) {
-        const id = artistReadQueue.shift(); artistReading++;
-        api('GET', `/library/tracks/${id}`).then((t) => {
-          rememberTracks([t]);
-          $$(`[data-credit-track="${id}"]`).forEach((el) => { el.outerHTML = artistLinksHtml({ track_id: Number(id), artists: t.artists }); });
-        }).catch(() => { /* keep the unsplit search fallback */ }).finally(() => { artistReading--; pump(); });
-      }
-    };
-    pump();
+    pumpCredits();
   };
   // A zone's volume slider: the output's hardware range and the zone's level, or this browser's
   // own volume; null when the device sets it
@@ -3214,6 +3260,7 @@
   };
   const setView = (v, arg, how = 'push') => {
     if (popPending && how !== 'pop') return popPending.then(() => setView(v, arg, how)); // a menu's entry is still being popped
+    cancelArtistReads(); // the page being left reads no more credits
     { const t = toItem(v, arg); if (t) { v = 'item'; arg = t; } }
     if (v === 'discover') { if (arg && arg.tag) { v = 'tag'; arg = arg.tag; } else { v = 'home'; arg = undefined; } }
     // A section of its own starts with an empty search box (second review: "queen" stayed after leaving Search)
@@ -3918,8 +3965,18 @@
   // ---- one row, one tile, one menu (docs/ux/08-item-page.md) ----
   const imgSrc = (u) => (u && u.startsWith('/v1/') ? u + tokenQ() : u);
   const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
+  // Library tracks by id, in order and with duplicates: the ones a page already loaded come
+  // from the track cache, the rest are read four at a time (not one request per song at once).
+  const readTracks = async (ids) => {
+    const out = ids.map((id) => state.trackCache.get('track:' + id) || null);
+    const need = [...new Set(ids.filter((id, k) => !out[k]))]; const got = new Map();
+    const worker = async () => { while (need.length) { const id = need.shift(); got.set(id, await api('GET', `/library/tracks/${id}`)); } };
+    await Promise.all(Array.from({ length: Math.min(4, need.length) }, worker));
+    rememberTracks([...got.values()]);
+    return ids.map((id, k) => out[k] || got.get(id));
+  };
   // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
-  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
+  const playSongs =async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
     const first = songs[k];
     if (first && first.track_id == null && !first.uri && first.page) {
       // A song only known by its link: the resolver finds where it plays.
@@ -3928,7 +3985,7 @@
     const list = songs.slice(k).filter((t) => t.track_id != null || t.uri);
     if (!list.length) return toast('Nothing here plays on your services', 'error');
     if (pf && pf.mode === 'connect') return spotifyPlay(list.map((t) => t.uri).filter(Boolean), anchorEl);
-    if (list.every((t) => t.track_id != null)) { try { const tr = await Promise.all(list.map((t) => api('GET', `/library/tracks/${t.track_id}`))); return how === 'replace' ? playTracks(tr, true) : playTracks(tr, false, how); } catch (e) { return toast(e.message, 'error'); } }
+    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id)); return how === 'replace' ? playTracks(tr, true) : playTracks(tr, false, how); } catch (e) { return toast(e.message, 'error'); } }
     // In a mixed queue a library row has track_id, not a provider URI.
     // Keep every playable row (and duplicates) in its original position.
     const items = list.map((t) => qOf(t, fallback));
