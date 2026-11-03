@@ -572,6 +572,33 @@ async fn reports_are_never_in_a_backup() {
     }
 }
 
+#[tokio::test]
+async fn a_listeners_short_name_is_this_nodes_own() {
+    // Keyed with a secret of the node's: an export can't be matched to a public key, and the same
+    // person has another short name on another node
+    let mut people = Vec::new();
+    for _ in 0..2 {
+        let dir = tempfile::tempdir().unwrap();
+        let s = node(dir.path(), Some(OWNER));
+        let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+        let app = router(s);
+        let (st, _) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(report("hi"))).await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (st, _) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(report("again"))).await;
+        assert_eq!(st, StatusCode::CREATED);
+        let pending = inbox(dir.path()).pending(pm_api::feedback::now()).unwrap();
+        assert_eq!(
+            pending[0].person, pending[1].person,
+            "one short name per person on a node"
+        );
+        people.push(pending[0].person.clone());
+    }
+    assert_ne!(people[0], people[1]);
+    use sha2::Digest;
+    let unkeyed = hex::encode(sha2::Sha256::digest(format!("pm-feedback-reporter:{ANN}")));
+    assert!(!people.contains(&unkeyed[..8].to_string()));
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {

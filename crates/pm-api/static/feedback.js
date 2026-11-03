@@ -14,7 +14,7 @@
   const STATES = { saved: 'Saved on the node', received: 'Received for review', reviewed: 'Reviewed' };
   const MAX = 4000;
   let opts = null;
-  let draft = null; // { who, kind, text, withDetails, client_id }: kept until saved, for the sign-in that wrote it
+  let draft = null; // { who, kind, text, details, client_id }: kept until saved, for the sign-in that wrote it
   const dialogs = new Set(); // the open dialogs' close functions
   const who = () => (opts && opts.token && opts.token()) || '';
   let helpBtn = null;
@@ -98,27 +98,32 @@
     items[0].focus();
   };
 
+  const fresh = () => ({ who: who(), kind: 'problem', text: '', details: null, client_id: uuid() });
+
   const report = () => {
     // A draft is its writer's: after a sign-out or with someone else signed in, it's gone
     if (draft && draft.who !== who()) draft = null;
-    if (!draft) draft = { who: who(), kind: 'problem', text: '', withDetails: false, client_id: uuid() };
+    if (!draft) draft = fresh();
+    // This dialog's draft: a late answer to an earlier send never swaps it out from under it
+    let dr = draft;
     const status = h('p', { class: 'fb-status', role: 'status', 'aria-live': 'polite' });
     const error = h('p', { class: 'field-err fb-error', role: 'alert' });
     const text = h('textarea', { class: 'input fb-text', id: 'fb-text', rows: '6', maxlength: String(MAX), required: true,
       placeholder: 'What happened, and what did you expect?' });
-    text.value = draft.text;
+    text.value = dr.text;
     const count = h('span', { class: 'muted fb-count', 'aria-live': 'off' });
     const counted = () => { count.textContent = `${text.value.length} / ${MAX}`; };
     counted();
-    text.addEventListener('input', () => { draft.text = text.value; counted(); error.textContent = ''; });
+    text.addEventListener('input', () => { dr.text = text.value; counted(); error.textContent = ''; });
     const kinds = h('div', { class: 'fb-kinds', role: 'radiogroup', 'aria-label': 'Kind of report' },
       KINDS.map(([k, label]) => h('label', { class: 'fb-kind' },
-        h('input', { type: 'radio', name: 'fb-kind', value: k, checked: draft.kind === k, onchange: () => { draft.kind = k; } }), ` ${label}`)));
-    const preview = h('pre', { class: 'fb-preview', id: 'fb-preview', hidden: !draft.withDetails });
-    const showDetails = () => { preview.textContent = JSON.stringify(details(), null, 1); preview.hidden = !draft.withDetails; };
+        h('input', { type: 'radio', name: 'fb-kind', value: k, checked: dr.kind === k, onchange: () => { dr.kind = k; } }), ` ${label}`)));
+    // The details are taken once, when ticked: what the preview shows is what every try sends
+    const preview = h('pre', { class: 'fb-preview', id: 'fb-preview', hidden: !dr.details });
+    const showDetails = () => { preview.textContent = dr.details ? JSON.stringify(dr.details, null, 1) : ''; preview.hidden = !dr.details; };
     showDetails();
-    const tick = h('input', { type: 'checkbox', id: 'fb-details', checked: draft.withDetails, 'aria-controls': 'fb-preview',
-      onchange: (e) => { draft.withDetails = e.target.checked; showDetails(); error.textContent = ''; } });
+    const tick = h('input', { type: 'checkbox', id: 'fb-details', checked: !!dr.details, 'aria-controls': 'fb-preview',
+      onchange: (e) => { dr.details = e.target.checked ? details() : null; showDetails(); error.textContent = ''; } });
     const send = h('button', { class: 'btn primary', type: 'button', 'data-send': true, text: 'Send' });
     const cancel = h('button', { class: 'btn', type: 'button', text: 'Cancel' });
     const d = h('dialog', { class: 'dialog fb-dialog', 'aria-labelledby': 'fb-title' },
@@ -138,20 +143,24 @@
     send.addEventListener('click', async () => {
       error.textContent = '';
       if (!text.value.trim()) { error.textContent = 'Describe the problem first.'; text.focus(); return; }
-      if (draft.who !== who()) {
-        draft = { who: who(), kind: 'problem', text: '', withDetails: false, client_id: uuid() };
-        text.value = ''; counted();
-        error.textContent = 'Someone else is signed in now, so that report was cleared.';
+      if (dr.who !== who()) {
+        dr = draft = fresh();
+        text.value = ''; counted(); tick.checked = false; showDetails();
+        error.textContent = 'The sign-in changed, so this report was cleared.';
         return;
       }
-      const body = { kind: draft.kind, text: text.value, client_id: draft.client_id };
-      if (draft.withDetails) body.details = details();
+      const sent = dr;
+      const body = { kind: sent.kind, text: text.value, client_id: sent.client_id };
+      if (sent.details) body.details = sent.details;
       send.disabled = true; send.textContent = 'Sending…'; status.textContent = 'Sending…';
       let r;
       try { r = await request('POST', '/feedback', body); } catch (e) { r = null; }
+      const saved = r && (r.status === 201 || r.status === 200);
+      if (saved && draft === sent) draft = null;
+      // Closed meanwhile, or someone else signed in: the answer is for no one here now
+      if (!d.isConnected || sent.who !== who()) return;
       send.disabled = false; send.textContent = 'Send'; status.textContent = '';
-      if (r && (r.status === 201 || r.status === 200)) {
-        draft = null;
+      if (saved) {
         d.replaceChildren(
           h('h2', { id: 'fb-title', text: 'Report saved' }),
           h('p', { class: 'fb-done', role: 'status', text: 'Saved privately on this node. "My reports" shows when it has been received and reviewed.' }),
@@ -165,8 +174,8 @@
       else if (r.status === 429) {
         const min = Math.max(1, Math.ceil((+r.retryAfter || 60) / 60));
         error.textContent = `That's a lot of reports at once. Your report is kept here: try again in ${min} minute${min === 1 ? '' : 's'}.`;
-      } else if (r.status === 401) error.textContent = "Your sign-in has ended. Sign in again to send a report; this text isn't kept once you close this window.";
-      else if (r.status === 409) { draft.client_id = uuid(); error.textContent = (r.json && r.json.error) || 'Your first version was already saved. Send again to save this one as a new report.'; }
+      } else if (r.status === 401) error.textContent = "Your sign-in has ended, so this report can't be sent. Copy the text if you want to keep it.";
+      else if (r.status === 409) { sent.client_id = uuid(); error.textContent = (r.json && r.json.error) || 'Your first version was already saved. Send again to save this one as a new report.'; }
       else error.textContent = (r.json && r.json.error) || "The node couldn't save the report. Try again.";
     });
     text.focus();

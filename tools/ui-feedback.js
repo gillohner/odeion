@@ -67,22 +67,27 @@ const afterIntake = async (browser) => {
       // Requests the page makes, and (mock) the node's answers
       const posts = [];
       const reports = [];
-      let next = null; // the next POST's forced answer: 'abort', 429, 507
+      let next = null; // the next POST's forced answer: 'abort', 429, 507, 409
+      let hold = null; // a promise the next POST (or My reports) waits on before it is answered
+      let holdMine = null;
       await page.route(`${ORIGIN}/v1/feedback`, async (r) => {
         const body = r.request().postDataJSON();
         posts.push({ body, auth: r.request().headers().authorization });
+        if (hold) { const h = hold; hold = null; await h; }
         if (next === 'abort') { next = null; return r.abort('connectionreset'); }
         if (next === 429) { next = null; return r.fulfill({ status: 429, headers: { 'retry-after': '120' }, json: { error: 'too many' } }); }
         if (next === 507) { next = null; return r.fulfill({ status: 507, json: { error: "The node's report inbox is full. Tell the node's owner." } }); }
         if (next === 409) { next = null; return r.fulfill({ status: 409, json: { error: 'This report was already saved as you first wrote it. Send again to save this version as a new report.' } }); }
         if (!MOCK) return r.continue();
+        // Like the node: the same id again is the same report, or 409 when its words changed
         const same = reports.find((x) => x.client_id === body.client_id);
+        if (same && same.text !== body.text) return r.fulfill({ status: 409, json: { error: 'This report was already saved as you first wrote it. Send again to save this version as a new report.' } });
         if (same) return r.fulfill({ status: 200, json: { id: same.id, state: 'saved' } });
         const id = `fb_${String(reports.length).padStart(16, '0')}`;
-        reports.push({ id, client_id: body.client_id, kind: body.kind, sent_at: 1_800_000_000 + reports.length, state: 'saved', preview: body.text.trim().slice(0, 80) });
+        reports.push({ id, client_id: body.client_id, kind: body.kind, text: body.text, sent_at: 1_800_000_000 + reports.length, state: 'saved', preview: body.text.trim().slice(0, 80) });
         return r.fulfill({ status: 201, json: { id, state: 'saved' } });
       });
-      if (MOCK) await page.route(`${ORIGIN}/v1/feedback/mine`, (r) => r.fulfill({ json: [...reports].sort((x, y) => y.sent_at - x.sent_at) }));
+      if (MOCK) await page.route(`${ORIGIN}/v1/feedback/mine`, async (r) => { if (holdMine) { const h = holdMine; holdMine = null; await h; } return r.fulfill({ json: [...reports].sort((x, y) => y.sent_at - x.sent_at) }); });
       await page.goto(`${ORIGIN}/__fb-host`);
       const w = `[${width}]`;
 
@@ -139,11 +144,14 @@ const afterIntake = async (browser) => {
       const shown = JSON.parse(await dialog.locator('#fb-preview').textContent());
       ok(shown.view === 'queue' && shown.shell === (phone ? 'phone' : width < 1024 ? 'tablet' : 'desktop') && shown.version === '0.2.3' && shown.browser === 'chromium', `${w} the preview shows the details (${JSON.stringify(shown)})`);
       if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `feedback-${width}-dialog.png`) });
+      // The phone turns before Send: what goes is still what the preview showed
+      if (phone) await page.setViewportSize({ width: 800, height: 760 });
       await dialog.getByRole('button', { name: 'Send' }).click();
       const saved = page.getByRole('dialog', { name: 'Report saved' });
       await saved.waitFor();
       const last = posts[posts.length - 1].body;
       ok(JSON.stringify(last.details) === JSON.stringify(shown), `${w} exactly the previewed details are sent`);
+      if (phone) await page.setViewportSize({ width, height: 760 });
       ok(new Set(posts.map((p) => p.body.client_id)).size === 1, `${w} every try is the same report (one client id)`);
       ok(/Saved privately on this node/.test(await saved.textContent()) && !/Hermes/.test(await saved.textContent()), `${w} saved, with no claim beyond the node`);
       if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `feedback-${width}-saved.png`) });
@@ -175,7 +183,7 @@ const afterIntake = async (browser) => {
         await page.evaluate(() => { window.__fbToken = 'cleo-token'; });
         const before = posts.length;
         await dlg.getByRole('button', { name: 'Send' }).click();
-        await dlg.getByRole('alert').filter({ hasText: 'Someone else is signed in now' }).waitFor();
+        await dlg.getByRole('alert').filter({ hasText: 'The sign-in changed' }).waitFor();
         ok(posts.length === before && await dlg.getByRole('textbox', { name: 'Description' }).inputValue() === '', `${w} a report is never sent under someone else's sign-in`);
         // An edit after a lost answer: told so, and sent again as a new report
         await dlg.getByRole('textbox', { name: 'Description' }).fill('CLEO first');
@@ -186,6 +194,38 @@ const afterIntake = async (browser) => {
         await dlg.getByRole('button', { name: 'Send' }).click();
         await page.getByRole('dialog', { name: 'Report saved' }).waitFor();
         ok(posts[posts.length - 1].body.client_id !== firstId && !posts.some((p) => p.body.text.includes('ANN-DRAFT')), `${w} after "already saved" the edit goes as a new report, and no one else's draft went`);
+        // A late answer to a send never breaks the next dialog (Escape while sending, reopen)
+        await page.keyboard.press('Escape');
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        dlg = page.getByRole('dialog', { name: 'Report a problem' });
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('SLOW report');
+        let release; hold = new Promise((res) => { release = res; });
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await page.keyboard.press('Escape');
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        dlg = page.getByRole('dialog', { name: 'Report a problem' });
+        release();
+        await page.waitForTimeout(300);
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('SLOW report, more');
+        ok((await dlg.locator('.fb-count').textContent()).startsWith('17 /'), `${w} the reopened dialog still works after the late answer`);
+        // The first version was saved meanwhile: the edit is told so, then goes as a new report
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await dlg.getByRole('alert').filter({ hasText: 'already saved as you first wrote it' }).waitFor();
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await page.getByRole('dialog', { name: 'Report saved' }).waitFor();
+        ok(reports.some((x) => x.text === 'SLOW report') && reports.some((x) => x.text === 'SLOW report, more'), `${w} both versions are saved, each once`);
+        ok(errors.length === 0, `${w} no page errors after a late answer ${errors.join('; ')}`);
+        await page.keyboard.press('Escape');
+        // A late "My reports" answer for someone who signed out is never shown to who is here now
+        let releaseMine; holdMine = new Promise((res) => { releaseMine = res; });
+        await help.click(); await page.getByRole('menuitem', { name: 'My reports' }).click();
+        const mineDlg = page.getByRole('dialog', { name: 'My reports' });
+        await mineDlg.waitFor();
+        await page.evaluate(() => { window.__fbToken = 'dan-token'; });
+        releaseMine();
+        await page.waitForTimeout(300);
+        ok(await mineDlg.getByRole('listitem').count() === 0, `${w} a late My reports answer for an earlier sign-in shows nothing`);
+        await page.keyboard.press('Escape');
         // reset() on sign-out: open dialogs and the draft go
         await page.keyboard.press('Escape');
         await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();

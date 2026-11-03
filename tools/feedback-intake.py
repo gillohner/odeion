@@ -9,7 +9,11 @@ CONFIG is the operator's own JSON file; nothing in a report ever changes what ru
     {"fetch":   ["pm-node", "-c", "/srv/node.toml", "feedback", "pending"],
      "receipt": ["pm-node", "-c", "/srv/node.toml", "feedback", "receipt", "{id}", "{state}", "--ref", "{ref}"],
      "dir":     "/srv/feedback-intake/music-node",
-     "receipts": "/srv/feedback-intake/music-node/receipts.jsonl"}
+     "receipts": "/srv/feedback-intake/music-node/receipts.jsonl",
+     "timeout_s": 120}
+
+`timeout_s` (optional, 1-3600, default 120) bounds each command: one that hangs (a half-open ssh
+link) is stopped, so the next intake can run.
 
 `fetch` prints `pm-node feedback pending`'s JSON. `receipt` is run with no shell; `{id}`, `{state}`
 and `{ref}` are filled in only after they pass strict checks (a report id is `fb_` and 16 hex
@@ -25,6 +29,7 @@ import fcntl
 import json
 import os
 import re
+import selectors
 import subprocess
 import sys
 import time
@@ -60,6 +65,10 @@ def load_config(path):
         argv = cfg.get(key)
         if not (isinstance(argv, list) and argv and all(isinstance(a, str) for a in argv)):
             raise IntakeError(f"config {key!r} is a list of strings (a command, no shell)")
+    t = cfg.get("timeout_s", TIMEOUT)
+    if not (isinstance(t, int) and not isinstance(t, bool) and 1 <= t <= 3600):
+        raise IntakeError("config 'timeout_s' is a whole number of seconds, 1-3600")
+    cfg["timeout_s"] = t
     for key in ("dir", "receipts"):
         if not isinstance(cfg.get(key), str) or not os.path.isabs(cfg[key]):
             raise IntakeError(f"config {key!r} is an absolute path")
@@ -71,32 +80,54 @@ def private_dir(path):
     os.chmod(path, 0o700)
 
 
-def run(argv):
-    """Run a command (no shell); its stdout (at most MAX_OUTPUT bytes), or IntakeError without
-    echoing it."""
+def run(argv, timeout):
+    """Run a command (no shell) for at most `timeout` seconds; its stdout (at most MAX_OUTPUT
+    bytes), or IntakeError without echoing it."""
     try:
         p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError as e:
         raise IntakeError(f"{argv[0]}: {type(e).__name__}") from None
+    deadline = time.monotonic() + timeout
+    out = bytearray()
+    sel = selectors.DefaultSelector()
+    sel.register(p.stdout, selectors.EVENT_READ)
     try:
-        out = p.stdout.read(MAX_OUTPUT + 1)
-        if len(out) > MAX_OUTPUT:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise IntakeError(f"{argv[0]}: TimeoutExpired after {timeout} s")
+            if not sel.select(left):
+                continue
+            chunk = os.read(p.stdout.fileno(), 1 << 16)
+            if not chunk:
+                break
+            out += chunk
+            if len(out) > MAX_OUTPUT:
+                raise IntakeError(f"{argv[0]} printed more than {MAX_OUTPUT} bytes")
+        try:
+            code = p.wait(timeout=max(0.1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise IntakeError(f"{argv[0]}: TimeoutExpired after {timeout} s") from None
+    finally:
+        sel.close()
+        if p.poll() is None:
             p.kill()
             p.wait()
-            raise IntakeError(f"{argv[0]} printed more than {MAX_OUTPUT} bytes")
         p.stdout.close()
-        code = p.wait(timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.wait()
-        raise IntakeError(f"{argv[0]}: TimeoutExpired") from None
     if code != 0:
         raise IntakeError(f"{argv[0]} exited with status {code}")
-    return out
+    return bytes(out)
 
 
 def valid_report(r):
     """The report if it has exactly the export's shape, else None."""
+    try:
+        return _valid_report(r)
+    except TypeError:
+        return None  # a list or an object where a word belongs
+
+
+def _valid_report(r):
     if not isinstance(r, dict):
         return None
     allowed = {"id", "kind", "text", "details", "from", "person", "sent_at"}
@@ -133,7 +164,7 @@ def fill(template, values):
 def receipt(cfg, report_id, state):
     if not ID.fullmatch(report_id) or state not in ("received", "reviewed"):
         raise IntakeError("a receipt needs a report id and received or reviewed")
-    run(fill(cfg["receipt"], {"id": report_id, "state": state, "ref": reference(report_id)}))
+    run(fill(cfg["receipt"], {"id": report_id, "state": state, "ref": reference(report_id)}), cfg["timeout_s"])
 
 
 def log_receipt(cfg, report, state):
@@ -162,13 +193,13 @@ def kept(path, report):
 
 
 def store(cfg, report):
-    """Keep the report in the private folder: True for a new copy, False when a good copy was there
-    (a lost receipt). A copy is written whole to a temp file, synced, then moved into place, so a
+    """Keep the report in the private folder: "new", "again" when a good copy was there (a lost
+    receipt) or "repaired" when a broken one was. A copy is written whole to a temp file, synced, then moved into place, so a
     crash or a full disk never leaves a broken one; a broken one from before is replaced."""
     path = os.path.join(cfg["dir"], report["id"] + ".json")
     there = os.path.exists(path)
     if there and kept(path, report):
-        return False
+        return "again"
     tmp = os.path.join(cfg["dir"], f".{report['id']}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
@@ -191,13 +222,26 @@ def store(cfg, report):
         os.close(d)
     if not kept(path, report):
         raise IntakeError("a kept copy didn't read back")
-    return not there
+    return "repaired" if there else "new"
+
+
+def sweep_temp(cfg):
+    """Temp copies a crash left (they hold report text): gone after an hour. Runs under the lock."""
+    for name in os.listdir(cfg["dir"]):
+        if name.startswith(".fb_") and name.endswith(".tmp"):
+            path = os.path.join(cfg["dir"], name)
+            try:
+                if time.time() - os.lstat(path).st_mtime > 3600:
+                    os.unlink(path)
+            except OSError:
+                pass
 
 
 def intake(cfg):
     private_dir(cfg["dir"])
+    sweep_temp(cfg)
     try:
-        export = json.loads(run(cfg["fetch"]))
+        export = json.loads(run(cfg["fetch"], cfg["timeout_s"]))
     except ValueError:
         raise IntakeError("the fetch command didn't print JSON") from None
     if not (
@@ -207,7 +251,7 @@ def intake(cfg):
         and isinstance(export.get("reports"), list)
     ):
         raise IntakeError("the fetch command didn't print pm-feedback-pending version 1")
-    counts = {"new": 0, "again": 0, "received": 0, "invalid": 0, "receipt_failed": 0, "store_failed": 0}
+    counts = {"new": 0, "again": 0, "repaired": 0, "received": 0, "invalid": 0, "receipt_failed": 0, "store_failed": 0}
     stuck = []
     for r in export["reports"]:
         report = valid_report(r)
@@ -218,7 +262,7 @@ def intake(cfg):
                 stuck.append(r["id"])
             continue
         try:
-            counts["new" if store(cfg, report) else "again"] += 1
+            counts[store(cfg, report)] += 1
         except (OSError, IntakeError):
             # No good copy: no receipt, so it stays new on the node for the next intake
             counts["store_failed"] += 1

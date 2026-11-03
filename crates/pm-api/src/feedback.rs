@@ -20,7 +20,6 @@ use axum::{Extension, Json};
 use futures_util::StreamExt;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -268,11 +267,14 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS report (
     receipt TEXT,
     UNIQUE (reporter, client_id)
 );
-CREATE INDEX IF NOT EXISTS report_sent ON report (sent_at);";
+CREATE INDEX IF NOT EXISTS report_sent ON report (sent_at);
+CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);";
 
 /// The node's private inbox.
 pub struct Inbox {
     conn: Connection,
+    /// This inbox's own key for listeners' short names (made once, kept in the inbox).
+    secret: [u8; 32],
 }
 
 impl Inbox {
@@ -314,7 +316,17 @@ impl Inbox {
         let conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Inbox { conn })
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (k, v) VALUES ('reporter_key', ?1)",
+            params![rand::random::<[u8; 32]>().to_vec()],
+        )?;
+        let key: Vec<u8> = conn.query_row("SELECT v FROM meta WHERE k = 'reporter_key'", [], |row| {
+            row.get(0)
+        })?;
+        let secret = key
+            .try_into()
+            .map_err(|_| InboxError::Store("the inbox's reporter key is damaged".into()))?;
+        Ok(Inbox { conn, secret })
     }
 
     /// Drop what is past keeping: reviewed reports after 90 days, any after a year.
@@ -523,20 +535,34 @@ pub fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Who sent a report, as the inbox keeps it: the owner, or a listener's key hashed (so the inbox
-/// never holds anyone's key).
+/// The owner, as the inbox keeps them.
 const OWNER: &str = "owner";
 
-fn reporter(c: &Caller) -> Option<String> {
+/// Who may send a report: the owner or a listener (their key); party guests and nobody else.
+enum Sender {
+    Owner,
+    Listener(String),
+}
+
+fn sender(c: &Caller) -> Option<Sender> {
     match (c.role, c.key.as_deref()) {
-        (Role::Owner, _) => Some(OWNER.into()),
-        (Role::Listener, Some(k)) => {
-            let mut h = Sha256::new();
-            h.update(b"pm-feedback-reporter:");
-            h.update(k.trim_start_matches("pubky").as_bytes());
-            Some(hex::encode(h.finalize()))
-        }
+        (Role::Owner, _) => Some(Sender::Owner),
+        (Role::Listener, Some(k)) => Some(Sender::Listener(k.trim_start_matches("pubky").to_string())),
         _ => None,
+    }
+}
+
+impl Inbox {
+    /// Who sent a report, as the inbox keeps it: the owner, or a listener's key hashed with this
+    /// inbox's own secret. The inbox never holds anyone's key, and its short names can't be matched
+    /// to a public key or to the same person on another node.
+    fn reporter_of(&self, who: &Sender) -> String {
+        match who {
+            Sender::Owner => OWNER.into(),
+            Sender::Listener(k) => blake3::keyed_hash(&self.secret, k.as_bytes())
+                .to_hex()
+                .to_string(),
+        }
     }
 }
 
@@ -634,7 +660,7 @@ pub async fn send(
     let Some(token) = header_token(&headers) else {
         return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
     };
-    let Some(who) = reporter(&c) else {
+    let Some(who) = sender(&c) else {
         return refuse(StatusCode::FORBIDDEN, "Only the node's people send reports.");
     };
     // The body, bounded, read here: a refusal never repeats it (nor logs it)
@@ -675,8 +701,12 @@ pub async fn send(
         Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
     };
     let dir = s.data_dir();
-    let saved =
-        tokio::task::spawn_blocking(move || Inbox::open(&dir)?.add(&who, &r, now(), &signed_in)).await;
+    let saved = tokio::task::spawn_blocking(move || {
+        let mut inbox = Inbox::open(&dir)?;
+        let reporter = inbox.reporter_of(&who);
+        inbox.add(&reporter, &r, now(), &signed_in)
+    })
+    .await;
     match saved {
         Ok(Ok((id, new))) => {
             tracing::info!(%id, new, "feedback: report saved");
@@ -728,12 +758,12 @@ pub async fn mine(
     if header_token(&headers).is_none() {
         return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
     }
-    let Some(who) = reporter(&c) else {
+    let Some(who) = sender(&c) else {
         return refuse(StatusCode::FORBIDDEN, "Only the node's people send reports.");
     };
     let dir = s.data_dir();
     match tokio::task::spawn_blocking(move || match Inbox::open_existing(&dir)? {
-        Some(inbox) => inbox.mine(&who),
+        Some(inbox) => inbox.mine(&inbox.reporter_of(&who)),
         None => Ok(Vec::new()),
     })
     .await

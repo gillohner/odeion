@@ -62,6 +62,8 @@ state = os.environ["FAKE_STATE"]
 with open(state) as f:
     s = json.load(f)
 if sys.argv[1] == "pending":
+    import time
+    time.sleep(s.get("sleep", 0))
     print(json.dumps(s["export"]))
 elif sys.argv[1] == "receipt":
     s["calls"].append(sys.argv[2:])
@@ -90,6 +92,8 @@ def fake():
             dict(good, kind="command"),
             dict(good, url="https://example.com"),
             dict(good, details={"cookie": "x"}),
+            dict(good, kind=["problem"]),
+            dict(good, **{"from": {"x": 1}}),
             dict(good, details={"view": "../../etc"}),
             dict(good, person="o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy"),
             "fb_0123456789abcdef",
@@ -108,7 +112,7 @@ def fake():
         counts = json.loads(out or "{}")
         stuck = counts.pop("invalid_ids", None)
         check(stuck == [good["id"]], f"malformed reports with a good id are named by it: {stuck}")
-        check(counts == {"new": 1, "again": 0, "received": 0, "invalid": len(bad), "receipt_failed": 1, "store_failed": 0},
+        check(counts == {"new": 1, "again": 0, "repaired": 0, "received": 0, "invalid": len(bad), "receipt_failed": 1, "store_failed": 0},
               f"one report kept, every malformed one refused: {counts}")
         check(CANARY not in out + err and "line two" not in out + err, "no report text in the output")
         check(mode(cfg["dir"]) == 0o700, f"the intake folder is private ({oct(mode(cfg['dir']))})")
@@ -174,7 +178,24 @@ def fake():
         with open(os.path.join(cfg["dir"], ".lock"), "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             rc, out, err = intake(cfg_path, "intake")
-        check(rc == 1 and "another intake" in err, "a second intake at once waits its turn")
+        check(rc == 1 and "another intake" in err, "a second intake at once stops at once, the first one untouched")
+
+        # A fetch that hangs (a half-open ssh link) is stopped at the timeout, and the lock goes with it
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[]), "calls": [], "sleep": 30}, f)
+        with open(cfg_path) as f:
+            slow_cfg = dict(json.load(f), timeout_s=1)
+        slow_path = os.path.join(work, "slow.json")
+        with open(slow_path, "w") as f:
+            json.dump(slow_cfg, f)
+        t0 = time.monotonic()
+        rc, out, err = intake(slow_path, "intake")
+        took = time.monotonic() - t0
+        check(rc == 1 and "Timeout" in err and took < 10, f"a hung fetch stops at the timeout ({rc}, {took:.1f} s)")
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[]), "calls": []}, f)
+        rc, out, err = intake(cfg_path, "intake")
+        check(rc == 0, f"the next intake runs: the lock went with the stopped one ({rc} {err.strip()})")
 
         # A report the tool can't take is named by id (never by text), so it doesn't sit unseen
         stuck = dict(good, id="fb_00000000000000ee", text="y" * 4001)
