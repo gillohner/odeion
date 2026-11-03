@@ -600,24 +600,58 @@ async fn a_listeners_short_name_is_this_nodes_own() {
 }
 
 #[tokio::test]
-async fn a_short_api_token_pasted_into_a_report_is_taken_out() {
-    // The node takes a short token from its config (with a warning); a report never keeps it
+async fn a_node_with_a_short_api_token_takes_no_reports() {
+    // A short owner token would be guessable through the reports (a scrubbed match changes the
+    // text): reports wait until the token is long enough
     let dir = tempfile::tempdir().unwrap();
-    let app = router(node(dir.path(), Some("k3y9z")));
-    let (st, _) = call(
-        &app,
-        Some("k3y9z"),
-        "POST",
-        "/v1/feedback",
-        Some(report("token k3y9z pasted")),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CREATED);
-    let kept = stored(dir.path());
-    assert!(
-        !kept.contains("k3y9z") && kept.contains("token [token removed] pasted"),
-        "{kept}"
-    );
+    let s = node(dir.path(), Some("k3y9z"));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s);
+    for who in ["k3y9z", ann.as_str()] {
+        let (st, r) = call(
+            &app,
+            Some(who),
+            "POST",
+            "/v1/feedback",
+            Some(report("token k3y9z pasted")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+        let (st, _) = call(&app, Some(who), "GET", "/v1/feedback/mine", None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(stored(dir.path()), "[]");
+}
+
+#[tokio::test]
+async fn whether_a_report_is_taken_never_depends_on_a_secret_in_it() {
+    // The length is measured before tokens come out: the owner's token in a listener's text
+    // changes nothing about the answer
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s);
+    let pad = |n: usize, with: &str| format!("{with}{}", "x".repeat(n - with.chars().count()));
+    for n in [pm_api::feedback::MAX_TEXT, pm_api::feedback::MAX_TEXT + 1] {
+        let (with, _) = call(
+            &app,
+            Some(&ann),
+            "POST",
+            "/v1/feedback",
+            Some(report(&pad(n, OWNER))),
+        )
+        .await;
+        let (without, _) = call(
+            &app,
+            Some(&ann),
+            "POST",
+            "/v1/feedback",
+            Some(report(&pad(n, "y"))),
+        )
+        .await;
+        assert_eq!(with, without, "{n} characters: the answer gave the token away");
+    }
+    assert!(!stored(dir.path()).contains(OWNER));
 }
 
 // ---- helpers ----

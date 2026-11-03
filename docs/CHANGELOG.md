@@ -11,6 +11,7 @@ Newest first. Dates are when the change landed on `main`.
   - The node's operator reads new reports with `pm-node feedback pending` and records receipts with `pm-node feedback receipt`; `tools/feedback-intake.py` keeps a whole copy of each in a private folder, marked as untrusted text, before it sends a receipt.
   - Limits: 4000 characters, 5 reports an hour and 20 a day per person, 100 a day for the node, 500 reports waiting in the inbox. Reviewed reports go after 90 days, any after a year.
   - A draft belongs to the sign-in that wrote it: someone else signing in on the same page never sees or sends it.
+  - Reports need the node's API token to be at least 16 characters (the length the node already warns below): a shorter one could be guessed from how reports are taken.
   - `feedback.js` is the Help "?" menu with "Report a problem" and "My reports", ready for the page to mount.
 
 ### 2026-11-02

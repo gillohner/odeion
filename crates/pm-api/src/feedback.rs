@@ -407,6 +407,10 @@ impl Inbox {
         if count as usize >= MAX_REPORTS || bytes as usize + size > MAX_BYTES {
             return Err(InboxError::Full);
         }
+        // And again right before the write: a sign-out during the checks above saves nothing
+        if !still() {
+            return Err(InboxError::SignedOut);
+        }
         let id = format!("fb_{}", hex::encode(rand::random::<[u8; 8]>()));
         tx.execute(
             "INSERT INTO report (id, client_id, reporter, kind, text, details, sent_at, state)
@@ -584,14 +588,11 @@ fn clean(text: &str) -> String {
 /// The text with every token taken out: the `secrets` given (the sender's own, the node's API
 /// token) and anything shaped like one of the node's tokens.
 fn scrub(text: &str, secrets: &[String]) -> String {
-    let mut t = text.to_string();
-    // Every one, however short: a short API token is a weak one, never a reason to keep it
-    for s in secrets.iter().filter(|s| !s.is_empty()) {
-        t = t.replace(s.as_str(), REMOVED);
-    }
+    // The token shapes first, so no secret inside one can cut it apart; then the secrets, longest
+    // first, every one however short
     let token_char = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
-    let mut out = String::with_capacity(t.len());
-    let mut rest = t.as_str();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
     while let Some(at) = TOKEN_PREFIXES.iter().filter_map(|p| rest.find(p)).min() {
         let tail = &rest[at + 4..];
         let run = tail.bytes().take_while(|&b| token_char(b)).count();
@@ -605,6 +606,11 @@ fn scrub(text: &str, secrets: &[String]) -> String {
         }
     }
     out.push_str(rest);
+    let mut secrets: Vec<&String> = secrets.iter().filter(|s| !s.is_empty()).collect();
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    for s in secrets {
+        out = out.replace(s.as_str(), REMOVED);
+    }
     out
 }
 
@@ -613,11 +619,13 @@ const TOO_LONG: &str = "That report is too long: at most 4000 characters.";
 
 /// A report's text as it is kept, or why it can't be: cleaned, tokens taken out, then measured.
 fn prepare(raw: &str, secrets: &[String]) -> Result<String, &'static str> {
-    let text = scrub(&clean(raw), secrets);
+    // Measured before the tokens come out: whether a report is taken never depends on a secret
+    // in it (with the node's token at least MIN_TOKEN long, taking one out only shortens it)
+    let text = clean(raw);
     match text.chars().count() {
         0 => Err(EMPTY),
         n if n > MAX_TEXT => Err(TOO_LONG),
-        _ => Ok(text),
+        _ => Ok(scrub(&text, secrets)),
     }
 }
 
@@ -639,6 +647,11 @@ fn refuse(status: StatusCode, msg: &str) -> Response {
 
 const NO_TOKEN: &str =
     "Reports need the node's API token set: without one the node can't tell who sent them.";
+/// The shortest node API token reports work with (the node warns below it): a shorter one could be
+/// guessed from how reports with it in them are taken.
+pub const MIN_TOKEN: usize = 16;
+const SHORT_TOKEN: &str =
+    "Reports need the node's API token to be at least 16 characters long. Ask the node's owner to set a longer one.";
 const NOT_UNDERSTOOD: &str = "The node didn't understand that report. Reload the page and try again.";
 const NOT_SAVED: &str = "The node couldn't save the report. Try again.";
 
@@ -660,6 +673,9 @@ pub async fn send(
     let Some(api_token) = s.token() else {
         return refuse(StatusCode::FORBIDDEN, NO_TOKEN);
     };
+    if api_token.len() < MIN_TOKEN {
+        return refuse(StatusCode::FORBIDDEN, SHORT_TOKEN);
+    }
     let Some(token) = header_token(&headers) else {
         return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
     };
@@ -755,8 +771,10 @@ pub async fn mine(
     Extension(c): Extension<Caller>,
     headers: HeaderMap,
 ) -> Response {
-    if s.token().is_none() {
-        return refuse(StatusCode::FORBIDDEN, NO_TOKEN);
+    match s.token() {
+        None => return refuse(StatusCode::FORBIDDEN, NO_TOKEN),
+        Some(t) if t.len() < MIN_TOKEN => return refuse(StatusCode::FORBIDDEN, SHORT_TOKEN),
+        Some(_) => {}
     }
     if header_token(&headers).is_none() {
         return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
@@ -965,11 +983,13 @@ mod tests {
     }
 
     #[test]
-    fn the_length_counts_once_tokens_are_taken_out() {
-        let token = "abcdefghij".to_string(); // 10 characters, 15 once taken out
-        let text = format!("{token} ").repeat(MAX_TEXT / 11);
-        assert!(text.trim().chars().count() <= MAX_TEXT);
-        assert_eq!(prepare(&text, std::slice::from_ref(&token)), Err(TOO_LONG));
+    fn the_length_is_measured_before_tokens_come_out() {
+        // Whether a report is taken never depends on a secret in it
+        let token = "0123456789abcdefghij".to_string(); // 20 characters, 15 once taken out
+        let at_most = format!("{token}{}", "x".repeat(MAX_TEXT - 20));
+        assert!(prepare(&at_most, std::slice::from_ref(&token)).is_ok());
+        let over = format!("{token}{}", "x".repeat(MAX_TEXT - 19));
+        assert_eq!(prepare(&over, std::slice::from_ref(&token)), Err(TOO_LONG));
         assert_eq!(prepare(" a\r\nb ", &[]), Ok("a\nb".to_string()));
         assert_eq!(prepare(" \u{7} ", &[]), Err(EMPTY));
     }
@@ -1015,5 +1035,36 @@ mod tests {
             prepare("no secrets", &[String::new()]),
             Ok("no secrets".to_string())
         );
+    }
+
+    #[test]
+    fn a_secret_inside_a_pasted_token_never_saves_the_token() {
+        // The token shapes go first, then the secrets, longest first
+        let pasted = "pml_Q7xaW2kPz9LmN4vB8rT1yHcJ6dFgS0EuIoKpZqXwVbM";
+        assert_eq!(
+            scrub(
+                &format!("see {pasted} end"),
+                &["a".to_string(), pasted.to_string()]
+            ),
+            "see [token removed] end"
+        );
+    }
+
+    #[test]
+    fn a_sign_out_during_the_checks_saves_nothing() {
+        // Signed in at the first check, out by the write: both are asked
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        let asked = std::cell::Cell::new(0);
+        let still = || {
+            asked.set(asked.get() + 1);
+            asked.get() == 1
+        };
+        assert!(matches!(
+            inbox.add("p", &new("late"), 1_000, &still),
+            Err(InboxError::SignedOut)
+        ));
+        assert_eq!(asked.get(), 2);
+        assert!(inbox.pending(1_000).unwrap().is_empty());
     }
 }
