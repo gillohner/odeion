@@ -515,6 +515,8 @@ const LISTENER_READS: &[&str] = &[
 /// acts on the caller's own account, reads included; the apps and clients behind them stay the
 /// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
 const LISTENER_OWN: &[&str] = &[
+    // Their own problem reports (feedback.rs keeps each person to theirs)
+    "/feedback",
     "/sources/tidal/signin",
     "/sources/qobuz/signin",
     "/sources/spotify/signin",

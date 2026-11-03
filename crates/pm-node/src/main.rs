@@ -5,6 +5,7 @@
 
 mod api_token;
 mod config;
+mod feedback;
 mod library;
 mod outputs;
 mod play;
@@ -114,6 +115,27 @@ enum Cmd {
     Discover {
         #[command(subcommand)]
         cmd: DiscoverCmd,
+    },
+    /// The node's private problem reports: new ones, and receipts for them.
+    Feedback {
+        #[command(subcommand)]
+        cmd: FeedbackCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum FeedbackCmd {
+    /// Print the reports no one has received yet, as JSON.
+    Pending,
+    /// Record that a report was received or reviewed; its sender sees that.
+    Receipt {
+        /// The report's id (`fb_` and 16 hex digits).
+        id: String,
+        /// `received` or `reviewed`.
+        state: pm_api::feedback::State,
+        /// Your own reference for it: 1–64 letters, digits, '.', '_' or '-'.
+        #[arg(long = "ref")]
+        reference: String,
     },
 }
 
@@ -456,6 +478,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         }
     }
     pm_api::backup::start_schedule(&state);
+    pm_api::feedback::start_housekeeping(&state);
     pm_api::podcasts::spawn_background(&state);
     pm_api::gpodder::spawn_background(&state);
     pm_api::audiobookshelf::spawn_background(&state);
@@ -666,6 +689,10 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Upload { files } => upload(&cfg, &files).await?,
         Cmd::Login => login(&cfg).await?,
         Cmd::Stats => library::stats(&cfg)?,
+        Cmd::Feedback { cmd } => match cmd {
+            FeedbackCmd::Pending => feedback::pending(&cfg)?,
+            FeedbackCmd::Receipt { id, state, reference } => feedback::receipt(&cfg, &id, state, &reference)?,
+        },
         Cmd::Backup { file, force } => library::backup(&cfg, &file, force)?,
         Cmd::Restore { file } => library::restore(&cfg, &file)?,
         Cmd::ImportPlaylist { file, name } => library::import_playlist(&cfg, &file, name.as_deref())?,

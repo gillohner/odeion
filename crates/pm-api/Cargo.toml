@@ -51,6 +51,8 @@ time = { workspace = true }
 url = { workspace = true }
 notify = "8"
 futures-util = { workspace = true }
+# The private problem-report inbox, its own file beside the library (feedback.rs)
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

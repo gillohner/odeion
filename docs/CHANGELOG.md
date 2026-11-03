@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-03
+
+- **Problem reports to a private inbox on the node** (not in the app's menus yet). The owner and listeners can send a problem, an idea or a question (`POST /v1/feedback`), and see their own reports and where each is (`GET /v1/feedback/mine`: saved, received, reviewed). A report carries only what its sender wrote, and the technical details they ticked (app version, page, phone/tablet/desktop, browser); nothing is collected on its own.
+  - Reports stay on the node in their own file, readable by the node's user only, never in a backup or on the homeserver. Tokens pasted into one are taken out, and no report's text is logged.
+  - The node's operator reads new reports with `pm-node feedback pending` and records receipts with `pm-node feedback receipt`; `tools/feedback-intake.py` keeps reports in a private folder, marked as untrusted text, and sends the receipts.
+  - Limits: 4000 characters, 5 reports an hour and 20 a day per person, 100 a day for the node, 500 reports in the inbox. Reviewed reports go after 90 days, any after a year.
+  - `feedback.js` is the Help "?" menu with "Report a problem" and "My reports", ready for the page to mount.
+
 ### 2026-11-02
 
 - **Copies to the homeserver: the disk guards, tightened.**

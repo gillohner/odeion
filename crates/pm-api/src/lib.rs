@@ -45,6 +45,7 @@ pub mod discover;
 pub mod downloads;
 pub mod drives;
 pub mod events;
+pub mod feedback;
 pub mod files;
 pub mod first_run;
 pub mod first_steps;
@@ -721,6 +722,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/me/services", get(signin::my_services))
         .route("/people", get(people::list))
+        // Problem reports to the node's private inbox (feedback.rs)
+        .route("/feedback", post(feedback::send))
+        .route("/feedback/mine", get(feedback::mine))
         .route("/devices", get(devices::list))
         .route(
             "/devices/{id}",
@@ -802,6 +806,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/ux/", get(ux_index))
         .route("/ux/{*path}", get(ux_file))
         .route("/app.js", get(web_js))
+        .route("/feedback.js", get(feedback_js))
+        .route("/feedback.css", get(feedback_css))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
         .nest("/v1", v1)
@@ -1057,6 +1063,29 @@ async fn web_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("../static/app.js"),
+    )
+        .into_response()
+}
+
+/// Help and problem reports (feedback.js, feedback.css), loaded by the page.
+async fn feedback_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/feedback.js"),
+    )
+        .into_response()
+}
+
+async fn feedback_css() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/feedback.css"),
     )
         .into_response()
 }
