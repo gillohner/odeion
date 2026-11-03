@@ -28,6 +28,7 @@ steps. You don't need to be a developer.
 | A Raspberry Pi or Linux machine without Docker | the release download and a system service | [Install on Linux without Docker](docs/guides/install-linux.md) |
 | A Mac, Windows PC, Linux desktop or Android phone | the Pubky Music app, to control a node and play on that device | [The desktop and Android app](docs/guides/desktop-app.md) |
 | A Raspberry Pi with a DAC, as a speaker for your node | squeezelite | [Speakers](docs/guides/speakers.md#a-raspberry-pi-with-a-dac-squeezelite) |
+| A phone, tablet or computer with just a browser | the web app, installed from your node's page | [Install the web app](docs/guides/install-web-app.md) |
 
 The app and squeezelite don't run a node themselves: install the node with Docker or on Linux,
 then connect them to it. Umbrel isn’t supported right now; use Docker or the Linux install.

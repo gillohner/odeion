@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-03
+
+- **Install the web app.** The node's page installs as an app named Odeion, with the approved Odeion mark (an O cut into three sound grooves) as its icon on phones, tablets and computers, in the browser tab and in the sidebar. An **Install app** button in the top bar (and under the login, before you sign in) asks the browser to install where it can, and shows the steps for other browsers (Safari, Firefox, iPhone and iPad); `#install` on any page brings back a hidden button. On a plain `http://` address it explains that browsers install only from HTTPS. Behind a sign-in proxy the app still installs. After a visit over HTTPS the browser keeps the node's public page files, fetched without your sign-in (so a sign-in proxy's or anyone's private page is never kept), never your library or music: the app then still opens while the node is away or a proxy in front of it answers with an error, says it can't reach the node, and offers **Reconnect** once it answers. It never reloads by itself while music plays. Icons are no longer cached for a day, so the new logo shows at once. See [Install the web app](guides/install-web-app.md).
+
 ### 2026-11-02
 
 - **Copies to the homeserver: the disk guards, tightened.**
