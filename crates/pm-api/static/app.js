@@ -298,9 +298,9 @@
         + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
         + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
         + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
-          + row('Add a WebDAV share', 'A music folder on Nextcloud, ownCloud or a NAS, played where it is (it is read again every 6 hours).', `<button class="btn" id="wdopen">${icon('plus')} Add share</button>`))
+          + row('Add a WebDAV share', 'A music folder on Nextcloud, ownCloud or a NAS, played where it is (it is read again every 6 hours).', `<button class="btn" id="wdopen">${icon('plus')} Add share</button>`) + loginGuide('webdav:share', {}, { open: false }))
         + group('Cloud drives', drv.roots.map((r) => row(esc(r.name), `${r.provider === 'google' ? 'Google Drive' : 'OneDrive'} · ${countOf(r.tracks, 'songs')}`, `<button class="btn sm" data-dr-scan="${esc(r.id)}">Rescan</button><button class="btn sm ghost" data-dr-del="${esc(r.id)}">Remove</button>`)).join('')
-          + drv.providers.map((p) => row(esc(p.name), !p.configured ? 'Not set up on this node: add its app in Settings › This node › Service apps' : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.', !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
+          + drv.providers.map((p) => row(esc(p.name), !p.configured ? 'Not set up on this node: add its app in Settings › This node › Service apps' : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.', !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`) + (p.configured && !p.connected ? loginGuide(`drive:${p.id}`, {}, { open: false }) : '')).join(''))
         + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
         + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then the folder as an album (one MusicBrainz lookup for a whole album), then how it sounds (AcoustID) for the rest. Unsure matches, and songs where two ways disagree, wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
     return library;
@@ -1180,6 +1180,7 @@
     $('#loginpage').hidden = false;
     const w = $('#loginwhy'); w.hidden = !LOGIN_WHY[why]; w.textContent = LOGIN_WHY[why] || '';
     $('#tok').value = ''; $('#logintoken').open = false;
+    $('#loginguide').innerHTML = loginGuide('node:ring', {}, { open: false, h: 2 }); $('#logintokguide').innerHTML = loginGuide('node:token', {}, { open: true, h: 2 });
     try { lg.renewal = sessionStorage.getItem('pm.loginRenew'); sessionStorage.removeItem('pm.loginRenew'); } catch { /* a plain log in; Settings asks again */ }
     // The app behind is hidden: the screen's heading takes the focus, so it is announced
     $('#loginh').focus();
@@ -1397,7 +1398,7 @@
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
-  const spotSetup = (sp, hidden) => `<form class="set-group" id="spotapp" ${hidden ? 'hidden' : ''}><p class="muted small">Spotify lets each person use their own free developer app. It takes about two minutes, once:</p><ol class="muted small steps"><li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a>, sign in with your Spotify account and choose <b>Create app</b> (any name and description).</li><li>Under <b>Redirect URIs</b> add this address, tick <b>Web API</b>, and save:<div class="toolbar"><code class="path">${esc(sp.redirect_uri)}</code><button type="button" class="btn ghost sm" id="spotcopy">Copy</button></div></li><li>Under <b>User Management</b>, add every Spotify account that will sign in here (up to 25).</li><li>Copy the <b>Client ID</b> from the app's Settings and paste it below. No secret is needed.</li></ol><div class="toolbar"><label class="sr-only" for="spotid">Spotify client ID</label><input id="spotid" name="id" class="input" autocomplete="off" spellcheck="false" placeholder="Client ID (32 letters and digits)" pattern="[0-9a-fA-F]{32}" required value="${esc(sp.client_id || '')}"><button class="btn primary">Save</button>${hidden ? '<button type="button" class="btn ghost" id="spotappcancel">Cancel</button>' : ''}</div></form>`;
+  const spotSetup = (sp, hidden) => `<form class="set-group" id="spotapp" ${hidden ? 'hidden' : ''}><p class="muted small">Your app’s redirect URI (the steps above say where it goes):</p><div class="toolbar"><code class="path">${esc(sp.redirect_uri)}</code><button type="button" class="btn ghost sm" id="spotcopy">Copy</button></div><div class="toolbar"><label class="sr-only" for="spotid">Spotify client ID</label><input id="spotid" name="id" class="input" autocomplete="off" spellcheck="false" placeholder="Client ID (32 letters and digits)" pattern="[0-9a-fA-F]{32}" required value="${esc(sp.client_id || '')}"><button class="btn primary">Save</button>${hidden ? '<button type="button" class="btn ghost" id="spotappcancel">Cancel</button>' : ''}</div></form>`;
   // The fallback for a sign-in whose last step could not reach this node (another network, an app allowing only
   // loopback redirects): paste the address the sign-in page landed on; the node finishes from its parameters.
   const pasteBack = (svc) => `<details class="small"><summary>Landed on a page that didn't load?</summary><form class="toolbar" id="${svc}paste"><input class="input" name="url" placeholder="Paste that page's address (…?code=…)" autocomplete="off" spellcheck="false" required aria-label="The address you landed on"><button class="btn sm" type="submit">Finish sign-in</button></form></details>`;
@@ -1421,13 +1422,559 @@
   const sgRow = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${sgHelp(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
   const sgBlock = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${sgHelp(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
   const sgGroup = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
+  // ---- Login and setup guides (docs/ux/login-guides.md) ----
+  // One numbered guide per sign-in or setup method the node offers, shown beside its controls.
+  // tools/login-guides-check.js compares this table with the runtime registries (signin.rs ways,
+  // apps.rs Service apps, drives.rs providers, the UI's own forms): a method without a guide
+  // fails CI. Plain text only: the renderer escapes everything, links come from `links`. A step is
+  // a string, `{ t, code }` (a command or value to copy) or `(c) => …` with the page's values
+  // (`c.redirect`, `c.path`…), also escaped. `level`: recommended (open), advanced (closed), only.
+  // `where`: browser (a page opens here), server (on the node's machine), both.
+  // LOGIN-GUIDES-BEGIN
+  const LG_RELOAD = 'Reload this page; the node looks again.';
+  const LG_OUT = 'Still failing: Sign out here, then sign in again the same way.';
+  const LOGIN_GUIDES = {
+    'node:ring': { title: 'Log in with Pubky Ring', level: 'recommended', where: 'both',
+      needs: ['Pubky Ring on your phone, holding the Pubky identity this node belongs to (or one the owner invited)'],
+      steps: ['On this device: press Open in Pubky Ring. On a computer: show the QR code and scan it with Pubky Ring.', 'In Pubky Ring, check the node’s name and approve.', 'Come back to this page; it continues by itself.'],
+      done: 'The library opens. The browser keeps the session until you log out.',
+      fix: ['“Not this node’s owner”: approve with the identity the node belongs to, then Try again.', 'Nothing happens after approving: keep this page open, or press Try again for a fresh code (each lasts ten minutes).', 'Session ended: log in again; your settings stay on the node.'],
+      links: [['Pubky', 'https://pubky.org'], ['Pubky Ring', 'https://github.com/pubky/pubky-ring']] },
+    'node:token': { title: 'Log in with the node’s API token', level: 'advanced', where: 'server',
+      needs: ['A shell on the node’s machine. Read the token there yourself; never paste it, config files or logs into a chat'],
+      steps: [{ t: 'Linux install from the guide: the token is [api] token in the config.', code: 'sudo grep -E \'^token *=\' /etc/pubky-music/node.toml' }, { t: 'Linux without a token in the config: the node made one in its data folder.', code: 'sudo cat /var/lib/pubky-music/api-token' }, { t: 'Docker with docker run or the plain compose file: the node made one.', code: 'docker exec pubky-music cat /data/api-token' }, { t: 'Docker bundle (setup.sh): it is PM_TOKEN in .env, in the bundle’s folder.', code: 'grep ^PM_TOKEN= .env' }, 'Type or paste it into the API token field below (it stays masked) and press Log in with the token.'],
+      done: 'The library opens; the token stays in this browser only.',
+      fix: ['Refused: a token in node.toml or PM_TOKEN wins over the api-token file; read that one instead.', 'Refused after a change: Settings › This node can replace the token; read it again.', 'Log out removes it from this browser.'],
+      links: [['Troubleshooting guide', 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused']] },
+    'tidal:app': { title: 'Sign in at TIDAL', level: 'recommended', where: 'browser',
+      needs: ['A TIDAL account', 'This node’s TIDAL app (built in, or the owner’s own in Settings › This node › Service apps)'],
+      steps: ['Pick the recommended app above (or the owner’s own app).', 'Press Sign in at TIDAL; TIDAL’s sign-in page opens in this browser.', 'Sign in and allow access; TIDAL sends you back here.'],
+      done: 'Signed in shows your TIDAL user. Search, albums and your playlists work; TIDAL plays 30-second previews to this kind of app.',
+      fix: ['The page after TIDAL did not load (another network): use “Landed on a page that didn’t load?” and paste its address.', 'Renewal failed or TIDAL says the sign-in ended: Sign out, then Sign in at TIDAL again.', 'An own app is refused: its redirect URI and scopes must match the values under Your app’s settings.'],
+      links: [['TIDAL developer portal', 'https://developer.tidal.com'], ['TIDAL authorization', 'https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization']] },
+    'tidal:device': { title: 'Full tracks with a code (unofficial)', level: 'advanced', where: 'both',
+      needs: ['A paid TIDAL plan', 'A TIDAL device client you are allowed to use, entered by the owner. No device client ships with the node; an app from developer.tidal.com is not one.'],
+      steps: ['Owner, once: enter the device client ID and secret below and press Check.', 'Press Sign in with a code.', 'Open link.tidal.com on any device, sign in to TIDAL and enter the code before it expires.', 'This page continues by itself once TIDAL says yes.'],
+      done: 'Full tracks shows Working with your quality choice.',
+      fix: ['The code expired: press New code.', 'Full tracks switched themselves off: press Try again; previews play meanwhile.', 'TIDAL refused the client: it can stop accepting one at any time; Forget it and use the official sign-in.', LG_OUT],
+      links: [['TIDAL full tracks guide', 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/tidal-full-tracks.md']] },
+    'tidal:import': { title: 'Use a sign-in already on this machine', level: 'advanced', where: 'server',
+      needs: ['A sign-in to your own TIDAL account that you made yourself in one of the listed programs, with a client you are allowed to use'],
+      steps: ['Pick the found sign-in and press Use it, or pick its token file.', 'The node only reads the file; it keeps its own copy.'],
+      done: 'Signed in names the program it came from.',
+      fix: ['Not usable: sign in again in that program for a newer file, or use Sign in at TIDAL.', 'Expired and not renewed: Sign out here and pick another way.'],
+      links: [['TIDAL developer portal', 'https://developer.tidal.com']] },
+    'tidal:paste': { title: 'Paste your own token', level: 'advanced', where: 'browser',
+      needs: ['Your own TIDAL access token (a refresh token on the next line keeps it alive), from a sign-in you made with a client you are allowed to use'],
+      steps: ['Paste the token file’s contents or the bare token below.', 'Press Use it. It is never shown again.'],
+      done: 'Signed in shows Pasted token.',
+      fix: ['Refused: the token expired; paste a newer one, or use Sign in at TIDAL.', LG_OUT],
+      links: [['TIDAL authorization', 'https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization']] },
+    'qobuz:own': { title: 'Qobuz with your own app and account', level: 'only', where: 'browser',
+      needs: ['A paid Qobuz streaming plan', 'An app ID and secret that Qobuz issued to you (ask api@qobuz.com; there is no public developer sign-up)'],
+      steps: ['Step 1: enter the app ID and secret, press Check, then Save.', 'Step 2: enter your Qobuz email and password and press Sign in. They go to Qobuz once; the node keeps only Qobuz’s session.', 'Pick a quality under Playback.'],
+      done: 'Full tracks shows Working.',
+      fix: ['Check says the app is refused: ask Qobuz about your app; Forget it and enter the new values.', 'Full tracks switched themselves off: press Try again.', LG_OUT],
+      links: [['Qobuz', 'https://www.qobuz.com'], ['Qobuz guide', 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/qobuz.md']] },
+    'qobuz:import': { title: 'Use a config already on this machine', level: 'advanced', where: 'server',
+      needs: ['A streamrip or qobuz-dl config holding an app ID and secret Qobuz issued to you. Those programs normally take them from Qobuz’s own web player: they were not issued to you, so don’t use such a file.'],
+      steps: ['Press Use it beside the found config, or pick the file.', 'The node reads it once and keeps its own copy.'],
+      done: 'Full tracks shows Working.',
+      fix: ['Not usable: enter your own app in step 1 instead.', LG_OUT],
+      links: [['Qobuz', 'https://www.qobuz.com']] },
+    'qobuz:paste': { title: 'Paste a config', level: 'advanced', where: 'browser',
+      needs: ['The same rule: only an app ID and secret Qobuz issued to you, with your own account'],
+      steps: ['Paste the config’s contents.', 'Press Use it. Nothing is shown again.'],
+      done: 'Full tracks shows Working.',
+      fix: ['Refused: enter the values in step 1 instead.', LG_OUT],
+      links: [['Qobuz', 'https://www.qobuz.com']] },
+    'spotify:app': { title: 'Connect your own Spotify app', level: 'advanced', where: 'browser',
+      needs: ['A Spotify account; the app’s owner needs Premium', 'In development mode Spotify lets in only the accounts you add by hand (five at the time of writing; see its quota modes page)'],
+      steps: ['Open the Spotify developer dashboard and press Create app.', (c) => ({ t: 'Under Redirect URIs add exactly this address and tick Web API. Spotify accepts only HTTPS, or a loopback address like http://127.0.0.1.', code: c.redirect || '' }), 'Under User Management add every Spotify account that will sign in here.', 'Copy the Client ID into the field below and Save. No secret is needed.', 'Press Connect Spotify and allow access.'],
+      done: 'Signed in shows your Spotify name; your devices appear under Play on.',
+      fix: ['“INVALID_CLIENT: Invalid redirect URI”: the address must match exactly, including https.', 'The page after Spotify did not load: use “Landed on a page that didn’t load?” and paste its address.', 'Renewal failed: Sign out, then Connect Spotify again.'],
+      links: [['Spotify developer dashboard', 'https://developer.spotify.com/dashboard'], ['Redirect URIs', 'https://developer.spotify.com/documentation/web-api/concepts/redirect_uri'], ['Quota modes', 'https://developer.spotify.com/documentation/web-api/concepts/quota-modes']] },
+    'spotify:librespot': { title: 'Pair with Spotify Connect (librespot)', level: 'recommended', where: 'both',
+      needs: ['Spotify Premium (librespot works with Premium only)', 'librespot installed where the node looks; the owner switches it on'],
+      steps: ['Press Switch librespot on; set its device name and output below.', 'Open Spotify on a phone or computer on the same network.', 'Pick the node’s device name under Devices and play. That pairs it with your account; no password is typed here.'],
+      done: 'Status shows Running, picked by your account, and music plays on the chosen output.',
+      fix: ['The device is missing in Spotify: phone and node must be on the same network, and mDNS must pass.', 'Not running: press Try again under librespot; check the node log.', 'Sign out stops librespot and forgets its sign-in; pair again to come back.'],
+      links: [['librespot', 'https://github.com/librespot-org/librespot']],
+      missing: {
+  "title": "librespot isn’t installed where the node looks",
+  "intro": "Install the executable on the machine running this node. It is found at [spotify] librespot in node.toml, PM_LIBRESPOT, <data folder>/bin/librespot, or the node’s PATH. A host install alone is not visible in Docker. Use the matching instructions below, check the version, then reload this page; no service restart is needed for a new file in data/bin.",
+  "native": [
+    {
+      "t": "On Debian/Ubuntu, install the build tools and sound/TLS headers. Rust must already be installed from its official installer.",
+      "code": "sudo apt install build-essential pkg-config libasound2-dev libssl-dev"
+    },
+    {
+      "t": "Build the upstream librespot package.",
+      "code": "cargo install librespot --locked"
+    },
+    {
+      "t": "For the documented Linux service, create a bin folder owned by the service user, then install the executable. This keeps later node-managed downloads writable.",
+      "code": "sudo install -d -m 0755 -o pubky-music -g pubky-music /var/lib/pubky-music/bin\nsudo install -m 0755 -o pubky-music -g pubky-music ~/.cargo/bin/librespot /var/lib/pubky-music/bin/librespot"
+    },
+    {
+      "t": "Check it runs as the node’s user; then reload this page.",
+      "code": "sudo -u pubky-music /var/lib/pubky-music/bin/librespot --version"
+    },
+    "Other native installations, including macOS: build using the upstream compiling guide, set [spotify] librespot to the executable’s absolute path in the node’s config, and restart only if you changed that config. Do not use the Linux service-user commands on macOS."
+  ],
+  "docker": [
+    "Run these commands in one terminal on the Linux Docker host. The ordinary Docker guide names the node container pubky-music; the bundle generates a name such as <project>-music-1. Select the node image, not PostgreSQL or the homeserver.",
+    {
+      "t": "List running containers and enter the actual node container name. Keep this terminal open for the following steps.",
+      "code": "docker ps --format '{{.Names}}  {{.Image}}'\nread -r -p 'Odeion node container name: ' NODE_CONTAINER"
+    },
+    {
+      "t": "Check that host and container have the same architecture for this command (for example x86_64 or aarch64). Stop if they differ; use the upstream compiling guide for the container’s architecture instead.",
+      "code": "uname -m\ndocker exec \"$NODE_CONTAINER\" uname -m"
+    },
+    {
+      "t": "Build for the image’s Debian bookworm/glibc environment. Rustls avoids an external TLS-library dependency. The persistent bin folder and executable must belong to uid/gid 1000.",
+      "code": "docker run --rm --volumes-from \"$NODE_CONTAINER\" rust:1-bookworm sh -c 'apt-get update && apt-get install -y --no-install-recommends libasound2-dev pkg-config && cargo install librespot --locked --no-default-features --features \"rustls-tls-webpki-roots rodio-backend with-libmdns\" --root /tmp/ls && install -d -m 0755 -o 1000 -g 1000 /data/bin && install -m 0755 -o 1000 -g 1000 /tmp/ls/bin/librespot /data/bin/librespot'"
+    },
+    {
+      "t": "Check the executable inside the container, not on the host. Reload this page after it reports its version.",
+      "code": "docker exec \"$NODE_CONTAINER\" /data/bin/librespot --version"
+    },
+    "If the version check fails despite the file existing, the executable may have the wrong architecture, loader or shared libraries. Rebuild for this container; do not keep enabling a binary that cannot run. A node zone needs librespot’s pipe backend; the upstream build above includes it."
+  ]
+} },
+    'spotify:librespot-file': { title: 'librespot with your own credentials.json', level: 'advanced', where: 'server',
+      needs: ['Spotify Premium', 'librespot’s own credentials.json, from the cache folder (-c) of a librespot you signed in to your own account with. Other players’ state files are a different format and are refused', 'librespot installed (as above)'],
+      steps: ['Pick the file, or paste its contents.', 'Press Use this file. The node keeps a copy only it can read; it is never shown again.'],
+      done: 'Signed in shows librespot with your Spotify user.',
+      fix: ['Refused: the file is not a librespot credentials file, or Spotify ended that sign-in; pair with Spotify Connect instead.', 'Treat the file like a password: delete stray copies; librespot advises a cache folder only you can read (mode 700).', LG_OUT],
+      links: [['librespot', 'https://github.com/librespot-org/librespot']] },
+    'youtube:key': { title: 'Search with your YouTube Data API key', level: 'recommended', where: 'browser',
+      needs: ['A Google account; no billing needed for the free daily quota'],
+      steps: ['Open the Google Cloud console and create or pick a project.', 'Enable YouTube Data API v3 for it.', 'Under Credentials create an API key; restrict it to YouTube Data API v3.', 'Paste the key below and Save; the node checks it with YouTube.'],
+      done: 'Search on · your API key.',
+      fix: ['Quota exceeded: the default allocation is 100 search calls per day; Google resets daily quotas at midnight Pacific time. Check your project’s actual allocation in Google Cloud.', 'Key refused: the API is not enabled, or the key’s restrictions exclude it.', 'Forget the key to remove it.'],
+      links: [['YouTube Data API in Google Cloud', 'https://console.cloud.google.com/apis/library/youtube.googleapis.com'], ['Getting started', 'https://developers.google.com/youtube/v3/getting-started'], ['Current quotas', 'https://developers.google.com/youtube/v3/determine_quota_cost']] },
+    'youtube:cookies': { title: 'yt-dlp with your own cookies file', level: 'advanced', where: 'server',
+      needs: ['yt-dlp on the node (YouTube › On your speakers)', 'A cookies.txt exported from your own browser session, in Netscape format'],
+      steps: ['Export cookies for youtube.com from your browser, as yt-dlp’s FAQ describes.', 'Pick the file or paste it below and press Use this file.'],
+      done: 'Signed in shows the cookies file; yt-dlp plays as your account.',
+      fix: ['YouTube asks to sign in again: cookies expire; export a fresh file.', 'Cookies are as good as your password: keep the file private and Sign out here when done.'],
+      links: [['yt-dlp FAQ: cookies', 'https://github.com/yt-dlp/yt-dlp/wiki/FAQ']] },
+    'lastfm:own': { title: 'Connect Last.fm with your own API account', level: 'recommended', where: 'browser',
+      needs: ['A Last.fm account'],
+      steps: ['Create an API account at Last.fm (any name; the callback URL can stay empty).', 'Enter its API key and shared secret here and Save.', 'Press Connect Last.fm and allow access on Last.fm’s page.'],
+      done: 'Signed in shows your Last.fm user; plays scrobble.',
+      fix: ['Last.fm says the key is invalid: copy both values again from your API account page.', 'Scrobbles wait: they are sent once Last.fm answers again.', LG_OUT],
+      links: [['Create a Last.fm API account', 'https://www.last.fm/api/account/create'], ['Last.fm web auth', 'https://www.last.fm/api/authspec']] },
+    'lastfm:import': { title: 'Use your scrobbler’s sign-in on this machine', level: 'advanced', where: 'server',
+      needs: ['rescrobbled set up with your own Last.fm API account'],
+      steps: ['Press Use it beside the found sign-in.', 'The node reads it once and keeps its own copy.'],
+      done: 'Signed in names the program it came from.',
+      fix: ['Not usable: connect with your own API account instead.', LG_OUT],
+      links: [['Last.fm API', 'https://www.last.fm/api/authspec']] },
+    'lastfm:paste': { title: 'Paste a key, secret and session key', level: 'advanced', where: 'browser',
+      needs: ['Your own API key and shared secret, and a session key made with them'],
+      steps: ['Paste the three lines: API key, shared secret, session key.', 'Press Use it. Nothing is shown again.'],
+      done: 'Signed in shows Pasted sign-in.',
+      fix: ['Refused: Last.fm did not accept the session key; connect with your own API account instead.'],
+      links: [['Last.fm web auth', 'https://www.last.fm/api/authspec']] },
+    'subsonic:server': { title: 'Connect your Subsonic-compatible server', level: 'only', where: 'browser',
+      needs: ['Navidrome, Airsonic, Gonic, Ampache, LMS or another Subsonic-API server this node can reach', 'Your user on it'],
+      steps: ['Enter the server’s address (https:// when it is on the internet).', 'Enter your user and password.', 'Press Connect; the node checks the server.'],
+      done: 'Connected shows the server, its version and your user; its playlists are listed.',
+      fix: ['Not reachable: open the address from the node’s machine; a LAN name may not resolve in Docker.', 'Wrong password: Forget this server and connect again.'],
+      links: [['Subsonic API', 'https://www.subsonic.org/pages/api.jsp'], ['Navidrome docs', 'https://www.navidrome.org/docs/']] },
+    'jellyfin:server': { title: 'Sign in to your Jellyfin', level: 'only', where: 'browser',
+      needs: ['A Jellyfin (or Emby) server this node can reach, and your user on it'],
+      steps: ['Enter the server’s address, your user and password.', 'Press Sign in. The password is used once; the node keeps Jellyfin’s access token.'],
+      done: 'Signed in shows the server and your user.',
+      fix: ['Token revoked on the server (Dashboard › Devices): Sign out here and sign in again.', 'Not reachable: open the address from the node’s machine.'],
+      links: [['Jellyfin docs', 'https://jellyfin.org/docs/']] },
+    'jamendo:signin': { title: 'Sign in to Jamendo (optional)', level: 'only', where: 'browser',
+      needs: ['A Jamendo account', 'The owner’s own Jamendo app with its secret (Settings › This node › Service apps); search and playback need none'],
+      steps: ['Press Sign in to Jamendo; Jamendo’s page opens here.', 'Allow access; it comes back here.', 'Press Add my Jamendo likes to Favourites.'],
+      done: 'Signed in shows your Jamendo name.',
+      fix: ['Jamendo refuses the redirect: the app’s redirect URL must be on the same domain as the one shown.', LG_OUT],
+      links: [['Jamendo developer portal', 'https://devportal.jamendo.com']] },
+    'listenbrainz:token': { title: 'Connect ListenBrainz', level: 'only', where: 'browser',
+      needs: ['A MusicBrainz account (ListenBrainz signs in with it)'],
+      steps: ['Open your ListenBrainz settings and copy the user token.', 'Paste it here and press Connect.'],
+      done: 'Connected shows your ListenBrainz user.',
+      fix: ['Token refused: reset it on ListenBrainz and paste the new one.', 'Disconnect, then connect again.'],
+      links: [['ListenBrainz settings', 'https://listenbrainz.org/settings/']] },
+    'webdav:share': { title: 'Add a WebDAV share', level: 'only', where: 'browser',
+      needs: ['The share’s WebDAV address, user and password (Nextcloud: an app password)'],
+      steps: ['Press Add a share.', 'Enter the address, user and password; the node checks them.', 'Name it and add; the node scans it.'],
+      done: 'The share is listed with its song count.',
+      fix: ['Refused: make a new app password and remove and add the share again.', 'Not reachable: open the address from the node’s machine.'],
+      links: [['Nextcloud: WebDAV', 'https://docs.nextcloud.com/server/latest/user_manual/en/files/access_webdav.html']] },
+    'drive:google': { title: 'Sign in to Google Drive', level: 'only', where: 'browser',
+      needs: ['A Google account', 'The node’s Google Drive app (Settings › This node › Service apps)'],
+      steps: ['Press Sign in; Google’s page opens here.', 'Allow read access to your Drive; it comes back here.', 'Press Add a folder and pick your music folder.'],
+      done: 'Signed in shows your account; the folder is read every 6 hours.',
+      fix: ['“This app isn’t verified”: an own app in testing; you must be listed as its test user.', 'Access was removed in your Google account: Sign out, then Sign in again.'],
+      links: [['Google OAuth for web servers', 'https://developers.google.com/identity/protocols/oauth2/web-server']] },
+    'drive:onedrive': { title: 'Sign in to OneDrive', level: 'only', where: 'browser',
+      needs: ['A Microsoft account', 'The node’s OneDrive app (built in or Settings › This node › Service apps)'],
+      steps: ['Press Sign in; Microsoft’s page opens here.', 'Allow access; it comes back here.', 'Press Add a folder and pick your music folder.'],
+      done: 'Signed in shows your account; the folder is read every 6 hours.',
+      fix: ['Sign-in refused: the app’s redirect URI must be the one shown in Service apps.', 'Sign out, then Sign in again.'],
+      links: [['Register an app (Microsoft)', 'https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app']] },
+    'app:spotify': { title: 'Spotify: your own developer app', level: 'only', where: 'browser',
+      needs: ['A Spotify account; the app’s owner needs Premium'],
+      steps: ['Create an app in the Spotify developer dashboard; tick Web API.', (c) => ({ t: 'Add this redirect URI (HTTPS, or loopback http://127.0.0.1 only):', code: c.redirect || '' }), 'Add every listener under User Management.', 'Enter its Client ID on Sources › Spotify.'],
+      done: 'Set; listeners can press Connect Spotify.',
+      fix: ['Spotify Connect pairing (librespot) needs no app at all.', 'Changing the app signs everyone out of the old one.'],
+      links: [['Spotify developer dashboard', 'https://developer.spotify.com/dashboard'], ['Quota modes', 'https://developer.spotify.com/documentation/web-api/concepts/quota-modes']] },
+    'app:tidal': { title: 'TIDAL: your own developer app', level: 'advanced', where: 'browser',
+      needs: ['A TIDAL developer account'],
+      steps: ['Create an app at developer.tidal.com.', (c) => ({ t: 'Add the redirect URI: the first without a secret, the second if you also enter the app’s secret.', code: [c.redirect, c.callback].filter(Boolean).join('\n') }), 'Enter its client ID (and secret, if you use the second address) and Save.'],
+      done: 'Set: Your own app; people sign in at TIDAL again.',
+      fix: ['Remove goes back to the built-in app.', 'It still gives 30-second previews; full tracks are a separate, owner-entered device client.'],
+      links: [['TIDAL developer portal', 'https://developer.tidal.com'], ['TIDAL authorization', 'https://developer.tidal.com/documentation/api-sdk/api-sdk-authorization']] },
+    'app:tidal-full': { title: 'TIDAL full tracks: a device client', level: 'advanced', where: 'browser',
+      needs: ['A TIDAL device client you are allowed to use; none ships with the node, and a developer.tidal.com app is not one'],
+      steps: ['Open Sources › TIDAL and pick the code sign-in.', 'Enter the client ID and secret, press Check and Save.'],
+      done: 'Set; people sign in with a code at link.tidal.com.',
+      fix: ['TIDAL can stop accepting it at any time: Forget it there.'],
+      links: [['TIDAL full tracks guide', 'https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/tidal-full-tracks.md']] },
+    'app:qobuz': { title: 'Qobuz: an app Qobuz issued to you', level: 'advanced', where: 'browser',
+      needs: ['An app ID and secret from Qobuz (api@qobuz.com)'],
+      steps: ['Open Sources › Qobuz.', 'Step 1: enter them, Check and Save.'],
+      done: 'Set; Qobuz sign-in opens.',
+      fix: ['Without one, Qobuz doesn’t play here.'],
+      links: [['Qobuz', 'https://www.qobuz.com']] },
+    'app:soundcloud': { title: 'SoundCloud: your approved app', level: 'advanced', where: 'browser',
+      needs: ['A SoundCloud app approved for you by SoundCloud'],
+      steps: ['Apply for API access in SoundCloud’s developer pages.', 'Enter its client ID on Sources › SoundCloud.'],
+      done: 'Set; SoundCloud search works.',
+      fix: ['Refused: SoundCloud revoked or has not approved the app.'],
+      links: [['SoundCloud developers', 'https://developers.soundcloud.com']] },
+    'app:youtube': { title: 'YouTube Data: an API key', level: 'advanced', where: 'browser',
+      needs: ['A Google account'],
+      steps: ['Enable YouTube Data API v3 in Google Cloud and create an API key.', 'Enter it on Sources › YouTube.'],
+      done: 'Set; YouTube search works.',
+      fix: ['About 100 searches a day; Forget the key there.'],
+      links: [['YouTube Data API in Google Cloud', 'https://console.cloud.google.com/apis/library/youtube.googleapis.com']] },
+    'app:lastfm': { title: 'Last.fm: an API account', level: 'advanced', where: 'browser',
+      needs: ['A Last.fm account'],
+      steps: ['Create an API account at Last.fm.', 'Enter its key and secret in Settings › Accounts › Last.fm.'],
+      done: 'Set; Connect Last.fm opens.',
+      fix: ['Invalid key: copy both values again.'],
+      links: [['Create a Last.fm API account', 'https://www.last.fm/api/account/create']] },
+    'app:jamendo': { title: 'Jamendo: your own app with its secret', level: 'advanced', where: 'browser',
+      needs: ['A Jamendo developer account; playback needs only the built-in app'],
+      steps: ['Create an app in the Jamendo developer portal.', (c) => ({ t: 'Set its redirect URL to:', code: c.redirect || '' }), 'Enter client ID and secret and Save.'],
+      done: 'Set; Sign in to Jamendo appears on Sources › Jamendo.',
+      fix: ['Remove goes back to the built-in app.'],
+      links: [['Jamendo developer portal', 'https://devportal.jamendo.com']] },
+    'app:acoustid': { title: 'AcoustID: an application key', level: 'advanced', where: 'browser',
+      needs: ['An AcoustID account (signs in with MusicBrainz)'],
+      steps: ['Register an application at AcoustID.', 'Open Your library › Node library › Identify, paste its key, press Check, then Save key.'],
+      done: 'Identify shows the key with OK.',
+      fix: ['The built-in key covers most nodes; remove yours to go back.'],
+      links: [['New AcoustID application', 'https://acoustid.org/new-application']] },
+    'app:google-drive': { title: 'Google Drive: your own OAuth client', level: 'advanced', where: 'browser',
+      needs: ['A Google Cloud project'],
+      steps: ['Create an OAuth client of type Web application in Google Cloud and enable the Google Drive API.', (c) => ({ t: 'Add exactly this authorized redirect URI (with a secret, the node’s own callback):', code: c.callback || '' }), 'While the app is in testing, add each person as a test user.', 'Enter its client ID and client secret here and Save.'],
+      done: 'Set; Library › Cloud drives › Sign in opens.',
+      fix: ['Unverified apps allow 100 people and show a warning.'],
+      links: [['Google OAuth for web servers', 'https://developers.google.com/identity/protocols/oauth2/web-server']] },
+    'app:onedrive': { title: 'OneDrive: your own app registration', level: 'advanced', where: 'browser',
+      needs: ['A Microsoft account'],
+      steps: ['Register an app in Microsoft Entra; supported accounts: include personal Microsoft accounts.', (c) => ({ t: 'Under Authentication add the platform Mobile and desktop applications (not Single-page application: the node redeems the code itself) with this custom redirect URI:', code: c.redirect || '' }), 'Enter its Application (client) ID and Save. No secret.'],
+      done: 'Set; Library › Cloud drives › Sign in opens.',
+      fix: ['Remove goes back to the built-in app.'],
+      links: [['Register an app (Microsoft)', 'https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app']] },
+    'source:open': { title: 'Use it without signing in', level: 'recommended', where: 'browser',
+      needs: ['Nothing: no account, app or key'],
+      steps: ['Leave the switch at the top On.', (c) => `Press Search ${c.name || 'this source'} below, or search everywhere, and play a result.`, 'Its songs also show on song and album pages and follow your play order.'],
+      done: 'Its results show in search and play.',
+      fix: ['Status says it isn’t answering: the service is down or unreachable from the node; try later.', 'Turned off: switch it on again; nothing else is kept.'],
+      links: [['Sources and their limits', 'https://github.com/gillohner/pubky-music-node/blob/main/docs/STREAMING-PROVIDERS.md']] },
+    'soundcloud:client': { title: 'SoundCloud: enter a client ID', level: 'only', where: 'browser',
+      needs: ['A SoundCloud client ID you are allowed to use (SoundCloud approves API apps by hand). The node ships none and reads none off soundcloud.com'],
+      steps: ['Switch SoundCloud (unofficial) on.', 'Enter the client ID under Client ID and Save.', 'Press Search SoundCloud.'],
+      done: 'Client ID shows as set; search and playback work.',
+      fix: ['Switched itself off: SoundCloud stopped accepting the client. Change it, then Try again.', 'Forget removes it; SoundCloud stays off.'],
+      links: [['SoundCloud developers', 'https://developers.soundcloud.com']] },
+    'soundcloud:token': {
+  "title": "Your likes and playlists: your own existing OAuth token",
+  "level": "advanced",
+  "where": "browser",
+  "needs": [
+    "An OAuth access token for your own SoundCloud account, obtained through an app authorized for you",
+    "A compatible SoundCloud client ID set above; this unofficial mode has no browser sign-in or token-download button"
+  ],
+  "steps": [
+    "If you already use your own approved app, follow SoundCloud’s documented Authorization Code flow for your own account. Use its access token, never another app’s client secret.",
+    "Paste your own access token into Sign-in token (masked) and Save; the node checks it once."
+  ],
+  "done": "Signed in names your SoundCloud account; your likes and playlists show.",
+  "fix": [
+    "No existing authorized token: use SoundCloud in its own app or website instead. Do not copy client credentials from a web-player bundle.",
+    "Expired or refused: obtain a fresh token through your own authorized app, or Sign out here."
+  ],
+  "links": [
+    [
+      "SoundCloud authentication guide",
+      "https://developers.soundcloud.com/docs/api/guide#authentication"
+    ]
+  ]
+},
+    'bandcamp:identity': { title: 'Your purchases: your own Bandcamp sign-in', level: 'advanced', where: 'browser',
+      needs: ['Your own Bandcamp account with purchases', 'Bandcamp (unofficial) switched on. Search and streams need no sign-in'],
+      steps: ['Sign in on bandcamp.com in your own browser.', 'Open the developer tools’ storage for bandcamp.com and copy the value of the cookie named identity.', 'Paste it under Your purchases (masked) and Save; the node checks it once.'],
+      done: 'Signed in shows your collection; Your purchases lists what you bought.',
+      fix: ['Refused: sign in on bandcamp.com again and copy the new value.', 'Sign out removes it from the node.'],
+      links: [['Bandcamp', 'https://bandcamp.com']] },
+    'spotify:soloist': { title: 'Play on this machine with Spotify Soloist', level: 'only', where: 'both',
+      needs: ['Spotify Premium', 'A node on Linux or macOS', 'Your own Soloist API key'],
+      steps: ['On developer.spotify.com › Dashboard open Spotify Soloist API Key, accept Spotify’s terms and Generate.', 'Paste it under Your Soloist API key (masked) and Save.', 'Unless Soloist is installed, press Download (Spotify’s build for this machine).', 'Switch Spotify Soloist on, then pick the device in a Spotify app on this network and play.'],
+      done: 'Status shows Running, paired with a Spotify account.',
+      fix: ['Spotify’s builds stop working 90 days after they were made: press Update.', 'Not running: Try again or Restart.', 'Forget removes the key.'],
+      links: [['Generate your own Soloist key', 'https://developer.spotify.com/dashboard/soloist'], ['Spotify Soloist setup', 'https://developer.spotify.com/documentation/soloist/tutorials/getting-started']] },
+    'youtube:ytdlp': { title: 'YouTube on your speakers: get yt-dlp', level: 'only', where: 'server',
+      needs: ['yt-dlp where the node runs (in Docker, inside the container)'],
+      steps: ['Switch On your speakers on.', 'Press Download yt-dlp: the node fetches yt-dlp’s official release and checks its checksums.', { t: 'No Download button: install yt-dlp yourself where the node runs, put it in the node’s data folder bin/ or set [youtube] ytdlp in node.toml (PM_YTDLP), then reload. Check it:', code: 'yt-dlp --version' }, 'Pick a speaker zone and play a YouTube item.'],
+      done: 'yt-dlp shows its version and Health says Working.',
+      fix: ['YouTube changed something and plays fail: press Update.', 'Remove deletes the downloaded copy.'],
+      links: [['yt-dlp', 'https://github.com/yt-dlp/yt-dlp']] },
+    'acoustid:key': { title: 'Match by sound: an AcoustID key', level: 'only', where: 'browser',
+      needs: ['An AcoustID account (it signs in with MusicBrainz)'],
+      steps: ['Register an application at AcoustID and copy its application key.', 'Paste it into AcoustID key here.', 'Press Check, then Save key (Check alone saves nothing).', 'Press Identify again.'],
+      done: 'AcoustID key shows OK.',
+      fix: ['Key refused: register again and save the new key.', 'Remove goes back to the node’s own key.'],
+      links: [['New AcoustID application', 'https://acoustid.org/new-application']] },
+    "plex:pin": {
+  "title": "Sign in with Plex using a PIN",
+  "level": "recommended",
+  "where": "both",
+  "needs": [
+    "Your own Plex account with access to a Plex Media Server the node can reach",
+    "Plex switched on here",
+    "An interactive terminal on the node or its Linux Docker host, Python 3, and the node owner’s API token. Prompts do not echo; do not paste tokens, links or logs into chat."
+  ],
+  "steps": [
+    {
+      "t": "There is no PIN form on this page yet. Run this block on the node host (adjust NODE’s local port only if needed). It starts a PIN and waits for approval: At Action, press Enter to connect. All prompts are hidden; run interactively, not through a saved log.",
+      "code": "python3 - <<'PY'\nimport getpass, json, time, urllib.error, urllib.parse, urllib.request\nNODE = \"http://127.0.0.1:7788\"  # Run on the node host; adjust its local port if needed.\nnode_token = getpass.getpass(\"Node API token (not shown): \")\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args, **kwargs): return None\nopener = urllib.request.build_opener(NoRedirect())\ndef call(path, method=\"GET\", payload=None):\n    body = None if payload is None else json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(NODE + path, data=body, method=method, headers={\"Authorization\": \"Bearer \" + node_token, \"Content-Type\": \"application/json\"})\n    with opener.open(req, timeout=20) as reply:\n        raw = reply.read()\n        return json.loads(raw) if raw else {}\ntry:\n    action = getpass.getpass(\"Action [connect/disconnect, Enter for connect] (not shown): \").strip().lower() or \"connect\"\n    if action not in (\"connect\", \"disconnect\"): raise ValueError(\"choose connect or disconnect\")\n    if action == \"disconnect\":\n        call(\"/v1/sources/plex/server\", \"DELETE\")\n        print(\"Signed out. Run again and choose connect to sign in anew.\")\n    else:\n        pin = call(\"/v1/sources/plex/pin\", \"POST\")\n        link = pin[\"auth_url\"]\n        parsed = urllib.parse.urlsplit(link)\n        if parsed.scheme != \"https\" or parsed.hostname != \"app.plex.tv\": raise ValueError(\"unexpected sign-in host\")\n        print(\"Open this private Plex sign-in link in your browser; do not share it:\")\n        print(link)\n        for attempt in range(120):\n            status = call(\"/v1/sources/plex/pin/\" + str(int(pin[\"id\"])))\n            if status.get(\"status\") == \"connected\":\n                print(\"Plex connected. Reload this page; no account token is printed.\")\n                break\n            if status.get(\"status\") == \"expired\":\n                print(\"The PIN expired. Run this block again for a new sign-in.\")\n                raise SystemExit(1)\n            time.sleep(2)\n        else:\n            print(\"Still waiting. Check that you approved; run this block again if needed.\")\n            raise SystemExit(1)\nexcept urllib.error.HTTPError as exc:\n    print(\"Node refused the request (HTTP %s). Check permissions, source On and the fields; no response body is printed.\" % exc.code)\n    raise SystemExit(1)\nexcept (urllib.error.URLError, ValueError):\n    print(\"Could not complete setup. Check the local node address, server address and account; no raw error is printed.\")\n    raise SystemExit(1)\nPY"
+    },
+    "Open the private app.plex.tv link it prints in your browser, sign in to your own Plex account and approve. Keep the terminal open; the link is short-lived, not a shareable login.",
+    "The node checks the approval and picks your own server first, then the first responding connection. Reload this page."
+  ],
+  "done": "The script reports connected and this page shows the connected Plex server; no account token is printed.",
+  "fix": [
+    "Expired or still waiting: run the block again for a new link.",
+    "Approved but no server connects: check your Plex account has access and the node can reach that server.",
+    "For a full sign-out, run the same block and type disconnect at Action. Run it again with connect to sign in anew; no provider password is requested for disconnect."
+  ],
+  "links": [
+    [
+      "Plex sign-in",
+      "https://app.plex.tv/auth"
+    ],
+    [
+      "Plex account support",
+      "https://support.plex.tv/"
+    ]
+  ]
+},
+    "plex:server": {
+  "title": "connect Plex with your existing token",
+  "level": "advanced",
+  "where": "server",
+  "needs": [
+    "Plex switched on here.",
+    "A Plex Media Server address and your own X-Plex-Token; PIN sign-in above avoids retrieving a token manually",
+    "An interactive terminal on the node or its Linux Docker host, Python 3, and the node owner’s API token. Prompts do not echo; do not paste tokens, links or logs into chat."
+  ],
+  "steps": [
+    "If you already have a token, find it only for your own account as Plex describes.",
+    {
+      "t": "No form is offered here. Run this local request; all prompts are hidden, JSON is encoded safely, and secrets never become process arguments: At Action, press Enter to connect. All prompts are hidden; run interactively, not through a saved log.",
+      "code": "python3 - <<'PY'\nimport getpass, json, time, urllib.error, urllib.parse, urllib.request\nNODE = \"http://127.0.0.1:7788\"  # Run on the node host; adjust its local port if needed.\nnode_token = getpass.getpass(\"Node API token (not shown): \")\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args, **kwargs): return None\nopener = urllib.request.build_opener(NoRedirect())\ndef call(path, method=\"GET\", payload=None):\n    body = None if payload is None else json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(NODE + path, data=body, method=method, headers={\"Authorization\": \"Bearer \" + node_token, \"Content-Type\": \"application/json\"})\n    with opener.open(req, timeout=20) as reply:\n        raw = reply.read()\n        return json.loads(raw) if raw else {}\ntry:\n    action = getpass.getpass(\"Action [connect/disconnect, Enter for connect] (not shown): \").strip().lower() or \"connect\"\n    if action not in (\"connect\", \"disconnect\"): raise ValueError(\"choose connect or disconnect\")\n    if action == \"disconnect\":\n        call(\"/v1/sources/plex/server\", \"DELETE\")\n        print(\"Signed out. Run again and choose connect to sign in anew.\")\n    else:\n        payload = json.loads(\"{}\")\n        payload[\"url\"] = getpass.getpass(\"Plex server URL (not shown): \").strip()\n        payload[\"token\"] = getpass.getpass(\"Plex token (not shown): \")\n        call(\"/v1/sources/plex/server\", \"PUT\", payload)\n        print(\"Saved. Reload this page to check the actual connection status.\")\nexcept urllib.error.HTTPError as exc:\n    print(\"Node refused the request (HTTP %s). Check permissions, source On and the fields; no response body is printed.\" % exc.code)\n    raise SystemExit(1)\nexcept (urllib.error.URLError, ValueError):\n    print(\"Could not complete setup. Check the local node address, server address and account; no raw error is printed.\")\n    raise SystemExit(1)\nPY"
+    },
+    "Reload this page to check the actual connected server."
+  ],
+  "done": "Plex shows the connected server; Search Plex works.",
+  "fix": [
+    "Refused: the token was revoked or the server is unreachable. Use PIN sign-in, or obtain a current token from your own account.",
+    "For a full sign-out, run the same block and type disconnect at Action. Run it again with connect to sign in anew; no provider password is requested for disconnect."
+  ],
+  "links": [
+    [
+      "Plex: finding your token",
+      "https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/"
+    ]
+  ]
+},
+    "audiobookshelf:password": {
+  "title": "Sign in to Audiobookshelf with your account",
+  "level": "recommended",
+  "where": "server",
+  "needs": [
+    "Audiobookshelf switched on here.",
+    "Audiobookshelf 2.26 or newer that the node can reach, and your own username/password",
+    "The account must be allowed to create the API key the node keeps; otherwise ask the server administrator for an authorized API key",
+    "An interactive terminal on the node or its Linux Docker host, Python 3, and the node owner’s API token. Prompts do not echo; do not paste tokens, links or logs into chat."
+  ],
+  "steps": [
+    {
+      "t": "There is no account form here yet. Run this local request; the password is used for sign-in and the node keeps the resulting API key: At Action, press Enter to connect. All prompts are hidden; run interactively, not through a saved log.",
+      "code": "python3 - <<'PY'\nimport getpass, json, time, urllib.error, urllib.parse, urllib.request\nNODE = \"http://127.0.0.1:7788\"  # Run on the node host; adjust its local port if needed.\nnode_token = getpass.getpass(\"Node API token (not shown): \")\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args, **kwargs): return None\nopener = urllib.request.build_opener(NoRedirect())\ndef call(path, method=\"GET\", payload=None):\n    body = None if payload is None else json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(NODE + path, data=body, method=method, headers={\"Authorization\": \"Bearer \" + node_token, \"Content-Type\": \"application/json\"})\n    with opener.open(req, timeout=20) as reply:\n        raw = reply.read()\n        return json.loads(raw) if raw else {}\ntry:\n    action = getpass.getpass(\"Action [connect/disconnect, Enter for connect] (not shown): \").strip().lower() or \"connect\"\n    if action not in (\"connect\", \"disconnect\"): raise ValueError(\"choose connect or disconnect\")\n    if action == \"disconnect\":\n        call(\"/v1/sources/audiobookshelf/server\", \"DELETE\")\n        print(\"Signed out. Run again and choose connect to sign in anew.\")\n    else:\n        payload = json.loads(\"{}\")\n        payload[\"url\"] = getpass.getpass(\"Audiobookshelf server URL (not shown): \").strip()\n        payload[\"user\"] = getpass.getpass(\"Audiobookshelf username (not shown): \").strip()\n        payload[\"password\"] = getpass.getpass(\"Audiobookshelf password (not shown): \")\n        call(\"/v1/sources/audiobookshelf/server\", \"PUT\", payload)\n        print(\"Saved. Reload this page to check the actual connection status.\")\nexcept urllib.error.HTTPError as exc:\n    print(\"Node refused the request (HTTP %s). Check permissions, source On and the fields; no response body is printed.\" % exc.code)\n    raise SystemExit(1)\nexcept (urllib.error.URLError, ValueError):\n    print(\"Could not complete setup. Check the local node address, server address and account; no raw error is printed.\")\n    raise SystemExit(1)\nPY"
+    },
+    "Reload this page and check the server, user and version."
+  ],
+  "done": "Audiobookshelf shows connected. The password is not printed or kept by this script.",
+  "fix": [
+    "Wrong credentials or no key-creation permission: check with the server administrator, or use your own authorized API key below.",
+    "For a full sign-out, run the same block and type disconnect at Action. Run it again with connect to sign in anew; no provider password is requested for disconnect."
+  ],
+  "links": [
+    [
+      "Audiobookshelf docs",
+      "https://www.audiobookshelf.org/docs"
+    ]
+  ]
+},
+    "audiobookshelf:server": {
+  "title": "Audiobookshelf with your API key",
+  "level": "advanced",
+  "where": "server",
+  "needs": [
+    "Audiobookshelf switched on here.",
+    "Audiobookshelf 2.26 or newer and its address",
+    "Your own API key from Audiobookshelf › Settings › API Keys (an administrator can create one)",
+    "An interactive terminal on the node or its Linux Docker host, Python 3, and the node owner’s API token. Prompts do not echo; do not paste tokens, links or logs into chat."
+  ],
+  "steps": [
+    "Create a key authorized for your account in Audiobookshelf, or ask your server administrator for one.",
+    {
+      "t": "No API-key form is offered here. Run this local request with hidden prompts and encoded JSON: At Action, press Enter to connect. All prompts are hidden; run interactively, not through a saved log.",
+      "code": "python3 - <<'PY'\nimport getpass, json, time, urllib.error, urllib.parse, urllib.request\nNODE = \"http://127.0.0.1:7788\"  # Run on the node host; adjust its local port if needed.\nnode_token = getpass.getpass(\"Node API token (not shown): \")\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args, **kwargs): return None\nopener = urllib.request.build_opener(NoRedirect())\ndef call(path, method=\"GET\", payload=None):\n    body = None if payload is None else json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(NODE + path, data=body, method=method, headers={\"Authorization\": \"Bearer \" + node_token, \"Content-Type\": \"application/json\"})\n    with opener.open(req, timeout=20) as reply:\n        raw = reply.read()\n        return json.loads(raw) if raw else {}\ntry:\n    action = getpass.getpass(\"Action [connect/disconnect, Enter for connect] (not shown): \").strip().lower() or \"connect\"\n    if action not in (\"connect\", \"disconnect\"): raise ValueError(\"choose connect or disconnect\")\n    if action == \"disconnect\":\n        call(\"/v1/sources/audiobookshelf/server\", \"DELETE\")\n        print(\"Signed out. Run again and choose connect to sign in anew.\")\n    else:\n        payload = json.loads(\"{}\")\n        payload[\"url\"] = getpass.getpass(\"Audiobookshelf server URL (not shown): \").strip()\n        payload[\"api_key\"] = getpass.getpass(\"Audiobookshelf API key (not shown): \")\n        call(\"/v1/sources/audiobookshelf/server\", \"PUT\", payload)\n        print(\"Saved. Reload this page to check the actual connection status.\")\nexcept urllib.error.HTTPError as exc:\n    print(\"Node refused the request (HTTP %s). Check permissions, source On and the fields; no response body is printed.\" % exc.code)\n    raise SystemExit(1)\nexcept (urllib.error.URLError, ValueError):\n    print(\"Could not complete setup. Check the local node address, server address and account; no raw error is printed.\")\n    raise SystemExit(1)\nPY"
+    },
+    "Reload this page to check the actual connection."
+  ],
+  "done": "Audiobookshelf shows the connected server, user and version.",
+  "fix": [
+    "Key revoked: create an authorized replacement, or sign in with your own account above.",
+    "For a full sign-out, run the same block and type disconnect at Action. Run it again with connect to sign in anew; no provider password is requested for disconnect."
+  ],
+  "links": [
+    [
+      "Audiobookshelf docs",
+      "https://www.audiobookshelf.org/docs"
+    ]
+  ]
+},
+    "podcasts:gpodder": {
+  "title": "Sync subscriptions with gPodder",
+  "level": "advanced",
+  "where": "server",
+  "needs": [
+    "Your own gpodder.net, opodsync or compatible gPodder API v2 account",
+    "Podcasts switched on; the node stores the sync password, so use a dedicated credential where supported",
+    "An interactive terminal on the node or its Linux Docker host, Python 3, and the node owner’s API token. Prompts do not echo; do not paste tokens, links or logs into chat."
+  ],
+  "steps": [
+    {
+      "t": "This page has no sync-account form yet. Run on the node host; choose the server address and enter your own username/password at hidden prompts: At Action, press Enter to connect. All prompts are hidden; run interactively, not through a saved log.",
+      "code": "python3 - <<'PY'\nimport getpass, json, time, urllib.error, urllib.parse, urllib.request\nNODE = \"http://127.0.0.1:7788\"  # Run on the node host; adjust its local port if needed.\nnode_token = getpass.getpass(\"Node API token (not shown): \")\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args, **kwargs): return None\nopener = urllib.request.build_opener(NoRedirect())\ndef call(path, method=\"GET\", payload=None):\n    body = None if payload is None else json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(NODE + path, data=body, method=method, headers={\"Authorization\": \"Bearer \" + node_token, \"Content-Type\": \"application/json\"})\n    with opener.open(req, timeout=20) as reply:\n        raw = reply.read()\n        return json.loads(raw) if raw else {}\ntry:\n    action = getpass.getpass(\"Action [connect/disconnect, Enter for connect] (not shown): \").strip().lower() or \"connect\"\n    if action not in (\"connect\", \"disconnect\"): raise ValueError(\"choose connect or disconnect\")\n    if action == \"disconnect\":\n        call(\"/v1/podcasts/gpodder\", \"DELETE\")\n        print(\"Signed out. Run again and choose connect to sign in anew.\")\n    else:\n        payload = json.loads(\"{\\\"kind\\\":\\\"gpodder\\\"}\")\n        payload[\"server\"] = getpass.getpass(\"gPodder server URL (not shown): \").strip()\n        payload[\"username\"] = getpass.getpass(\"gPodder username (not shown): \").strip()\n        payload[\"password\"] = getpass.getpass(\"gPodder password (not shown): \")\n        call(\"/v1/podcasts/gpodder\", \"PUT\", payload)\n        call(\"/v1/podcasts/gpodder/sync\", \"POST\")\n        print(\"Saved. Reload this page to check the actual connection status.\")\nexcept urllib.error.HTTPError as exc:\n    print(\"Node refused the request (HTTP %s). Check permissions, source On and the fields; no response body is printed.\" % exc.code)\n    raise SystemExit(1)\nexcept (urllib.error.URLError, ValueError):\n    print(\"Could not complete setup. Check the local node address, server address and account; no raw error is printed.\")\n    raise SystemExit(1)\nPY"
+    },
+    "Reload Podcasts; the account is saved only if the first sync works."
+  ],
+  "done": "Your subscriptions show on the node; sync runs every 15 minutes.",
+  "fix": [
+    "Refused: verify this is a gPodder API v2 server and your own current credentials. Nextcloud uses the separate method below.",
+    "For a full sign-out, run the same block and type disconnect at Action. Run it again with connect to sign in anew; no provider password is requested for disconnect."
+  ],
+  "links": [
+    [
+      "gPodder",
+      "https://gpodder.net"
+    ]
+  ]
+},
+    "podcasts:nextcloud": {
+  "title": "Sync subscriptions with Nextcloud",
+  "level": "advanced",
+  "where": "server",
+  "needs": [
+    "Your own Nextcloud account on a server with the gpoddersync app enabled",
+    "A Nextcloud device-specific (app) password made in your account’s security settings; the node stores it for sync",
+    "Podcasts switched on",
+    "An interactive terminal on the node or its Linux Docker host, Python 3, and the node owner’s API token. Prompts do not echo; do not paste tokens, links or logs into chat."
+  ],
+  "steps": [
+    "In your Nextcloud account open Settings › Security and create a device-specific (app) password. Ask the server administrator to enable gpoddersync if it is missing.",
+    {
+      "t": "There is no sync-account form here yet. Run this local request; it submits the explicit nextcloud server kind: At Action, press Enter to connect. All prompts are hidden; run interactively, not through a saved log.",
+      "code": "python3 - <<'PY'\nimport getpass, json, time, urllib.error, urllib.parse, urllib.request\nNODE = \"http://127.0.0.1:7788\"  # Run on the node host; adjust its local port if needed.\nnode_token = getpass.getpass(\"Node API token (not shown): \")\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, *args, **kwargs): return None\nopener = urllib.request.build_opener(NoRedirect())\ndef call(path, method=\"GET\", payload=None):\n    body = None if payload is None else json.dumps(payload).encode(\"utf-8\")\n    req = urllib.request.Request(NODE + path, data=body, method=method, headers={\"Authorization\": \"Bearer \" + node_token, \"Content-Type\": \"application/json\"})\n    with opener.open(req, timeout=20) as reply:\n        raw = reply.read()\n        return json.loads(raw) if raw else {}\ntry:\n    action = getpass.getpass(\"Action [connect/disconnect, Enter for connect] (not shown): \").strip().lower() or \"connect\"\n    if action not in (\"connect\", \"disconnect\"): raise ValueError(\"choose connect or disconnect\")\n    if action == \"disconnect\":\n        call(\"/v1/podcasts/gpodder\", \"DELETE\")\n        print(\"Signed out. Run again and choose connect to sign in anew.\")\n    else:\n        payload = json.loads(\"{\\\"kind\\\":\\\"nextcloud\\\"}\")\n        payload[\"server\"] = getpass.getpass(\"Nextcloud server URL (not shown): \").strip()\n        payload[\"username\"] = getpass.getpass(\"Nextcloud username (not shown): \").strip()\n        payload[\"password\"] = getpass.getpass(\"Nextcloud app password (not shown): \")\n        call(\"/v1/podcasts/gpodder\", \"PUT\", payload)\n        call(\"/v1/podcasts/gpodder/sync\", \"POST\")\n        print(\"Saved. Reload this page to check the actual connection status.\")\nexcept urllib.error.HTTPError as exc:\n    print(\"Node refused the request (HTTP %s). Check permissions, source On and the fields; no response body is printed.\" % exc.code)\n    raise SystemExit(1)\nexcept (urllib.error.URLError, ValueError):\n    print(\"Could not complete setup. Check the local node address, server address and account; no raw error is printed.\")\n    raise SystemExit(1)\nPY"
+    },
+    "Reload Podcasts after the first sync succeeds."
+  ],
+  "done": "Your Nextcloud-synced subscriptions show here; sync runs every 15 minutes.",
+  "fix": [
+    "Refused: check the server URL, app password and installed gpoddersync app. Ordinary gPodder uses the other method above.",
+    "For a full sign-out, run the same block and type disconnect at Action. Run it again with connect to sign in anew; no provider password is requested for disconnect."
+  ],
+  "links": [
+    [
+      "Nextcloud gpoddersync app",
+      "https://apps.nextcloud.com/apps/gpoddersync"
+    ],
+    [
+      "Nextcloud app passwords",
+      "https://docs.nextcloud.com/server/latest/user_manual/en/session_management.html"
+    ]
+  ]
+},
+  };
+  // Every source in streaming::services() and the guides its page shows (tools/login-guides-check.js)
+  const LOGIN_SOURCES = {
+    archive: ['source:open'], audius: ['source:open'], deezer: ['source:open'], radio: ['source:open'],
+    podcasts: ['source:open', 'podcasts:gpodder', 'podcasts:nextcloud'], jamendo: ['source:open', 'jamendo:signin'], bandcamp: ['source:open', 'bandcamp:identity'],
+    tidal: ['tidal:app', 'tidal:import', 'tidal:device', 'tidal:paste'], qobuz: ['qobuz:own', 'qobuz:import', 'qobuz:paste'],
+    spotify: ['spotify:app', 'spotify:librespot', 'spotify:librespot-file', 'spotify:soloist'], youtube: ['youtube:key', 'youtube:cookies', 'youtube:ytdlp'],
+    soundcloud: ['soundcloud:client', 'soundcloud:token'], subsonic: ['subsonic:server'], jellyfin: ['jellyfin:server'],
+    plex: ['plex:pin', 'plex:server'], audiobookshelf: ['audiobookshelf:password', 'audiobookshelf:server'],
+  };
+  // Offered, but nothing for anyone to sign in to or set up
+  const LOGIN_GUIDE_NONE = { 'app:fanart': 'Built in (artist images); nothing to set up.', 'app:audiodb': 'Built in, or its public test key; nothing to set up.' };
+  // LOGIN-GUIDES-END
+  const LG_WHERE = { browser: 'In this browser.', server: 'On the node’s machine, not in this browser.', both: 'Here, plus a step on another device or the node’s machine.' };
+  const lgItem = (s, c) => {
+    const v = typeof s === 'function' ? s(c) : s; if (!v) return '';
+    return typeof v === 'string' ? `<li>${esc(v)}</li>` : `<li>${esc(v.t)}${v.code ? `<pre class="lguide-code"><code>${esc(v.code)}</code></pre>` : ''}</li>`;
+  };
+  const lgList = (items, c, tag = 'ol', cls = 'lguide-steps') => `<${tag} class="${cls}">${items.map((s) => lgItem(s, c)).join('')}</${tag}>`;
+  // A guide as a disclosure with a heading: open for the recommended way, closed for advanced
+  // ones. `c` carries the page's values (`redirect`), `o.missing` shows the install steps first,
+  // `o.h` the heading level (4 under a section's h3; 2 on the login page under its h1).
+  const loginGuide = (key, c = {}, o = {}) => {
+    const g = LOGIN_GUIDES[key]; if (!g) return '';
+    const id = `lg-${String(key).replace(/[^a-z0-9]+/gi, '-')}${o.missing ? '-missing' : ''}`;
+    const open = o.open != null ? o.open : g.level !== 'advanced';
+    const pill = g.level === 'recommended' ? '<span class="pill ok">Recommended</span>' : g.level === 'advanced' ? '<span class="pill">Advanced</span>' : '';
+    const ms = o.missing && g.missing;
+    const missing = ms ? `<div class="notice warn lguide-missing" role="status"><p><b>${esc(ms.title)}.</b> ${esc(ms.intro)}</p><details class="lguide-sub"><summary><h5 class="lguide-sub-h">On a Linux install</h5></summary>${lgList(ms.native, c)}</details><details class="lguide-sub"><summary><h5 class="lguide-sub-h">In Docker</h5></summary>${lgList(ms.docker, c)}</details><p>${esc(LG_RELOAD)} <a href="https://github.com/librespot-org/librespot" target="_blank" rel="noopener">librespot</a></p></div>` : '';
+    return `<details class="lguide" data-guide="${esc(key)}"${open ? ' open' : ''}><summary><h${o.h || 4} class="lguide-h" id="${id}">${ms ? 'Set up first: ' : 'How to: '}${esc(g.title)}</h${o.h || 4}>${pill}</summary><div class="lguide-body" role="group" aria-labelledby="${id}">${missing}`
+      + `<p class="lguide-meta"><b>Before you start</b></p>${lgList(g.needs, c, 'ul', 'lguide-needs')}<p class="lguide-meta"><b>Where:</b> ${esc(LG_WHERE[g.where])}</p>`
+      + `${lgList(g.steps, c)}<p class="lguide-done"><b>When it worked:</b> ${esc(g.done)}</p><p class="lguide-meta"><b>If it doesn’t work</b></p>${lgList(g.fix, c, 'ul', 'lguide-fix')}`
+      + `<p class="lguide-links"><b>Official:</b> ${g.links.map(([t, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener">${esc(t)}</a>`).join(' · ')}</p></div></details>`;
+  };
   // ---- Guided setup pieces (Sources › Qobuz and TIDAL full tracks, TASK-qobuz-tidal-setup-ux) ----
-  const GUIDE = (file) => `https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/${file}`;
+  const GUIDE = (file) =>`https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/${file}`;
   const guideLink = (file) => `<a href="${GUIDE(file)}" target="_blank" rel="noopener">Guide</a>`;
   // A numbered step card, a check mark once done. `sub` and `body` are HTML
   const stepCard = (no, title, done, sub, body) => `<div class="setup-step card-step ${done ? 'done' : ''}" data-step="${no}"><span class="stepmark" aria-hidden="true">${done ? icon('check') : no}</span><div class="grow"><div class="name">${no}. ${title}${done ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${body}</div></div>`;
   // A secret field with Show / Hide: a password until shown
   const secretInput = (name, label, placeholder, autocomplete = 'off', disabled = false) => `<span class="secretwrap"><input class="input" name="${name}" type="password" placeholder="${esc(placeholder)}" autocomplete="${autocomplete}" aria-label="${esc(label)}" spellcheck="false" required ${disabled ? 'disabled' : ''}><button class="icon-btn showpw" type="button" aria-label="Show ${esc(label)}" aria-pressed="false" title="Show">${icon('eye')}</button></span>`;
+  // A pasted secret (a token file, a config) is masked like a password until Show is pressed
+  const revealBtn = '<button class="btn ghost sm" type="button" data-reveal aria-pressed="false">Show what I pasted</button>';
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-reveal]'); if (!b) return; const t = b.closest('form') && b.closest('form').querySelector('.secret-area'); if (!t) return; const show = t.classList.contains('masked'); t.classList.toggle('masked', !show); b.setAttribute('aria-pressed', String(show)); b.textContent = show ? 'Hide what I pasted' : 'Show what I pasted'; });
   // One name ("Show …") and the pressed state say it all; only the picture and the tooltip change
   const wireSecretToggles = (root) => $$('.showpw', root).forEach((b) => b.onclick = () => { const i = b.previousElementSibling; const show = i.type === 'password'; i.type = show ? 'text' : 'password'; b.setAttribute('aria-pressed', String(show)); b.title = show ? 'Hide' : 'Show'; b.innerHTML = icon(show ? 'eye-off' : 'eye'); });
   // A pasted block (`app_id=… app_secret=…`, a config section, JSON) split into its two values
@@ -1456,16 +2003,19 @@
     if (!el.isConnected) return;
     const mem = state.signin = state.signin || {}; const m = mem[cfg.source] = mem[cfg.source] || {};
     const wayOf = (id) => si.ways.find((w) => w.id === id) || {};
-    const usable = si.ways.filter((w) => w.available);
-    // The way picked here, else the remembered one, else the recommended one
-    let pick = [m.way, si.chosen].find((id) => usable.some((w) => w.id === id)) || (usable.find((w) => w.recommended) || usable[0] || si.ways[0] || {}).id;
+    const guidedRecommended = (w) => { const guide = LOGIN_GUIDES[`${cfg.source}:${w.id}`]; return guide ? guide.level === 'recommended' : !!w.recommended; };
+    const orderedWays = [...si.ways].sort((a, b) => Number(guidedRecommended(b)) - Number(guidedRecommended(a)));
+    const usable = orderedWays.filter((w) => w.available);
+    // Keep the backend’s recommended default and remembered choice; guide ordering does not change authentication selection.
+    let pick = [m.way, si.chosen].find((id) => usable.some((w) => w.id === id)) || (usable.find((w) => w.recommended) || usable[0] || orderedWays[0] || {}).id;
     const choosing = !si.in_use || !!m.change;
     const rows = [];
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
     if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
     if (choosing) {
-      const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
-      rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
+      const ways = orderedWays.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${guidedRecommended(w) ? '<span class="pill ok">Recommended</span>' : (LOGIN_GUIDES[`${cfg.source}:${w.id}`] || {}).level === 'advanced' ? '<span class="pill">Advanced</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
+      const needsSetup = si.ways.filter((w) => !w.available && (LOGIN_GUIDES[`${cfg.source}:${w.id}`] || {}).missing && !/owner/.test(w.reason || '')).map((w) => loginGuide(`${cfg.source}:${w.id}`, {}, { missing: true, open: false })).join('');
+      rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div>${needsSetup}<div class="way-action" data-sg="action"></div>`));
     }
     if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
     if (cfg.extra) rows.push(...[].concat(cfg.extra(si, pick) || []));
@@ -1488,7 +2038,7 @@
         const paste = o.withPaste ? h.pasteArea(o) : '';
         return `${list}${file}${paste}${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}`;
       },
-      pasteArea: (o = {}) => `<form class="stack" data-sg="paste"><textarea class="input" name="text" rows="${o.rows || 3}" aria-label="${esc(o.label || 'What to paste')}" placeholder="${esc(o.placeholder || '')}" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button><span class="muted small">${esc(o.note || 'Kept like the node’s own sign-in; never shown again.')}</span></div></form>`,
+      pasteArea: (o = {}) => `<form class="stack" data-sg="paste"><textarea class="input secret-area masked" name="text" rows="${o.rows || 3}" aria-label="${esc(o.label || 'What to paste')}" placeholder="${esc(o.placeholder || '')}" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button>${revealBtn}<span class="muted small">${esc(o.note || 'Kept like the node’s own sign-in; never shown again.')}</span></div></form>`,
     };
     const act = el.querySelector('[data-sg="action"]');
     const renderAction = () => {
@@ -1499,7 +2049,7 @@
       if (si.in_use && si.in_use.way === pick) html = '<p class="muted small">This is the way in use.</p>';
       else if (cfg.actions) html = cfg.actions(pick, si, h);
       if (html == null) html = w.action === 'import' ? h.importArea() : w.action === 'paste' ? h.pasteArea() : '';
-      act.innerHTML = html;
+      act.innerHTML = (w.available === false ? '' : loginGuide(`${cfg.source}:${pick}`, { redirect: ((si.details || {}).status || {}).redirect_uri || '' })) + html;
       const useIt = act.querySelector('[data-sg="use"]'); if (useIt) useIt.onclick = async () => { if (await h.choose(pick)) { toast(`Using ${w.label || 'this way'}`); h.done(); } };
       act.querySelectorAll('[data-import]').forEach((b) => b.onclick = async () => { b.disabled = true; await h.useImport({ id: b.dataset.import }, b.dataset.import); b.disabled = false; });
       const ff = act.querySelector('[data-sg="file"]'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } h.useImport({ text: await file.text() }, 'the file'); };
@@ -1621,7 +2171,7 @@
     const appInfo = hasApp ? `<p class="small">App <code class="path">${esc(u.app_id || '')}</code> · ${u.app_from === 'config' ? 'set in the node config' : u.app_from === 'import' ? 'from an imported config' : 'entered here'}.${u.app_from !== 'config' ? ` <button class="btn ghost sm" type="button" id="qbappchange">${m.changeApp ? 'Keep it' : 'Change'}</button> <button class="btn ghost sm" type="button" id="qbappforget">Forget</button>` : ''}</p>` : '';
     const appForm = hasApp && !m.changeApp ? '' : `<form class="stack" id="qbapp" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="App ID (digits)" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Qobuz app ID" required>${secretInput('secret', 'Qobuz app secret', 'App secret')}</div><div class="toolbar"><button class="btn" type="button" id="qbcheck">Check</button><button class="btn primary" type="submit">Save</button><span class="check-out small" id="qbcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>app_id=… app_secret=…</code> block or JSON into either field: it is split.</p></form>`;
     const found = si.imports || []; const places = si.places || [];
-    const importBox = `<details class="small" id="qbimport"><summary>Already use streamrip or qobuz-dl? Use its config</summary><div class="stack">${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><p class="muted small">Pick streamrip’s config.toml or qobuz-dl’s config.ini: it is only read; its app values and sign-in are kept here like the node’s own, replacing the current app.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="[qobuz] … or [DEFAULT] … from streamrip’s config.toml or qobuz-dl’s config.ini" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Nothing is shown again once saved.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div></details>`;
+    const importBox = `<details class="small" id="qbimport"><summary>Already use streamrip or qobuz-dl? Use its config</summary><div class="stack">${loginGuide('qobuz:import')}${loginGuide('qobuz:paste')}${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><p class="muted small">Pick streamrip’s config.toml or qobuz-dl’s config.ini: it is only read; its app values and sign-in are kept here like the node’s own, replacing the current app.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input secret-area masked" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="[qobuz] … or [DEFAULT] … from streamrip’s config.toml or qobuz-dl’s config.ini" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button>${revealBtn}<span class="muted small">Nothing is shown again once saved.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div></details>`;
     const step1 = stepCard(1, 'App ID and secret', hasApp, `Qobuz has no public developer page: ask Qobuz for API access at <a href="mailto:api@qobuz.com">api@qobuz.com</a> (an app ID and secret). The node keeps them like a sign-in and never shows the secret again. ${guideLink('qobuz.md')}`, appInfo + appForm + importBox);
     // 2. The account
     const acct = u.signed_in
@@ -1630,7 +2180,7 @@
     const step2 = stepCard(2, 'Your Qobuz account', u.signed_in, `${hasApp ? '' : 'After step 1. '}Your email and password go to Qobuz once; the node keeps only the session Qobuz answers with. A paid streaming plan is needed.`, acct);
     const playback = u.signed_in ? sgGroup('Playback', sgRow('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option><option value="mp3" ${u.quality === 'mp3' ? 'selected' : ''}>MP3 (320 kbps)</option></select>`)
       + (u.health && u.health.ok ? sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>') : '')) : '';
-    el.innerHTML = sgGroup('Qobuz', status) + sgGroup('Set up', `<div class="setup-steps">${step1}${step2}</div>`) + playback;
+    el.innerHTML = sgGroup('Qobuz', status) + sgGroup('Set up', `${u.signed_in ? '' : loginGuide('qobuz:own')}<div class="setup-steps">${step1}${step2}</div>`) + playback;
     // Wiring
     const refill = () => qobuzSetup(el);
     const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } state.sources = null; refill(); };
@@ -1686,7 +2236,7 @@
     source: 'youtube', name: 'YouTube', el,
     actions: (pick, si, h) => {
       const key = (si.details.key || {}).set;
-      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key’s 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, enable the YouTube Data API v3, then create an API key under Credentials and paste it here. It is checked once, then never shown again.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
+      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Google’s default allocation is 100 search calls per day. YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, enable the YouTube Data API v3, then create an API key under Credentials and paste it here. It is checked once, then never shown again.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
       if (pick === 'cookies') return h.importArea({ fileLabel: 'Cookies file', accept: '.txt,text/plain', what: 'the cookies file', intro: 'The Netscape cookies file you export for yt-dlp; the copy is kept readable by the node only, and yt-dlp on your speakers plays as your account.', withPaste: true, label: 'Cookies file contents', placeholder: '# Netscape HTTP Cookie File …', rows: 4 });
       return null;
     },
@@ -5078,17 +5628,17 @@
           const subAccount = active !== 'subsonic' ? '' : sub && sub.connected
             ? `<div class="toolbar"><span class="pill ok account">Connected · ${esc(sub.name || 'your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.user || '')}@${esc(sub.url || '')}</span><button class="btn ghost" id="subforget">Forget this server</button></div>`
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
-            : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node. The password stays on this node; requests are signed with a fresh token each time.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
+            : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node. The password stays on this node; requests are signed with a fresh token each time.</p>${loginGuide('subsonic:server')}<label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
           let jf = null; let jfPls = []; if (active === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
           const jfAccount = active !== 'jellyfin' ? '' : jf && jf.connected
             ? `<div class="toolbar"><span class="pill ok account">Signed in · ${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · ${esc(jf.user || '')}</span><button class="btn ghost" id="jfout">Sign out</button></div>`
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz recording id in Jellyfin)</span></div>${jfPls.length ? `<div class="list">${jfPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-jfpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No music playlists.</p>'}</section>`
-            : `<form class="card subform" id="jfform"><h3>Sign in to your Jellyfin</h3><p class="muted small">Also works with Emby. The password is used once to sign in; the node keeps only the access token Jellyfin gives it.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
+            : `<form class="card subform" id="jfform"><h3>Sign in to your Jellyfin</h3><p class="muted small">Also works with Emby. The password is used once to sign in; the node keeps only the access token Jellyfin gives it.</p>${loginGuide('jellyfin:server')}<label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
           let jam = null; if (active === 'jamendo') { try { jam = await api('GET', '/sources/jamendo/status'); } catch { jam = null; } if (state.view !== 'sources') return; }
           const jamAccount = active !== 'jamendo' ? '' : !jam || !jam.configured ? `<div class="notice">This build of the node has no built-in Jamendo app. Add one in Settings › This node › Service apps.</div>`
             : jam.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${jam.name ? ' · ' + esc(jam.name) : ''}</span><button class="btn" id="jamimport">${icon('heart')} Add my Jamendo likes to Favourites</button><button class="btn ghost" id="jamout">Sign out</button></div>`
             : !jam.can_sign_in ? `<p class="muted small">Search and full-length playback need no account. Signing in to bring your Jamendo likes over needs your own Jamendo app with its secret in the node config (<code>[jamendo]</code>).</p>`
-            : `<div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button><span class="muted small">Optional: search and full-length playback need no account. Signing in brings your likes and favourites to this node. The Jamendo app's redirect URL must be on the same domain as <code>${esc(jam.redirect_uri)}</code>.</span></div>`;
+            : `<div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button><span class="muted small">Optional: search and full-length playback need no account. Signing in brings your likes and favourites to this node. The Jamendo app's redirect URL must be on the same domain as <code>${esc(jam.redirect_uri)}</code>.</span></div>${loginGuide('jamendo:signin', {}, { open: false })}`;
           let spot = null; if (active === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
           const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
@@ -5099,6 +5649,9 @@
                 + (cur.id === 'tidal' || cur.id === 'qobuz' ? '' : (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
                 + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
               + (account ? group('Account', block('', '', account)) : '')
+              // The source-level guides, under their own heading: no sign-in needed, or a server to connect
+              + ((g) => (g ? group('How to use it', g) : ''))(((LOGIN_SOURCES[cur.id] || []).includes('source:open') ? loginGuide('source:open', { name: cur.name }, { open: cur.id !== 'jamendo' && cur.id !== 'bandcamp' }) : '')
+                + (cur.id === 'plex' ? loginGuide('plex:pin') + loginGuide('plex:server') : '') + (cur.id === 'audiobookshelf' ? loginGuide('audiobookshelf:password') + loginGuide('audiobookshelf:server') : '') + (cur.id === 'podcasts' ? loginGuide('podcasts:gpodder') + loginGuide('podcasts:nextcloud') : ''))
               + (cur.id === 'tidal' ? '<div id="tidalsignin"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="signin-qobuz"></div>' : '')
               + (cur.id === 'spotify' ? '<div id="signin-spotify"></div>' : '')
@@ -5129,6 +5682,7 @@
               rows.push(y
                 ? row('yt-dlp', `${esc(y.version ? 'Version ' + y.version : 'Found')}: ${y.from === 'downloaded' ? 'downloaded by this node' : y.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(y.path)}</code>).`, y.from === 'downloaded' ? '<button class="btn ghost sm" id="yzupdate">Update</button><button class="btn ghost sm" id="yzremove">Remove</button>' : '')
                 : row('yt-dlp', u.can_download ? 'Needed to play YouTube on your speakers. The node downloads it from yt-dlp’s official GitHub releases and checks it against the release’s checksums.' : 'Needed to play YouTube on your speakers. Install yt-dlp on this machine, then reload this page.', u.can_download ? '<button class="btn primary sm" id="yzget">Download yt-dlp</button>' : ''));
+              if (!y) rows.push(loginGuide('youtube:ytdlp'));
               if (u.health) rows.push(row('Health', esc(u.health.ok ? `Working: ${u.health.detail}.` : `Last try: ${u.health.detail}`), `<span class="pill ${u.health.ok ? 'ok' : 'bad'}">${u.health.ok ? 'OK' : 'Problem'}</span>`));
             }
             yz.innerHTML = group('On your speakers', rows.join(''));
@@ -5151,6 +5705,7 @@
               rows.push(u.signed_in
                 ? row('Signed in', `Your Bandcamp collection${u.user ? ' (' + esc(u.user) + ')' : ''}. The sign-in stays on the node and never comes back.`, '<button class="btn ghost sm" id="bcout">Sign out</button>')
                 : `<form class="set-row set-block" id="bcin"><div class="set-label"><div class="set-name">Your purchases</div>${help('To download what you bought: sign in on bandcamp.com in your browser, open its cookies for bandcamp.com and copy the value of the one named identity. The node checks it once with Bandcamp and keeps it like a sign-in. Search and streams work without it.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="identity" type="password" placeholder="identity cookie value" autocomplete="off" spellcheck="false" aria-label="Bandcamp identity cookie" required><button class="btn" type="submit">Save</button></div></div></form>`);
+              if (!u.signed_in) rows.push(loginGuide('bandcamp:identity'));
               rows.push(row('Download format', `Bought music downloads into <code class="path">${esc(u.folder)}</code>, a library folder. When a release lacks this format, the best one it has is used.`, `<select class="input" id="bcfmt" aria-label="Bandcamp download format">${u.formats.map((f) => `<option value="${esc(f)}" ${f === u.format ? 'selected' : ''}>${esc(FMT[f] || f)}</option>`).join('')}</select>`));
               rows.push(row('Streams', 'What Bandcamp’s own player plays: MP3 128 kbit/s, full tracks where the artist allows it.', ''));
               if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
@@ -5198,6 +5753,7 @@
                 const n = u.now; const who = [n.artists.join(', '), n.album].filter(Boolean).join(' · ');
                 rows.push(row(n.status === 'paused' ? 'Paused' : n.status === 'playing' ? 'Playing on this machine' : 'Loaded', `${esc(n.title)}${who ? ' · ' + esc(who) : ''}${n.volume != null ? ` · volume ${n.volume}` : ''}`, `<button class="btn ghost sm" id="slprev" aria-label="Previous">${icon('prev')}</button><button class="btn sm" id="sltoggle">${n.status === 'playing' ? 'Pause' : 'Play'}</button><button class="btn ghost sm" id="slnext" aria-label="Next">${icon('next')}</button>`));
               }
+              rows.push(loginGuide('spotify:soloist', {}, { open: !u.running }));
               rows.push(`<form class="set-row set-block" id="slkey"><div class="set-label"><div class="set-name">Your Soloist API key</div>${help('Each person makes their own key, with a Spotify Premium account, at developer.spotify.com › Dashboard › Spotify Soloist API Key (accept Spotify’s terms, then Generate). The node keeps it like a sign-in and never shows it again. Soloist takes the key only on its command line, so other users of this machine can see it while Soloist runs.')}</div><div class="set-body"><div class="toolbar">${u.key_set ? `<span class="pill ok">Saved</span><button type="button" class="btn ghost sm" id="slkeychange">Change</button><button type="button" class="btn ghost sm" id="slkeyforget">Forget</button>` : ''}<input class="input" name="key" type="password" placeholder="Soloist API key" autocomplete="off" spellcheck="false" aria-label="Spotify Soloist API key" ${u.key_set ? 'hidden' : 'required'}><button class="btn" type="submit" ${u.key_set ? 'hidden' : ''}>Save</button></div></div></form>`);
               rows.push(`<form class="set-row set-block" id="sldev"><div class="set-label"><div class="set-name">Device</div>${help('The name Spotify apps show for this machine, and, with PipeWire, which output Soloist uses (a node name or id; empty means the system default).')}</div><div class="set-body"><div class="toolbar"><input class="input" name="name" placeholder="Device name" maxlength="64" autocomplete="off" aria-label="Spotify Connect device name" value="${esc(u.device_name)}"><input class="input" name="pw" placeholder="PipeWire output (optional)" autocomplete="off" spellcheck="false" aria-label="PipeWire output" value="${esc(u.pipewire_device || '')}"><button class="btn" type="submit">Save</button></div></div></form>`);
               rows.push(b
@@ -5259,9 +5815,11 @@
               rows.push(u.signed_in
                 ? row('Signed in', `Your likes and playlists come from SoundCloud account ${esc(u.user || '')}. The token stays on the node and never comes back.`, '<button class="btn ghost sm" id="sctokenforget">Sign out</button>')
                 : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in). The node checks it once with SoundCloud and keeps it like a sign-in; it never shows it again. Without it, search and playback still work.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
+              if (!u.signed_in) rows.push(loginGuide('soundcloud:token'));
               rows.push(row('Streams', 'MP3 as SoundCloud serves it, progressive or stitched from HLS. Tracks SoundCloud encrypts (Go+) are skipped; a track SoundCloud only snips plays its 30-second preview.', ''));
               if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
             }
+            if (!u.client_from) rows.splice(1, 0, loginGuide('soundcloud:client'));
             scm.innerHTML = group('Unofficial mode', rows.join(''));
             const put = async (body, ok) => { try { await api('PUT', '/sources/soundcloud/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#scon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'SoundCloud is on' : 'SoundCloud is off');
@@ -5994,10 +6552,13 @@
           // This node › Service apps: the apps the admin sets once for everyone
           // Built in, or the admin's own app (Advanced); the service's limits in plain words
           const appFrom = (a) => a.from === 'settings' ? 'Your own app' : a.from === 'builtin' ? 'Built in' : a.from === 'config' ? 'Your own app, set in node.toml' : a.from ? 'Set' : '';
-          const appAdvanced = (a) => !a.set ? '' : `<details class="small app-adv"><summary>Advanced: use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
+          // Its guide sits under Advanced with the form (service links stay under Advanced), or alone
+          // `redirect`: the first address (the return page, used without a secret); `callback`: the node's own, used with one
+          const appGuide = (a) => loginGuide(`app:${a.id}`, { redirect: (a.redirects || [])[0] || '', callback: (a.redirects || []).find((r) => /\/callback$/.test(r)) || '' }, { open: !!a.set });
+          const appAdvanced = (a) => !a.set ? '' : `<details class="small app-adv"><summary>Advanced: use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}${appGuide(a)}</details>`;
           // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
           const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
-          const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? help(esc(a.limits)) : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
+          const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? help(esc(a.limits)) : ''}${appAdvanced(a)}${!a.set && a.page ? appGuide(a) : ''}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
           const appsTab = group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
@@ -6090,7 +6651,7 @@
             const box = $('#lbbody'); if (!box) return;
             let lb; try { lb = await api('GET', '/listenbrainz'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
             if (!lb.connected) {
-              box.innerHTML = `<p class="muted small">Send what you play to ListenBrainz, bring your listens here, and get its recommendations. Your user token is on <a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">listenbrainz.org/settings</a>; it stays on this node.</p><form class="row" id="lbform"><input class="input" name="token" type="password" placeholder="User token" autocomplete="off" style="flex:1;min-width:200px" required><button class="btn primary" id="lbconnect" type="submit">Connect</button></form>`;
+              box.innerHTML = `<p class="muted small">Send what you play to ListenBrainz, bring your listens here, and get its recommendations. Your user token is on <a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">listenbrainz.org/settings</a>; it stays on this node.</p>${loginGuide('listenbrainz:token', {}, { open: false })}<form class="row" id="lbform"><input class="input" name="token" type="password" placeholder="User token" autocomplete="off" style="flex:1;min-width:200px" required><button class="btn primary" id="lbconnect" type="submit">Connect</button></form>`;
               $('#lbform').onsubmit = async (e) => { e.preventDefault(); const b = $('#lbconnect'); b.disabled = true; try { await api('PUT', '/listenbrainz', { token: new FormData($('#lbform')).get('token') }); toast('ListenBrainz connected'); loadLb(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } };
               return;
             }
@@ -6449,7 +7010,7 @@
         const words = ks === 'ok' ? `Matching by how songs sound uses ${st.acoustid_own ? 'your' : 'the node’s'} AcoustID key.`
           : ks === 'refused' ? `AcoustID refused the key (${esc(st.acoustid_detail || p.acoustid_refused || '')}), so songs are matched by title and artist only. Get a free one at ${where} and paste it here.`
           : `Songs are matched by their title and artist only. Matching by how they sound (AcoustID) finds more: get a free key at ${where} (register an application) and paste it here.`;
-        return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
+        return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p>${ks === 'ok' ? '' : loginGuide('acoustid:key')}<form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
       <div class="actions"><button class="btn primary" id="idrun" ${p.running ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;

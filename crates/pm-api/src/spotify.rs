@@ -1393,7 +1393,7 @@ impl crate::signin::SignInSource for SpotifySignIn {
             if !who.is_owner() {
                 "librespot on this node is the owner's.".to_string()
             } else if cfg!(unix) {
-                "Install librespot first (the Spotify tab says how).".to_string()
+                "librespot isn't installed where the node looks: follow Set up first: librespot below (Linux install or Docker), then reload.".to_string()
             } else {
                 "The node runs librespot on Linux and macOS only.".to_string()
             }
@@ -1425,7 +1425,7 @@ impl crate::signin::SignInSource for SpotifySignIn {
             Way {
                 id: WAY_LIBRESPOT_FILE.into(),
                 label: "librespot with a credentials.json you pick".into(),
-                note: "The credentials.json another librespot (spotifyd, raspotify, go-librespot) saved after its sign-in; the node never looks for it, you pick the file or paste it. Kept readable by the node only.".into(),
+                note: "librespot's own credentials.json, from the cache folder of a librespot you signed in with; the node never looks for it, you pick the file or paste it. Kept readable by the node only.".into(),
                 action: "import".into(),
                 recommended: false,
                 available: supported,

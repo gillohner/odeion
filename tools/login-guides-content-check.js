@@ -1,0 +1,23 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const root = process.argv[2] || process.cwd();
+const source = fs.readFileSync(path.join(root, 'crates/pm-api/static/app.js'), 'utf8');
+const block = /\/\/ LOGIN-GUIDES-BEGIN\n([\s\S]*?)\/\/ LOGIN-GUIDES-END/.exec(source);
+const box = {};
+vm.runInNewContext(`${block[1]}\nbox.guides = LOGIN_GUIDES;`, { box });
+const guides = box.guides;
+let failures = 0;
+function check(ok, name) { console.log(`${ok ? 'ok' : 'FAIL'} ${name}`); if (!ok) failures++; }
+const commands = steps => (steps || []).filter(x => x && typeof x === 'object').map(x => x.code || '').join('\n');
+const install = guides['spotify:librespot'].missing;
+check(commands(install.native).split('\n').some(x => x.includes('install -d') && x.includes('pubky-music') && x.includes('-o ') && x.includes('-g ')), 'native bin directory has service-user ownership before installing executable');
+check(commands(install.docker).includes('install -d') && /-o\s+1000/.test(commands(install.docker)) && /-g\s+1000/.test(commands(install.docker)), 'Docker bin directory has uid/gid1000 ownership before installing executable');
+check(!JSON.stringify(install.docker).includes('docker exec pubky-music') && commands(install.docker).includes('NODE_CONTAINER'), 'Docker instructions discover the real node container, including unnamed bundle containers');
+check(!JSON.stringify(install).includes('image has no OpenSSL'), 'no unverified transitive OpenSSL package claim');
+check(!/each search spends 100 of.*10,000/i.test(source), 'YouTube search quota uses current call allocation, not obsolete unit arithmetic');
+check(!JSON.stringify(guides).includes('Pubky Music'), 'new guide prose is branding-neutral or Odeion');
+check(guides['spotify:app'].level === 'advanced', 'Spotify own developer app is Advanced, not the recommended easy route');
+check(!/image has no OpenSSL/i.test(fs.readFileSync(path.join(root, 'docs/ux/login-guides.md'), 'utf8')), 'inventory does not repeat an unsupported OpenSSL assertion');
+if (failures) process.exit(1);
+console.log('login guide content regression checks passed');

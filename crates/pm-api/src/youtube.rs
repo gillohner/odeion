@@ -6,7 +6,7 @@
 //!
 //! Search is optional: with the owner's own YouTube Data API key (free, in Google Cloud), the
 //! YouTube tab and the scoped search find music videos. It is never part of the unified search,
-//! because each search spends 100 of the key's 10,000 daily quota units.
+//! because the default YouTube search allocation is 100 calls per day.
 
 use crate::state::NodeState;
 use crate::streaming::StreamingService;

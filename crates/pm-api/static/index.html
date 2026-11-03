@@ -129,7 +129,9 @@
     <p class="muted" id="loginsub">With Pubky Ring, the app that holds your Pubky identity.</p>
     <p class="notice" id="loginwhy" role="status" hidden></p>
     <div id="loginbody" aria-live="polite"></div>
+    <div id="loginguide"></div>
     <details class="logintoken" id="logintoken"><summary class="muted small">Use the node’s API token instead</summary>
+      <div id="logintokguide"></div>
       <form id="tokform">
         <p class="muted small">The node makes one and keeps it in the <code>api-token</code> file in its data folder (Docker: <code>docker exec pubky-music cat /data/api-token</code>). One set by hand is <code>[api] token</code> in node.toml or <code>PM_TOKEN</code>. <a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">Where to find it</a>. It stays in this browser.</p>
         <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off" aria-describedby="tokerr"></label>

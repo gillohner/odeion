@@ -257,7 +257,7 @@ Open Sources › TIDAL › Sign in. Settings › This node › Service apps list
 in use or yours, and what the service limits.
 
 - **Spotify:** playing through Spotify Connect needs no app (librespot, below). Search, your library and playlist
-  import need an app of your own, because Spotify allows no shared one (an app in development mode lets in 25 people).
+  import need an app of your own, because Spotify allows no shared one (an app in development mode lets in five people, per Spotify's quota modes page, 2026-11-02).
   Sources › Spotify walks you through it; see [Advanced: use your own app](STREAMING-PROVIDERS.md#advanced-use-your-own-app).
 - **Spotify on this machine (Soloist):** Spotify's official headless player, run by the node (Linux, macOS). It needs a
   Soloist API key of your own (see Advanced). Then under Sources › Spotify › Play on this machine press Download

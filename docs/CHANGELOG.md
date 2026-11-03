@@ -6,6 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Sign-in and setup guides beside every way to sign in.** Every source's page and every other sign-in or setup has a short numbered guide next to its controls: what you need first, where it happens, the steps, what success looks like and how to recover. The recommended way's guide is open; imports, pastes, tokens and own apps stay behind their heading.
+  - Sources that need no account say so (switch on, search, play). Plex, Audiobookshelf and gPodder sync, which have no form yet, get the call to run on the node's machine.
+  - Log in with the API token says where it is for each kind of install: node.toml on the Linux install, the generated file, Docker, and the bundle's `.env`.
+  - Spotify Connect pairing (librespot) comes before a credentials.json, and only librespot's own credentials.json is named. While librespot is missing, Sign in shows how to install it on Linux or into the Docker container, each behind its own heading, with an architecture check and a version check.
+  - The AcoustID guide sits beside Identify's key field and ends with Save key. Google Drive's guide gives the node's own callback for an app with a secret; OneDrive's registers a mobile and desktop redirect, which the node's sign-in needs.
+  - A pasted token, cookies file or config is masked until you press Show what I pasted.
+  - Spotify's development-mode limit now reads five people, as Spotify's quota modes page says, instead of 25. Spotify's app steps show once.
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.

@@ -24,7 +24,7 @@ const get = async () => (await fetch(`${BASE}/v1/node/apps`, { headers: { author
       await tidal.waitFor();
       assert.match(await tidal.textContent(), /30-second previews/, 'TIDAL says what it limits');
       const spotify = panel.locator('.set-row', { has: page.locator('.set-name', { hasText: /^Spotify$/ }) });
-      assert.match(await spotify.textContent(), /25\s+people/, 'Spotify says its 25-person limit');
+      assert.match(await spotify.textContent(), /five\s+people/, 'Spotify says its five-person limit (quota modes, 2026-11-02)');
       // A console link is only under Advanced
       for (const a of await panel.locator('a[href*="developer"], a[href*="console."]').all()) {
         assert.ok(await a.evaluate((el) => !!el.closest('details.app-adv')), `${await a.getAttribute('href')} sits under Advanced`);

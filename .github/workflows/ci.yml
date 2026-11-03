@@ -374,6 +374,8 @@ jobs:
           node-version: 22
       - name: design lint (classed buttons, no icon glyphs, every class styled)
         run: node tools/design-lint.js
+      - name: login guides (every offered sign-in or setup method has its guide and inventory row)
+        run: node tools/login-guides-check.js && node tools/login-guides-check.js --self-test && node tools/login-guides-content-check.js . && python3 -I tools/login-guides-recipes-check.py .
       - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |
@@ -569,6 +571,9 @@ jobs:
       - name: service apps (built in or your own, limits, Advanced form, the secret kept back)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-service-apps.js ci-token http://127.0.0.1:7788
+      - name: login guides in the browser (synthetic fixtures, every guide, 1440/820/390, no overflow)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-login-guides.js $GITHUB_WORKSPACE
       - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
         timeout-minutes: 15
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788

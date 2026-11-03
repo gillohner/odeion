@@ -65,12 +65,12 @@ const cases = [
         // A refused import remains visible and keyboard users can return to the ways.
         if (!c.file) {
           await panel.locator('textarea').fill('not a sign-in');
-          await panel.locator('[data-sg=paste] button').click();
+          await panel.locator('[data-sg=paste] button[type=submit]').click();
           await panel.locator('[data-sg=error]:not([hidden])').waitFor();
           await panel.locator('[data-sg=another]').click();
           assert.equal(await page.evaluate(() => document.activeElement.type), 'radio');
           await panel.locator('textarea').fill(c.text);
-          await panel.locator('[data-sg=paste] button').click();
+          await panel.locator('[data-sg=paste] button[type=submit]').click();
         } else {
           await panel.locator('input[type=file]').setInputFiles({ name: 'config.ini', mimeType: 'text/plain', buffer: Buffer.from(c.text) });
           await panel.locator('[data-sg=file] button').click();

@@ -309,7 +309,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             status: Some("GET /v1/sources/spotify/status"),
             get_one: Some("https://developer.spotify.com/dashboard"),
             limits: Some(
-                "Spotify doesn't let one app serve every node: an app in development mode lets in 25 \
+                "Spotify doesn't let one app serve every node: an app in development mode lets in five \
                  people, each added by hand under User Management, and its owner needs Premium. More \
                  people need Spotify's approval, which it gives only to large organisations. Playing \
                  through Spotify Connect (librespot) needs no app.",
