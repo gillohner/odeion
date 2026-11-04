@@ -1146,7 +1146,11 @@ impl Store {
                 rusqlite::params![(unix / DAY) as i64, gone as i64],
             )
             .map_err(storage)?;
-            if grew_past(&tx, pages_before, self.cap)? {
+            #[cfg(test)]
+            let too_big = EVICT_COUNT_TOO_BIG.with(|n| n.replace(n.get().saturating_sub(1)) > 0);
+            #[cfg(not(test))]
+            let too_big = false;
+            if too_big || grew_past(&tx, pages_before, self.cap)? {
                 // Not even the count fits (a new day's, and no page came free): no room made
                 return Ok(0);
             }
@@ -1343,6 +1347,8 @@ thread_local! {
     static VACUUM_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Tests: an eviction's count can't be saved.
     static FAIL_EVICT_COUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests: the next this many eviction counts would grow the file past the cap.
+    static EVICT_COUNT_TOO_BIG: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// A stored event: when (unix seconds, to the minute), alias, role, viewport, the event.
@@ -3816,7 +3822,7 @@ mod tests {
                     unix,
                 )
                 .unwrap();
-            u.ingest(u.epoch(&p), &p, &q, T2, &[visit.clone()], 3, t0, unix)
+            u.ingest(u.epoch(&p), &p, &q, T2, std::slice::from_ref(&visit), 3, t0, unix)
                 .unwrap();
             let _ = u.flush(unix);
             assert!(pages() <= cap, "{} bytes on day {d}, cap {cap}", pages());
@@ -3845,6 +3851,37 @@ mod tests {
         );
         let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY).unwrap();
         assert_eq!(s["dropped"]["evicted"], 0, "{s}");
+    }
+
+    /// Claude review of 790dd500, L1: when an eviction's count doesn't fit (a new day's row, and
+    /// deleting the oldest day freed no page), the next oldest go too, instead of no room at all
+    /// until that day's retention ends.
+    #[test]
+    fn an_eviction_whose_count_does_not_fit_takes_the_next_oldest_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let p = l("a");
+        let a = open(&u, &p, T1, t0);
+        let nav = Event::Nav {
+            view: View::Home,
+            how: How::Push,
+        };
+        for (day, n) in [(1_000, 1), (1_001, 20)] {
+            u.ingest(u.epoch(&p), &p, &a, T1, &vec![nav.clone(); n], 0, t0, day * DAY)
+                .unwrap();
+            u.flush(day * DAY).unwrap();
+        }
+        assert_eq!(stored(&u), 21);
+        EVICT_COUNT_TOO_BIG.with(|n| n.set(1));
+        let gone = u.with_store(true, |s| s.make_room(1_002 * DAY));
+        EVICT_COUNT_TOO_BIG.with(|n| n.set(0));
+        let gone = gone.unwrap().unwrap();
+        assert!(gone > 1, "the next oldest went too: {gone}");
+        assert_eq!(stored(&u), 21 - gone);
+        let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_002 * DAY).unwrap();
+        assert_eq!(s["dropped"]["evicted"], gone, "{s}");
     }
 
     /// Kimi review of 77c62a81, L3: a flush the file can't take keeps its page loads and counts
