@@ -403,7 +403,7 @@ pub(crate) async fn delete(
 async fn change(s: &Arc<NodeState>, c: &Caller, r: &ItemRef, on: bool) -> Result<Response, ApiError> {
     if let Some(key) = listener(c) {
         let uri = listener_uri(&s.library.lock().expect("library poisoned"), r)?;
-        return crate::personal::set_bookmark(s, key, uri, on).await;
+        return crate::personal::set_bookmark(s, key, uri, on, r.at).await;
     }
     let (uri, on) = set_at(&s.library.lock().expect("library poisoned"), r, on, r.at)?;
     s.notify_library();

@@ -1,7 +1,7 @@
 //! A listener's own bookmarks (TASK-listener-personal-library-1104, ADR 0016 step 5): on their
 //! own homeserver, through the session they gave the node, never the owner's. The listener's
-//! homeserver is a fake here (`pm_api::personal::PersonalHomeserver`); the real one is checked
-//! against a testnet in testnet_sync.rs's style when `PM_TESTNET=1`.
+//! homeserver is a fake here (`pm_api::personal::PersonalHomeserver`); how the node's own
+//! reaches it (`Grants`: what its errors mean, the grant file) has unit tests in personal.rs.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -37,6 +37,10 @@ struct Fake {
 }
 
 impl Fake {
+    /// A homeserver takes a moment: requests made at once overlap, as they do for real.
+    async fn moment() {
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
     fn check(&self, key: &str, op: &str, uri: &str) -> Result<(), PersonalError> {
         self.calls.lock().unwrap().push(format!("{key} {op} {uri}"));
         if !self.connected.lock().unwrap().contains(key) {
@@ -49,6 +53,13 @@ impl Fake {
             return Err(PersonalError::Unreachable("connection refused".into()));
         }
         Ok(())
+    }
+    fn at(&self, key: &str, uri: &str) -> Option<i64> {
+        self.bookmarks
+            .lock()
+            .unwrap()
+            .get(key)
+            .and_then(|b| b.iter().find(|(u, _)| u == uri).map(|(_, at)| *at))
     }
     fn of(&self, key: &str) -> Vec<String> {
         let mut v: Vec<String> = self
@@ -71,7 +82,12 @@ impl PersonalHomeserver for Fake {
     async fn disconnect(&self, key: &str) {
         self.connected.lock().unwrap().remove(key);
     }
-    async fn bookmarks(&self, key: &str) -> Result<Vec<(String, i64)>, PersonalError> {
+    async fn bookmarks(
+        &self,
+        key: &str,
+        _known: &[(String, i64)],
+    ) -> Result<Vec<(String, i64)>, PersonalError> {
+        Self::moment().await;
         self.check(key, "list", "")?;
         Ok(self
             .bookmarks
@@ -82,6 +98,7 @@ impl PersonalHomeserver for Fake {
             .unwrap_or_default())
     }
     async fn put_bookmark(&self, key: &str, uri: &str, created_at: i64) -> Result<(), PersonalError> {
+        Self::moment().await;
         self.check(key, "put", uri)?;
         let mut all = self.bookmarks.lock().unwrap();
         let mine = all.entry(key.to_string()).or_default();
@@ -90,6 +107,7 @@ impl PersonalHomeserver for Fake {
         Ok(())
     }
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError> {
+        Self::moment().await;
         self.check(key, "delete", uri)?;
         if let Some(mine) = self.bookmarks.lock().unwrap().get_mut(key) {
             mine.retain(|(u, _)| u != uri);
@@ -458,6 +476,197 @@ async fn a_listener_reaches_only_their_own_bookmark_routes() {
         "{:?}",
         fake.calls.lock().unwrap()
     );
+}
+
+#[tokio::test]
+async fn a_direct_change_wins_over_one_still_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    // Hearted while her homeserver is away (it waits), un-hearted once it is back
+    fake.down.store(true, Ordering::SeqCst);
+    call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_B})),
+    )
+    .await;
+    fake.down.store(false, Ordering::SeqCst);
+    let q = format!("/v1/bookmarks?uri={}", urlencode(SONG_B));
+    let (st, v) = call(&app, &ann, "DELETE", &q, None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The next read must not bring the waiting heart back
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(uris(&v).is_empty(), "{v}");
+    assert_eq!(v["homeserver"]["pending"], 0, "{v}");
+    assert!(fake.of(ANN).is_empty(), "the un-heart stands");
+}
+
+#[tokio::test]
+async fn changes_made_at_once_all_wait_and_all_land() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    fake.down.store(true, Ordering::SeqCst);
+    let songs: Vec<String> = (0..6)
+        .map(|i| format!("https://musicbrainz.org/recording/0c9b1d6e-4e5f-4f3a-9c11-5b7d0a6e2f4{i}"))
+        .collect();
+    // Six hearts at once (two devices, say), and a read meanwhile
+    let mut all = Vec::new();
+    for u in &songs {
+        let (app, ann, u) = (app.clone(), ann.clone(), u.clone());
+        all.push(tokio::spawn(async move {
+            call(
+                &app,
+                &ann,
+                "PUT",
+                "/v1/bookmarks",
+                Some(serde_json::json!({"uri": u})),
+            )
+            .await
+        }));
+    }
+    let reading = {
+        let (app, ann) = (app.clone(), ann.clone());
+        tokio::spawn(async move { call(&app, &ann, "GET", "/v1/bookmarks", None).await })
+    };
+    for h in all {
+        let (st, v) = h.await.unwrap();
+        assert_eq!(
+            (st, v["pending"].clone()),
+            (StatusCode::OK, serde_json::json!(true)),
+            "{v}"
+        );
+    }
+    reading.await.unwrap();
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(v["homeserver"]["pending"], 6, "none of them lost: {v}");
+    fake.down.store(false, Ordering::SeqCst);
+    call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    let mut want = songs.clone();
+    want.sort();
+    assert_eq!(fake.of(ANN), want, "every one reached her homeserver");
+}
+
+#[tokio::test]
+async fn an_offline_change_keeps_its_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    // A heart a device made offline at 1000 s keeps that time
+    call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_B, "at": 1000})),
+    )
+    .await;
+    assert_eq!(fake.at(ANN, SONG_B), Some(1_000_000_000));
+    // Hearted again now; a clear the device made offline at 2000 s, sent later, is older: it stays
+    call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_C})),
+    )
+    .await;
+    let q = format!("/v1/bookmarks?uri={}&at=2000", urlencode(SONG_C));
+    let (st, v) = call(&app, &ann, "DELETE", &q, None).await;
+    assert_eq!(
+        (st, v["bookmarked"].clone()),
+        (StatusCode::OK, serde_json::json!(true)),
+        "{v}"
+    );
+    assert!(fake.of(ANN).contains(&SONG_C.to_string()));
+}
+
+#[tokio::test]
+async fn a_disconnected_listener_reads_nothing_and_a_removed_one_leaves_no_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_B})),
+    )
+    .await;
+    call(&app, &ann, "DELETE", "/v1/me/homeserver", None).await;
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(
+        uris(&v).is_empty(),
+        "not connected: none (as docs/api.md says): {v}"
+    );
+    let copy = format!("person.{ANN}.bookmarks");
+    assert!(
+        s.library.lock().unwrap().get_setting(&copy).unwrap().is_some(),
+        "the copy waits for a reconnect"
+    );
+    pm_api::accounts::forget_person(&s, ANN).unwrap();
+    assert!(
+        s.library.lock().unwrap().get_setting(&copy).unwrap().is_none(),
+        "removed: no copy left"
+    );
+}
+
+#[tokio::test]
+async fn a_listener_whose_music_access_is_off_reaches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let roster = serde_json::json!({"people": [
+        {"key": ANN, "access": "music", "music_enabled": false, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    let app = router(s.clone());
+    let (st, _) = call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_B})),
+    )
+    .await;
+    assert!(
+        st == StatusCode::UNAUTHORIZED || st == StatusCode::FORBIDDEN,
+        "{st}"
+    );
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_library_item_not_identified_yet_is_no_listener_bookmark() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"album_id": 999})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    assert!(
+        fake.calls.lock().unwrap().is_empty(),
+        "nothing reaches her homeserver"
+    );
+    assert!(owners_rows(&s).is_empty());
 }
 
 fn urlencode(s: &str) -> String {

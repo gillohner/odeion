@@ -54,6 +54,8 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       await page.route(/\/v1\/sources\/tidal\/signin$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { source: 'tidal', chosen: 'own-device', in_use: null, ways: [
         { id: 'app', label: 'TIDAL’s own sign-in', available: true }, { id: 'device', label: 'A device code', available: true, recommended: true }, { id: 'own-device', label: 'A device client of your own', available: true }],
         details: { unofficial: { client_from: null }, status: { signed_in: false } }, imports: [], places: [] } }) : r.fallback()));
+      await page.route(/\/v1\/sources\/spotify\/signin$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { source: 'spotify', chosen: 'app', in_use: null, ways: [{ id: 'app', label: 'Spotify’s own sign-in', available: true, recommended: true }],
+        details: { status: { configured: true, signed_in: false, app_from: 'settings', client_id: 'nodesclientid0123', redirect_uri: 'http://node.example/v1/sources/spotify/callback' }, librespot: {} }, imports: [], places: [] } }) : r.fallback()));
       const go = async (p) => { await page.goto(BASE + p); await page.locator('#main h1, #main h2').first().waitFor({ timeout: 20000 }); await sleep(400); };
 
       // ---- not connected: Favourites asks to connect ----
@@ -104,6 +106,12 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       assert.equal(await page.locator('#tfclient').count(), 0, 'no device client form for a listener');
       assert.match(await page.locator('details[data-svc="tidal"]').innerText(), /set up by whoever runs this node/);
       await shot('settings-tidal');
+      // Spotify: their own sign-in; the node's app (its client id, Change, Forget) stays the owner's
+      await page.locator('details[data-svc="spotify"] > summary').click();
+      await page.locator('details[data-svc="spotify"] #spotin').waitFor();
+      const sp = await page.locator('details[data-svc="spotify"]').innerText();
+      assert.doesNotMatch(sp, /nodesclientid0123|Your Spotify app/, 'never the node’s Spotify app');
+      assert.equal(await page.locator('details[data-svc="spotify"] #spotapp, details[data-svc="spotify"] #spotappchange').count(), 0);
       // Disconnect
       await page.locator('#hsoff').click(); await sleep(400);
       assert.ok(writes.some((w) => w.m === 'DISCONNECT'));
