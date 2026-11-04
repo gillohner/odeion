@@ -872,6 +872,8 @@ struct Store {
     path: PathBuf,
     /// After a VACUUM failed (no room for its copy), none is tried before this (unix seconds).
     vacuum_after: u64,
+    /// Its size on disk at most ([`Limits::max_store_bytes`]): no write grows it past this.
+    cap: u64,
 }
 
 /// How long after a failed VACUUM the next is tried (housekeeping runs hourly).
@@ -929,6 +931,7 @@ impl Store {
             salt,
             path: path.to_path_buf(),
             vacuum_after: 0,
+            cap: u64::MAX,
         }))
     }
 
@@ -947,6 +950,7 @@ impl Store {
             salt,
             path: path.to_path_buf(),
             vacuum_after: 0,
+            cap: u64::MAX,
         }))
     }
 
@@ -975,20 +979,37 @@ impl Store {
             .map_err(storage)
     }
 
-    fn set_pref(&self, p: &Person, pref: Pref) -> Result<(), Refusal> {
-        self.conn
-            .execute(
+    /// Saves a choice without growing the file past the cap: the oldest events make room first (a
+    /// choice matters more than they do), and once none are left it is refused. A Stop still
+    /// holds in memory then, and housekeeping saves it when the file takes it.
+    fn set_pref(&mut self, p: &Person, pref: Pref) -> Result<(), Refusal> {
+        let person = self.person_id(p);
+        loop {
+            let pages_before: i64 = self
+                .conn
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .map_err(storage)?;
+            let tx = self.conn.transaction().map_err(storage)?;
+            tx.execute(
                 "INSERT INTO pref (person, stopped, choice, notice_seen) VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(person) DO UPDATE SET stopped = ?2, choice = ?3, notice_seen = ?4",
                 rusqlite::params![
-                    self.person_id(p),
+                    person,
                     pref.stopped as i64,
                     pref.choice as i64,
                     pref.notice_seen as i64
                 ],
             )
-            .map(|_| ())
-            .map_err(storage)
+            .map_err(storage)?;
+            if !grew_past(&tx, pages_before, self.cap)? {
+                return tx.commit().map_err(storage);
+            }
+            // Undone
+            drop(tx);
+            if self.make_room(unix_now())? == 0 {
+                return Err(Refusal::Storage);
+            }
+        }
     }
 
     /// The switch and its generation, together or not at all.
@@ -1009,14 +1030,14 @@ impl Store {
             .map_err(storage)
     }
 
-    /// Writes the rows and counts in one transaction. With `cap`, a write that would make the file
-    /// bigger than `cap` bytes is undone instead (false): it may only fill free pages then.
+    /// Writes the rows and counts in one transaction. A write that would make the file bigger than
+    /// `cap` bytes is undone instead (false): it may only fill free pages then.
     fn write(
         &mut self,
         rows: &[Row],
         opens: &[(u64, &'static str, Viewport)],
         dropped: Dropped,
-        cap: Option<u64>,
+        cap: u64,
     ) -> Result<bool, Refusal> {
         let pages_before: i64 = self
             .conn
@@ -1075,48 +1096,43 @@ impl Store {
                 }
             }
         }
-        if let Some(cap) = cap {
-            let pages: i64 = tx
-                .query_row("PRAGMA page_count", [], |r| r.get(0))
-                .map_err(storage)?;
-            let size: i64 = tx
-                .query_row("PRAGMA page_size", [], |r| r.get(0))
-                .map_err(storage)?;
-            if pages > pages_before && (pages.max(0) * size) as u64 > cap {
-                // Dropped: undone
-                return Ok(false);
-            }
+        if grew_past(&tx, pages_before, cap)? {
+            // Dropped: undone
+            return Ok(false);
         }
         tx.commit().map_err(storage)?;
         Ok(true)
     }
 
     /// Makes room under the cap: the oldest day goes, or the oldest tenth when only one day is
-    /// left (counted as evicted). How many raw events went.
+    /// left (counted as evicted, in the same write; never growing the file past the cap for that
+    /// count). How many raw events went.
     fn make_room(&mut self, unix: u64) -> Result<u64, Refusal> {
         let (count, _, _) = self.sizes()?;
-        let oldest: Option<i64> = self
+        let pages_before: i64 = self
             .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .map_err(storage)?;
+        // The events and their count together, or neither
+        let tx = self.conn.transaction().map_err(storage)?;
+        let oldest: Option<i64> = tx
             .query_row("SELECT MIN(day) FROM event", [], |r| r.get(0))
             .map_err(storage)?;
         let Some(oldest) = oldest else { return Ok(0) };
-        let newest: i64 = self
-            .conn
+        let newest: i64 = tx
             .query_row("SELECT MAX(day) FROM event", [], |r| r.get(0))
             .map_err(storage)?;
         let gone = if oldest < newest {
-            self.conn
-                .execute("DELETE FROM event WHERE day = ?1", [oldest])
+            tx.execute("DELETE FROM event WHERE day = ?1", [oldest])
                 .map_err(storage)?
         } else {
             // One day left: its oldest tenth
             let n = (count / 10).max(1) as i64;
-            self.conn
-                .execute(
-                    "DELETE FROM event WHERE seq IN (SELECT seq FROM event ORDER BY seq LIMIT ?1)",
-                    [n],
-                )
-                .map_err(storage)?
+            tx.execute(
+                "DELETE FROM event WHERE seq IN (SELECT seq FROM event ORDER BY seq LIMIT ?1)",
+                [n],
+            )
+            .map_err(storage)?
         };
         let gone = gone as u64;
         #[cfg(test)]
@@ -1124,14 +1140,18 @@ impl Store {
             return Err(Refusal::Storage);
         }
         if gone > 0 {
-            self.conn
-                .execute(
-                    "INSERT INTO daily (day, metric, key, n) VALUES (?1, 'dropped', 'evicted', ?2)
-                     ON CONFLICT(day, metric, key) DO UPDATE SET n = n + ?2",
-                    rusqlite::params![(unix / DAY) as i64, gone as i64],
-                )
-                .map_err(storage)?;
+            tx.execute(
+                "INSERT INTO daily (day, metric, key, n) VALUES (?1, 'dropped', 'evicted', ?2)
+                 ON CONFLICT(day, metric, key) DO UPDATE SET n = n + ?2",
+                rusqlite::params![(unix / DAY) as i64, gone as i64],
+            )
+            .map_err(storage)?;
+            if grew_past(&tx, pages_before, self.cap)? {
+                // Not even the count fits (a new day's, and no page came free): no room made
+                return Ok(0);
+            }
         }
+        tx.commit().map_err(storage)?;
         Ok(gone)
     }
 
@@ -1335,6 +1355,19 @@ fn get_meta(conn: &rusqlite::Connection, k: &str) -> Result<Option<String>, Refu
         .map_err(storage)
 }
 
+/// Whether this transaction made the file bigger than `cap` bytes (it may only fill free pages).
+fn grew_past(tx: &rusqlite::Transaction, pages_before: i64, cap: u64) -> Result<bool, Refusal> {
+    let pages: i64 = tx
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .map_err(storage)?;
+    let size: i64 = tx
+        .query_row("PRAGMA page_size", [], |r| r.get(0))
+        .map_err(storage)?;
+    Ok(pages > pages_before && (pages.max(0) * size) as u64 > cap)
+}
+
+/// A fixed set of keys (salt, schema, the switch, its generation and when it went on), each
+/// rewritten in place: the file's metadata never grows with use.
 fn set_meta(conn: &rusqlite::Connection, k: &str, v: &str) -> Result<(), Refusal> {
     conn.execute(
         "INSERT INTO meta (k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = ?2",
@@ -1555,6 +1588,9 @@ impl Usage {
                 return Ok(None);
             };
             *st = Store::open(path, create)?;
+            if let Some(s) = st.as_mut() {
+                s.cap = self.limits.max_store_bytes;
+            }
         }
         match st.as_mut() {
             Some(s) => f(s).map(Some),
@@ -2283,36 +2319,54 @@ impl Usage {
             let (count, bytes) = s.size()?;
             Ok(count > limits.max_events || bytes > limits.max_store_bytes)
         };
-        let cap = Some(limits.max_store_bytes);
+        let cap = limits.max_store_bytes;
         let written = self.with_store(true, |s| {
             // Never past the cap on disk: a batch that would grow the file past it makes room
             // first (the oldest go), and if it still does not fit, its events count as evicted
+            let mut left = None;
             if !s.write(&rows, &opens, dropped, cap)?
                 && (s.make_room(unix)? == 0 || !s.write(&rows, &opens, dropped, cap)?)
             {
                 let mut dropped = dropped;
                 dropped.evicted += rows.len() as u64;
-                // The day's counts alone (a few rows; room was just made)
-                s.write(&[], &opens, dropped, None)?;
+                // The day's counts alone; if not even they fit, they wait for room
+                if !s.write(&[], &opens, dropped, cap)? {
+                    left = Some(dropped);
+                }
             }
             // Written: what happens next is never a failure to write them
             if over(s).unwrap_or(false) {
                 let _ = s.housekeep(unix, limits);
             }
-            Ok(())
+            Ok(left)
         });
         match written {
+            Ok(Some(Some(left))) => {
+                self.keep_for_later(opens, left);
+                Ok(n)
+            }
             Ok(_) => Ok(n),
             Err(e) => {
-                // Not written: counted, never kept waiting without bound
-                let mut inner = self.lock();
-                inner.pending_dropped.add(Dropped {
-                    queue_full: n as u64,
-                    ..Dropped::default()
-                });
+                // Not written (nothing of it was committed): its events count as lost to a full
+                // queue, never kept waiting without bound; its page loads and counts wait
+                let mut dropped = dropped;
+                dropped.queue_full += n as u64;
+                self.keep_for_later(opens, dropped);
                 Err(e)
             }
         }
+    }
+
+    /// What a flush could not write waits for the next one: its counts, and its page loads up to
+    /// a queue's worth (the newest). Called with `writing` held, so no Clear comes between.
+    fn keep_for_later(&self, opens: Vec<(u64, &'static str, Viewport)>, dropped: Dropped) {
+        let mut inner = self.lock();
+        inner.pending_dropped.add(dropped);
+        let mut opens = opens;
+        opens.append(&mut inner.pending_opens);
+        let excess = opens.len().saturating_sub(self.limits.queue_max);
+        opens.drain(..excess);
+        inner.pending_opens = opens;
     }
 
     /// Deletes stored rows past retention and over the caps (hourly).

@@ -97,7 +97,9 @@ folder by hand copies it too: leave `usage.sqlite` out ([backup guide](backup-an
   write runs, SQLite's journal is extra, and an event over the count is gone at the end of that
   write. Free space is given back when most of the file is free. That needs room on the disk for a
   copy of the file: when it fails, it is tried again an hour later, and events fill the free space
-  meanwhile.
+  meanwhile. People's choices (Stop, the notice read) never grow it past the cap either: the oldest
+  events make room for them, and if none are left a Stop still holds and is saved once there is
+  room. The day's counts wait in memory for room the same way.
 - Times are kept to the minute.
 - One person can have at most 8 browsers taking part at once and open 30 a minute, so nobody can
   crowd out anyone else.
