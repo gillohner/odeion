@@ -64,6 +64,8 @@ struct Inner {
     boot: String,
     /// Controllers connected to `/v1/events` right now (the volume poll runs only while one is).
     watchers: std::sync::atomic::AtomicUsize,
+    /// Woken when the first controller connects, so the volume poll reads at once.
+    first_watcher: tokio::sync::Notify,
 }
 
 /// Counts one connected controller while it lives.
@@ -85,6 +87,7 @@ impl EventBus {
                 library_rev: AtomicU64::new(0),
                 boot: format!("{:016x}", rand::random::<u64>()),
                 watchers: std::sync::atomic::AtomicUsize::new(0),
+                first_watcher: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -103,8 +106,15 @@ impl EventBus {
 
     /// A controller is watching until the returned guard drops.
     pub fn watch(&self) -> Watching {
-        self.inner.watchers.fetch_add(1, Ordering::Relaxed);
+        if self.inner.watchers.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.inner.first_watcher.notify_waiters();
+        }
         Watching(self.inner.clone())
+    }
+
+    /// Resolves when a controller connects while none was.
+    pub async fn first_watcher(&self) {
+        self.inner.first_watcher.notified().await;
     }
 
     /// Whether any controller is connected to `/v1/events`.

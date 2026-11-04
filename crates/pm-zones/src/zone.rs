@@ -383,9 +383,14 @@ impl Zone {
         }
     }
 
-    /// The state's `volume`, through the engine; nothing is sent when it is the same. Also for a
-    /// level the device announced itself (UPnP events).
-    pub fn publish_volume(&self, v: Option<pm_model::ZoneVolume>) {
+    /// A level the device announced itself (UPnP events), through the engine. Always sent: the
+    /// state may not show a level announced just before yet, and events must land in order.
+    pub fn announce_volume(&self, v: pm_model::ZoneVolume) {
+        self.send(Command::Volume(Some(v)));
+    }
+
+    /// The state's `volume`, through the engine; nothing is sent when it is the same.
+    fn publish_volume(&self, v: Option<pm_model::ZoneVolume>) {
         if self.state().volume != v {
             self.send(Command::Volume(v));
         }

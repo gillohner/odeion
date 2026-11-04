@@ -1,26 +1,38 @@
 //! A UPnP renderer's volume, live (TASK-volume-readback): the node subscribes to the renderer's
-//! events (OpenHome `Volume` first, RenderingControl's `LastChange` as the fallback) and each
-//! NOTIFY moves the zone's `volume`, so a change made in the Linn app, on its remote or on the
-//! device shows at once. The renderer calls `/v1/upnp/events/{token}` (no bearer token, LAN only);
-//! the token is random per subscription and names the zone.
+//! events (RenderingControl's `LastChange`, the service the level is set and read through;
+//! OpenHome `Volume` when that is all the renderer events) and each NOTIFY moves the zone's
+//! `volume`, so a change made in the Linn app, on its remote or on the device shows at once. The
+//! renderer calls `/v1/upnp/events/{token}` (no bearer token, LAN only); the token is random per
+//! zone and names it.
 //!
-//! While a zone's subscription works, the 10 s volume poll leaves it alone (`Following::live`).
+//! The 10 s volume poll leaves a zone alone only while its events demonstrably arrive
+//! (`Following::live`, set by a NOTIFY, cleared on every new subscription and when one is lost).
+//! A renderer that accepts the subscription but whose events never reach the node (a callback
+//! behind a proxy, an https address) stays on the poll.
 
 use crate::state::NodeState;
 use axum::extract::{Path, State};
-use axum::http::{Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use pm_out_upnp::gena::{self, Source};
-use pm_zones::{Zone, ZoneId};
+use pm_zones::Zone;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 struct Sub {
-    zone: ZoneId,
+    /// This zone, not whichever zone has its name later (a zone made again under the same name
+    /// on another output must not get this renderer's level).
+    zone: Weak<Zone>,
     source: Source,
-    /// OpenHome's `VolumeMax` as last told (100 until then).
-    volume_max: u32,
+    /// The subscription held now; `None` while subscribing (the renderer's first NOTIFY may come
+    /// before its answer), when the first NOTIFY's SID is taken.
+    sid: Option<String>,
+    /// The last `SEQ` applied for `sid`: an older event arriving late is dropped.
+    seq: Option<u32>,
+    /// What this subscription published last; an event merges into it, in `SEQ` order.
+    last: Option<pm_model::ZoneVolume>,
+    following: Arc<Following>,
 }
 
 /// The subscriptions this node holds, by callback token.
@@ -29,55 +41,93 @@ pub struct Gena {
     subs: Mutex<HashMap<String, Sub>>,
 }
 
-/// Whether a zone's volume arrives by event right now (the poll then leaves it alone).
+/// Whether a zone's volume arrives by event right now (the poll then leaves it alone): set by a
+/// NOTIFY on the current subscription, cleared when a new one starts or one is lost.
 #[derive(Default)]
 pub struct Following {
     pub live: AtomicBool,
 }
 
-/// `NOTIFY /v1/upnp/events/{token}`: a renderer's event. Always 200 for a known token (a renderer
-/// that gets an error may drop the subscription); 412 for one the node doesn't hold, as GENA says.
+/// The zone behind `weak` if it is still the one in the registry under its id.
+fn current(node: &NodeState, weak: &Weak<Zone>) -> Option<Arc<Zone>> {
+    let z = weak.upgrade()?;
+    let now = node.zones.get(z.id())?;
+    Arc::ptr_eq(&z, &now).then_some(z)
+}
+
+/// `NOTIFY /v1/upnp/events/{token}`: a renderer's event. 200 for the subscription the node
+/// holds (a renderer that gets an error may drop it); 412 for a token, SID or zone it doesn't
+/// hold any more, as GENA says, so the renderer stops sending.
 pub(crate) async fn notify(
     State(s): State<Arc<NodeState>>,
     Path(token): Path<String>,
     method: Method,
+    headers: HeaderMap,
     body: String,
 ) -> StatusCode {
     if method.as_str() != "NOTIFY" {
         return StatusCode::METHOD_NOT_ALLOWED;
     }
-    let (zone, change) = {
-        let mut subs = s.gena.subs.lock().expect("gena subs");
-        let Some(sub) = subs.get_mut(&token) else {
-            return StatusCode::PRECONDITION_FAILED;
-        };
-        let c = gena::read_notify(sub.source, &body, sub.volume_max);
-        if let Some(m) = c.volume_max {
-            sub.volume_max = m;
-        }
-        (sub.zone.clone(), c)
+    let header = |n: &str| {
+        headers
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim().to_string())
     };
-    if let Some(z) = s.zones.get(&zone) {
-        apply(&z, change);
+    let (sid, seq) = (header("sid"), header("seq").and_then(|v| v.parse::<u32>().ok()));
+    let weak = match s.gena.subs.lock().expect("gena subs").get(&token) {
+        Some(sub) => sub.zone.clone(),
+        None => return StatusCode::PRECONDITION_FAILED,
+    };
+    let Some(z) = current(&s, &weak) else {
+        return StatusCode::PRECONDITION_FAILED;
+    };
+    let mut subs = s.gena.subs.lock().expect("gena subs");
+    let Some(sub) = subs.get_mut(&token) else {
+        return StatusCode::PRECONDITION_FAILED;
+    };
+    match (&sub.sid, &sid) {
+        // An event of a subscription given up (renewal failed, subscribed again)
+        (Some(have), Some(got)) if have != got => return StatusCode::PRECONDITION_FAILED,
+        (None, Some(got)) => sub.sid = Some(got.clone()),
+        _ => {}
+    }
+    if let Some(n) = seq {
+        if sub.seq.is_some_and(|prev| n <= prev) {
+            return StatusCode::OK;
+        }
+        sub.seq = Some(n);
+    }
+    let change = gena::read_notify(sub.source, &body);
+    sub.following.live.store(true, Ordering::Relaxed);
+    let was = sub.last.or(z.state().volume);
+    if let Some(v) = merge(was, change) {
+        if sub.last != Some(v) {
+            sub.last = Some(v);
+            // Still under the lock: events reach the zone in the order the renderer sent them
+            z.announce_volume(v);
+        }
     }
     StatusCode::OK
 }
 
-/// Merge what an event said into the zone's volume: a field it didn't carry keeps its value.
-pub(crate) fn apply(z: &Zone, c: gena::VolumeChange) {
-    let was = z.state().volume;
+/// What an event said merged into the volume before it: a field it didn't carry keeps its value.
+pub(crate) fn merge(
+    was: Option<pm_model::ZoneVolume>,
+    c: gena::VolumeChange,
+) -> Option<pm_model::ZoneVolume> {
     let level = c
         .percent
         .map(pm_model::VolumeLevel::Percent)
-        .or(was.map(|w| w.level));
-    let Some(level) = level else { return };
+        .or(was.map(|w| w.level))?;
     let muted = c.muted.or(was.map(|w| w.muted)).unwrap_or(false);
-    z.publish_volume(Some(pm_model::ZoneVolume { level, muted }));
+    Some(pm_model::ZoneVolume { level, muted })
 }
 
 /// Follow `zone`'s renderer by event for as long as the zone is in the registry: subscribe,
-/// renew at 80 % of what the renderer grants, subscribe again when it forgets the subscription
-/// (412), drops it or restarts; back off while it refuses. `following.live` says when it works.
+/// renew in time (and at least every minute, so a renderer that restarted and forgot the
+/// subscription is subscribed again soon), subscribe again when a renewal fails; back off while
+/// it refuses. The poll steps aside only while events arrive (`following.live`).
 pub(crate) fn follow(
     node: &Arc<NodeState>,
     zone: &Arc<Zone>,
@@ -85,34 +135,56 @@ pub(crate) fn follow(
     following: Arc<Following>,
 ) {
     let r = out.renderer();
-    let (url, source) = match (&r.events.openhome_volume, &r.events.rendering_control) {
-        (Some(u), _) => (u.clone(), Source::OpenHomeVolume),
-        (None, Some(u)) => (u.clone(), Source::RenderingControl),
+    let (url, source) = match (&r.events.rendering_control, &r.events.openhome_volume) {
+        (Some(u), _) => (u.clone(), Source::RenderingControl),
+        (None, Some(u)) => (u.clone(), Source::OpenHomeVolume),
         _ => return,
     };
     let token = format!("{:032x}", rand::random::<u128>());
     let callback = format!("{}/v1/upnp/events/{token}", node.public_url.trim_end_matches('/'));
+    let zone_ref = Arc::downgrade(zone);
     node.gena.subs.lock().expect("gena subs").insert(
         token.clone(),
         Sub {
-            zone: zone.id().clone(),
+            zone: zone_ref.clone(),
             source,
-            volume_max: 100,
+            sid: None,
+            seq: None,
+            last: None,
+            following: following.clone(),
         },
     );
     let weak = Arc::downgrade(node);
-    let zid = zone.id().clone();
     let name = r.friendly_name.clone();
     tokio::spawn(async move {
-        let here = || weak.upgrade().is_some_and(|n| n.zones.get(&zid).is_some());
+        let here = || weak.upgrade().is_some_and(|n| current(&n, &zone_ref).is_some());
+        // A new subscription: no event has arrived on it yet
+        let start = || {
+            following.live.store(false, Ordering::Relaxed);
+            if let Some(n) = weak.upgrade() {
+                if let Some(sub) = n.gena.subs.lock().expect("gena subs").get_mut(&token) {
+                    (sub.sid, sub.seq) = (None, None);
+                }
+            }
+        };
         let mut backoff = Duration::from_secs(30);
         let mut sid: Option<String> = None;
         while here() {
+            start();
             let (u, cb) = (url.clone(), callback.clone());
             match tokio::task::spawn_blocking(move || gena::subscribe(&u, &cb)).await {
                 Ok(Ok(sub)) => {
-                    tracing::debug!(renderer = %name, ?source, "following its volume by event");
-                    following.live.store(true, Ordering::Relaxed);
+                    tracing::debug!(renderer = %name, ?source, "subscribed to its volume events");
+                    if let Some(n) = weak.upgrade() {
+                        if let Some(held) = n.gena.subs.lock().expect("gena subs").get_mut(&token) {
+                            // An event taken meanwhile came from another (an old) subscription
+                            if held.sid.as_deref() != Some(&sub.sid) {
+                                held.seq = None;
+                                following.live.store(false, Ordering::Relaxed);
+                            }
+                            held.sid = Some(sub.sid.clone());
+                        }
+                    }
                     backoff = Duration::from_secs(30);
                     sid = Some(sub.sid.clone());
                     let mut timeout = sub.timeout;
@@ -124,11 +196,10 @@ pub(crate) fn follow(
                         let (u, id) = (url.clone(), sub.sid.clone());
                         match tokio::task::spawn_blocking(move || gena::renew(&u, &id)).await {
                             Ok(Ok(Some(again))) => timeout = again.timeout,
-                            // Forgotten (412), refused or unreachable: subscribe afresh
+                            // Forgotten (412: restarted), refused or unreachable: subscribe afresh
                             _ => break,
                         }
                     }
-                    following.live.store(false, Ordering::Relaxed);
                 }
                 Ok(Err(e)) => {
                     tracing::debug!(renderer = %name, "no volume events ({e}); the poll reads it");
@@ -149,14 +220,16 @@ pub(crate) fn follow(
     });
 }
 
-/// Renew at 80 % of the granted time, never sooner than 5 s (1 s in tests).
+/// Renew at 80 % of the granted time but at least once a minute (a renderer that restarted has
+/// forgotten the subscription; the failed renewal subscribes again, and its first event brings
+/// the level), never sooner than 5 s (1 s in tests).
 fn renew_after(timeout: Duration) -> Duration {
     let floor = if cfg!(test) {
         Duration::from_secs(1)
     } else {
         Duration::from_secs(5)
     };
-    (timeout * 4 / 5).max(floor)
+    (timeout * 4 / 5).min(Duration::from_secs(60)).max(floor)
 }
 
 #[cfg(test)]
@@ -165,7 +238,12 @@ mod tests {
 
     #[test]
     fn renews_before_the_subscription_runs_out() {
-        assert_eq!(renew_after(Duration::from_secs(300)), Duration::from_secs(240));
+        assert_eq!(
+            renew_after(Duration::from_secs(300)),
+            Duration::from_secs(60),
+            "a minute at most"
+        );
+        assert_eq!(renew_after(Duration::from_secs(50)), Duration::from_secs(40));
         assert_eq!(
             renew_after(Duration::from_secs(1)),
             Duration::from_secs(1),

@@ -533,11 +533,16 @@ impl NodeState {
             let weak = Arc::downgrade(&zone);
             let node = Arc::downgrade(self);
             let zid = zone.id().clone();
+            let bus = self.events.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(volume_poll());
                 let mut first = true;
                 loop {
-                    tick.tick().await;
+                    // A page that connects reads the level at once, not on the next tick
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = bus.first_watcher() => tick.reset(),
+                    }
                     // Gone from the registry (ungrouped, the device left): the poll ends too
                     let Some(n) = node.upgrade() else { break };
                     if n.zones.get(&zid).is_none() {

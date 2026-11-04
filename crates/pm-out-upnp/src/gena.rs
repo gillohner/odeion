@@ -1,11 +1,10 @@
 //! UPnP eventing (GENA): subscribing to a renderer's volume changes and reading its NOTIFY
 //! bodies, so a change made on the device, its remote or its own app shows at once.
 //!
-//! Two sources, the first one a renderer has wins: the OpenHome `Volume` service (properties
-//! `Volume`, `Mute`, `VolumeMax`; a Linn's, and what Roon follows) and RenderingControl, whose one
-//! evented variable `LastChange` carries an escaped `<Event>` document with `Volume` and `Mute`.
-//! The node answers every NOTIFY with 200; the subscription is renewed before it runs out and
-//! made again when the renderer forgets it (412) or restarts.
+//! Two sources: RenderingControl, whose one evented variable `LastChange` carries an escaped
+//! `<Event>` document with `Volume` and `Mute` (the service the node sets and reads the level
+//! through, so the numbers agree), and the OpenHome `Volume` service (properties `Volume` and
+//! `Mute`) for a renderer that only events there. Both are taken as 0–100, as the setter is.
 
 use crate::UpnpError;
 use std::time::Duration;
@@ -20,11 +19,9 @@ pub enum Source {
 /// What one NOTIFY said about the volume; a field it didn't carry is `None`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct VolumeChange {
-    /// 0–100, already scaled by OpenHome's `VolumeMax`.
+    /// 0–100, on the same scale as RenderingControl's `SetVolume`.
     pub percent: Option<u8>,
     pub muted: Option<bool>,
-    /// OpenHome's `VolumeMax` when this event carried it (a later `Volume` scales by it).
-    pub volume_max: Option<u32>,
 }
 
 /// A subscription the renderer granted.
@@ -126,7 +123,9 @@ fn properties(body: &str) -> Vec<(String, String)> {
     use quick_xml::events::Event;
     use quick_xml::Reader;
     let mut r = Reader::from_str(body);
-    r.config_mut().trim_text(true);
+    // Not trimmed: trimming would also drop the spaces between the escaped attributes of a
+    // LastChange document (`channel=&quot;Master&quot; val=…`); values are trimmed where read
+    r.config_mut().trim_text(false);
     let mut out = Vec::new();
     let mut depth_in_property = 0usize;
     let mut current: Option<(String, String)> = None;
@@ -206,28 +205,21 @@ fn truthy(v: &str) -> Option<bool> {
     }
 }
 
-/// What a NOTIFY body from `source` says about the volume. `volume_max` is the last OpenHome
-/// `VolumeMax` seen for this renderer (100 when none yet).
-pub fn read_notify(source: Source, body: &str, volume_max: u32) -> VolumeChange {
+/// What a NOTIFY body from `source` says about the volume. OpenHome's `Volume` is taken as is
+/// (capped at 100), not scaled by its `VolumeMax`: the node sets and reads the level through
+/// RenderingControl's 0–100, and an event must land on the same scale.
+pub fn read_notify(source: Source, body: &str) -> VolumeChange {
     let mut c = VolumeChange::default();
     match source {
         Source::OpenHomeVolume => {
-            let props = properties(body);
-            let max = props
-                .iter()
-                .find(|(k, _)| k == "VolumeMax")
-                .and_then(|(_, v)| v.trim().parse::<u32>().ok())
-                .filter(|m| *m > 0);
-            c.volume_max = max;
-            let max = max.unwrap_or(volume_max.max(1));
-            for (k, v) in &props {
+            for (k, v) in properties(body) {
                 match k.as_str() {
                     "Volume" => {
                         if let Ok(n) = v.trim().parse::<u32>() {
-                            c.percent = Some(((n.min(max) * 100 + max / 2) / max).min(100) as u8);
+                            c.percent = Some(n.min(100) as u8);
                         }
                     }
-                    "Mute" => c.muted = truthy(v),
+                    "Mute" => c.muted = truthy(&v),
                     _ => {}
                 }
             }
@@ -298,29 +290,41 @@ mod tests {
     fn rendering_control_last_change_gives_volume_and_mute() {
         // As a Linn (and most renderers) send it: the Event document escaped inside LastChange
         let body = r#"<?xml version="1.0"?><e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event xmlns="urn:schemas-upnp-org:metadata-1-0/RCS/"&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="LF" val="12"/&gt;&lt;Volume channel="Master" val="37"/&gt;&lt;Mute channel="Master" val="1"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#;
-        let c = read_notify(Source::RenderingControl, body, 100);
+        let c = read_notify(Source::RenderingControl, body);
         assert_eq!((c.percent, c.muted), (Some(37), Some(true)));
         // Only the mute changed: no volume in it
         let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Mute channel="Master" val="0"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#;
-        let c = read_notify(Source::RenderingControl, body, 100);
+        let c = read_notify(Source::RenderingControl, body);
         assert_eq!((c.percent, c.muted), (None, Some(false)));
     }
 
     #[test]
-    fn openhome_volume_is_scaled_by_its_maximum() {
+    fn openhome_volume_is_read_on_the_setters_scale() {
         let body = r#"<?xml version="1.0"?><e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><Volume>66</Volume></e:property><e:property><Mute>false</Mute></e:property><e:property><VolumeMax>100</VolumeMax></e:property></e:propertyset>"#;
-        let c = read_notify(Source::OpenHomeVolume, body, 100);
-        assert_eq!(
-            (c.percent, c.muted, c.volume_max),
-            (Some(66), Some(false), Some(100))
-        );
-        // A renderer whose scale ends at 80: 40 of 80 is 50 %; later events use the stored max
+        let c = read_notify(Source::OpenHomeVolume, body);
+        assert_eq!((c.percent, c.muted), (Some(66), Some(false)));
+        // A maximum under 100 doesn't rescale it: 40 stays 40, as RenderingControl reads it
         let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><VolumeMax>80</VolumeMax></e:property><e:property><Volume>40</Volume></e:property></e:propertyset>"#;
-        assert_eq!(read_notify(Source::OpenHomeVolume, body, 100).percent, Some(50));
-        let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><Volume>20</Volume></e:property></e:propertyset>"#;
-        assert_eq!(read_notify(Source::OpenHomeVolume, body, 80).percent, Some(25));
+        assert_eq!(read_notify(Source::OpenHomeVolume, body).percent, Some(40));
+        let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><Volume>140</Volume></e:property></e:propertyset>"#;
+        assert_eq!(read_notify(Source::OpenHomeVolume, body).percent, Some(100));
         let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><Mute>1</Mute></e:property></e:propertyset>"#;
-        assert_eq!(read_notify(Source::OpenHomeVolume, body, 80).muted, Some(true));
+        assert_eq!(read_notify(Source::OpenHomeVolume, body).muted, Some(true));
+    }
+
+    #[test]
+    fn quotes_escaped_as_entities_keep_their_attributes_apart() {
+        // Sonos-style: the attribute quotes inside LastChange are `&quot;`, with whitespace and
+        // a line break between the properties
+        let body = "<e:propertyset xmlns:e=\"urn:schemas-upnp-org:event-1-0\">\n  <e:property>\n    <LastChange>&lt;Event xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/RCS/&quot;&gt;&lt;InstanceID val=&quot;0&quot;&gt;&lt;Volume channel=&quot;Master&quot; val=&quot;20&quot;/&gt;&lt;Mute channel=&quot;Master&quot; val=&quot;0&quot;/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange>\n  </e:property>\n</e:propertyset>";
+        let c = read_notify(Source::RenderingControl, body);
+        assert_eq!((c.percent, c.muted), (Some(20), Some(false)));
+        let lc = properties(body);
+        assert!(
+            lc[0].1.contains(r#"channel="Master" val="20""#),
+            "the space between the attributes is kept: {}",
+            lc[0].1
+        );
     }
 
     #[test]

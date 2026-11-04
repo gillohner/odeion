@@ -5284,15 +5284,20 @@ mod tests {
     }
 
     /// A UPnP renderer's volume follows its events (TASK-volume-readback): the node subscribes,
-    /// a NOTIFY to the callback moves the zone's level and mute, a renew the renderer refuses
-    /// (412) makes a fresh SUBSCRIBE, and a token the node doesn't hold gets 412.
+    /// a renew the renderer refuses (412) makes a fresh SUBSCRIBE, a NOTIFY to the callback
+    /// moves the zone's level and mute, and the poll steps aside only once events arrive. Late,
+    /// stale and foreign events are dropped, and a zone made again under the same name doesn't
+    /// get this renderer's level.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_renderers_volume_events_move_the_zone() {
+        // The same value the read-back test uses (tests share the process environment)
+        std::env::set_var("PM_VOLUME_POLL_MS", "200");
         let log = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
         let renewals = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let reads = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let (l2, r2) = (log.clone(), renewals.clone());
+        let (l2, r2, rd) = (log.clone(), renewals.clone(), reads.clone());
         let mock = Router::new()
             .route(
                 "/rc/event",
@@ -5330,9 +5335,16 @@ mod tests {
                     }
                 }),
             )
+            // The poll's GetVolume/GetMute, counted
             .route(
                 "/rc/control",
-                post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+                post(move || {
+                    let rd = rd.clone();
+                    async move {
+                        rd.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                }),
             );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
 
@@ -5382,50 +5394,13 @@ mod tests {
         })
         .await
         .expect("the node never subscribed");
-        // A NOTIFY from the LAN moves the zone's volume and mute
-        let notify = |token: &str, body: &str| {
-            let mut req = Request::builder()
-                .method("NOTIFY")
-                .uri(format!("/v1/upnp/events/{token}"))
-                .header("NT", "upnp:event")
-                .header("SID", "uuid:sub-1")
-                .body(Body::from(body.to_string()))
-                .unwrap();
-            req.extensions_mut().insert(axum::extract::ConnectInfo(
-                "192.168.1.30:49152".parse::<std::net::SocketAddr>().unwrap(),
-            ));
-            req
-        };
-        let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Volume channel="Master" val="37"/&gt;&lt;Mute channel="Master" val="1"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#;
-        let resp = app.clone().oneshot(notify(&token, body)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        zone.wait_acked().await;
-        assert_eq!(
-            zone.state().volume,
-            Some(pm_model::ZoneVolume {
-                level: pm_model::VolumeLevel::Percent(37),
-                muted: true
-            })
-        );
-        // Only the mute changes next: the level stays
-        let body = r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;&lt;Mute channel="Master" val="0"/&gt;&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#;
-        app.clone().oneshot(notify(&token, body)).await.unwrap();
-        zone.wait_acked().await;
-        assert_eq!(
-            zone.state().volume.map(|v| (v.level, v.muted)),
-            Some((pm_model::VolumeLevel::Percent(37), false))
-        );
-        // A token the node doesn't hold: 412, as GENA says; a request from outside the LAN: refused
-        let resp = app.clone().oneshot(notify("nope", body)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
-        let mut outside = notify(&token, body);
-        outside.extensions_mut().insert(axum::extract::ConnectInfo(
-            "8.8.8.8:5000".parse::<std::net::SocketAddr>().unwrap(),
-        ));
-        assert_eq!(
-            app.clone().oneshot(outside).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
+        let reads_now = || reads.load(std::sync::atomic::Ordering::SeqCst);
+        let ms = |n| tokio::time::sleep(std::time::Duration::from_millis(n));
+        // A page is open: with no event arrived yet the poll keeps reading, subscription or not
+        let watching = s.events.watch();
+        let before = reads_now();
+        ms(700).await;
+        assert!(reads_now() > before, "no event yet, so the poll reads");
         // The renewal is refused (412): the node subscribes afresh
         let again = tokio::time::timeout(std::time::Duration::from_secs(8), async {
             loop {
@@ -5440,7 +5415,7 @@ mod tests {
                     }
                 }
                 drop(l);
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                ms(100).await;
             }
         })
         .await;
@@ -5449,6 +5424,118 @@ mod tests {
             "no fresh SUBSCRIBE after a refused renewal: {:?}",
             log.lock().unwrap()
         );
+        // A NOTIFY from the LAN moves the zone's volume and mute
+        let notify_as = |token: &str, sid: &str, seq: u32, body: &str| {
+            let mut req = Request::builder()
+                .method("NOTIFY")
+                .uri(format!("/v1/upnp/events/{token}"))
+                .header("NT", "upnp:event")
+                .header("SID", sid)
+                .header("SEQ", seq.to_string())
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                "192.168.1.30:49152".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            req
+        };
+        let notify = |token: &str, seq: u32, body: &str| notify_as(token, "uuid:sub-1", seq, body);
+        let event = |inner: &str| {
+            format!(
+                r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;{inner}&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#
+            )
+        };
+        let level = |v: u32| event(&format!(r#"&lt;Volume channel="Master" val="{v}"/&gt;"#));
+        let body =
+            event(r#"&lt;Volume channel="Master" val="37"/&gt;&lt;Mute channel="Master" val="1"/&gt;"#);
+        let resp = app.clone().oneshot(notify(&token, 0, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume,
+            Some(pm_model::ZoneVolume {
+                level: pm_model::VolumeLevel::Percent(37),
+                muted: true
+            })
+        );
+        // Events arrive now: the poll leaves the zone alone (one read may have been under way)
+        ms(300).await;
+        let before = reads_now();
+        ms(800).await;
+        assert_eq!(reads_now(), before, "events work, so the poll doesn't read");
+        // Only the mute changes next: the level stays
+        let body = event(r#"&lt;Mute channel="Master" val="0"/&gt;"#);
+        app.clone().oneshot(notify(&token, 1, &body)).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| (v.level, v.muted)),
+            Some((pm_model::VolumeLevel::Percent(37), false))
+        );
+        // A quick turn whose events arrive out of order: the later one (SEQ) wins
+        app.clone().oneshot(notify(&token, 3, &level(40))).await.unwrap();
+        app.clone().oneshot(notify(&token, 2, &level(30))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // Back and forth at once (40 → 41 → 40): ends at 40, the last word
+        app.clone().oneshot(notify(&token, 4, &level(41))).await.unwrap();
+        app.clone().oneshot(notify(&token, 5, &level(40))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // An event of a subscription the node gave up: 412, nothing moves
+        let resp = app
+            .clone()
+            .oneshot(notify_as(&token, "uuid:old", 6, &level(12)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        // A token the node doesn't hold: 412, as GENA says; a request from outside the LAN: refused
+        let resp = app.clone().oneshot(notify("nope", 7, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        let mut outside = notify(&token, 7, &body);
+        outside.extensions_mut().insert(axum::extract::ConnectInfo(
+            "8.8.8.8:5000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        assert_eq!(
+            app.clone().oneshot(outside).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // The zone goes and another output gets a zone of the same name: the renderer's events
+        // don't reach it, and the node unsubscribes
+        let zid = zone.id().clone();
+        s.remove_zone(&zid);
+        let other: Arc<dyn pm_zones::Output> =
+            Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        s.outputs.register(other.clone());
+        let twin = s.create_zone("Fake Linn", other);
+        assert_eq!(twin.id(), &zid, "the same name gives the same id");
+        twin.wait_acked().await;
+        let twin_was = twin.state().volume;
+        let resp = app.clone().oneshot(notify(&token, 8, &level(9))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        twin.wait_acked().await;
+        assert_eq!(
+            twin.state().volume,
+            twin_was,
+            "the renderer's level went to another zone"
+        );
+        let gone = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !log.lock().unwrap().iter().any(|(m, _)| m == "UNSUBSCRIBE") {
+                ms(100).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "no UNSUBSCRIBE: {:?}", log.lock().unwrap());
+        drop(watching);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
