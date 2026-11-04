@@ -2260,7 +2260,7 @@ async fn tracks(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiRe
         .lock()
         .expect("library poisoned")
         .list_tracks(p.after.map(TrackId), limit)?;
-    Ok(Json(Tracks { tracks }))
+    Ok(Json(Tracks::plain(tracks)))
 }
 
 async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<pm_model::Track> {
@@ -2621,8 +2621,8 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
-    let tracks = s.library.lock().expect("library poisoned").artist_tracks(id)?;
-    Ok(Json(Tracks { tracks }))
+    let songs = s.library.lock().expect("library poisoned").artist_songs(id)?;
+    Ok(Json(Tracks::songs(songs)))
 }
 
 async fn albums(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiResult<Vec<pm_model::Album>> {
@@ -2674,8 +2674,8 @@ async fn genre(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
 }
 
 async fn album_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
-    let tracks = s.library.lock().expect("library poisoned").album_tracks(id)?;
-    Ok(Json(Tracks { tracks }))
+    let songs = s.library.lock().expect("library poisoned").album_songs(id)?;
+    Ok(Json(Tracks::songs(songs)))
 }
 
 async fn history(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<History> {
@@ -19943,5 +19943,99 @@ exec sleep 300
         );
         let (_, si) = call(&app, "GET", signin, None).await;
         assert!(si["in_use"].is_null(), "{si}");
+    }
+
+    /// Owner report (iPad, 2026-11-04): an album showed every song twice, the NAS file and an old
+    /// homeserver copy whose file is gone. The album page and its tracks show each song once,
+    /// play-all gets one per song, and a song kept in two present copies lists them as `versions`.
+    #[tokio::test]
+    async fn album_shows_one_row_per_song_with_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (aid, nas, kept, home) = {
+            let lib = s.library.lock().unwrap();
+            let album = pm_model::Album {
+                id: None,
+                title: "Crossroad: Unplugged Live".into(),
+                album_artist: Some("Calvin Russell".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(1997),
+                upc: None,
+                total_discs: None,
+            };
+            let mut ids = Vec::new();
+            for (no, path) in [
+                (1, "music/Roon/01.flac"),
+                (
+                    1,
+                    "homeserver/data/files/u/priv/pubky.music/files/aaaaaaaaaaaaaaaa-01.flac",
+                ),
+                (2, "music/Roon/02.flac"),
+                (
+                    2,
+                    "homeserver/data/files/u/priv/pubky.music/files/bbbbbbbbbbbbbbbb-02.flac",
+                ),
+            ] {
+                let mut tr = untagged_track(dir.path().join(path), &format!("Song {no}"), "Calvin Russell");
+                tr.album = Some(album.clone());
+                tr.track_no = Some(no);
+                tr.duration_ms = Some(60_000);
+                ids.push(lib.upsert_track(&tr).unwrap().0);
+            }
+            // The copy of song 1 was deleted; the copy of song 2 is still there
+            let gone = dir
+                .path()
+                .join("homeserver/data/files/u/priv/pubky.music/files/aaaaaaaaaaaaaaaa-01.flac");
+            let root = dir.path().join("homeserver/data/files/u/priv/pubky.music/files");
+            let scan = lib.begin_scan(&root).unwrap();
+            lib.mark_file_seen(&root.join("bbbbbbbbbbbbbbbb-02.flac"), scan)
+                .unwrap();
+            assert_eq!(lib.mark_missing_under(&root, scan).unwrap(), 1, "{gone:?}");
+            let aid = lib
+                .get_track(pm_model::TrackId(ids[0]))
+                .unwrap()
+                .unwrap()
+                .album
+                .unwrap()
+                .id
+                .unwrap();
+            (aid, ids[0], ids[2], ids[3])
+        };
+        let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        let songs = al["songs"].as_array().unwrap();
+        assert_eq!(songs.len(), 2, "{al}");
+        assert_eq!(songs[0]["track_id"], nas);
+        assert!(
+            songs[0].get("versions").is_none(),
+            "one present copy: no versions {al}"
+        );
+        assert_eq!(
+            songs[1]["track_id"], kept,
+            "the NAS file over the homeserver copy"
+        );
+        let v = songs[1]["versions"].as_array().unwrap();
+        assert_eq!(v.len(), 2, "{al}");
+        assert_eq!(
+            (v[0]["track_id"].as_i64(), v[0]["best"].as_bool()),
+            (Some(kept), Some(true))
+        );
+        assert_eq!(v[1]["track_id"], home);
+        assert_eq!(v[1]["source"], "homeserver");
+        assert!(v[1].get("path").is_none(), "no file paths in versions");
+        let (st, tr) = call(&app, "GET", &format!("/v1/library/albums/{aid}/tracks"), None).await;
+        assert_eq!(st, StatusCode::OK, "{tr}");
+        assert_eq!(
+            tr["tracks"].as_array().unwrap().len(),
+            2,
+            "play-all queues one per song"
+        );
+        assert_eq!(
+            tr["versions"][kept.to_string()].as_array().unwrap().len(),
+            2,
+            "{tr}"
+        );
     }
 }
