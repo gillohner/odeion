@@ -97,6 +97,10 @@ pub struct ZoneState {
     /// Crossfade between tracks in ms; 0 = off.
     #[serde(default)]
     pub crossfade_ms: u64,
+    /// The output's level as last read back (after a change, and on the zone's poll); `None`
+    /// until a read succeeds, or when the output can't say.
+    #[serde(default)]
+    pub volume: Option<pm_model::ZoneVolume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -175,6 +179,7 @@ impl Zone {
             acked: 0,
             sync: output.sync(),
             crossfade_ms: 0,
+            volume: None,
         };
         let (state_tx, state) = watch::channel(initial);
         let crossfade = Arc::new(AtomicU64::new(0));
@@ -331,9 +336,24 @@ impl Zone {
         self.send(Command::Seek(ms));
     }
 
-    /// Hardware volume on the output; the audio path is untouched.
+    /// Hardware volume on the output; the audio path is untouched. The level is read back into
+    /// the state afterwards, so every controller shows what the device took.
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        self.output.set_volume(v).await
+        self.output.set_volume(v).await?;
+        self.refresh_volume().await;
+        Ok(())
+    }
+
+    /// Read the output's level and publish it in the state. A read that fails leaves the last
+    /// value; an output that can't say publishes `None` ("level unknown").
+    pub async fn refresh_volume(&self) -> Option<pm_model::ZoneVolume> {
+        match self.output.volume().await {
+            Ok(v) => {
+                self.send(Command::Volume(v));
+                v
+            }
+            Err(_) => None,
+        }
     }
 
     /// Wait until every command sent so far was handled, whatever the

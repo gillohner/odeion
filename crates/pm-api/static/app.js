@@ -1380,7 +1380,96 @@
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
-  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
+  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); };
+  // ---- One volume, one source (TASK-volume-one-source) ----
+  // Every slider for a zone reads the same thing: the level the node read back from the output
+  // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
+  // audio element. `value` is null while the node hasn't read it: nothing is made up.
+  const zoneVolume = (z) => {
+    if (!z) return null;
+    if (z.id === BROWSER) return { kind: 'db', min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))), muted: !!audio.muted };
+    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume; const hk = typeof hv === 'string' ? hv : hv && hv.kind;
+    const v = z.volume || null;
+    const kind = v && v.percent != null ? 'percent' : v && v.db != null ? 'db' : hk === 'db' ? 'db' : hk === 'percent' ? 'percent' : null;
+    if (!kind) return null;
+    if (kind === 'percent') return { kind, min: 0, max: 100, step: 1, value: v && v.percent != null ? v.percent : null, muted: !!(v && v.muted) };
+    const r = hk === 'db' ? hv : { min: -60, max: 0, step: 1 };
+    return { kind, min: r.min, max: r.max, step: r.step || 1, value: v && v.db != null ? Math.min(r.max, Math.max(r.min, v.db)) : null, muted: !!(v && v.muted) };
+  };
+  const levelText = (r) => (!r ? '' : r.muted ? 'Muted' : r.value == null ? 'Level unknown' : r.kind === 'percent' ? `${Math.round(r.value)} %` : `${Math.round(r.value)} dB`);
+  // A slider shows the zone's level; one being dragged is left alone until it is let go
+  const applyVol = (el, r) => {
+    if (!el || !r || el.dataset.dragging) return;
+    el.min = r.min; el.max = r.max; el.step = r.step;
+    el.classList.toggle('unknown', r.value == null); el.classList.toggle('muted', !!r.muted);
+    el.value = r.value == null ? r.min : r.value;
+    el.setAttribute('aria-valuetext', levelText(r)); setFill(el);
+  };
+  const volSliders = (z) => { const els = new Set(); if (z.id === state.zone) for (const el of [$('#vol'), $('#npvol'), $('#volpopvol')]) if (el) els.add(el); for (const el of $$(`[data-zvol="${CSS.escape(z.id)}"]`)) els.add(el); return [...els]; };
+  const syncVolumeSliders = (z, except) => {
+    if (!z) return;
+    const r = zoneVolume(z);
+    if (z.id === state.zone) $('.player').classList.toggle('novol', !r);
+    if (!r) return;
+    for (const el of volSliders(z)) if (el !== except) applyVol(el, r);
+    for (const t of $$(`[data-vollevel="${CSS.escape(z.id)}"]`)) t.textContent = levelText(r);
+    for (const b of $$(`[data-volmute="${CSS.escape(z.id)}"]`)) { b.setAttribute('aria-pressed', String(!!r.muted)); b.title = r.muted ? 'Unmute' : 'Mute'; }
+    // The owner's output list says the dB range; asked once
+    if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; syncVolumeSliders(z); }).catch(() => {}).finally(() => { state.outputsP = null; });
+  };
+  const setZoneVol = async (z, value, from) => {
+    const r = zoneVolume(z); if (!r) return;
+    const num = Number(value);
+    if (z.id === BROWSER) { audio.volume = Math.pow(10, num / 20); syncVolumeSliders(z, from); return; }
+    const body = r.kind === 'percent' ? { percent: Math.round(num) } : { db: num };
+    // Shown as set until the node's read-back arrives (its zone event syncs every slider)
+    z.volume = { ...(z.volume || {}), ...body };
+    syncVolumeSliders(z, from);
+    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: body }); } catch (e) { toast(e.message, 'error'); }
+  };
+  const setZoneMute = async (z, m) => {
+    if (!z) return;
+    if (z.id === BROWSER) { audio.muted = m; syncVolumeSliders(z); return; }
+    z.volume = { ...(z.volume || {}), muted: m };
+    syncVolumeSliders(z);
+    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { mute: m } }); } catch (e) { toast(e.message, 'error'); }
+  };
+  const bindVolSlider = (el, zoneOf) => {
+    if (!el) return;
+    const done = () => { delete el.dataset.dragging; };
+    el.addEventListener('pointerdown', () => { el.dataset.dragging = '1'; });
+    // Let go: the slider catches up with the zone (after `change`, which follows the pointer)
+    const letGo = () => { done(); setTimeout(() => syncVolumeSliders(zoneOf()), 0); };
+    el.addEventListener('pointerup', letGo); el.addEventListener('pointercancel', letGo);
+    el.addEventListener('input', () => { setFill(el); const z = zoneOf(); const r = zoneVolume(z); if (r) for (const t of $$(`[data-vollevel="${CSS.escape(z.id)}"]`)) t.textContent = levelText({ ...r, value: Number(el.value), muted: false }); });
+    el.addEventListener('change', () => { done(); const z = zoneOf(); if (z) setZoneVol(z, el.value, el); });
+  };
+  const volPop = () => $('#volpop');
+  const closeVolPop = (fromBack) => {
+    const vp = volPop(); if (!vp || vp.hidden) return;
+    const inside = vp.contains(document.activeElement);
+    vp.hidden = true; $('#scrim').hidden = true; $('#volbtn').setAttribute('aria-expanded', 'false');
+    const k = transients.indexOf(volTr); if (k >= 0) transients.splice(k, 1);
+    if (fromBack !== true) popTransient();
+    if (inside) $('#volbtn').focus();
+  };
+  const volTr = { open: () => !volPop().hidden, close: closeVolPop };
+  // Where the bar has no room for the slider: the volume button opens this, the zone's one slider
+  const drawVolPop = () => {
+    const vp = volPop(); const z = currentZone(); const r = zoneVolume(z);
+    vp.innerHTML = `<div class="pop-title">Volume · ${esc(z ? z.name : 'Zone')}</div>` + (r && z
+      ? `<div class="volpop-row"><button class="icon-btn" data-volmute="${esc(z.id)}" aria-pressed="${!!r.muted}" title="${r.muted ? 'Unmute' : 'Mute'}" aria-label="Mute">${icon('volume')}</button><input type="range" id="volpopvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}">${esc(levelText(r))}</span></div>`
+      : '<p class="qp-note">This zone sets its volume on the device.</p>');
+    const el = $('#volpopvol', vp); if (el) { applyVol(el, r); bindVolSlider(el, currentZone); }
+    const m = $('[data-volmute]', vp); if (m) m.onclick = () => setZoneMute(currentZone(), m.getAttribute('aria-pressed') !== 'true');
+  };
+  const openVolPop = () => {
+    closePop(); closeJobPop(); closeQPanel(); drawVolPop();
+    volPop().hidden = false; $('#scrim').hidden = false; $('#volbtn').setAttribute('aria-expanded', 'true');
+    transients.push(volTr); pushTransient();
+    const el = $('#volpopvol'); if (el) el.focus();
+  };
+  bindVolSlider($('#vol'), currentZone);
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
   const streamUrlFor = (uri) => { if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
@@ -1938,13 +2027,7 @@
     const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0;
     transport({ action: 'seek', position_ms: Math.round((seek.value / 1000) * d) });
   });
-  const vol = $('#vol');
-  setFill(vol);
-  vol.addEventListener('input', () => setFill(vol));
-  vol.addEventListener('change', () => {
-    if (isBrowser()) { audio.volume = Math.pow(10, vol.value / 20); return; }
-    api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(vol.value) } }).catch((e) => toast(e.message, 'error'));
-  });
+  // The bar's volume slider is bound with the other volume sliders (zoneVolume, above).
 
   // Zone picker.
   const zonePop = $('#zonepop');
@@ -2206,7 +2289,7 @@
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
     closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $('#scrim').onclick = () => { closePop(); closeJobPop(); closeQPanel(); };
+  $('#scrim').onclick = () => { closePop(); closeJobPop(); closeQPanel(); closeVolPop(); };
   // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
@@ -2316,17 +2399,6 @@
   const creditNames = (credit) => String(credit || '').split(/\s*(?:,|;|\/| & | feat\.? | ft\.? | featuring | x | vs\.? )\s*/i).map((x) => x.trim()).filter(Boolean);
   // A zone's volume slider: the output's hardware range and the zone's level, or this browser's
   // own volume; null when the device sets it
-  const zoneVolRange = (z) => {
-    if (!z) return null;
-    if (z.id === BROWSER) return { min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))) };
-    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume && out.caps.hw_volume.kind === 'db' ? out.caps.hw_volume : null;
-    return hv ? { min: hv.min, max: hv.max, step: hv.step || 1, value: z.volume_db != null ? Math.min(hv.max, Math.max(hv.min, z.volume_db)) : hv.max } : null;
-  };
-  const setZoneVol = (z, db) => {
-    const bar = $('#vol'); if (bar && z.id === state.zone) { bar.value = db; setFill(bar); }
-    if (z.id === BROWSER) { audio.volume = Math.pow(10, db / 20); return; }
-    api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { db: Number(db) } }).catch((e) => toast(e.message, 'error'));
-  };
   // Title, artists and album of what plays, each a link to its page (player bar and Now Playing);
   // `plain` is text only, for a bar that opens Now playing as a whole
   const npLinksHtml = (it, live, plain) => {
@@ -2457,7 +2529,7 @@
       const err = z && z.transport === 'stopped' && z.error;
       $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
       $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek);
-      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, DSP and volume';
+      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, and DSP';
       q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
       syncQPanel();
       return;
@@ -2580,9 +2652,6 @@
         + row('crossfeed', 'Headphone crossfeed', !!(cf && cf.enabled !== false), ro, cf && cf.enabled !== false ? `${cf.level_db} dB below ${cf.cutoff_hz} Hz` : 'off')
         + (isOwner() ? `<button class="btn sm ghost" id="qpdsp">${icon('settings')} All DSP settings</button>` : '');
     }
-    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume && out.caps.hw_volume.kind === 'db' ? out.caps.hw_volume : null;
-    const bar = $('#vol');
-    const vmin = hv ? hv.min : -60; const vmax = hv ? hv.max : 0; const vstep = hv ? hv.step || 1 : 1; const vval = Math.min(vmax, Math.max(vmin, Number(bar.value)));
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
       <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
@@ -2592,18 +2661,13 @@
       ${np && np.signal_path ? pathHtml(np, 'compact') : `<p class="qp-note">${isBrowser() ? 'This browser decodes the file itself; the node makes no signal-path claim.' : 'Nothing playing.'}</p>`}
       <div class="pop-title">DSP · ${esc(z.name)}</div>
       <div class="qp-dsp">${dsp}</div>
-      <div class="pop-title">Volume</div>
-      <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>
       <div class="qp-foot">${np && np.format ? '<button class="btn sm ghost" id="qpquality">Quality choices…</button>' : ''}<button class="btn sm ghost" id="qpnow">${icon('play')} Now playing</button></div>`;
     qPanelKey = qpKey();
     $$('[data-dsp]', qPanel).forEach((c) => { if (state.dspBusy) c.disabled = true; c.onchange = () => toggleDsp(c.dataset.dsp, c.checked); });
     const qd = $('#qpdsp', qPanel); if (qd) qd.onclick = () => { closeQPanel(); state.dspOpen = state.zone; setView('settings', 'playback'); };
     const qq = $('#qpquality', qPanel); if (qq) qq.onclick = () => { closeQPanel(); qualitySheet(); };
     const qn = $('#qpnow', qPanel); if (qn) qn.onclick = () => { closeQPanel(); toggleNowPlaying(true); };
-    const v = $('#qpvol', qPanel); setFill(v);
     if (had) { const back = $(had, qPanel); if (back) back.focus(); }
-    v.oninput = () => setFill(v);
-    v.onchange = () => { bar.value = v.value; setFill(bar); if (isBrowser()) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); };
   };
   // Opened from `opener` (the pill or the volume button): only that one says it is expanded, and
   // the focus goes back to it on close
@@ -2617,15 +2681,10 @@
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#quality');
-    const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
+    const first = $('[data-dsp]:not(:disabled), button', qPanel); if (first) first.focus();
   };
-  // Where the bar has no room for the slider (narrow tablets and desktops): the Sound panel, at its volume
-  $('#volbtn').onclick = () => {
-    if (!qPanel.hidden) { closeQPanel(); return; }
-    openQPanel('#volbtn');
-    // At its volume; without a zone (no slider) the panel's first control, so focus is inside
-    const v = $('#qpvol', qPanel) || $('[data-dsp]:not(:disabled), button', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); }
-  };
+  // Where the bar has no room for the slider (narrow tablets and desktops): a small volume popover
+  $('#volbtn').onclick = () => { if (!volPop().hidden) closeVolPop(); else openVolPop(); };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
@@ -2762,7 +2821,7 @@
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
             <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
           </section>
           <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -2776,7 +2835,7 @@
     // Now playing's own transport (phones: the mini player hides behind it)
     // Volume in Now playing (phones and narrow tablets have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
-    const nv = $('#npvol', overlay); if (nv) { setFill(nv); nv.oninput = () => setFill(nv); nv.onchange = () => setZoneVol(z, nv.value); }
+    const nv = $('#npvol', overlay); if (nv) { applyVol(nv, zoneVolume(z)); bindVolSlider(nv, currentZone); syncVolumeSliders(z); }
     else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
@@ -3330,7 +3389,7 @@
 
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); return; }
+    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
@@ -5860,7 +5919,7 @@
                 <button class="icon-btn" data-zt="previous" title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
                 <button class="icon-btn" data-zt="next" title="Next">${icon('next')}</button>
-                ${hv ? `<input type="range" data-zvol="${esc(z.id)}" min="${hv.min}" max="${hv.max}" step="${hv.step || 1}" value="${z.volume_db != null ? z.volume_db : hv.max}" aria-label="Volume of ${esc(z.name)}">` : z.id === BROWSER ? `<input type="range" data-zvol="${BROWSER}" min="-60" max="0" value="${Math.round(20 * Math.log10(audio.volume || 1))}" aria-label="Browser volume">` : '<span class="muted small">Volume: set on the device</span>'}
+                ${zoneVolume(z) ? `<input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span>` : '<span class="muted small">Volume: set on the device</span>'}
                 ${z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}">Play to</button>`}
                 ${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''}
               </div></div>`;
@@ -5873,7 +5932,7 @@
           $$('[data-zcard]', main).forEach((card) => {
             const zid = card.dataset.zcard;
             $$('[data-zt]', card).forEach((b) => b.onclick = () => zoneTransport(zid, b.dataset.zt));
-            const v = $('[data-zvol]', card); if (v) { setFill(v); v.addEventListener('input', () => setFill(v)); v.addEventListener('change', () => { if (zid === BROWSER) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${encodeURIComponent(zid)}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); }); }
+            const v = $('[data-zvol]', card); if (v) { const zoneOf = () => (zid === BROWSER ? browserState() : state.zones[zid]); applyVol(v, zoneVolume(zoneOf())); bindVolSlider(v, zoneOf); syncVolumeSliders(zoneOf()); }
           });
           $$('[data-zsel]', main).forEach((b) => b.onclick = () => { state.zone = b.dataset.zsel; localStorage.setItem('pm.zone', state.zone); renderZoneName(); renderBar(); refreshQueue(); render(); });
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) { ensureZone(); renderZoneName(); } render(); } catch (e) { toast(e.message, 'error'); } });
@@ -6559,7 +6618,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
+    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {
@@ -6702,6 +6761,7 @@
       if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
+        syncVolumeSliders(ev.state);
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
           if (state.starting.sent !== false && ((ev.state.transport === 'playing' && fresh) || (state.starting.what === 'move' && ev.state.transport !== 'stopped'))) startDone(true);

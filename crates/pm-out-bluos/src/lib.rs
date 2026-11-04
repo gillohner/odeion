@@ -100,6 +100,14 @@ fn get_within(host: &str, port: u16, path: &str, timeout: Duration) -> Result<St
 }
 
 /// The value of `attr` on the first `<tag …>` element.
+/// The text of the first `<tag>…</tag>` in a BluOS answer (`<volume>40</volume>`).
+fn text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find("</")? + start;
+    Some(unescape(xml[start..end].trim()))
+}
+
 fn attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
     let start = xml.find(&format!("<{tag}"))?;
     let rest = &xml[start..];
@@ -298,6 +306,23 @@ impl Output for BluosOutput {
 
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         Ok(Box::new(self.open_sink(fmt, None).await?))
+    }
+
+    /// `/Status` says the player's volume (percent) and mute.
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        let (host, port) = (self.player.host.clone(), self.player.port);
+        tokio::task::spawn_blocking(move || -> Result<Option<pm_model::ZoneVolume>, BluosError> {
+            let xml = get(&host, port, "/Status")?;
+            Ok(text(&xml, "volume")
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|v| pm_model::ZoneVolume {
+                    level: pm_model::VolumeLevel::Percent(v.min(100) as u8),
+                    muted: text(&xml, "mute").is_some_and(|m| m == "1"),
+                }))
+        })
+        .await
+        .map_err(|_| SinkError::Device("BluOS volume read panicked".into()))?
+        .map_err(device_err)
     }
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {

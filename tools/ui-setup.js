@@ -187,15 +187,16 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         check(await shown('#search') || await shown('[data-bnav="search"]'), `${w}×${h}: search`);
         let vol = await shown('#vol');
         if (!vol && await shown('#volbtn')) {
-          await p.click('#volbtn'); vol = await visible(p, '#qpanel #qpvol', 5000);
-          check(await p.getAttribute('#volbtn', 'aria-expanded') === 'true' && await p.getAttribute('#quality', 'aria-expanded') === 'false', `${w}×${h}: only the volume button says the panel is open`);
+          await p.click('#volbtn'); vol = await visible(p, '#volpop #volpopvol', 5000);
+          check(vol && await p.getAttribute('#volbtn', 'aria-expanded') === 'true' && await p.getAttribute('#quality', 'aria-expanded') === 'false' && await p.$eval('#qpanel', (q) => q.hidden), `${w}×${h}: the volume button opens the volume popover, not the Sound panel`);
+          await p.keyboard.press('Escape'); await p.waitForTimeout(200);
+          check(await p.$eval('#volpop', (v) => v.hidden) && await p.evaluate(() => document.activeElement && document.activeElement.id === 'volbtn'), `${w}×${h}: Esc closes it and focus returns to the button`);
           const off = await p.evaluate(() => { document.body.classList.add('offline'); const d = getComputedStyle(document.querySelector('#volbtn')).display; document.body.classList.remove('offline'); return d; });
           check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
         }
-        if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         // A phone with nothing playing has no sound pill (UX sweep A4): volume is on the zone's card
         // (Zones, one tap), and in Now playing while something plays
-        let where = (await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel';
+        let where = (await shown('#vol')) ? 'slider in the bar' : 'in the volume popover';
         if (!vol && shell === 'phone') { await p.click('[data-bnav="zones"]'); vol = await visible(p, '#main [data-zvol]', 8000); where = 'on the zone card'; }
         check(vol, `${w}×${h}: volume (${where})`);
         if (shell === 'tablet') {
@@ -373,7 +374,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await waitText(p, '#quality .qtext', 'Played by this browser'), 'and says the browser plays it');
       await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === 'This browser' && (await p.textContent('#qpanel .qp-src .name')).trim() === 'Your library', 'the panel: the zone and the source');
-      check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpvol').count() === 1, 'no signal path claim for the browser; volume is there');
+      check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpanel input[type="range"]').count() === 0, 'no signal path claim for the browser; no volume in the panel (the bar has the one slider)');
       check(await p.getAttribute('#quality', 'aria-expanded') === 'true', 'the pill says the panel is open');
       check(await p.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement)), 'focus moved into the panel');
       await p.keyboard.press('Escape'); check(await gone(p, '#qpanel:not([hidden])'), 'Escape closes it');
@@ -861,6 +862,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await p.evaluate(() => { const b = document.querySelector('[data-alongjoin="0"]'); return !!b && !b.disabled && /Listen along with Alice/.test(b.getAttribute('aria-label')); }), 'after a refusal the button is back, named again');
       // and now it works: the page switches to the group and the row says you listen along
       alongStatus = 200;
+      // (after the refusal the page may already offer the other free speakers in a menu: closed first)
+      await p.keyboard.press('Escape'); await p.waitForTimeout(250);
       await p.click('[data-alongjoin="0"]'); await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
       const ok = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Listening along with Alice/.test(v || '')) return true; if (Date.now() > end) return false; await p.waitForTimeout(150); } })();
       check(ok && (await p.textContent('#zonename')).trim() === GROUP.name, `joined: a toast and the group zone in use (${(await p.textContent('#zonename')).trim()})`);

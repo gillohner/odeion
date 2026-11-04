@@ -262,6 +262,12 @@ pub trait Output: Send + Sync {
         Err(SinkError::NoVolume(self.id()))
     }
 
+    /// The level the output reports now, with its mute; `None` when it can't be read (the
+    /// pages say "level unknown" rather than guess).
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
+    }
+
     async fn standby(&self, _on: bool) -> Result<(), SinkError> {
         Err(SinkError::NoStandby(self.id()))
     }

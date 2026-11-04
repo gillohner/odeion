@@ -9,6 +9,14 @@ use std::sync::Arc;
 pub fn discover() -> OutputRegistry {
     let registry = OutputRegistry::new();
     registry.register(Arc::new(NullOutput::from_env()));
+    // Developer outputs with a pretend volume (dB and percent), for the pages' volume checks;
+    // hidden with the Null output unless developer outputs are switched on
+    registry.register(Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Db {
+        min: -60.0,
+        max: 0.0,
+        step: 1.0,
+    })));
+    registry.register(Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent)));
     #[cfg(feature = "alsa")]
     for out in pm_out_local::alsa::AlsaOutput::enumerate() {
         registry.register(Arc::new(out));

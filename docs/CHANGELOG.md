@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **One volume, one source** (owner's report: the bar's volume and the Sound panel's disagreed, and a Linn's showed empty). A zone now says its output's level (`volume`: dB or percent, with mute), read back from the device after every change and every 10 s (UPnP, BluOS, MPD, Snapcast; the others until they can say), so a change made on the device or in its own app shows. Every volume slider reads that one value: the player bar, Now playing on phones, and the Zones page; a level the node hasn't read shows no thumb and says "Level unknown" instead of a made-up -20 dB. The Sound panel has no volume any more. The bar has one slider when there is room; where there isn't, the volume button opens a small volume popover (slider, mute, the level) that Esc, Back and a tap outside close.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".

@@ -509,6 +509,20 @@ impl NodeState {
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
         let _ = self.events.send(ApiEvent::Zone { state: initial });
+        // The output's level, read back now and every few seconds (a Linn's own remote changes
+        // it; the pages show what the device says), for outputs with a hardware volume. The
+        // task ends with the zone.
+        if zone.output().caps().hw_volume.is_some() {
+            let weak = Arc::downgrade(&zone);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(VOLUME_POLL);
+                loop {
+                    tick.tick().await;
+                    let Some(z) = weak.upgrade() else { break };
+                    z.refresh_volume().await;
+                }
+            });
+        }
         tokio::spawn(async move {
             let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {
@@ -1687,6 +1701,9 @@ impl NodeState {
 const CONTACT_KEY: &str = "node.contact";
 
 /// Where a zone's crossfade length (ms) is kept.
+/// How often a zone reads its output's level back.
+const VOLUME_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub fn crossfade_key(zone: &ZoneId) -> String {
     format!("crossfade/{}", zone.0)
 }

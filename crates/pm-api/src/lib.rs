@@ -5105,6 +5105,115 @@ mod tests {
             .is_none());
     }
 
+    /// A zone says its output's level (`volume`): null for an output without one, the level
+    /// read back after every change (the dB cap applied), and mute (TASK-volume-one-source).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zones_report_their_volume_and_read_it_back_after_a_change() {
+        use pm_zones::outputs::NullOutput;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let db_out: Arc<dyn pm_zones::Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        let pc_out: Arc<dyn pm_zones::Output> =
+            Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        s.outputs.register(db_out.clone());
+        s.outputs.register(pc_out.clone());
+        let db_zone = s.create_zone("Null dB", db_out);
+        let pc_zone = s.create_zone("Null percent", pc_out);
+        let app = router(s.clone());
+        // The poll's first read has happened once the zones settle
+        db_zone.refresh_volume().await;
+        pc_zone.refresh_volume().await;
+        db_zone.wait_acked().await;
+        pc_zone.wait_acked().await;
+        let (st, zones) = call(&app, "GET", "/v1/zones", None).await;
+        assert_eq!(st, StatusCode::OK, "{zones}");
+        let by_out = |id: &str| {
+            zones
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|z| z["output"] == id)
+                .cloned()
+                .unwrap()
+        };
+        assert!(
+            by_out("null")["volume"].is_null(),
+            "no hardware volume: {}",
+            by_out("null")
+        );
+        assert_eq!(
+            by_out("null:db")["volume"],
+            serde_json::json!({"db": 0.0, "muted": false})
+        );
+        assert_eq!(
+            by_out("null:percent")["volume"],
+            serde_json::json!({"percent": 100, "muted": false})
+        );
+        // A change is read back
+        let dz = db_zone.id().0.clone();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{dz}/volume"),
+            Some(serde_json::json!({"volume": {"db": -20.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        db_zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{dz}"), None).await;
+        assert_eq!(
+            z["volume"],
+            serde_json::json!({"db": -20.0, "muted": false}),
+            "{z}"
+        );
+        // The zone's volume limit caps it
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{dz}/dsp"),
+            Some(serde_json::json!({"max_volume_db": -30.0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{dz}/volume"),
+            Some(serde_json::json!({"volume": {"db": -10.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        db_zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{dz}"), None).await;
+        assert_eq!(z["volume"]["db"], -30.0, "capped: {z}");
+        // Percent and mute, on a percent output
+        let pz = pc_zone.id().0.clone();
+        for (body, want) in [
+            (
+                serde_json::json!({"volume": {"percent": 40}}),
+                serde_json::json!({"percent": 40, "muted": false}),
+            ),
+            (
+                serde_json::json!({"volume": {"mute": true}}),
+                serde_json::json!({"percent": 40, "muted": true}),
+            ),
+            (
+                serde_json::json!({"volume": "up"}),
+                serde_json::json!({"percent": 43, "muted": true}),
+            ),
+        ] {
+            let (st, _) = call(&app, "POST", &format!("/v1/zones/{pz}/volume"), Some(body)).await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            pc_zone.wait_acked().await;
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{pz}"), None).await;
+            assert_eq!(z["volume"], want, "{z}");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audiobookshelf_asks_non_admins_for_a_key_and_ends_the_session() {
         let logouts = Arc::new(std::sync::atomic::AtomicU32::new(0));
