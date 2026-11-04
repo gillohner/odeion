@@ -1399,7 +1399,7 @@ pub(crate) fn sign_in(
     // Other apps' files are looked at for the tab, not for the overview line, and only for the
     // owner: they are on the owner's machine
     let found = if headers.is_some() && who.is_owner() {
-        crate::imports::scan_tidal()
+        crate::imports::scan_tidal(crate::imports::Renewers::of(s))
     } else {
         Vec::new()
     };
@@ -1665,12 +1665,12 @@ impl crate::signin::SignInSource for TidalSignIn {
     ) -> Result<&'static str, ApiError> {
         let (imp, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
             (Some(text), _) if !text.is_empty() => (
-                crate::imports::pasted_tidal(text)
+                crate::imports::pasted_tidal(text, crate::imports::Renewers::of(s))
                     .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
                 WAY_PASTE,
             ),
             (_, Some(id)) => {
-                let imp = crate::imports::scan_tidal()
+                let imp = crate::imports::scan_tidal(crate::imports::Renewers::of(s))
                     .into_iter()
                     .find(|i| i.found.id == id)
                     .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;

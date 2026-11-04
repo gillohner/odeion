@@ -12655,6 +12655,15 @@ exec sleep 300
         *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
+        // A device client of the owner's (a fake one): it renews python-tidal's device sessions
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                tidal_unofficial::CLIENT_KEY,
+                r#"{"id": "fake-device-client-id", "secret": "fake-device-secret", "from": "settings"}"#,
+            )
+            .unwrap();
         let app = router(s.clone());
         let signin = "/v1/sources/tidal/signin";
         let import = "/v1/sources/tidal/signin/import";
@@ -12665,7 +12674,10 @@ exec sleep 300
         assert_eq!(found[0]["id"], "tidal-dl-ng");
         assert_eq!(found[0]["user"], "4242");
         assert_eq!(found[0]["usable"], true);
-        assert_eq!(found[0]["renews"], true, "python-tidal's client is ours");
+        assert_eq!(
+            found[0]["renews"], true,
+            "a device session renews with the node's device client"
+        );
         assert_eq!(found[1]["id"], "tidal-dl");
         assert_eq!(found[1]["usable"], false);
         assert!(found[1]["reason"].as_str().unwrap().contains("expired"), "{si}");
@@ -19583,6 +19595,27 @@ exec sleep 300
                 .count(),
             3
         );
+        // A build without the browser client doesn't send people to Sign in with TIDAL: it says
+        // what lossless needs
+        let browser = s.tidal.write().unwrap().browser_client.take();
+        assert!(browser.is_some());
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(
+            u["health"]["detail"],
+            tidal_unofficial::AAC_ONLY_NO_BROWSER,
+            "{u}"
+        );
+        assert!(!tidal_unofficial::AAC_ONLY_NO_BROWSER.contains("again"));
+        s.tidal.write().unwrap().browser_client = browser;
+        // An imported device session wasn't signed in here: Sign in with TIDAL, not "again"
+        tidal_unofficial::update(&s, &who, |st| {
+            st.session.as_mut().unwrap().from = Some("tidal-dl-ng".into())
+        });
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], tidal_unofficial::AAC_ONLY_IMPORTED, "{u}");
+        tidal_unofficial::update(&s, &who, |st| st.session.as_mut().unwrap().from = None);
         // A browser session's AAC track: that track, not the sign-in
         call(
             &app,
@@ -19622,5 +19655,125 @@ exec sleep 300
         ] {
             assert!(!text.contains(secret), "a secret in the logs: {secret}");
         }
+    }
+
+    /// The vault carries each kind of TIDAL full-tracks session under its own app: a code sign-in
+    /// under the device client's id (as before), a Sign in with TIDAL one under `pkce:` and the
+    /// browser client's id. A node takes only a session it can renew, and a code sign-in made on a
+    /// node without the browser client doesn't replace a lossless session made elsewhere.
+    #[tokio::test]
+    async fn the_vault_carries_each_kind_of_tidal_session_under_its_own_app() {
+        use vault_cache::{
+            decide, made_with_our_app, node_app_for, sign_in_for, Do, Side, Synced, VaultSide, Wipe,
+        };
+        let b = vault_cache::BRIDGES
+            .iter()
+            .find(|b| b.service == "tidal-full")
+            .unwrap();
+        let node = |device: &'static str, browser: bool| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    tidal_unofficial::CLIENT_KEY,
+                    &serde_json::json!({"id": device, "secret": "fake-device-secret", "from": "settings"})
+                        .to_string(),
+                )
+                .unwrap();
+            s.tidal.write().unwrap().browser_client = browser.then(|| tidal_unofficial::BrowserClient {
+                id: "fake-browser-client-id".into(),
+                secret: "fake-browser-secret".into(),
+            });
+            (dir, s)
+        };
+        let travels = |client: Option<&str>, at: &str| {
+            let mut sess = serde_json::json!({"access_token": at, "refresh_token": "fake-rt", "expires_at": 4_000_000_000i64, "user_id": "42"});
+            if let Some(c) = client {
+                sess["client"] = serde_json::json!(c);
+            }
+            serde_json::json!({"tidal.unofficial": {"session": sess}})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let (device, browser) = (
+            travels(None, "fake-at-device"),
+            travels(Some("pkce"), "fake-at-browser"),
+        );
+        let (_d1, both) = node("fake-device-client-id", true).await;
+        // Labelled by kind; the device one exactly as before, so device sessions synced already
+        // still match
+        let device_app = node_app_for(&both, b, Some(&device));
+        let browser_app = node_app_for(&both, b, Some(&browser));
+        assert_eq!(device_app.as_deref(), Some("fake-device-client-id"));
+        assert_eq!(browser_app.as_deref(), Some("pkce:fake-browser-client-id"));
+        assert_eq!(
+            node_app_for(&both, b, None),
+            device_app,
+            "no copy: the usual kind's"
+        );
+        let in_vault_device = sign_in_for(b, &device, None, device_app.clone(), "L-device");
+        let in_vault_browser = sign_in_for(b, &browser, None, browser_app.clone(), "L-browser");
+        assert_eq!(
+            in_vault_browser.client_id.as_deref(),
+            Some("pkce:fake-browser-client-id")
+        );
+        assert!(made_with_our_app(&both, b, &in_vault_device));
+        assert!(made_with_our_app(&both, b, &in_vault_browser));
+        // The same device client, no browser client (a build from source): the device session
+        // is taken, the browser one isn't (it couldn't be renewed here)
+        let (_d2, no_browser) = node("fake-device-client-id", false).await;
+        assert_eq!(node_app_for(&no_browser, b, Some(&browser)), None);
+        assert!(made_with_our_app(&no_browser, b, &in_vault_device));
+        assert!(!made_with_our_app(&no_browser, b, &in_vault_browser));
+        // A device client of the owner's and this build's browser client: the browser session is
+        // taken (it renews with the browser client), the other device client's isn't
+        let (_d3, own_device) = node("fake-own-device-client-id", true).await;
+        assert!(made_with_our_app(&own_device, b, &in_vault_browser));
+        assert!(!made_with_our_app(&own_device, b, &in_vault_device));
+        // On the node without the browser client: it synced a code sign-in, another node then
+        // signed in with TIDAL. Its own code sign-in, refreshed or new, doesn't replace that
+        // lossless session in the vault
+        let side = |hash: &str, lineage: &str| Side {
+            hash: hash.into(),
+            account: Some("42".into()),
+            lineage: Some(lineage.into()),
+            expires_at: Some(4_000_000_000),
+        };
+        let seen = Synced {
+            hash: "h-device".into(),
+            account: Some("42".into()),
+            lineage: Some("L-device".into()),
+            app: device_app.clone(),
+            ..Default::default()
+        };
+        let theirs = VaultSide {
+            side: side("h-browser", "L-browser"),
+            from_a_node: true,
+            our_app: made_with_our_app(&no_browser, b, &in_vault_browser),
+        };
+        let wipe = Wipe::default();
+        let refreshed = side("h-device-2", "L-device");
+        let new_code = side("h-device-3", "L-device-new");
+        assert_eq!(
+            decide(Some(&seen), Some(&refreshed), Some(&theirs), &wipe),
+            Do::NotUsable
+        );
+        assert_ne!(
+            decide(Some(&seen), Some(&new_code), Some(&theirs), &wipe),
+            Do::Push
+        );
+        assert_ne!(decide(None, Some(&new_code), Some(&theirs), &wipe), Do::Push);
+        // ...while on a node with the browser client, the same vault copy is taken
+        let ours = VaultSide {
+            our_app: made_with_our_app(&both, b, &in_vault_browser),
+            ..theirs.clone()
+        };
+        assert_eq!(
+            decide(Some(&seen), Some(&refreshed), Some(&ours), &wipe),
+            Do::Pull
+        );
     }
 }

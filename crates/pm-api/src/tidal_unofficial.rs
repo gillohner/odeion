@@ -52,6 +52,11 @@ const BROWSER_WAIT_SECS: i64 = 600;
 /// The health line of a code sign-in that gets AAC where lossless was asked for.
 pub const AAC_ONLY_DEVICE: &str =
     "TIDAL sends this sign-in AAC only (lossy). Sign in with TIDAL again for lossless";
+/// The same for a device session imported from another app or pasted (it wasn't signed in here).
+pub const AAC_ONLY_IMPORTED: &str =
+    "TIDAL sends this sign-in AAC only (lossy). Sign in with TIDAL for lossless";
+/// The same on a build without the browser client: what is possible then.
+pub const AAC_ONLY_NO_BROWSER: &str = "TIDAL sends this sign-in AAC only (lossy). Lossless needs Sign in with TIDAL, which this build doesn't have (a release build carries it)";
 /// The health line of a browser sign-in whose last track still came as AAC.
 pub const AAC_TRACK: &str = "TIDAL sent the last track as AAC (lossy): it may have no lossless version";
 /// What the page says before the mode is switched on.
@@ -289,9 +294,25 @@ pub fn set_config_client(id: &str, secret: &str) {
     }
 }
 
-/// The device client id the full-tracks sign-in is made with (`vault_cache`).
+/// The device client id the code sign-in is made with (`vault_cache`): the app a device session
+/// is carried in the vault under, unchanged from before there were two kinds.
 pub(crate) fn app_id(s: &NodeState) -> Option<String> {
     client_of(&s.library.lock().expect("library poisoned")).map(|c| c.id)
+}
+
+/// The app a full-tracks session is carried in the vault under, by the client that made it: a
+/// device session the device client's id ([`app_id`]), a browser session `pkce:` and the browser
+/// client's id. None when this node has no client that renews it, so it never takes one it
+/// would have to switch off.
+pub(crate) fn app_of_session(s: &NodeState, session: &serde_json::Map<String, Value>) -> Option<String> {
+    let kind = match session.get("client") {
+        None | Some(Value::Null) => ClientKind::Device,
+        Some(v) => serde_json::from_value(v.clone()).ok()?,
+    };
+    match kind {
+        ClientKind::Device => app_id(s),
+        ClientKind::Pkce => browser_client(s).map(|c| format!("pkce:{}", c.id)),
+    }
 }
 
 /// The device client for the code sign-in: the owner's in Settings, else from node.toml, else the
@@ -1062,8 +1083,27 @@ pub struct FullStream {
     pub lossy: bool,
     /// The sign-in it was asked with.
     pub client: ClientKind,
+    /// The sign-in was imported from another app or pasted (not made on this node).
+    pub imported: bool,
+    /// This build has the browser client (Sign in with TIDAL is possible).
+    pub browser: bool,
     /// What TIDAL answered.
     pub answer: Answer,
+}
+
+impl FullStream {
+    /// The health line for how it played: lossless asked for (Max or High) and AAC came means
+    /// the code sign-in for a device session (Sign in with TIDAL is the way to lossless, where
+    /// this build has it), and a track with no lossless version for a browser one.
+    pub fn health_line(&self) -> &'static str {
+        match (self.lossy, self.client) {
+            (false, _) => "full tracks are playing",
+            (true, ClientKind::Pkce) => AAC_TRACK,
+            (true, ClientKind::Device) if !self.browser => AAC_ONLY_NO_BROWSER,
+            (true, ClientKind::Device) if self.imported => AAC_ONLY_IMPORTED,
+            (true, ClientKind::Device) => AAC_ONLY_DEVICE,
+        }
+    }
 }
 
 /// Whether a failure is the mode's (switch it off) or only this track's.
@@ -1403,6 +1443,8 @@ pub fn open_blocking(
         mime,
         lossy: answer.lossy(),
         client: sess.client,
+        imported: sess.from.is_some(),
+        browser: ep.browser_client.is_some(),
         answer,
     }))
 }
@@ -1418,16 +1460,9 @@ pub fn record(
     let mut st = load(&lib, who);
     match r {
         Ok(Some(f)) => {
-            // Lossless asked for (Max or High) and AAC came: the code sign-in is why, a browser
-            // sign-in's track may have no lossless version
-            let detail = match (f.lossy, f.client) {
-                (false, _) => "full tracks are playing",
-                (true, ClientKind::Device) => AAC_ONLY_DEVICE,
-                (true, ClientKind::Pkce) => AAC_TRACK,
-            };
             st.health = Some(Health {
                 ok: true,
-                detail: detail.into(),
+                detail: f.health_line().into(),
                 at: now(),
                 lossy: f.lossy,
             });

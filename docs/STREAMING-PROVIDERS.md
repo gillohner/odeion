@@ -39,11 +39,13 @@ the page sends the browser on to that callback, and the node checks the nonce an
 verifier, which never leaves it. This works for a node on a LAN with no port forwarding. An app with its secret in the
 node config keeps the direct redirect. CI runs `tools/secret-scan.py` over the repository and the built binary.
 
-**Modes.** A service can have an Official mode (its public API) and an Unofficial mode (its private API, may break,
-off by default, its own warning and sign-in). Sources › TIDAL holds both behind one **Sign in**: the ways sit side by
-side (the official app, the device sign-in tidal-dl-ng uses, your own app), one is picked and remembered, and the status
-line says which is in use (STEWARD-CREDENTIALS-REUSE.md). Every source on the Sources page also has an on/off switch:
-off hides it from search, Home, item pages and the play order, and keeps its sign-in.
+**Modes.** A service can have an Official mode (its public API) and an Unofficial mode (its private API, may break, off
+by default, its own warning and sign-in). Sources › TIDAL holds both behind one **Sign in**: the ways sit side by side
+(Sign in with TIDAL, the browser sign-in python-tidal and tidal-dl-ng use, first for lossless; the code sign-in as the
+fallback; a sign-in found in another app; under Advanced the official app, your own device client and a pasted token),
+one is picked and remembered, and the status line says which is in use (STEWARD-CREDENTIALS-REUSE.md). Every source on
+the Sources page also has an on/off switch: off hides it from search, Home, item pages and the play order, and keeps its
+sign-in.
 
 Full-length audio is granted to the **application**, never to the person signing in: no identity scheme
 (Pubky, Nostr, a different OAuth account) changes the tier TIDAL assigned to the app, and borrowing another
