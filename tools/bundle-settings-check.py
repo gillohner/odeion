@@ -25,6 +25,8 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# The compose command: COMPOSE="/path/to/docker-compose" checks another version (CI has v2)
+COMPOSE = os.environ.get("COMPOSE", "docker compose").split()
 BUNDLE = REPO / "deploy" / "bundle"
 problems = []
 
@@ -145,7 +147,7 @@ esac
         r = subprocess.run(["sh", str(d / "setup.sh")], cwd=d, env={"PATH": "/usr/bin:/bin", "HOME": str(base)},
                            capture_output=True, text=True)
         (d / "home").mkdir()
-        c = subprocess.run(["docker", "compose", "-f", str(d / "docker-compose.yml"), "--project-directory", str(d),
+        c = subprocess.run(COMPOSE + ["-f", str(d / "docker-compose.yml"), "--project-directory", str(d),
                             "config", "--format", "json"], cwd=d, env={"PATH": "/usr/bin:/bin", "HOME": str(d / "home")},
                            capture_output=True, text=True)
         music = _json.loads(c.stdout)["services"]["music"] if c.returncode == 0 else {}
@@ -186,6 +188,13 @@ esac
         ({}, "export ODEION_TOKEN=exported\nPM_TOKEN=env-old\n"),
         ({}, 'PM_TOKEN=""\n'),
         ({}, "PM_TOKEN=first\nPM_TOKEN=last\n"),
+        # the new name alone (Compose v2 once evaluated an inner :? first and refused this)
+        ({}, "ODEION_TOKEN=env-new\n"),
+        ({}, "ODEION_TOKEN=\nPM_TOKEN=\n"),
+        # a comment starts only at space + #, not tab + #; `KEY: value` is a line too
+        ({}, "ODEION_TOKEN=abc\t# a note\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN: colon-value\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=first\nODEION_TOKEN:\nPM_TOKEN=env-old\n"),
     ]
     for i, (shell, envtext) in enumerate(cases):
         cd = base / f"cmp{i}"
@@ -194,13 +203,65 @@ esac
         (cd / ".env").write_text("ADMIN_PASSWORD=fixture-admin\nDB_PASSWORD=fixture-db\n" + envtext)
         (cd / "home").mkdir()
         e = {"PATH": "/usr/bin:/bin", "HOME": str(cd / "home"), **shell}
-        r = subprocess.run(["docker", "compose", "-f", str(cd / "docker-compose.yml"), "--project-directory", str(cd),
+        r = subprocess.run(COMPOSE + ["-f", str(cd / "docker-compose.yml"), "--project-directory", str(cd),
                             "config", "--format", "json"], cwd=cd, env=e, capture_output=True, text=True)
         want = json.loads(r.stdout)["services"]["music"]["environment"].get("PM_TOKEN") if r.returncode == 0 else ("" if "missing a value" in r.stderr else f"<compose refuses: {r.stderr.strip()[-120:]}>")
         rr = subprocess.run(["bash", "-euo", "pipefail", "-c", f'. "{BUNDLE}/settings.sh"\nsetting TOKEN'], cwd=cd,
                             env={"PATH": "/usr/bin:/bin", **shell}, capture_output=True, text=True)
         got = rr.stdout if rr.returncode == 0 else f"<error {rr.stderr.strip()[:80]}>"
         check(got == want, f"setting TOKEN matches compose: shell {shell}, .env {envtext.strip()!r} (compose {want!r}, setting {got!r})")
+
+    # No token in .env: backup.sh and restore.sh stop at once and say to run setup.sh, before docker
+    for script, args in (("backup.sh", []), ("restore.sh", ["fixture-backup"])):
+        d = base / f"notoken-{script}"
+        shutil.copytree(BUNDLE, d, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
+        (d / ".env").write_text("ADMIN_PASSWORD=fixture-admin\nODEION_TOKEN=\nPM_TOKEN=\n")
+        fb = d / "fixture-backup"
+        (fb / "config").mkdir(parents=True)
+        (fb / "config" / ".env").write_text((d / ".env").read_text())
+        subprocess.run("sha256sum config/.env > SHA256SUMS", shell=True, cwd=fb, check=True)
+        calls = d / "docker-calls"
+        stubdir = d / "stub"
+        stubdir.mkdir()
+        (stubdir / "docker").write_text(f'#!/bin/sh\necho "docker $*" >> "{calls}"\nexit 0\n')
+        (stubdir / "docker").chmod(0o755)
+        r = subprocess.run(["bash", str(d / script), *args], cwd=d, capture_output=True, text=True,
+                           env={"PATH": f"{stubdir}:/usr/bin:/bin", "HOME": str(base)})
+        check(r.returncode != 0 and "run ./setup.sh" in r.stderr and not calls.exists(),
+              f"{script} without a token stops at once and says to run ./setup.sh ({r.stderr.strip()[-120:]!r})")
+
+    # restore.sh: a backup made by v0.2.x locked its sign-ins under the raw .env value (quotes and all);
+    # when the node refuses the read value, restore.sh tries the raw one once (the real block, a stand-in API)
+    rs = (BUNDLE / "restore.sh").read_text()
+    blk = rs[rs.find("# --- sign-ins: begin"):rs.find("# --- sign-ins: end")]
+    check(bool(blk.strip()), "restore.sh marks its sign-ins block")
+    for envtext, expect, want_ok in (('PM_BACKUP_PASSPHRASE="two words"\n', '"two words"', True),
+                                     ('PM_BACKUP_PASSPHRASE="two words"\n', "two words", True),
+                                     ("PM_BACKUP_PASSPHRASE=plain\n", "other", False)):
+        d = Path(tempfile.mkdtemp(dir=base))
+        (d / ".env").write_text(envtext)
+        prog = f'''set -euo pipefail
+. "{BUNDLE}/settings.sh"
+die() {{ echo "restore: $*" >&2; exit 1; }}
+sleep() {{ :; }}
+B=/fixture
+PASS=$(setting BACKUP_PASSPHRASE)
+node_api() {{
+  case $2 in
+    /v1/info) echo '{{"scanning":false}}' ;;
+    /v1/restore*) if [ "$PASS" = "$EXPECT" ]; then echo '{{"restored":true}}'; else echo "That passphrase does not open this backup"; return 22; fi ;;
+  esac
+}}
+{blk}
+echo "used=[$PASS]"
+'''
+        r = subprocess.run(["bash", "-c", prog], cwd=d, capture_output=True, text=True,
+                           env={"PATH": "/usr/bin:/bin", "EXPECT": expect})
+        if want_ok:
+            check(r.returncode == 0 and f"used=[{expect}]" in r.stdout,
+                  f"restore with {envtext.strip()!r}, backup locked under {expect!r}: taken ({(r.stdout + r.stderr).strip()[-120:]!r})")
+        else:
+            check(r.returncode != 0 and "does not open" in r.stderr, "a passphrase that is wrong either way still stops, saying why")
 
     for script in ("backup.sh", "restore.sh"):
         s = (BUNDLE / script).read_text()

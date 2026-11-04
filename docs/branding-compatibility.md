@@ -125,6 +125,18 @@ Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the n
   an inline ` #` comment are dropped, so `ODEION_TOKEN=""` is empty and `"abc"` is `abc`. A value
   that starts with `#` stays a value (`ODEION_TOKEN= # x` is `# x` to compose too). Checked against
   the real `docker compose config` in `tools/bundle-settings-check.py`, which CI runs (`branding` job).
+  `KEY: value` lines count too; a comment starts only at a space then `#` (a tab then `#` stays in the
+  value). Not handled, and a follow-up: backslash escapes inside `"…"`, `$VAR`/`${VAR}` expansion and
+  values over several lines. `setup.sh` writes hex values, so its own `.env` never needs them.
+- **The token in the bundle:** `${ODEION_TOKEN:-${PM_TOKEN:-}}`, with no `:?` inside (Compose v2 checks
+  an inner `:?` before the outer name). With no token at all the node makes its own and keeps it in
+  its data folder, because it listens beyond localhost, so the API is never open
+  (`crates/pm-node/src/api_token.rs`). `ADMIN_PASSWORD` still requires `setup.sh`. `backup.sh` and
+  `restore.sh` stop at once without a token in `.env`, saying to run `./setup.sh`. CI checks all
+  this on the runner's Compose v2; it was also checked locally on v5.5.1 and v2.40.3.
+- **Backups from before Odeion:** `backup.sh` up to v0.2.2 read the passphrase from `.env` as
+  written, quotes and comment included. When the node refuses the passphrase as read now,
+  `restore.sh` tries it as written once.
   Other `.env` keys (`ADMIN_PASSWORD`, `MUSIC_DIR`, …) never had a `PM_` name and are unchanged.
 - **TrueNAS:** its settings are written under `environment:` in the YAML; an `ODEION_` key there
   works as in `docker run -e`.

@@ -31,6 +31,9 @@ for f in .env docker-compose.override.yml; do
   cp "$B/config/$f" "$f"
 done
 chmod 600 .env
+# The node's API token, before anything is changed: the sign-ins go back through the node's API
+TOKEN=$(setting TOKEN)
+[ -n "$TOKEN" ] || die "no API token in .env (ODEION_TOKEN or PM_TOKEN): run ./setup.sh, or put the old node's token there, then ./restore.sh again"
 PROJECT=$(docker compose config 2>/dev/null | sed -n 's/^name: *//p' | head -n 1)
 [ -n "$PROJECT" ] || die "docker compose cannot read this folder's compose files"
 [ -z "$(docker compose ps -aq)" ] || die "the bundle $PROJECT already has containers: this restores into a fresh install only"
@@ -99,7 +102,6 @@ docker compose up -d
 echo "The bundle is up. Putting the sign-ins back once the node's first scan is done..."
 
 # --- the sign-ins, through the node's own restore (Settings › Backup) ---------------------------
-TOKEN=$(setting TOKEN)
 PASS=$(setting BACKUP_PASSPHRASE)
 [ -n "$PASS" ] || [ ! -f "$B/node/passphrase" ] || PASS=$(cat "$B/node/passphrase")
 PORT=$(node_port "$NODE")
@@ -112,6 +114,11 @@ node_api() {
       printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" > /tmp/h
       exec curl -sS --fail-with-body -H @/tmp/h "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
 }
+# --- sign-ins: begin (tools/bundle-settings-check.py runs this block with a stand-in API)
+# backup.sh before Odeion (v0.2.x) read the passphrase from .env as written, quotes and an inline
+# comment included, and locked the sign-ins under that: when the node refuses the value read now,
+# try it as written once
+RAW_PASS=${PM_BACKUP_PASSPHRASE:-$(sed -n 's/^PM_BACKUP_PASSPHRASE=//p' .env 2>/dev/null | tail -n 1)}
 if [ -n "$PASS" ]; then q=''; else q='?skip_secrets=true'; fi
 # The node scans its folders when it starts and refuses a restore meanwhile (409): wait for two
 # idle answers in a row (the scan may not have begun at the first), and try again after a 409
@@ -122,12 +129,26 @@ for i in $(seq 720); do
   case $info in *'"scanning":false'*) idle=$(( idle + 1 )) ;; *) idle=0 ;; esac
   if [ "$idle" -ge 2 ]; then
     if report=$(node_api POST "/v1/restore$q" "$B/node/library.pmbackup" 2>&1); then break; fi
-    case $report in *scan*) idle=0 ;; *) die "the node did not take $B/node/library.pmbackup ($report): restore it in Settings › Backup" ;; esac
+    case $report in
+      *scan*) idle=0 ;;
+      *"does not open"*)
+        if [ -n "$RAW_PASS" ] && [ "$RAW_PASS" != "$PASS" ]; then
+          echo "  the passphrase as read does not open this backup; trying it as written in .env (a backup from before Odeion)"
+          PASS=$RAW_PASS
+          RAW_PASS=
+          idle=0
+        else
+          die "the node did not take $B/node/library.pmbackup ($report): restore it in Settings › Backup"
+        fi
+        ;;
+      *) die "the node did not take $B/node/library.pmbackup ($report): restore it in Settings › Backup" ;;
+    esac
     report=""
   fi
   [ $(( i % 30 )) -ne 0 ] || echo "  still waiting for the node (a first scan of a big library takes a while)"
   sleep 5
 done
 [ -n "$report" ] || die "the node did not finish its first scan: restore $B/node/library.pmbackup in Settings › Backup later"
+# --- sign-ins: end
 echo "Restored. The node's report (sign-ins put back, folders it cannot find, notes):"
 printf '%s\n' "$report" | sed 's/,"/,\n  "/g'

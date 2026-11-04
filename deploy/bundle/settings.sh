@@ -4,21 +4,24 @@
 # PM_<NAME> still works and loses to the ODEION_ one. POSIX sh, so setup.sh (sh) can use it too.
 
 # dotenv_get <KEY> [file]: KEY's value in .env (or file) as compose's .env parser reads it; status 1
-# when no line sets KEY. The last line wins; `export KEY=` counts; around the value, spaces go; "…"
-# and '…' give what is between the quotes (anything after the closing quote is dropped); unquoted, a
-# ` #` and what follows is a comment (a value that starts with # is a value). Not handled: escapes
-# in "…" and ${VAR} in values (the bundle's generated values have neither).
+# when no line sets KEY. The last line wins; `export KEY=` and `KEY: value` count; around the value,
+# spaces go; "…" and '…' give what is between the quotes (anything after the closing quote is
+# dropped); unquoted, a space then # starts a comment (not a tab then #; a value that starts with #
+# is a value). Not handled (a documented follow-up; the values setup.sh writes are hex): backslash
+# escapes in "…", $VAR / ${VAR} expansion, values over several lines.
 dotenv_get() {
   local line v
-  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "${2:-.env}" 2>/dev/null | tail -n 1) || true
+  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*[=:]" "${2:-.env}" 2>/dev/null | tail -n 1) || true
   [ -n "$line" ] || return 1
-  v=${line#*=}
+  v=${line#*"$1"}
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v#?}
   v=${v#"${v%%[![:space:]]*}"}
   case $v in
     \"*) v=${v#\"}; v=${v%%\"*} ;;
     \'*) v=${v#\'}; v=${v%%\'*} ;;
     *)
-      case $v in *[[:space:]]\#*) v=$(printf '%s' "$v" | sed 's/[[:space:]]#.*//') ;; esac
+      v=${v%%" #"*}
       v=${v%"${v##*[![:space:]]}"}
       ;;
   esac

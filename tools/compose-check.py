@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# The compose command: COMPOSE="/path/to/docker-compose" checks another version (CI has v2)
+COMPOSE = os.environ.get("COMPOSE", "docker compose").split()
 problems = []
 
 
@@ -42,7 +44,7 @@ def config(compose, env_text, extra_env=None, name="case"):
     (d / "home").mkdir()
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(d / "home")}
     env.update(extra_env or {})
-    r = subprocess.run(["docker", "compose", "-f", str(d / compose.name), "--project-directory", str(d),
+    r = subprocess.run(COMPOSE + ["-f", str(d / compose.name), "--project-directory", str(d),
                         "config", "--format", "json"], env=env, capture_output=True, text=True, cwd=d)
     return r, (json.loads(r.stdout) if r.returncode == 0 else {})
 
@@ -99,8 +101,16 @@ try:
     r, c, e, image = bundle("PM_TOKEN=fixture-old-token\n", {"ODEION_NAME": "From the shell"})
     check(e.get("PM_NAME") == "From the shell", "a new name from the shell's environment is read too")
 
-    r, *_ = bundle("PM_NAME=No token\n")
-    check(r.returncode != 0 and "run ./setup.sh first" in r.stderr, "no token at all still stops the start")
+    # No token at all: compose passes an empty one and the node makes its own and keeps it (it listens
+    # beyond localhost: crates/pm-node/src/api_token.rs), so the API is never open; a bundle without
+    # setup.sh's ADMIN_PASSWORD still stops
+    r, c, e, image = bundle("PM_NAME=No token\n")
+    check(r.returncode == 0 and e.get("PM_TOKEN") == "" and e.get("PM_LISTEN") == "0.0.0.0:7788",
+          "no token at all: an empty one, so the node makes its own (it listens beyond localhost)")
+    keep, base_env = base_env, "DB_PASSWORD=fixture-db\n"
+    r, *_ = bundle("PM_TOKEN=fixture-old-token\n")
+    base_env = keep
+    check(r.returncode != 0 and "run ./setup.sh first" in r.stderr, "without setup.sh's ADMIN_PASSWORD the start still stops")
 
     r, c, e, image = bundle("PM_TOKEN=fixture-old-token\n")
     check(e.get("PM_NAME") == "Odeion" and image == "ghcr.io/gillohner/pubky-music-node:edge",
