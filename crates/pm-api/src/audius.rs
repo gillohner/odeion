@@ -179,31 +179,35 @@ impl StreamingService for Audius {
     }
 
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError> {
-        let host = host(s).await?;
         let ok = |x: &str| {
             !x.is_empty()
                 && x.bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
         };
-        let req = match id.strip_prefix(PERMALINK) {
-            // `GET /v1/resolve?url=` answers with the track the page is (through a redirect)
+        // The id is checked before any network: a track id, or a song's page to resolve
+        let page = match id.strip_prefix(PERMALINK) {
             Some(path) => match path.split_once('/') {
                 Some((handle, slug)) if ok(handle) && ok(slug) && !slug.contains('/') => {
-                    s.http_client().get(format!("{host}/v1/resolve")).query(&[
-                        ("url", format!("https://audius.co/{handle}/{slug}").as_str()),
-                        ("app_name", APP_NAME),
-                    ])
+                    Some(format!("https://audius.co/{handle}/{slug}"))
                 }
                 _ => return Err(ApiError::bad_request("bad track link")),
             },
-            None => {
-                if id.trim().is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                    return Err(ApiError::bad_request("bad track id"));
-                }
-                s.http_client()
-                    .get(format!("{host}/v1/tracks/{id}"))
-                    .query(&[("app_name", APP_NAME)])
+            None if id.trim().is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) => {
+                return Err(ApiError::bad_request("bad track id"))
             }
+            None => None,
+        };
+        let host = host(s).await?;
+        let req = match &page {
+            // `GET /v1/resolve?url=` answers with the track the page is (through a redirect)
+            Some(url) => s
+                .http_client()
+                .get(format!("{host}/v1/resolve"))
+                .query(&[("url", url.as_str()), ("app_name", APP_NAME)]),
+            None => s
+                .http_client()
+                .get(format!("{host}/v1/tracks/{id}"))
+                .query(&[("app_name", APP_NAME)]),
         };
         let resp = req.send().await.map_err(upstream)?;
         if resp.status() == StatusCode::NOT_FOUND {

@@ -181,7 +181,21 @@ pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
         let &[handle, slug] = segs.as_slice() else {
             return None;
         };
-        if !ok(handle) || !ok(slug) {
+        // Audius's own pages with two segments (`/trending/underground`, `/<handle>/tracks`)
+        // are not songs
+        const SITE: [&str; 9] = [
+            "trending", "explore", "search", "feed", "library", "upload", "settings", "signup", "signin",
+        ];
+        const PROFILE: [&str; 7] = [
+            "tracks",
+            "reposts",
+            "playlists",
+            "albums",
+            "collectibles",
+            "followers",
+            "following",
+        ];
+        if !ok(handle) || !ok(slug) || SITE.contains(&handle) || PROFILE.contains(&slug) {
             return None;
         }
         return Some(ServiceLink {
@@ -1256,6 +1270,13 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
         connect: res.connect.clone(),
         ..Default::default()
     };
+    // A source switched off on Sources: its list, cached while it was on, doesn't stand in
+    let cached = cached.filter(|_| {
+        !it.page
+            .as_deref()
+            .and_then(|p| service_link(p, false))
+            .is_some_and(|l| turned_off(&acc, l.service))
+    });
     if let Some(c) = cached {
         return External {
             it,
@@ -1392,6 +1413,11 @@ async fn fetch_contents(
             continue;
         }
         let l = cand;
+        // A source switched off on Sources lists nothing here either; the ones that need no
+        // sign-in would otherwise answer anyway (the signed-in ones refuse by themselves)
+        if matches!(l.service, "archive" | "audius" | "jamendo") && access(acc, l.service) == Access::No {
+            continue;
+        }
         {
             let svc: Option<Box<dyn StreamingService>> = match l.service {
                 "tidal" => Some(Box::new(crate::tidal::Tidal)),
@@ -2151,5 +2177,16 @@ mod archive_links {
             "an album, not a song"
         );
         assert!(service_link("https://audius.co/a%20b/c", false).is_none());
+        for u in [
+            "https://audius.co/trending/underground",
+            "https://audius.co/explore/remixables",
+            "https://audius.co/techwipe/tracks",
+            "https://audius.co/techwipe/reposts",
+        ] {
+            assert!(
+                service_link(u, false).is_none(),
+                "{u} is a page of the site, not a song"
+            );
+        }
     }
 }

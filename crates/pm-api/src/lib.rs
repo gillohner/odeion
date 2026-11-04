@@ -5247,6 +5247,19 @@ mod tests {
         assert_eq!(st, StatusCode::OK, "{q}");
         let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
         assert_eq!(zone.wait_stopped().await.error, None);
+        // The archive switched off on Sources: the page lists nothing and plays from nowhere
+        let off = serde_json::json!({"enabled": false});
+        let (st, _) = call(&app, "PUT", "/v1/sources/archive/enabled", Some(off)).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, dark) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{dark}");
+        assert!(
+            dark["songs"].as_array().unwrap().is_empty() && dark["plays_from"].is_null(),
+            "{dark}"
+        );
+        let on = serde_json::json!({"enabled": true});
+        let (st, _) = call(&app, "PUT", "/v1/sources/archive/enabled", Some(on)).await;
+        assert_eq!(st, StatusCode::OK);
         // A restricted item: the page says so, with nothing to play and no "plays from"
         let id = crate::discover::page_id("https://archive.org/details/locked-set");
         let (st, pg) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
