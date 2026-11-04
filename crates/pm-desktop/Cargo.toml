@@ -59,8 +59,16 @@ jni = "0.22"
 # The webview hands over jni 0.21 objects (wry); used for the Wi-Fi multicast lock.
 jni021 = { package = "jni", version = "0.21" }
 rustls-platform-verifier = "0.7"
+# The Ring transport probe (feature `ring-transport-probe`, src/ring_probe.rs).
+pubky = { version = "0.16", optional = true }
+futures-util = { version = "0.3", optional = true }
 pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
+
+[features]
+# Android emulator CI only (.github/workflows/android-ring-transport.yml): the app routes a
+# fixture Pubky Ring grant exchange once at start and logs where it went. Never in releases.
+ring-transport-probe = ["dep:pubky", "dep:futures-util"]
 
 [profile.release]
 lto = "thin"
