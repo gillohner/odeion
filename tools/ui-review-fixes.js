@@ -16,9 +16,9 @@ function external(run){run.external=[];run.page.on('request',(r)=>{const u=new U
 // A collection whose play-from rows are: library, a link card, the same library song again,
 // a Spotify Connect pick (plays_from but no stream: only its canonical page), TIDAL, a
 // second library song and an unavailable row; plus a local-only library track.
-function mixed(){
+function mixed(connectFirst){
  const t1=lib(1),t2=lib(2),t3=lib(3);
- const rows=[
+ let rows=[
   {uri:mb(1),t:t1,p:{track_id:1,stream_uri:'track:1',plays_from:{service:'library',label:'Your library'}}},
   {uri:LINK,link:true,p:{plays_from:null}},
   {uri:mb(1),t:t1,p:{track_id:1,stream_uri:'track:1',plays_from:{service:'library',label:'Your library'}}},
@@ -27,6 +27,8 @@ function mixed(){
   {uri:mb(2),t:t2,p:{track_id:2,stream_uri:'track:2',plays_from:{service:'library',label:'Your library'}}},
   {uri:mb(60),t:null,p:{title:'Nowhere',plays_from:null,reason:'Not on your connected services'}},
  ];
+ // A Connect pick first: Play must still start the rest, never the Connect page alone
+ if(connectFirst)rows=[rows[3],...rows.slice(0,3),...rows.slice(4)];
  const items=rows.map((r)=>({uri:r.uri}));
  const d={summary:{...summary,items:items.length},playlist:{...summary,items},tracks:rows.map((r)=>r.t||null),entries:rows.map((r)=>({kind:r.link?'link':'track',uri:r.uri})),local_tracks:[t3]};
  const pf={order:{order:['library','tidal','spotify'],services:[]},own_order:false,items:rows.map((r,k)=>({index:k,uri:r.uri,sources:[],...r.p}))};
@@ -66,8 +68,8 @@ const cases={
  },
  // M1: a Connect pick has no stream; its canonical page must never become audio.
  async 'm1-connect-omitted'(browser){
-  for(const width of [1280,820,390])for(const how of ['list','detail']){
-   const m=mixed();const run=await create(browser,width,{tracks:m.tracks,collections:[m.d.summary],fixtures:m.fx});external(run);const {page,state}=run;
+  for(const width of [1280,820,390])for(const how of ['list','detail','detail-connect-first']){
+   const m=mixed(how==='detail-connect-first');const run=await create(browser,width,{tracks:m.tracks,collections:[m.d.summary],fixtures:m.fx});external(run);const {page,state}=run;
    if(how==='list'){await go(page,'/playlists');await page.locator('[data-plplay="c1"]').click();}else{await go(page,'/playlist/c1');await page.locator('#plsongs [data-splay]').first().waitFor();await page.locator('#plplay').click();}
    await until(async()=>(await queue(page)).length>0,'browser queue written');await sleep(400);
    const q=await queue(page);const src=(await page.evaluate(()=>pmPlayer.now())).src;
@@ -76,6 +78,7 @@ const cases={
    assert.doesNotMatch(src,/musicbrainz|^https?:\/\/(?!odeion-fixture\.test)/,`${width} ${how}: audio element never loads a canonical page`);
    assert.deepEqual(run.external,[],`${width} ${how}: no third-party request`);
    if(how==='list')assert.match(await page.locator('#toast').innerText(),/1 song plays only through Spotify Connect/,'list Play says what it left out');
+   else assert.match(await page.locator('#toast').innerText(),/left out of this browser's queue/,'detail Play says what it left out');
    assert.deepEqual(state.errors,[]);console.log(`PASS ${width} ${how} Play: Connect row omitted, streams/duplicates/order kept, no canonical audio`);
    await run.context.close();
   }

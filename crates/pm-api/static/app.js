@@ -1902,7 +1902,8 @@
         rememberTracks(d.tracks); rememberTracks(d.local_tracks);
         const elsewhere = new Map();
         const songs = pf.items.flatMap((r, k) => {
-          if (!r.plays_from || ['link', 'post'].includes(d.entries && d.entries[k] && d.entries[k].kind)) return [];
+          if (['link', 'post'].includes(d.entries && d.entries[k] && d.entries[k].kind)) return [];
+          if (!r.plays_from) { elsewhere.set('', (elsewhere.get('') || 0) + 1); return []; }
           const lib = r.plays_from.service === 'library'; const t = lib ? d.tracks[k] : null;
           const song = { uri: r.stream_uri || null, track_id: lib ? (r.track_id ?? (t && t.id)) : null, artists: t ? t.artists : undefined, title: r.title, artist: r.artist, album: r.album, duration_ms: r.duration_ms, image: r.image };
           if (song.track_id != null || song.uri) return [song];
@@ -1910,7 +1911,7 @@
           elsewhere.set(name, (elsewhere.get(name) || 0) + 1); return [];
         });
         const local = (d.local_tracks || []).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms }));
-        const left = [...elsewhere].map(([name, n]) => `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} only through ${name}`).join('; ');
+        const left = [...elsewhere].map(([name, n]) => (name ? `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} only through ${name}` : `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} nowhere you are connected`)).join('; ');
         if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
         // Say what was omitted before starting: a playback failure must remain the last notice.
         if (left) toast(`${left}; left out of this browser's queue`);
@@ -2340,7 +2341,6 @@
   const headline = (p) => p.stages.reduce((w, s) => (ORDER[s.quality] > ORDER[w] ? s.quality : w), 'bit_perfect');
   const albumIdOf = (it) => { const t = state.trackCache.get(it.uri); return t && t.album ? t.album.id : null; };
   // The artists a credit names ("Sefa, Dr. Peacock" → two links), like the node splits them
-  const creditNames = (credit) => String(credit || '').split(/\s*(?:,|;|\/| & | feat\.? | ft\.? | featuring | x | vs\.? )\s*/i).map((x) => x.trim()).filter(Boolean);
   // Credits are identities, not comma-delimited text: a real artist can have
   // commas (or an ampersand) in their name. Only structured library metadata
   // separates people; an unstructured display credit is one safe search link.
@@ -2954,7 +2954,7 @@
     transients.push(tr); pushTransient();
     $('[data-qclose]', d).onclick = () => done();
     d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
-    const qp = $('[data-qplay]', d); if (qp) qp.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('settings', 'playback'); };
+    const qp = $('[data-qplay]', d); if (qp) qp.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('settings', 'playfrom'); };
     const qo = $('[data-qout]', d); if (qo) qo.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     if (svc === 'library') return;
@@ -3980,7 +3980,7 @@
     return ids.map((id, k) => out[k] || got.get(id));
   };
   // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
-  const playSongs =async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
+  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
     const first = songs[k];
     if (first && first.track_id == null && !first.uri && first.page) {
       // A song only known by its link: the resolver finds where it plays.
@@ -5205,7 +5205,15 @@
           $$('[data-lrm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/local/${b.dataset.lrm}`); render(); } catch (er) { toast(er.message, 'error'); } });
           // Cards (web pages, posts) play nowhere: Play and Shuffle play the songs around them
           const playable = (list) => list.filter((t) => !t.unavailable && !t.card);
-          const playAll = (shuffle, anchorEl) => { const list = [...playable(songs), ...localSongs]; return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl); };
+          // In this browser only a library song or a stream plays: a row with neither (a Spotify
+          // Connect pick, a song still being found) is left out and said, as the list's Play does,
+          // never played alone in place of the rest (review of #258)
+          const playAll = (shuffle, anchorEl) => {
+            const all = [...playable(songs), ...localSongs]; const list = all.filter((t) => t.track_id != null || t.uri); const out = all.length - list.length;
+            if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
+            if (out) toast(`${countOf(out, 'songs')} left out of this browser's queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
+            return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
+          };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
           stickyHead(d.summary.name, (el) => (isBrowser() ? playAll(false, el) : playPlaylist(d.summary.id)));
           $('#plshuffle').onclick = (e) => playAll(true, e.currentTarget);

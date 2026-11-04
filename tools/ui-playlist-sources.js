@@ -62,7 +62,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       // Play from is personal and lives in Settings only: no order editor on the playlist page
       check(!(await p.$('#plorder, #plownorder, #plorderopen')), 'no per-playlist Play from editor');
       // global order in Settings
-      await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
+      await p.goto(`${BASE}/settings/playfrom`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);
       check(g === globalBefore.length, `Settings lists the global order (${g})`);
       if (OUT) { await p.$eval('#gordercard', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/settings-play-from-1280-dark.png` }); }
