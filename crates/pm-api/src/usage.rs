@@ -3588,6 +3588,32 @@ mod tests {
             u.flush(1_000 * DAY).unwrap();
             assert!(pages() <= cap, "{} bytes, cap {cap}", pages());
         }
+        // At the cap the oldest make room: the newest batch is kept, and every event is either
+        // kept or counted as evicted (Claude review of 1496871a, L1)
+        let newest = Event::Visit {
+            view: View::Artists,
+            surface: Surface::Page,
+            ms: Ms::Lt1000,
+            exposed: vec![Control::RowPlay],
+            used: vec![],
+            unregistered: 0,
+        };
+        let p = l("a");
+        u.ingest(u.epoch(&p), &p, &a, T1, &vec![newest; 20], 0, t0, 1_000 * DAY)
+            .unwrap();
+        u.flush(1_000 * DAY).unwrap();
+        assert!(pages() <= cap, "{} bytes, cap {cap}", pages());
+        let rows = u.with_store(false, |s| s.rows()).unwrap().unwrap();
+        let kept = rows
+            .iter()
+            .filter(|r| matches!(r.4, Event::Visit { view: View::Artists, .. }))
+            .count();
+        assert_eq!(kept, 20, "the newest batch is kept at the cap");
+        let s = u
+            .summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY)
+            .unwrap();
+        let evicted = s["dropped"]["evicted"].as_u64().unwrap();
+        assert_eq!(rows.len() as u64 + evicted, 40 * 200 + 20, "{s}");
         let tries = VACUUM_TRIES.with(|n| n.get());
         assert!(
             tries <= 1,
@@ -3603,6 +3629,9 @@ mod tests {
         assert_eq!(VACUUM_TRIES.with(|n| n.get()), 1, "one try within the hour");
         let _ = u.housekeep_store(1_000 * DAY + 3_600);
         assert_eq!(VACUUM_TRIES.with(|n| n.get()), 2, "tried again an hour later");
+        // The clock stepped back two hours (NTP): the backoff is over, not three hours longer
+        let _ = u.housekeep_store(1_000 * DAY - 7_200);
+        assert_eq!(VACUUM_TRIES.with(|n| n.get()), 3, "tried again after the clock went back");
         let before = pages();
         let b = open(&u, &l("b"), T2, t0);
         batch(&u, "b", &b, T2);
@@ -3610,6 +3639,30 @@ mod tests {
         assert!(stored(&u) > 0, "events that fit in free pages are kept");
         assert!(pages() <= before.max(cap), "{} bytes, was {before}", pages());
         FAIL_VACUUM.with(|f| f.set(false));
+    }
+
+    /// Claude review of 1496871a, L2: what a Clear takes is gone from the file itself, not left
+    /// readable in its free pages (here the file cannot be compacted).
+    #[test]
+    fn a_clear_leaves_nothing_readable_in_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let a = open(&u, &l("a"), T1, t0);
+        send(&u, &l("a"), T1, &a, 20, t0).unwrap();
+        u.flush(1_000 * DAY).unwrap();
+        let rows = u.with_store(false, |s| s.rows()).unwrap().unwrap();
+        // The event as it is written in the file
+        let needle = serde_json::to_string(&rows[0].4).unwrap().into_bytes();
+        let has = |f: &[u8]| f.windows(needle.len()).any(|w| w == needle.as_slice());
+        assert!(has(&std::fs::read(dir.path().join(FILE)).unwrap()), "in the file first");
+        FAIL_VACUUM.with(|f| f.set(true));
+        u.clear_all(u.epoch(&Person::Owner), t0).unwrap();
+        let _ = u.housekeep_store(1_000 * DAY);
+        FAIL_VACUUM.with(|f| f.set(false));
+        assert_eq!(stored(&u), 0);
+        assert!(!has(&std::fs::read(dir.path().join(FILE)).unwrap()), "gone from the file");
     }
 
     /// Kimi K-L4: two removals of one person the file could not take are one cleanup (the owner's
