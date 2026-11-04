@@ -42,7 +42,8 @@ const OPEN = [
       const also = groups.find((g) => !g.open); const open = groups.find((g) => g.open);
       check(also && also.label === 'Also on' && also.items.length === 1 && also.items[0].tag === 'BUTTON' && also.items[0].aria === 'Switch to Your library', `${w}: "Also on" holds the service that plays here, as a switch (${JSON.stringify(also && also.items)})`);
       check(open && /^Open in/.test(open.label) && open.items.length === 2 && open.items.every((i) => i.tag === 'A' && i.target === '_blank' && i.rel === 'noopener' && /^Open in .* \(new tab\)$/.test(i.aria)), `${w}: "Open in" holds the sites only, each a new-tab link (${JSON.stringify(open && open.items.map((i) => i.aria))})`);
-      check(!(await p.$$eval('.hero .also-ico', (es) => es.some((e) => /^(spotify|apple|library)$/.test(e.title)))), `${w}: tooltips use display names, never the raw id`);
+      const titles = await p.$$eval('.hero .also-ico', (es) => es.map((e) => e.title));
+      check(titles.includes('Switch to Your library') && titles.includes('Open in Spotify (new tab)') && titles.includes('Open in Apple Music (new tab)') && !titles.some((t) => /^(spotify|apple|library|tidal)$/.test(t)), `${w}: tooltips use display names, never a bare raw id (${titles.join(' | ')})`);
       check(!/Open on /.test(await p.textContent('#main')) && (await p.$$eval('#main [aria-label*="Open on "], #main [title*="Open on "]', (es) => es.length)) === 0, `${w}: nothing on the page says "Open on"`);
       // The ⋯ menu: one "Open in…" row, its second menu listing every site; "Also on…" the same way
       await p.click('#imore'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]');
@@ -52,7 +53,15 @@ const OPEN = [
       await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: 'Open in…' }).click(); await sleep(300);
       const sub = await p.$$eval('.popover.menu:not([hidden]) [data-mi], .popover.menu:not([hidden]) .pop-title', (es) => es.map((e) => e.textContent.trim()));
       check(sub[0] === 'Open in' && sub.slice(1).length === 4 && ['Spotify', 'Amazon Music', 'Apple Music', 'Discogs'].every((n) => sub.includes(n)), `${w}: the second menu lists every site (${sub.join(' | ')})`);
-      await p.keyboard.press('Escape'); await sleep(200);
+      // The second menu has its own Back step: Back closes it and the page stays where it was
+      await p.goBack(); await sleep(400);
+      check(await p.$eval('.popover.menu', (m) => m.hidden) && /\/album\/tidal-5$/.test(p.url()), `${w}: Back closes the second menu and the page stays (${new URL(p.url()).pathname})`);
+      // "Also on…" in the menu, then its row: the service's page here
+      await p.click('#imore'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]');
+      await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: 'Also on…' }).click(); await sleep(400);
+      await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: 'Your library' }).click();
+      check(await until(async () => /\/album\/lib-9$/.test(p.url()), 8000), `${w}: the menu's Also on › Your library switches to the page here`);
+      await p.goto(BASE + '/album/tidal-5'); await p.waitForSelector('.hero .actions', { timeout: 20000 });
       // Switching: "Also on" opens the service's page here, no new tab
       const pagesBefore = ctx.pages().length;
       await p.click('.hero .also-icons:not(.open-in) .also-ico'); await until(async () => /\/album\/lib-9$/.test(p.url()), 8000);
@@ -62,6 +71,13 @@ const OPEN = [
       await p.click('#imore'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]');
       const rows2 = await p.$$eval('.popover.menu:not([hidden]) [data-mi]', (bs) => bs.map((b) => b.textContent.trim()));
       check(rows2.includes('Open in Discogs') && !rows2.includes('Open in…'), `${w}: one site is a direct "Open in Discogs" row (${rows2.filter((r) => /Open/.test(r)).join(' | ')})`);
+      await p.keyboard.press('Escape'); await sleep(200);
+      // A song page has no icon row, so no "Also on…" in its menu
+      await p.route(/\/v1\/item\/song\/tidal-1$/, (r) => r.fulfill({ json: page('song', 'tidal-1', 'One', { also_on: [ALSO[0]], open_on: [OPEN[0]], link: 'https://tidal.com/track/1' }) }));
+      await p.goto(BASE + '/song/tidal-1'); await p.waitForSelector('.hero .actions', { timeout: 20000 });
+      await p.click('#imore'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]');
+      const rows3 = await p.$$eval('.popover.menu:not([hidden]) [data-mi]', (bs) => bs.map((b) => b.textContent.trim()));
+      check(!rows3.includes('Also on…') && rows3.includes('Open in Spotify'), `${w}: a song page's menu has no "Also on…" (no icon row there), its one site a direct row`);
       await p.keyboard.press('Escape');
       check(errors.length === 0, `${w}: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
