@@ -601,3 +601,28 @@ async fn a_slow_transcode_fails_only_its_song() {
     let r = pm_offline::sync(&store, &node, &opts()).await.unwrap();
     assert_eq!(r.downloaded, [1]);
 }
+
+/// The page names the install script and its styles (pm-api pwa.js, pwa.css): the device keeps
+/// them with the page, so its offline copy loads them as what they are, not as the page.
+#[tokio::test]
+async fn the_offline_page_keeps_its_install_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    std::fs::write(dir.path().join("ui/index.html"), "<html>the web UI</html>").unwrap();
+    std::fs::write(dir.path().join("ui/pwa.js"), "console.log('pwa')").unwrap();
+    std::fs::write(dir.path().join("ui/pwa.css"), ".install-btn{}").unwrap();
+    let (addr, _task) = pm_offline::server::serve(store).await.unwrap();
+    let me = format!("127.0.0.1:{}", addr.port());
+    for (path, body, mime) in [
+        ("/pwa.js", "console.log('pwa')", "text/javascript"),
+        ("/pwa.css", ".install-btn{}", "text/css"),
+    ] {
+        let r = raw_get(addr, path, &me).await;
+        assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+        assert!(
+            r.to_lowercase().contains(&format!("content-type: {mime}")),
+            "{path}: {r}"
+        );
+        assert!(r.ends_with(body), "{path}: {r}");
+    }
+}

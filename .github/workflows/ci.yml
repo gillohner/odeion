@@ -374,6 +374,8 @@ jobs:
           node-version: 22
       - name: design lint (classed buttons, no icon glyphs, every class styled)
         run: node tools/design-lint.js
+      - name: installable web app (manifest, real icons, page links, routes, worker promises)
+        run: node tools/pwa-check.js
       - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |
@@ -400,6 +402,7 @@ jobs:
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
+          node $GITHUB_WORKSPACE/tools/ui-pwa.js $GITHUB_WORKSPACE
       - name: 'no developer-console link in the docs outside "Advanced: use your own app"'
         run: python3 -I tools/console-links.py
       - name: no client secret, private key or keystore in the repository or the binary
@@ -414,8 +417,24 @@ jobs:
             nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:7791/v1/info >/dev/null && break; sleep 1; done
           node $GITHUB_WORKSPACE/tools/ui-tidal-login.js http://127.0.0.1:7791 7811
+      - name: installable web app in a real Chromium (fixture node; CDP install checks with negative controls, worker privacy, offline/5xx/silent node, account switch)
+        # a normal run takes about two minutes; a broken harness must not hold the runner
+        timeout-minutes: 10
+        run: |
+          mkdir -p /tmp/pwa/data /tmp/pwa/music /tmp/pwa/home && cp crates/pm-audio/tests/fixtures/*.flac /tmp/pwa/music/
+          printf 'data_dir = "/tmp/pwa/data"\n[library]\nfolders = ["/tmp/pwa/music"]\n[api]\nlisten = "0.0.0.0:7841"\ntoken = "ci-pwa-token"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n' > /tmp/pwa/node.toml
+          cd /tmp/pw && npm install --no-audit --no-fund @noble/hashes@1.5.0 >/dev/null
+          SQLITE=$(node -e "try { require('node:sqlite') } catch { process.stdout.write('--experimental-sqlite') }")
+          node $SQLITE $GITHUB_WORKSPACE/tools/ui-pwa-browser.js ci-pwa-token http://127.0.0.1:7841 /tmp/pwa/out \
+            --lan "http://$(hostname -I | awk '{print $1}'):7841" --data /tmp/pwa/data \
+            -- env HOME=/tmp/pwa/home $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/pwa/node.toml serve
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pwa-browser
+          path: /tmp/pwa/out
       - if: failure()
-        run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true
+        run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   speed:
     # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan

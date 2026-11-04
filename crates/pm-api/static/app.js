@@ -743,9 +743,10 @@
       else if ((e.key === ' ' || e.key === 'Enter') && !t.busy) { e.preventDefault(); tick(p); }
     };
     // ---- artists and albums: a search over the library's lists ----
-    const lists = { artists: null, albums: null };
+    // `lists` holds only whole lists; `partial` the one paging in now, drawn as it grows
+    const lists = { artists: null, albums: null }; const partial = { artists: null, albums: null };
     const pickList = (kind) => {
-      const all = lists[kind]; const box = $('#cplist', d); if (!box || !all) return;
+      const all = lists[kind] || partial[kind]; const box = $('#cplist', d); if (!box || !all) return;
       const q = ($('#cpq', d).value || '').trim().toLowerCase();
       const hit = (x) => !q || String(kind === 'artists' ? x.name : `${x.title} ${x.album_artist || x.artist || ''}`).toLowerCase().includes(q);
       const rows = []; for (const x of all) { if (hit(x)) rows.push(x); if (rows.length >= 30) break; }
@@ -758,24 +759,33 @@
       try {
         if (kind === 'artists') lists.artists = await api('GET', '/library/artists');
         else {
-          // The node gives at most 1 000 albums an answer: page on with `after`, the list growing
-          // A list left part way (another choice, or a failed page) is dropped, so the next look
-          // loads it whole
-          let after = null; lists.albums = [];
+          // The node gives at most 1 000 albums an answer: page on with `after`, the list growing.
+          // Only the newest load may draw, and only a whole list is kept: one left part way
+          // (another choice, a failed page) loads whole next time
+          let after = null; let got = []; partial.albums = null;
           for (;;) {
-            let page; try { page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`); } catch (e) { lists.albums = null; throw e; }
-            if (gen !== loadGen) { lists.albums = null; return; }
-            lists.albums = lists.albums.concat(page); pickList(kind);
+            const page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`);
+            if (gen !== loadGen) return;
+            got = got.concat(page); partial.albums = got; pickList(kind);
             if (page.length < 1000 || !page.length) break;
             after = page[page.length - 1].id;
           }
+          lists.albums = got; partial.albums = null;
         }
-      } catch (e) { if (gen === loadGen && box.isConnected) box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; const b = $('#cplretry', d); if (b) b.onclick = () => loadList(kind); return; }
+      } catch (e) {
+        // Only the newest load answers: the part it had goes (a search would draw it over the
+        // error), and its Try again is the one bound
+        if (gen !== loadGen) return;
+        partial[kind] = null;
+        if (box.isConnected) { box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; $('#cplretry', d).onclick = () => loadList(kind); }
+        return;
+      }
       if (gen === loadGen) pickList(kind);
     };
     let loadGen = 0;
     // ---- the panel for each choice ----
     const drawPanel = () => {
+      loadGen++; // a list still loading for the last choice draws nothing more
       // A node without the folder list: Folders goes, and the choice (and the focus) moves on
       const fell = pick.mode === 'folders' && t.missing;
       if (fell) pick.mode = preset ? 'preset' : 'all';
@@ -956,7 +966,7 @@
   // the space it keeps free running out, failures in a row), never shown as done
   const jobCancelled = (p) => !!(p.cancelled || p.state === 'cancelled');
   const jobStopped = (p) => jobDone(p) && (jobCancelled(p) || p.state === 'failed' || !!p.stopped_reason || !!p.full);
-  const jobStopWhy = (p) => p.stopped_reason || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
+  const jobStopWhy = (p) => p.stopped_reason || (p.state === 'failed' && p.error) || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
   const jobStopShort = (p) => (jobCancelled(p) && !p.stopped_reason ? 'Cancelled' : /space|full|reserve|room/i.test(jobStopWhy(p)) ? 'Stopped: full' : /in a row/i.test(jobStopWhy(p)) ? 'Stopped: failures' : 'Stopped');
   const jobTitle = (p) => (p.kind === 'import' ? (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
     ? (jobDone(p) ? (jobStopped(p) ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
@@ -4032,7 +4042,7 @@
     $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = all[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
-  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a), true)}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div>${coverFrom(coverSvc(a))}</button>`).join('')}</div>`;
+  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a), true)}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${esc(a.year || '')}</div>${coverFrom(coverSvc(a))}</button>`).join('')}</div>`;
   const bindItemTiles = (box, tiles, kind) => {
     $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; setView('item', { kind, id: tiles[Number(b.dataset.tile)].id }); });
     $$('[data-tileplay]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { const pg = await api('GET', `/item/${kind}/${tiles[Number(b.dataset.tileplay)].id}`); playSongs(pg.songs, 0, 'replace', pg.plays_from, b, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } });

@@ -11,17 +11,19 @@
 <meta name="theme-color" content="#f5f5f8" media="(prefers-color-scheme: light)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Pubky Music">
-<link rel="manifest" href="/manifest.webmanifest">
+<meta name="apple-mobile-web-app-title" content="Odeion">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/pwa.css">
+<script src="/pwa.js"></script>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-mark" aria-hidden="true"><svg class="ic" viewBox="0 0 512 512"><use href="#i-odeion"/></svg></span>
       <span class="brand-name">Pubky Music</span>
     </div>
     <nav class="nav" aria-label="Main">
@@ -142,6 +144,7 @@
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
+    <symbol id="i-odeion" viewBox="0 0 512 512"><g fill="none" stroke="currentColor" stroke-width="25" stroke-linecap="round"><path d="M 394.36055 224.05695 A 142 142 0 1 1 333.33874 136.90878"/><path d="M 347.59079 234.85460 A 94 94 0 1 1 307.19607 177.16497"/><path d="M 300.82102 245.65225 A 46 46 0 1 1 281.05340 217.42115"/></g></symbol>
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 8a4.3 4.3 0 0 1 7.5 2.5c0 5.4-7.5 10-7.5 10z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
     <symbol id="i-heart-fill" viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 8a4.3 4.3 0 0 1 7.5 2.5c0 5.4-7.5 10-7.5 10z" fill="currentColor"/></symbol>

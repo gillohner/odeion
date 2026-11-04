@@ -1,0 +1,20 @@
+{
+  "name": "Odeion",
+  "mark": "groove-O: an O cut into three sound grooves",
+  "approved": "2026-11-03, by the project owner (logo preview reply); designs owned and supplied by the Hermes coordinator",
+  "background": "#0f1014",
+  "foreground": "#a496ff",
+  "safe_zone": "the whole mark lies within radius 157 of a 512 px canvas (maskable safe zone is radius 204.8)",
+  "sources": {
+    "odeion-mark.svg": "5d2f3066b44d1217d2ff28d19c5f34365f335496d676853a99b8d46a8fcbbd43",
+    "odeion-app-icon.svg": "6e85a81627a930364c8acb3dfd917748b73d12b28f0d781ec6dd3d2877bd7a40",
+    "odeion-logo-preview.png": "650f03a10e0e975e7bb0831b51cadbdee281824ab76abb269f8a1f443e5ef4a4"
+  },
+  "installed": {
+    "crates/pm-api/static/icon.svg": { "from": "odeion-app-icon.svg", "sha256": "6e85a81627a930364c8acb3dfd917748b73d12b28f0d781ec6dd3d2877bd7a40", "size": "512x512 viewBox" },
+    "crates/pm-api/static/apple-touch-icon.png": { "from": "odeion-icon-180.png", "sha256": "81b1968252c450118a0521d7a7eacd72afb13f120670df3325a9b29709d72093", "size": "180x180" },
+    "crates/pm-api/static/icon-192.png": { "from": "odeion-icon-192.png", "sha256": "79db010282923ea7e73e3a088d7937649a13b16901b97af2b048d66eace85591", "size": "192x192" },
+    "crates/pm-api/static/icon-512.png": { "from": "odeion-icon-512.png", "sha256": "1bc33c45bc58b339ffc52da4214695d257cf4eb3f4df3056c3a3b20903c5b16a", "size": "512x512" },
+    "crates/pm-api/static/icon-maskable-512.png": { "from": "odeion-maskable-512.png", "sha256": "1bc33c45bc58b339ffc52da4214695d257cf4eb3f4df3056c3a3b20903c5b16a", "size": "512x512" }
+  }
+}

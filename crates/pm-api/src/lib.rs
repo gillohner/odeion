@@ -806,6 +806,59 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/app.js", get(web_js))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
+        // Installing the web app (docs/guides/install-web-app.md): public like the page
+        .route(
+            "/pwa.js",
+            get(|| async { install_file(INSTALL_JS, "no-cache", include_bytes!("../static/pwa.js")) }),
+        )
+        .route(
+            "/pwa.css",
+            get(|| async { install_file(INSTALL_CSS, "no-cache", include_bytes!("../static/pwa.css")) }),
+        )
+        .route(
+            "/sw.js",
+            get(|| async { install_file(INSTALL_JS, "no-cache", include_bytes!("../static/sw.js")) }),
+        )
+        .route(
+            "/icon-192.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/icon-192.png"),
+                )
+            }),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/icon-512.png"),
+                )
+            }),
+        )
+        .route(
+            "/icon-maskable-512.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/icon-maskable-512.png"),
+                )
+            }),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/apple-touch-icon.png"),
+                )
+            }),
+        )
         .nest("/v1", v1)
         // Reached without a bearer token: the OAuth redirect target and the
         // Pubky Ring sign-in that hands the token out.
@@ -1078,9 +1131,26 @@ async fn web_icon() -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::CACHE_CONTROL, INSTALL_ICON_CACHE),
         ],
         include_str!("../static/icon.svg"),
+    )
+        .into_response()
+}
+
+const INSTALL_JS: &str = "text/javascript; charset=utf-8";
+const INSTALL_CSS: &str = "text/css; charset=utf-8";
+const INSTALL_PNG: &str = "image/png";
+/// The icons keep their file names when the picture changes (the Odeion logo replaced the old
+/// one), so browsers ask again every time instead of keeping a day-old icon.
+const INSTALL_ICON_CACHE: &str = "no-cache";
+
+/// One of the installable web app's files: the install script and its styles, the service
+/// worker (never cached by HTTP, so a changed one reaches browsers at once) and the icons.
+fn install_file(mime: &'static str, cache: &'static str, body: &'static [u8]) -> Response {
+    (
+        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
+        body,
     )
         .into_response()
 }
@@ -17296,6 +17366,62 @@ exec sleep 300
             .unwrap();
         let r = app.clone().oneshot(req).await.unwrap();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
+    }
+
+    /// The installable web app (docs/guides/install-web-app.md): a browser installs it before
+    /// anyone signs in, so the manifest, its icons, the install script and the service worker
+    /// load without a token, with the types browsers insist on; the worker is never cached by
+    /// HTTP, so a fixed one reaches every browser at its next visit.
+    #[tokio::test]
+    async fn install_files_load_without_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s);
+        for (path, mime, cache) in [
+            ("/manifest.webmanifest", "application/manifest+json", "no-cache"),
+            ("/icon.svg", "image/svg+xml", "no-cache"),
+            ("/icon-192.png", "image/png", "no-cache"),
+            ("/icon-512.png", "image/png", "no-cache"),
+            ("/icon-maskable-512.png", "image/png", "no-cache"),
+            ("/apple-touch-icon.png", "image/png", "no-cache"),
+            ("/pwa.js", "text/javascript; charset=utf-8", "no-cache"),
+            ("/pwa.css", "text/css; charset=utf-8", "no-cache"),
+            ("/sw.js", "text/javascript; charset=utf-8", "no-cache"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], mime, "{path}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], cache, "{path}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            if mime == "image/png" {
+                assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} is a PNG");
+            } else {
+                assert!(!body.is_empty(), "{path}");
+            }
+        }
+        // The page names them, and its policy lets the node's own worker run
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.starts_with("script-src 'self'"), "{csp}");
+        assert!(
+            !csp.contains("worker-src") && !csp.contains("default-src"),
+            "{csp}"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let page = std::str::from_utf8(&body).unwrap();
+        assert!(page.contains(r#"<script src="/pwa.js"></script>"#));
+        assert!(page.contains(r#"<link rel="apple-touch-icon" href="/apple-touch-icon.png">"#));
     }
 
     // Identification review, completion and reuse (their own file: fewer shared lines here)
