@@ -796,8 +796,12 @@ struct Inner {
     forced_off: bool,
     /// People whose Stop (or other choice) could not be saved yet.
     unsaved_prefs: BTreeSet<Person>,
-    /// Removed people whose rows and choice the file could not delete yet: (person, aliases).
+    /// Removed people whose rows and choice the file could not delete yet: (person, aliases),
+    /// one entry per person.
     cleanup_pending: Vec<(Person, Vec<String>)>,
+    /// People who stopped before their stored choice could be read: it is merged in (the choice
+    /// generation past both) before anything of theirs is saved.
+    prefs_unread: BTreeSet<Person>,
 }
 
 /// Why something was refused (each a fixed answer, never the input).
@@ -978,6 +982,17 @@ impl Store {
             .map_err(storage)
     }
 
+    /// The switch and its generation, together or not at all.
+    fn set_switch(&mut self, on: bool, generation: u64) -> Result<(), Refusal> {
+        let tx = self.conn.transaction().map_err(storage)?;
+        set_meta(&tx, "on", if on { "1" } else { "0" })?;
+        set_meta(&tx, "generation", &generation.to_string())?;
+        if on {
+            set_meta(&tx, "enabled_at", &unix_now().to_string())?;
+        }
+        tx.commit().map_err(storage)
+    }
+
     fn forget_pref(&self, p: &Person) -> Result<(), Refusal> {
         self.conn
             .execute("DELETE FROM pref WHERE person = ?1", [self.person_id(p)])
@@ -1066,9 +1081,15 @@ impl Store {
             if count <= limits.max_events && on_disk <= limits.max_store_bytes {
                 break;
             }
-            // Only free pages (or the journal) are over: give them back first, once
+            // Only free pages (or the journal) are over: give them back first, once. Without room
+            // for its copy that fails: the rows stay, and the writer takes no more until it works
             if count <= limits.max_events && live <= limits.max_store_bytes && !compacted {
-                self.vacuum()?;
+                if self.vacuum().is_err() {
+                    tracing::warn!(
+                        "usage insights: the file could not be compacted; no more events until it can"
+                    );
+                    break;
+                }
                 compacted = true;
                 continue;
             }
@@ -1120,7 +1141,8 @@ impl Store {
                 .map_err(storage)?,
         );
         if page_count > 0 && free * 4 > page_count {
-            self.vacuum()?;
+            // Best effort: the cap does not depend on it
+            let _ = self.vacuum();
         }
         Ok(evicted)
     }
@@ -1509,15 +1531,43 @@ impl Usage {
     }
 
     fn pref_of(&self, inner: &mut Inner, p: &Person) -> Result<Pref, Refusal> {
-        if let Some(pref) = inner.prefs.get(p) {
-            return Ok(*pref);
+        if let Some(pref) = inner.prefs.get(p).copied() {
+            if !inner.prefs_unread.contains(p) {
+                return Ok(pref);
+            }
+            // A Stop made before their stored choice could be read: merged once it can be, its
+            // choice generation past both (so no page from before matches); saved later
+            return Ok(match self.with_store(false, |s| s.pref(p)) {
+                Ok(stored) => {
+                    let stored = stored.unwrap_or_default();
+                    let merged = Pref {
+                        stopped: pref.stopped,
+                        choice: pref.choice.max(stored.choice + 1),
+                        notice_seen: pref.notice_seen.max(stored.notice_seen),
+                    };
+                    inner.prefs.insert(p.clone(), merged);
+                    inner.prefs_unread.remove(p);
+                    inner.unsaved_prefs.insert(p.clone());
+                    merged
+                }
+                Err(_) => pref,
+            });
         }
-        let pref = self.with_store(false, |s| s.pref(p))?.unwrap_or_default();
+        // Removed and not yet forgotten in the file: that old row is no longer theirs
+        let pref = if inner.cleanup_pending.iter().any(|(q, _)| q == p) {
+            Pref::default()
+        } else {
+            self.with_store(false, |s| s.pref(p))?.unwrap_or_default()
+        };
         inner.prefs.insert(p.clone(), pref);
         Ok(pref)
     }
 
     fn save_pref(&self, inner: &mut Inner, p: &Person, pref: Pref) -> Result<(), Refusal> {
+        // Never over a stored choice not read yet (it could take the choice generation back)
+        if inner.prefs_unread.contains(p) {
+            return Err(Refusal::Storage);
+        }
         self.with_store(true, |s| s.set_pref(p, pref))?;
         inner.prefs.insert(p.clone(), pref);
         inner.unsaved_prefs.remove(p);
@@ -1578,83 +1628,83 @@ impl Usage {
     pub fn forget_listener(&self, key: &str) {
         let p = Person::Listener(key.trim_start_matches("pubky").to_string());
         let _w = self.writing.lock().unwrap_or_else(|e| e.into_inner());
-        let theirs: Vec<String> = {
-            let mut inner = self.lock();
-            *inner.epochs.entry(p.clone()).or_default() += 1;
-            Self::end_aliases(&mut inner, |a| a.person == p, Instant::now());
-            let theirs: BTreeSet<String> = inner
-                .ended
-                .iter()
-                .filter(|(_, (q, _))| q == &p)
-                .map(|(id, _)| id.clone())
-                .collect();
-            inner.pending.retain(|r| !theirs.contains(&r.alias));
-            inner.ended.retain(|_, (q, _)| q != &p);
-            inner.prefs.remove(&p);
-            inner.unsaved_prefs.remove(&p);
-            theirs.into_iter().collect()
-        };
-        if self.forget_in_file(&p, &theirs).is_err() {
+        let mut inner = self.lock();
+        *inner.epochs.entry(p.clone()).or_default() += 1;
+        Self::end_aliases(&mut inner, |a| a.person == p, Instant::now());
+        let theirs: BTreeSet<String> = inner
+            .ended
+            .iter()
+            .filter(|(_, (q, _))| q == &p)
+            .map(|(id, _)| id.clone())
+            .collect();
+        inner.pending.retain(|r| !theirs.contains(&r.alias));
+        inner.ended.retain(|_, (q, _)| q != &p);
+        inner.prefs.remove(&p);
+        inner.unsaved_prefs.remove(&p);
+        inner.prefs_unread.remove(&p);
+        let theirs: Vec<String> = theirs.into_iter().collect();
+        let done = self.with_store(false, |s| {
+            s.clear_aliases(&theirs)?;
+            s.forget_pref(&p)
+        });
+        if done.is_err() {
             // Not forgotten: tried again by housekeeping until it is (the owner's status counts
             // it). A restart before that leaves the rows linked to no one, until retention
             tracing::warn!("usage insights: a removed person's rows could not be deleted yet; trying again");
-            self.lock().cleanup_pending.push((p, theirs));
+            match inner.cleanup_pending.iter().position(|(q, _)| q == &p) {
+                Some(i) => inner.cleanup_pending[i].1.extend(theirs),
+                None => inner.cleanup_pending.push((p, theirs)),
+            }
         }
-    }
-
-    fn forget_in_file(&self, p: &Person, aliases: &[String]) -> Result<(), Refusal> {
-        self.with_store(false, |s| {
-            s.clear_aliases(aliases)?;
-            s.forget_pref(p)
-        })
-        .map(|_| ())
     }
 
     /// Saves what could not be saved before, and deletes what a removal could not delete: an
     /// Off, people's choices, removed people's rows. Each stays on its list until it succeeds.
+    /// Every change of the switch and of people's choices takes `writing` too, and each retry
+    /// writes under `inner`: a retry never writes over a later change.
     fn retry_unsaved(&self) {
         let _w = self.writing.lock().unwrap_or_else(|e| e.into_inner());
-        let (cleanups, forced, generation, prefs) = {
-            let inner = self.lock();
-            let prefs: Vec<(Person, Pref)> = inner
-                .unsaved_prefs
-                .iter()
-                .filter_map(|p| inner.prefs.get(p).map(|pref| (p.clone(), *pref)))
-                .collect();
-            (
-                inner.cleanup_pending.clone(),
-                inner.forced_off && inner.loaded,
-                inner.node_generation,
-                prefs,
-            )
-        };
         #[cfg(test)]
         if let Some(pause) = self.retry_pause.lock().unwrap_or_else(|e| e.into_inner()).take() {
             pause();
         }
-        for (p, aliases) in cleanups {
-            if self.forget_in_file(&p, &aliases).is_ok() {
-                self.lock().cleanup_pending.retain(|(q, _)| q != &p);
-            }
-        }
-        if forced {
-            let saved = self.with_store(false, |s| {
-                set_meta(&s.conn, "on", "0")?;
-                set_meta(&s.conn, "generation", &generation.to_string())
+        let mut inner = self.lock();
+        for (p, aliases) in inner.cleanup_pending.clone() {
+            // Invited again since: what they chose since then is theirs, in place of the old row
+            let now = inner.prefs.get(&p).copied();
+            let done = self.with_store(false, |s| {
+                s.clear_aliases(&aliases)?;
+                match now {
+                    Some(pref) => s.set_pref(&p, pref),
+                    None => s.forget_pref(&p),
+                }
             });
-            if saved.is_ok() {
-                let mut inner = self.lock();
-                if inner.node_generation == generation {
-                    inner.forced_off = false;
+            if done.is_ok() {
+                inner.cleanup_pending.retain(|(q, _)| q != &p);
+                if now.is_some() {
+                    inner.unsaved_prefs.remove(&p);
+                    inner.prefs_unread.remove(&p);
                 }
             }
         }
-        for (p, pref) in prefs {
-            if self.with_store(true, |s| s.set_pref(&p, pref)).is_ok() {
-                let mut inner = self.lock();
-                if inner.prefs.get(&p).is_some_and(|now| now.choice == pref.choice) {
-                    inner.unsaved_prefs.remove(&p);
-                }
+        if inner.forced_off && inner.loaded {
+            let generation = inner.node_generation;
+            if self
+                .with_store(false, |s| s.set_switch(false, generation))
+                .is_ok()
+            {
+                inner.forced_off = false;
+            }
+        }
+        let unsaved: Vec<Person> = inner.unsaved_prefs.iter().cloned().collect();
+        for p in unsaved {
+            if !inner.prefs.contains_key(&p) {
+                inner.unsaved_prefs.remove(&p);
+                continue;
+            }
+            // An unread Stop is merged with the stored choice first (and stays unsaved until it can be)
+            if let Ok(pref) = self.pref_of(&mut inner, &p) {
+                let _ = self.save_pref(&mut inner, &p, pref);
             }
         }
     }
@@ -1729,7 +1779,12 @@ impl Usage {
         always: bool,
     ) -> Result<std::sync::MutexGuard<'_, Inner>, Refusal> {
         let mut inner = self.lock();
-        Self::check(&inner, at, p)?;
+        if always {
+            // A Clear on the way never refuses a Stop or an Off; a sign-in that ended does
+            Self::check_revoked(&inner, at, p)?;
+        } else {
+            Self::check(&inner, at, p)?;
+        }
         self.expire(&mut inner, now);
         match self.load(&mut inner) {
             Ok(()) => Ok(inner),
@@ -1741,11 +1796,17 @@ impl Usage {
     /// Whether nothing that refuses a request let in at `at` happened since: a credential of `p`
     /// or everyone's ended, or Clear mine or Clear all.
     fn check(inner: &Inner, at: Epoch, p: &Person) -> Result<(), Refusal> {
-        if inner.all_epoch != at.all || inner.epochs.get(p).copied().unwrap_or(0) != at.person {
-            return Err(Refusal::Revoked);
-        }
+        Self::check_revoked(inner, at, p)?;
         if inner.clear_all != at.clear_all || inner.clears.get(p).copied().unwrap_or(0) != at.clear_person {
             return Err(Refusal::Cleared);
+        }
+        Ok(())
+    }
+
+    /// Whether no credential of `p` (or everyone's) ended since `at`.
+    fn check_revoked(inner: &Inner, at: Epoch, p: &Person) -> Result<(), Refusal> {
+        if inner.all_epoch != at.all || inner.epochs.get(p).copied().unwrap_or(0) != at.person {
+            return Err(Refusal::Revoked);
         }
         Ok(())
     }
@@ -1826,6 +1887,8 @@ impl Usage {
         shown: Option<u64>,
         now: Instant,
     ) -> Result<Status, Refusal> {
+        // With the writer held: housekeeping's retry of an earlier Off never writes over this
+        let _w = self.writing.lock().unwrap_or_else(|e| e.into_inner());
         let mut inner = self.guard_off(at, &Person::Owner, now, !on)?;
         let mut saved = true;
         if !on {
@@ -1840,21 +1903,14 @@ impl Usage {
             // saves it with a generation past the file's
             saved = loaded
                 && self
-                    .with_store(was_on, |s| {
-                        set_meta(&s.conn, "on", "0")?;
-                        set_meta(&s.conn, "generation", &generation.to_string())
-                    })
+                    .with_store(was_on, |s| s.set_switch(false, generation))
                     .is_ok();
             inner.forced_off = !saved;
         } else if shown != Some(inner.node_generation) {
             return Err(Refusal::Stale);
         } else if !inner.node_on {
             let generation = inner.node_generation + 1;
-            self.with_store(true, |s| {
-                set_meta(&s.conn, "on", "1")?;
-                set_meta(&s.conn, "generation", &generation.to_string())?;
-                set_meta(&s.conn, "enabled_at", &unix_now().to_string())
-            })?;
+            self.with_store(true, |s| s.set_switch(true, generation))?;
             inner.node_on = true;
             inner.node_generation = generation;
             inner.forced_off = false;
@@ -1899,8 +1955,11 @@ impl Usage {
         let mut inner = self.guard_off(at, p, now, !share)?;
         let mut pref = match self.pref_of(&mut inner, p) {
             Ok(pref) => pref,
-            // Stop never waits for the file
-            Err(_) if !share => inner.prefs.get(p).copied().unwrap_or_default(),
+            // Stop never waits for the file; the stored choice is merged in once it can be read
+            Err(_) if !share => {
+                inner.prefs_unread.insert(p.clone());
+                Pref::default()
+            }
             Err(e) => return Err(e),
         };
         if !share {
@@ -1936,6 +1995,8 @@ impl Usage {
         if version == 0 || version > NOTICE_VERSION {
             return Err(Refusal::Schema);
         }
+        // With the writer held: housekeeping's retry of an earlier choice never writes over this
+        let _w = self.writing.lock().unwrap_or_else(|e| e.into_inner());
         let mut inner = self.guard(at, p, now)?;
         let mut pref = self.pref_of(&mut inner, p)?;
         if pref.notice_seen < version {
@@ -2157,11 +2218,27 @@ impl Usage {
             return Ok(0);
         }
         let n = rows.len();
-        let written = self.with_store(true, |s| {
-            s.write(&rows, &opens, dropped)?;
+        let limits = &self.limits;
+        let over = |s: &Store| -> Result<bool, Refusal> {
             let (count, bytes) = s.size()?;
-            if count > self.limits.max_events || bytes > self.limits.max_store_bytes {
-                s.housekeep(unix, &self.limits)?;
+            Ok(count > limits.max_events || bytes > limits.max_store_bytes)
+        };
+        let written = self.with_store(true, |s| {
+            let mut rows: &[Row] = &rows;
+            let mut dropped = dropped;
+            // Still over the cap (it could not be compacted): tried again, and while it stays
+            // over, events are not written (counted as evicted) so the file never grows past it
+            if over(s)? {
+                let _ = s.housekeep(unix, limits);
+                if over(s)? {
+                    dropped.evicted += rows.len() as u64;
+                    rows = &[];
+                }
+            }
+            s.write(rows, &opens, dropped)?;
+            // Written: what happens next is never a failure to write them
+            if over(s).unwrap_or(false) {
+                let _ = s.housekeep(unix, limits);
             }
             Ok(())
         });

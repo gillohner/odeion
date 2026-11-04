@@ -30,8 +30,9 @@ In **Settings › You › Privacy › Usage insights**, and from the help menu:
 
 - **Stop for me** applies at once, on every browser you are signed in with, even if the node can't
   save it right then: it says so, and saves it as soon as it can (a restart before that would
-  forget it). What your browser sent and the node had not written yet is not written, and nothing
-  it was still sending lands afterwards. You can turn it back on there.
+  forget it). A Clear at the same moment never refuses it. What your browser sent and the node had
+  not written yet is not written, and nothing it was still sending lands afterwards. You can turn it
+  back on there.
 - **Clear mine** deletes the raw events still linked to you: those of your open browsers and of
   up to 200 closed within the last day. Older events are no longer linked to anyone (see below)
   and go when they expire. The daily counts (how many pages, buttons and page loads a day, with no
@@ -74,6 +75,13 @@ times to a person. To make that harder, times are kept to the minute only, and a
 hours at most. People's Stop choices are stored under a hashed key; someone holding the file who
 knows the listeners' keys can still tell who chose Stop.
 
+When the owner removes a listener, their choice and the events still linked to them are deleted.
+If the file can't take that right then, the node tries again until it can (the owner's status
+counts the people waiting for it). Should the node restart before that, the events are no longer
+linked to anyone and go with retention, and the old choice stays in the file under its hashed key:
+if the same person is invited again it applies to them again. It is never more than they chose, a
+Stop or the default.
+
 ## Where it is kept, and for how long
 
 In `usage.sqlite` in the node's data folder, readable only by the node's user (0600). The file is made when the owner first turns usage insights on, or when someone first records a choice (Stop, or that they read the notice); until the switch is on it holds only those choices. It is never in
@@ -82,7 +90,9 @@ a backup or a restore, and never copied to a homeserver.
 - Raw events: 14 days.
 - Daily counts: 90 days.
 - At most 400 000 events and 64 MiB on disk (the file with its journal). Over that, free space is
-  given back first, then the oldest day goes.
+  given back first, then the oldest day goes. When free space can't be given back (that needs room
+  on the disk for a copy of the file), no more events are written until it can: they are counted
+  as evicted, and the file does not grow past the cap.
 - Times are kept to the minute.
 - One person can have at most 8 browsers taking part at once and open 30 a minute, so nobody can
   crowd out anyone else.
