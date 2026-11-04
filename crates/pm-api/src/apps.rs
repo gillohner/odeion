@@ -191,17 +191,36 @@ fn current(s: &NodeState, id: &str) -> OwnApp {
     }
 }
 
+/// The services in [`OWN`] whose app node.toml or the environment sets. Recorded once, before
+/// any of the admin's own apps is applied (at start, or at the first look), while what is in use
+/// is node.toml's or this build's own; never guessed later from client ids, which a restored
+/// backup changes (review of #149: an own app then read as node.toml's, and a change got 409).
+fn from_config(s: &NodeState) -> &[&'static str] {
+    s.apps_from_config.get_or_init(|| {
+        OWN.into_iter()
+            .filter(|id| {
+                let now = current(s, id);
+                !now.client_id.trim().is_empty() && !builtin(id).is_some_and(|b| b.client_id == now.client_id)
+            })
+            .collect()
+    })
+}
+
 /// Where the app a service in [`OWN`] signs in with comes from.
 fn origin(s: &NodeState, own: &HashMap<String, OwnApp>, id: &str) -> Option<&'static str> {
+    if from_config(s).contains(&id) {
+        return Some("config");
+    }
     let now = current(s, id);
     if now.client_id.trim().is_empty() {
         None
-    } else if own.get(id).is_some_and(|o| o.client_id == now.client_id) {
-        Some("settings")
-    } else if builtin(id).is_some_and(|b| b.client_id == now.client_id) {
+    } else if !own.get(id).is_some_and(|o| o.client_id == now.client_id)
+        && builtin(id).is_some_and(|b| b.client_id == now.client_id)
+    {
         Some("builtin")
     } else {
-        Some("config")
+        // Entered here (also one a restored backup has since replaced in the settings)
+        Some("settings")
     }
 }
 
@@ -234,6 +253,7 @@ fn set_app(s: &NodeState, id: &str, app: Option<OwnApp>) {
 
 /// At start: the admin's own apps, where node.toml or the environment sets none.
 pub fn apply_own(s: &NodeState) {
+    from_config(s);
     let own = own_apps(&s.library.lock().expect("library poisoned"));
     for id in OWN {
         if let Some(app) = own.get(id) {
