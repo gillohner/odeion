@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **Health no longer labels a large homeserver library as down.** The authenticated check reads at most one private file-list entry instead of listing and checking every file. Empty accounts stay healthy; permission errors and the four-second deadline still apply.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".
@@ -53,8 +54,6 @@ Newest first. Dates are when the change landed on `main`.
 - **Identify again is quick when little changed.** MusicBrainz answers, files' content keys and AcoustID answers are kept, so a retry asks nothing, reads nothing and decodes nothing for songs that didn't change, and audio that can't be fingerprinted isn't decoded again. A song not found before is checked again by a plain Identify once its tags or file change, or once an AcoustID key or MusicBrainz contact is added. In a replay of a 19,452-song library against stand-in services, a cold run sent 2,668 MusicBrainz and 1,300 AcoustID requests and decoded 1,300 files; a retry with nothing changed sent none and decoded none; after 50 songs' tags were fixed, a plain run checked those 50 only (81 MusicBrainz requests, nothing decoded). MusicBrainz still gets one request a second from the whole node.
 
 ### 2026-11-02
-
-- **Health no longer labels a large homeserver library as down.** The authenticated check reads at most one private file-list entry instead of listing and checking every file. Empty accounts stay healthy; permission errors and the four-second deadline still apply.
 
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
