@@ -133,8 +133,6 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
         assert_ne!(st, StatusCode::UNAUTHORIZED, "{open}: {body}");
     }
     for owners in [
-        "/v1/favourites",
-        "/v1/bookmarks",
         "/v1/collections",
         "/v1/me/listens",
         "/v1/me/listens/stats",

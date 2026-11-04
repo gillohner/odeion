@@ -1361,12 +1361,12 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }
 .track .title:has(.idmark) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track .title:has(.idmark) > .idmark { flex: none; }
-/* A listener (#46) plays the shared library; the owner's favourites, playlists, tags and settings aren't theirs */
-body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="favourites"], body.listener .nav-item[data-view="playlists"],
+/* A listener (#46) plays the shared library; the owner's playlists, tags and settings aren't theirs (their bookmarks are their own) */
+body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="playlists"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
 body.listener .bnav[data-bnav="home"], body.listener .bnav[data-bnav="sources"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
-body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark, body.listener #itags,
-body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
+body.listener .idmark, body.listener #itags,
+body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
 /* Library › Add music */
 .addm { padding: 18px 20px; }
 .addm h3 { display: flex; align-items: center; gap: 8px; }
@@ -1429,6 +1429,13 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .npqual .qtext-long { font-weight: 550; }
 .qsheet .qnote { display: block; margin-top: 6px; }
 .qsheet .qjump { display: block; margin-bottom: 8px; font-size: 13px; }
+/* Settings › You › My streaming accounts (a listener): one service per row, its sign-in ways inside */
+details.set-row.svc-own { display: block; }
+.svc-own > summary { display: flex; flex-direction: column; gap: 2px; cursor: pointer; list-style: none; min-height: 40px; justify-content: center; }
+.svc-own > summary::-webkit-details-marker { display: none; }
+.svc-own[open] > summary { margin-bottom: 10px; }
+.svc-body:empty::before { content: ''; display: block; height: 40px; }
+html[data-shell="phone"] #hson, html[data-shell="tablet"] #hson, html[data-shell="phone"] #hsoff, html[data-shell="tablet"] #hsoff, html[data-shell="phone"] [data-hsconnect], html[data-shell="tablet"] [data-hsconnect] { min-height: 40px; }
 .set-row.flash, .flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; transition: outline-color 1.2s ease; }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
 .nav-item.nav-offline, .bnav.nav-offline { display: none; }

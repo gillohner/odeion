@@ -321,6 +321,25 @@ pub struct Bookmarks {
     /// Every bookmarked canonical URL, for quick "is this bookmarked" checks.
     #[serde(default)]
     pub uris: Vec<String>,
+    /// A listener's: where their own homeserver stands (personal.rs). The owner's have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homeserver: Option<PersonalState>,
+}
+
+/// Where a listener's own homeserver stands for the node (personal.rs).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonalState {
+    /// The node holds their grant.
+    pub connected: bool,
+    /// Their homeserver refused it (revoked in Ring): approve the node again.
+    #[serde(default)]
+    pub lost: bool,
+    /// Changes the node keeps until their homeserver answers.
+    #[serde(default)]
+    pub pending: usize,
+    /// It didn't answer just now: this is the node's copy.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// A tag on a canonical URL or a library object (one target field), with its label.
@@ -437,6 +456,9 @@ pub struct BookmarkChanged {
     /// The same as `bookmarked`, for clients of the deprecated `/v1/favourites`.
     #[serde(default)]
     pub favourite: bool,
+    /// A listener's change their homeserver didn't take yet: the node keeps it until it answers.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending: bool,
 }
 
 impl BookmarkChanged {
@@ -445,6 +467,7 @@ impl BookmarkChanged {
             uri,
             bookmarked,
             favourite: bookmarked,
+            pending: false,
         }
     }
 }

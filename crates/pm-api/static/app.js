@@ -1351,7 +1351,7 @@
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
-  const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
+  const LISTENER_VIEWS_OFF = new Set(['home', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z))];
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
@@ -1441,6 +1441,8 @@
   const GUIDE = (file) => `https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/${file}`;
   const guideLink = (file) => `<a href="${GUIDE(file)}" target="_blank" rel="noopener">Guide</a>`;
   // A numbered step card, a check mark once done. `sub` and `body` are HTML
+  // What the node's owner sets up (node apps, device clients), in a listener's own sign-ins
+  const ownerSets = (what) => `<p class="muted small">${what} is set up by whoever runs this node (Settings › This node); ask them. Your own account goes here once it is.</p>`;
   const stepCard = (no, title, done, sub, body) => `<div class="setup-step card-step ${done ? 'done' : ''}" data-step="${no}"><span class="stepmark" aria-hidden="true">${done ? icon('check') : no}</span><div class="grow"><div class="name">${no}. ${title}${done ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${body}</div></div>`;
   // A secret field with Show / Hide: a password until shown
   const secretInput = (name, label, placeholder, autocomplete = 'off', disabled = false) => `<span class="secretwrap"><input class="input" name="${name}" type="password" placeholder="${esc(placeholder)}" autocomplete="${autocomplete}" aria-label="${esc(label)}" spellcheck="false" required ${disabled ? 'disabled' : ''}><button class="icon-btn showpw" type="button" aria-label="Show ${esc(label)}" aria-pressed="false" title="Show">${icon('eye')}</button></span>`;
@@ -1538,7 +1540,8 @@
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
-        const client = u.client_from ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
+        const client = u.client_from && !isListener() ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
+        if (!u.client_from && isListener()) return ownerSets('The TIDAL device client');
         // No device client yet: the step card first (the node never ships another party's)
         if (!u.client_from) return stepCard(1, 'Device client ID and secret', false, `Full tracks need a TIDAL device client: enter one you are allowed to use; the node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
           `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
@@ -1638,7 +1641,7 @@
     const appForm = hasApp && !m.changeApp ? '' : `<form class="stack" id="qbapp" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="App ID (digits)" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Qobuz app ID" required>${secretInput('secret', 'Qobuz app secret', 'App secret')}</div><div class="toolbar"><button class="btn" type="button" id="qbcheck">Check</button><button class="btn primary" type="submit">Save</button><span class="check-out small" id="qbcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>app_id=… app_secret=…</code> block or JSON into either field: it is split.</p></form>`;
     const found = si.imports || []; const places = si.places || [];
     const importBox = `<details class="small" id="qbimport"><summary>Already use streamrip or qobuz-dl? Use its config</summary><div class="stack">${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><p class="muted small">Pick streamrip’s config.toml or qobuz-dl’s config.ini: it is only read; its app values and sign-in are kept here like the node’s own, replacing the current app.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="[qobuz] … or [DEFAULT] … from streamrip’s config.toml or qobuz-dl’s config.ini" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Nothing is shown again once saved.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div></details>`;
-    const step1 = stepCard(1, 'App ID and secret', hasApp, `Qobuz has no public developer page: ask Qobuz for API access at <a href="mailto:api@qobuz.com">api@qobuz.com</a> (an app ID and secret). The node keeps them like a sign-in and never shows the secret again. ${guideLink('qobuz.md')}`, appInfo + appForm + importBox);
+    const step1 = isListener() ? stepCard(1, 'Qobuz app', hasApp, hasApp ? 'Set up by whoever runs this node.' : '', hasApp ? '' : ownerSets('The node’s Qobuz app')) : stepCard(1, 'App ID and secret', hasApp, `Qobuz has no public developer page: ask Qobuz for API access at <a href="mailto:api@qobuz.com">api@qobuz.com</a> (an app ID and secret). The node keeps them like a sign-in and never shows the secret again. ${guideLink('qobuz.md')}`, appInfo + appForm + importBox);
     // 2. The account
     const acct = u.signed_in
       ? `<p class="small">Signed in${u.user ? ' as ' + esc(u.user) : ''}${u.plan ? ' · ' + esc(u.plan) : ''} · ${u.hires ? 'hi-res' : 'CD quality'}. Only Qobuz’s session is kept. <button class="btn ghost sm" type="button" id="qbout2">Sign out</button></p>`
@@ -1683,7 +1686,7 @@
     actions: (pick, si, h) => {
       const st = si.details.status || {}; const ls = si.details.librespot || {}; const w = h.wayOf(pick);
       if (pick === 'app') {
-        if (!st.configured) return spotSetup(st, false);
+        if (!st.configured) return isListener() ? ownerSets('The node’s Spotify app') : spotSetup(st, false);
         if (st.signed_in) return h.useButton(w, st.display_name ? ' as ' + esc(st.display_name) : '');
         return `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify’s sign-in; the app must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${spotAppRow(st)}${st.app_from === 'settings' ? spotSetup(st, true) : ''}`;
       }
@@ -3483,6 +3486,43 @@
     const line = $('[data-taggers]', box.closest('section') || box);
     if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
   };
+  // A listener connects their own homeserver (personal.rs): one approval in Pubky Ring for their
+  // bookmarks and collections folders, nothing else. Resolves true once the node holds it.
+  const homeserverDialog = (lost) => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    d.innerHTML = `<h2>${lost ? 'Approve this node again' : 'Connect your homeserver'}</h2><p class="muted">${lost ? 'Your homeserver no longer lets this node in (it was revoked in Pubky Ring, say). Approve it again to keep your bookmarks there.' : 'Your bookmarks are kept on your own homeserver, not the node’s. Approve this node once in Pubky Ring, for your bookmarks and collections folders only.'}</p><div id="hsbody"><p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p></div><div class="toolbar"><button class="btn ghost" data-hsclose>Not now</button></div>`;
+    document.body.appendChild(d);
+    let timer = null; let ended = false;
+    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
+    const done = (fromBack, ok) => { ended = true; clearTimeout(timer); const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(!!ok); };
+    transients.push(tr); pushTransient();
+    $('[data-hsclose]', d).onclick = () => done();
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
+    const body = $('#hsbody', d);
+    const start = async () => {
+      try {
+        const f = await api('POST', '/me/homeserver/connect');
+        if (ended) return;
+        body.innerHTML = `<div class="notice qrbox">${f.qr_svg ? `<div class="qr" role="img" aria-label="QR code to scan with Pubky Ring">${f.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve.</p><a class="btn primary" href="${esc(f.url)}">Open in Pubky Ring</a></div></div>`;
+        const poll = async () => {
+          if (ended) return;
+          let p; try { p = await api('GET', `/me/homeserver/connect/poll?id=${encodeURIComponent(f.id)}`); } catch { timer = setTimeout(poll, 3000); return; }
+          if (ended) return;
+          if (p.state === 'pending') { timer = setTimeout(poll, 2000); return; }
+          if (p.state === 'ok') { toast('Your homeserver is connected: your bookmarks are kept there'); done(false, true); return; }
+          if (p.state === 'denied') { body.innerHTML = `<p class="notice warn" role="alert">Not kept: ${esc(p.reason || 'Pubky Ring didn’t approve it')}. Approve it with your own identity, for every folder it asks.</p><button class="btn" data-hsagain>Try again</button>`; $('[data-hsagain]', d).onclick = start; return; }
+          start(); // the approval expired: a fresh one
+        };
+        timer = setTimeout(poll, 2000);
+      } catch (e) {
+        if (ended) return;
+        body.innerHTML = `<p class="muted">Can’t start it: ${esc(e.message)}</p><button class="btn" data-hsagain>Try again</button>`;
+        $('[data-hsagain]', d).onclick = start;
+      }
+    };
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    start();
+  });
   // Your library › Node library › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
@@ -3626,7 +3666,7 @@
   }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
-  const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
+  const OWNER_MENU = /playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   // `opts.all`: every item stays for a listener too (the items are names, not owner actions)
   const showMenu = (anchor, items, opts = {}) => {
@@ -4296,15 +4336,26 @@
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
 
   const loadFavourites = async () => { const f = await api('GET', '/favourites'); state.favUris = new Set(f.uris || []); return f; };
-  // A song not identified yet is a favourite on this node only until "Which song is this?"
-  const setFavourite = async (ref, on) => {
+  // A song not identified yet is a favourite on this node only until "Which song is this?".
+  // A listener's go to their own homeserver: the first one asks them to connect it.
+  const setFavourite = async (ref, on, again = true) => {
     let note = '';
-    if (on) {
-      const r = await api('PUT', '/favourites', ref); const k = ((r && r.uri) || '').split(':')[0];
-      if (isOffline()) note = ' (sent to your node when it is back)';
-      else if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
-      else if (k === 'album' || k === 'artist') note = ` (kept on this node until MusicBrainz knows this ${k})`;
-    } else await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
+    try {
+      if (on) {
+        const r = await api('PUT', '/favourites', ref); const k = ((r && r.uri) || '').split(':')[0];
+        if (isOffline()) note = ' (sent to your node when it is back)';
+        else if (r && r.pending) note = ' (on this node until your homeserver answers)';
+        else if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
+        else if (k === 'album' || k === 'artist') note = ` (kept on this node until MusicBrainz knows this ${k})`;
+      } else {
+        const r = await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
+        if (r && r.pending) note = ' (on this node until your homeserver answers)';
+      }
+    } catch (e) {
+      if (!(again && e.status === 409 && e.body && e.body.needs_connect)) throw e;
+      if (await homeserverDialog(!!e.body.lost)) return setFavourite(ref, on, false);
+      return;
+    }
     await loadFavourites();
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
   };
@@ -4619,13 +4670,21 @@
           const f = await loadFavourites();
           if (state.view !== 'favourites') return;
           const none = !f.albums.length && !f.tracks.length && !f.artists.length && !f.other.length;
+          // A listener's are on their own homeserver: connect it, approve it again, or what waits
+          const hs = f.homeserver;
+          const hsNote = !hs ? '' : !hs.connected ? `<div class="notice" id="hsnote"><p>Your bookmarks are kept on your own homeserver. Connect it once (one approval in Pubky Ring), then the hearts here are yours.</p><button class="btn primary" data-hsconnect>Connect your homeserver</button></div>`
+            : hs.lost ? `<div class="notice warn" role="alert" id="hsnote"><p>Your homeserver no longer lets this node in. These are the node’s copy; approve it again to change them.</p><button class="btn" data-hsconnect>Approve again</button></div>`
+              : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} wait on this node until your homeserver answers.</p>`
+                : hs.stale ? '<p class="muted small" id="hsnote" role="status">Your homeserver didn’t answer just now: this is the node’s copy.</p>' : '';
           main.innerHTML = pageHead('Favourites', `${countOf(f.albums.length, 'albums')} · ${countOf(f.tracks.length, 'tracks')} · ${countOf(f.artists.length, 'artists')}`, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play tracks</button>` : '')
-            + (none ? emptyState('heart', 'Nothing hearted yet', 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.') : '')
+            + hsNote
+            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.') : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
             + (f.other.length ? `<section class="section"><div class="section-head"><h3>From other services</h3></div><div id="favother"><div class="skeleton" style="height:56px"></div></div></section>` : '');
           lists.fav = f.tracks;
+          const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true);
           if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites') { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
           break;
@@ -6046,12 +6105,29 @@
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
             const zonesText = me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
+            // Their own homeserver, for their bookmarks (personal.rs)
+            const [hs, svcs] = await Promise.all([api('GET', '/me/homeserver').catch(() => null), api('GET', '/me/services').catch(() => null)]);
+            const hsRow = !hs ? row('My homeserver', 'The node can’t say right now.', '')
+              : hs.connected && !hs.lost ? row('My homeserver', `Connected: your bookmarks are kept there${hs.pending ? `, ${countOf(hs.pending, 'changes')} waiting on this node until it answers` : ''}. The node may write your bookmarks and collections folders, nothing else.`, '<button class="btn ghost" id="hsoff">Disconnect</button>')
+                : row('My homeserver', hs.lost ? '<span class="warn-text">It no longer lets this node in.</span> Approve it again to keep your bookmarks there.' : 'Not connected. Your bookmarks are kept on your own homeserver once you approve this node in Pubky Ring (your bookmarks and collections folders only).', `<button class="btn primary" id="hson">${hs.lost ? 'Approve again' : 'Connect'}</button>`);
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), `<button class="btn" id="lsignout">${icon('logout')} Log out</button>`)
-                + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
+                + hsRow
+                + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Your bookmarks are your own; the node’s playlists and settings belong to whoever runs it.`, ''))
+              // Your own streaming accounts: nobody else on the node plays with them (node apps stay the owner's)
+              + group('My streaming accounts', svcs ? svcs.map((v) => `<details class="set-row svc-own" data-svc="${esc(v.source)}"><summary class="set-label"><span class="set-name">${esc(v.name)}</span><span class="set-help">${v.connected ? `Signed in${v.user ? ' as ' + esc(v.user) : ''}.` : v.available ? 'Not signed in. Sign in with your own account to play from it here.' : esc(v.reason || 'Not set up on this node yet.')}</span></summary><div class="svc-body"></div></details>`).join('') : row('Streaming accounts', 'The node can’t say right now.', ''))
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             $('#lsignout').onclick = logOut;
+            // A service opens its own sign-in ways (the same as the owner's, without the node's setup)
+            $$('details[data-svc]', main).forEach((d) => d.addEventListener('toggle', () => {
+              const body = $('.svc-body', d); if (!d.open || body.dataset.drawn) return; body.dataset.drawn = '1';
+              const src = d.dataset.svc;
+              if (src === 'qobuz') qobuzSetup(body);
+              else signinChooser(src === 'tidal' ? tidalSigninCfg(body) : spotifySigninCfg(body));
+            }));
+            const hon = $('#hson'); if (hon) hon.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) { loadFavourites().catch(() => {}); render(); } };
+            const hoff = $('#hsoff'); if (hoff) hoff.onclick = async () => { hoff.disabled = true; try { await api('DELETE', '/me/homeserver'); toast('Disconnected: your homeserver keeps your bookmarks'); state.favUris = new Set(); render(); } catch (e) { hoff.disabled = false; toast(e.message, 'error'); } };
             break;
           }
           const info = await api('GET', '/info'); state.info = info;
@@ -6666,7 +6742,11 @@
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
-      } else { state.favUris = new Set(); state.sources = []; }
+      } else {
+        state.favUris = new Set(); state.sources = [];
+        // A listener's own bookmarks, from their homeserver (none until they connect it)
+        loadFavourites().catch(() => {});
+      }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();

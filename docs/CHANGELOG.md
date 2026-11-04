@@ -6,6 +6,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **Listeners have their own bookmarks, on their own homeserver** (owner's ask, 11-02 and 11-03).
+  - A listener approves the node once in Pubky Ring for their bookmarks and collections folders only (Settings › You › My homeserver, or the first heart). The node keeps that session only for the person who approved it, in a private file of its own; Disconnect, or People › Remove, forgets it.
+  - Their hearts and Favourites are theirs: written to their homeserver with their session, never into the owner's. When their homeserver doesn't answer, a change waits on the node and is written later; when it refuses the node (revoked in Ring), the page says so and asks them to approve it again.
+  - Settings › You lists their own streaming accounts (TIDAL, Qobuz, Spotify) with their own sign-in ways. What the node's owner sets up (the Spotify and Qobuz apps, the TIDAL device client) is never a listener's to see or change.
+  - The "your own come in a later version" sentence is gone. Their own collections come next.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".

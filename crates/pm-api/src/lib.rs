@@ -73,6 +73,7 @@ pub mod opensubsonic;
 pub mod party;
 pub mod peer;
 pub mod people;
+pub mod personal;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
@@ -714,6 +715,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        // A listener's own homeserver, for their bookmarks (personal.rs)
+        .route(
+            "/me/homeserver",
+            get(personal::status).delete(personal::disconnect),
+        )
+        .route("/me/homeserver/connect", post(personal::connect_start))
+        .route("/me/homeserver/connect/poll", get(personal::connect_poll))
         .route("/auth/pubky/renewal", post(login_renewal))
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))
