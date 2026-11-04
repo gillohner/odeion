@@ -3609,12 +3609,18 @@ mod tests {
         let rows = u.with_store(false, |s| s.rows()).unwrap().unwrap();
         let kept = rows
             .iter()
-            .filter(|r| matches!(r.4, Event::Visit { view: View::Artists, .. }))
+            .filter(|r| {
+                matches!(
+                    r.4,
+                    Event::Visit {
+                        view: View::Artists,
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(kept, 20, "the newest batch is kept at the cap");
-        let s = u
-            .summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY)
-            .unwrap();
+        let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY).unwrap();
         let evicted = s["dropped"]["evicted"].as_u64().unwrap();
         assert_eq!(rows.len() as u64 + evicted, 40 * 200 + 20, "{s}");
         let tries = VACUUM_TRIES.with(|n| n.get());
@@ -3634,7 +3640,11 @@ mod tests {
         assert_eq!(VACUUM_TRIES.with(|n| n.get()), 2, "tried again an hour later");
         // The clock stepped back two hours (NTP): the backoff is over, not three hours longer
         let _ = u.housekeep_store(1_000 * DAY - 7_200);
-        assert_eq!(VACUUM_TRIES.with(|n| n.get()), 3, "tried again after the clock went back");
+        assert_eq!(
+            VACUUM_TRIES.with(|n| n.get()),
+            3,
+            "tried again after the clock went back"
+        );
         let before = pages();
         let b = open(&u, &l("b"), T2, t0);
         batch(&u, "b", &b, T2);
@@ -3659,13 +3669,19 @@ mod tests {
         // The event as it is written in the file
         let needle = serde_json::to_string(&rows[0].4).unwrap().into_bytes();
         let has = |f: &[u8]| f.windows(needle.len()).any(|w| w == needle.as_slice());
-        assert!(has(&std::fs::read(dir.path().join(FILE)).unwrap()), "in the file first");
+        assert!(
+            has(&std::fs::read(dir.path().join(FILE)).unwrap()),
+            "in the file first"
+        );
         FAIL_VACUUM.with(|f| f.set(true));
         u.clear_all(u.epoch(&Person::Owner), t0).unwrap();
         let _ = u.housekeep_store(1_000 * DAY);
         FAIL_VACUUM.with(|f| f.set(false));
         assert_eq!(stored(&u), 0);
-        assert!(!has(&std::fs::read(dir.path().join(FILE)).unwrap()), "gone from the file");
+        assert!(
+            !has(&std::fs::read(dir.path().join(FILE)).unwrap()),
+            "gone from the file"
+        );
     }
 
     /// Kimi K-L4: two removals of one person the file could not take are one cleanup (the owner's
