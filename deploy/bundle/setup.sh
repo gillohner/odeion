@@ -8,7 +8,11 @@ ENV=.env
 touch "$ENV"
 chmod 600 "$ENV"
 
-has() { grep -q "^$1=" "$ENV"; }
+# A PM_ setting counts as there when .env has it under its ODEION_ name (the one from now on)
+has() {
+  grep -q "^$1=" "$ENV" && return 0
+  case $1 in PM_*) grep -q "^ODEION_${1#PM_}=" "$ENV" ;; *) return 1 ;; esac
+}
 put() { has "$1" || printf '%s=%s\n' "$1" "$2" >> "$ENV"; }
 secret() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 24

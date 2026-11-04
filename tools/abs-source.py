@@ -124,7 +124,7 @@ enabled = false
         v = api("PUT", "/v1/sources/audiobookshelf/server", {"url": ABS, "user": "root", "password": "ci-pw"})
         assert v["connected"] and v["user"] == "root", v
         keys = req(ABS + "/api/api-keys", headers=admin)["apiKeys"]
-        assert [k["name"] for k in keys] == ["Pubky Music node"], keys
+        assert [k["name"] for k in keys] == ["Odeion node"], keys
         log(f"connected; the node made its own API key: {v}")
 
         hits = api("GET", "/v1/sources/audiobookshelf/search?q=test")["items"]

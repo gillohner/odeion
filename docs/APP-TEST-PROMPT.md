@@ -1,4 +1,4 @@
-# App test prompt: the Pubky Music app on macOS, Windows, Linux and Android
+# App test prompt: the Odeion app on macOS, Windows, Linux and Android
 
 The app (`crates/pm-desktop`, Tauri 2, ADR 0012) has run only on Linux under Xvfb against a test
 node. Paste this into Claude Code on a machine with a display (or follow it by hand), with a node

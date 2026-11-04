@@ -1,6 +1,6 @@
 [package]
 name = "pm-endpoint"
-description = "Endpoint daemon: serves this machine's outputs to a Pubky Music Node"
+description = "Endpoint daemon: serves this machine's outputs to an Odeion node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

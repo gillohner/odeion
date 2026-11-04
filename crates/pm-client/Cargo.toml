@@ -1,6 +1,6 @@
 [package]
 name = "pm-client"
-description = "Rust client for the Pubky Music Node /v1 API (HTTP + WebSocket)"
+description = "Rust client for the Odeion node /v1 API (HTTP + WebSocket)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

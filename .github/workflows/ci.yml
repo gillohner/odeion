@@ -251,7 +251,7 @@ jobs:
       - run: cargo build -p pm-node
       - name: the node's CI image
         run: |
-          cp target/debug/pm-node deploy/docker/entrypoint.sh deploy/bundle/ci/
+          cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
           docker build -q -t pubky-music-node:ci deploy/bundle/ci
           # The image carries ffmpeg with the encoders downloads use
           docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3

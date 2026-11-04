@@ -4,18 +4,18 @@ How to reach your node away from home. Pick the first one that fits.
 
 | Way | For | What you set up |
 | :-- | :-- | :-- |
-| The Pubky Music app | the app on your laptop or phone | sign the node in to Pubky once |
+| The Odeion app | the app on your laptop or phone | sign the node in to Pubky once |
 | Tailscale | the app, a browser and Subsonic apps | Tailscale on the node and on each device |
 | Cloudflare Tunnel | a browser anywhere, at your own web address | a free Cloudflare account and a domain |
 
 Don't forward port 7788 on your router to the internet. The node expects a private network or a
 tunnel with HTTPS in front of it.
 
-## The Pubky Music app (nothing to open)
+## The Odeion app (nothing to open)
 
 1. On the node, sign in to Pubky: **Settings › My accounts › Sign in with Pubky**, and approve
    with the Pubky Ring app.
-2. In the Pubky Music app, choose **Sign in with Pubky Ring** on the connect page, with the same
+2. In the Odeion app, choose **Sign in with Pubky Ring** on the connect page, with the same
    Pubky account.
 
 The node keeps its connection details in your Pubky account, privately. Away from home the app

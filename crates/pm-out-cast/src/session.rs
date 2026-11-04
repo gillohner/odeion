@@ -520,7 +520,7 @@ fn load_payload(media: &Media) -> Value {
             "contentId": media.url,
             "contentType": media.content_type,
             "streamType": "LIVE",
-            "metadata": crate::meta_json(&media.meta, "Pubky Music"),
+            "metadata": crate::meta_json(&media.meta, "Odeion"),
         }
     })
 }
@@ -827,10 +827,7 @@ pub(crate) mod tests {
         assert_eq!(v["artist"], "A");
         assert_eq!(v["albumName"], "L");
         assert_eq!(v["images"][0]["url"], "http://x/a.jpg");
-        assert_eq!(
-            crate::meta_json(&Meta::default(), "Pubky Music")["title"],
-            "Pubky Music"
-        );
+        assert_eq!(crate::meta_json(&Meta::default(), "Odeion")["title"], "Odeion");
     }
 
     #[tokio::test]

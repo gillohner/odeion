@@ -131,7 +131,7 @@ fn listen_of(s: &NodeState, item: &pm_zones::QueueItem) -> Option<Value> {
     let mut title = item.title.clone().filter(|t| !t.trim().is_empty());
     let mut album = item.album.clone();
     let mut extra = serde_json::Map::new();
-    extra.insert("media_player".into(), json!("Pubky Music"));
+    extra.insert("media_player".into(), json!("Odeion"));
     extra.insert("submission_client".into(), json!("pubky-music-node"));
     extra.insert(
         "submission_client_version".into(),

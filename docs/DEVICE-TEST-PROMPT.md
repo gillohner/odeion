@@ -149,7 +149,7 @@ nearly every phone. In a group it is "loosely synced": Android adds latency the 
 
 ```
 1. Install pubky-music-android-arm64.apk from the edge release. Connect to your node (Pubky Ring,
-   "On this network", or by address). Allow notifications when asked: a "Pubky Music" notification
+   "On this network", or by address). Allow notifications when asked: a "Odeion" notification
    says the phone is a zone. The node's Zones list shows "<model> · Speaker or headphones".
 2. From another controller (the web UI on a laptop), play an album to the phone's zone: it plays from
    the phone's speaker within about a second. Pause, next and seek are heard at once.

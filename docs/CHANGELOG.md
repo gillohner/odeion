@@ -10,6 +10,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-02
 
+- **Pubky Music is now Odeion.** The web page, the installable web app, the desktop app's window, pages and dialogs (update question, crash report), the Android app (launcher label, player notification, crash report), the node's command and help, the service unit, the image's labels, Home Assistant, Roon and the guides say Odeion. Nothing has to be done: installs, data and sign-ins carry over.
+  - Not yet: the desktop app's installed name. Its installer, install folder, Start menu entry, macOS app name and Linux launcher still say Pubky Music, because those names are also what lets an update replace the installed app; renaming them safely needs tested upgrades on each platform (docs/branding-compatibility.md).
+  - The node's program is `odeiond`. `pm-node`, its old name, is the same program and ships next to it (in the downloads, the image and the build), so scripts, units and `docker exec … pm-node` keep working.
+  - Settings in the environment are `ODEION_<NAME>`; the `PM_<NAME>` ones still work for at least this release, and the node says (by name only, never a value) which old names it read. When both are set, the `ODEION_` one wins, even when empty.
+  - Linux without Docker: new installs use `odeiond.service`; `pubky-music-node.service` keeps working, and the Linux guide shows how to move (one unit at a time; the same user, config and data).
+  - Kept as they were, so nothing breaks: the repository and image names, the download file names, the app's identifier and updater (an installed app updates in place, Android included), the Home Assistant domain `pubky_music` and the Roon extension id, the Pubky data paths and capabilities, LAN discovery names, the config and data folders, and the compose project and volumes. docs/branding-compatibility.md lists each with why.
 - **Copies to the homeserver: the disk guards, tightened.**
   - Uploading one file goes the same guarded way as a copy: a good copy already there is never sent over, and a failed upload leaves nothing half written.
   - A size the homeserver doesn't give is never taken for an empty file. An upload whose size it doesn't confirm counts as failed and is checked again at the next start, and an empty leftover is deleted.

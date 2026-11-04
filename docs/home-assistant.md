@@ -4,7 +4,7 @@ Two ways for Home Assistant to use the node:
 
 1. **Built in, nothing to install:** every zone is a UPnP/DLNA MediaRenderer, so Home Assistant's own
    **DLNA Digital Media Renderer** (`dlna_dmr`) integration finds it and gives each zone a `media_player`.
-2. **Pubky Music integration** (custom, through HACS): richer, with the library in the media browser.
+2. **Odeion integration** (custom, through HACS): richer, with the library in the media browser.
    See [the integration's README](../integrations/home-assistant/README.md) once it lands.
 
 ## 1. DLNA (`dlna_dmr`): verified with a real Home Assistant

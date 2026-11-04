@@ -26,8 +26,9 @@ how many to keep. Best on another disk or a NAS. In Docker the folder must be in
 container; add a volume for it, for example `- /mnt/backup/pubky-music:/backups` under `volumes`
 (writable by user id 1000), and enter `/backups`. On Linux without Docker, the service may only
 write to its own folder: add the backup folder to the `ReadWritePaths=` line of
-`/etc/systemd/system/pubky-music-node.service` (separated by a space), make it writable by the
-`pubky-music` user, then `sudo systemctl daemon-reload && sudo systemctl restart pubky-music-node`.
+`/etc/systemd/system/odeiond.service` (`pubky-music-node.service` on an install from before Odeion;
+separated by a space), make it writable by the `pubky-music` user, then
+`sudo systemctl daemon-reload && sudo systemctl restart odeiond` (or `pubky-music-node`).
 
 ## The node with its own homeserver: `backup.sh`
 
@@ -150,8 +151,9 @@ docker compose up -d
 With a NAS app (Synology, Portainer, TrueNAS), use its "pull" or "update" button for the
 project, or redeploy it.
 
-**Linux without Docker:** download the new release file and install `pm-node` again as in
-[step 1](install-linux.md#1-download-and-install), then `sudo systemctl restart pubky-music-node`.
+**Linux without Docker:** download the new release file and install `odeiond` again as in
+[step 1](install-linux.md#1-download-and-install), then `sudo systemctl restart odeiond` (or
+`pubky-music-node` on an install from before Odeion).
 
 **The desktop app** asks when a new version is out (macOS, Windows, AppImage). Install a new
 `.deb` or Android `.apk` over the old one.
@@ -166,7 +168,7 @@ file) and run `docker compose pull && docker compose up -d` again.
 
 When the newer version changed the library's database (its CHANGELOG entry says so), put back the
 library from the backup you made before updating; versions after 0.2.0 refuse to start on a
-library a newer version changed ("this library was opened by a newer version of Pubky Music").
+library a newer version changed ("this library was opened by a newer version of Odeion").
 With the bundle:
 
 ```sh

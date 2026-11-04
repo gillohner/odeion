@@ -1,6 +1,6 @@
 [package]
 name = "pm-library"
-description = "Library scanning, tag reading, MBID/ISRC matching and the SQLite catalogue for the Pubky Music Node"
+description = "Library scanning, tag reading, MBID/ISRC matching and the SQLite catalogue for the Odeion node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

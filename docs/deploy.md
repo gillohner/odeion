@@ -12,10 +12,10 @@ One binary, three shapes. The homeserver is always a separate Pubky service the 
 ```sh
 sudo apt install libasound2-dev          # build only
 sudo apt install ffmpeg                  # smaller copies for phones (downloads); optional
-cargo build --release -p pm-node --features alsa
-pm-node config > node.toml               # edit: data_dir, [api] token (contact and folders can also be set later in Settings)
-pm-node -c node.toml scan
-pm-node -c node.toml serve               # API on [api] listen, one zone per ALSA hw: device
+cargo build --release -p pm-node --features alsa   # odeiond (and pm-node, its old name)
+odeiond config > node.toml               # edit: data_dir, [api] token (contact and folders can also be set later in Settings)
+odeiond -c node.toml scan
+odeiond -c node.toml serve               # API on [api] listen, one zone per ALSA hw: device
 ```
 
 Free the DAC from PipeWire/PulseAudio on desktop systems (see `docs/HARDWARE-TEST-PROMPT.md`).
@@ -25,6 +25,11 @@ Free the DAC from PipeWire/PulseAudio on desktop systems (see `docs/HARDWARE-TES
 `Dockerfile` builds the node with ALSA and runs it as an unprivileged user in the `audio` group.
 It includes ffmpeg (Debian's 5.1 series, pinned by `FFMPEG_VERSION`), so phones and laptops can
 download smaller copies (AAC, MP3, Opus) of songs, not only the originals.
+Every setting below is spelled `ODEION_<NAME>` from now on; the `PM_<NAME>` spelling still works for at
+least this release, and when both are set the `ODEION_` one wins, even when empty
+([docs/branding-compatibility.md](branding-compatibility.md)). The image keeps its name,
+`ghcr.io/gillohner/pubky-music-node`.
+
 The entrypoint writes `/data/node.toml` from `PM_*` variables on first start (see
 `deploy/docker/entrypoint.sh`).
 
@@ -32,7 +37,7 @@ The entrypoint writes `/data/node.toml` from `PM_*` variables on first start (se
 docker build -t pubky-music-node .
 docker run -d --name pm -p 7788:7788 --device /dev/snd \
   -v /srv/music:/music:ro -v pm-data:/data \
-  -e PM_CONTACT=you@example.org pubky-music-node
+  -e ODEION_CONTACT=you@example.org pubky-music-node
 curl -H "Authorization: Bearer $(docker exec pm cat /data/api-token)" http://localhost:7788/v1/info
 ```
 
@@ -157,7 +162,8 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 
    ```sh
    tar xzf pubky-music-node-linux-$ARCH.tar.gz
-   sudo install -m 755 pubky-music-node-linux-$ARCH/pm-node /usr/local/bin/
+   sudo install -m 755 pubky-music-node-linux-$ARCH/odeiond /usr/local/bin/
+   sudo ln -sf odeiond /usr/local/bin/pm-node   # the old name
    sudo install -o pubky-music -g pubky-music -m 600 /dev/stdin /etc/pubky-music/node.toml <<EOF
    data_dir = "/var/lib/pubky-music"
    [api]
@@ -176,9 +182,9 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 4. **Start them**
 
    ```sh
-   sudo install -m 644 pubky-homeserver.service pubky-music-node.service /etc/systemd/system/
+   sudo install -m 644 pubky-homeserver.service odeiond.service /etc/systemd/system/
    sudo systemctl daemon-reload
-   sudo systemctl enable --now pubky-homeserver pubky-music-node
+   sudo systemctl enable --now pubky-homeserver odeiond
    echo "Web UI: http://$LAN_IP:7788  token: $TOKEN"   # keep the token; the passwords are in the two config files
    ```
 
@@ -211,7 +217,8 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
   forwarded; write the hostname into `/var/lib/pubky-music/tunnel/domain` (no token needed) and
   restart the homeserver.
 - **Updating:** replace the binary and `sudo systemctl restart pubky-homeserver` (or
-  `pubky-music-node`). Back up `/var/lib/pubky-homeserver` (its `secret` is the homeserver's key)
+  `odeiond`; `pubky-music-node` on an install from before Odeion, which keeps working and can move
+  as in [the Linux guide](guides/install-linux.md#installed-before-odeion-pubky-music-nodeservice)). Back up `/var/lib/pubky-homeserver` (its `secret` is the homeserver's key)
   and the PostgreSQL database together.
 
 ## TrueNAS SCALE
@@ -236,7 +243,7 @@ only on the first start; after changing variables, set `PM_REWRITE_CONFIG=1` for
 
 ## Reaching the node from outside the house
 
-**Without any of the below:** once the node is signed in with Pubky Ring, the Pubky Music app reaches it from anywhere over iroh (ADR 0013): no port forwarding, no domain, and it works behind Docker's bridge too (outbound UDP only). `[remote] relay` picks the relays (empty = n0's public ones, a URL = your own iroh-relay, `none` = off); `[remote] enabled = false` turns it off. Browsers without the app still need one of the options below.
+**Without any of the below:** once the node is signed in with Pubky Ring, the Odeion app reaches it from anywhere over iroh (ADR 0013): no port forwarding, no domain, and it works behind Docker's bridge too (outbound UDP only). `[remote] relay` picks the relays (empty = n0's public ones, a URL = your own iroh-relay, `none` = off); `[remote] enabled = false` turns it off. Browsers without the app still need one of the options below.
 
 The node speaks plain HTTPS/WebSocket and expects a bearer token, so any private network layer
 works until the Pubky transport exists (ADR 0008):
@@ -316,7 +323,7 @@ Network speakers play in their own protocols: UPnP/OpenHome renderers (Sonos and
 with their own grouping), Chromecast, AirPlay, BluOS, MPD and Snapcast (`[outputs]` and Settings ›
 Speakers and outputs).
 
-The computer the Pubky Music app runs on is a zone through the app's **built-in player** (ADR 0007).
+The computer the Odeion app runs on is a zone through the app's **built-in player** (ADR 0007).
 It answers only its own node: each time the app starts it makes a random key and registers the
 player with the node it is connected to (`POST /v1/outputs/endpoints {address, key}`); the node
 keeps the key in `<data_dir>/endpoint-keys.json` (0600) and shows it in every connection. Another
@@ -345,7 +352,7 @@ The node scans folders; anything the operating system can mount is a folder.
 | NAS / network shares (SMB, NFS) | mount them (`/etc/fstab`, `mount -t cifs …`) and add the mount point; use `_netdev` so the mount exists before the node starts |
 | Dropbox, Google Drive, OneDrive, S3, WebDAV, … | `rclone mount remote:Music /mnt/music --vfs-cache-mode full --read-only` (a systemd unit keeps it up), then add `/mnt/music`. The VFS cache makes the first play of a file a download and every later one local; bit-perfect playback is unaffected because the node reads the original bytes |
 | Downloads from another app (a download client, a seedbox) | point that app at a folder the node watches; the watcher rescans after the last change |
-| Your Pubky homeserver | `pm-node upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |
+| Your Pubky homeserver | `odeiond upload` or `POST /v1/pubky/files` stores originals under `/priv/pubky.music/files/`; "Bring files here" (`POST /v1/pubky/files/mirror`) pulls what the node lacks into a library folder as a background job and scans it |
 | Streams | internet radio and the Internet Archive need no storage at all |
 
 Scans read tags, embedded art and MusicBrainz ids; tag with Picard first and favourites, tags,
@@ -392,7 +399,7 @@ only, the newest `KEEP` (7) kept. `deploy/bundle/restore.sh <folder>` puts it ba
 install and refuses to touch one that has containers or data. Details:
 [guides/backup-and-update.md](guides/backup-and-update.md).
 
-From the command line: `pm-node -c node.toml backup <file>` writes a database snapshot (without
-sign-ins) while the node runs. `pm-node -c node.toml restore <file>`, with the node stopped, takes
+From the command line: `odeiond -c node.toml backup <file>` writes a database snapshot (without
+sign-ins) while the node runs. `odeiond -c node.toml restore <file>`, with the node stopped, takes
 that snapshot or a `.pmbackup` file (its library only; the previous database is kept as
 `library.db.bak`).

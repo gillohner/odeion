@@ -12,6 +12,8 @@ umask 077
 cd "${BUNDLE_DIR:-$(dirname "$0")}"
 
 die() { echo "restore: $*" >&2; exit 1; }
+# setting, node_port: ODEION_ settings first, then PM_ ones
+. ./settings.sh
 [ $# -eq 1 ] || die "usage: ./restore.sh <backup folder>"
 B=$(cd "$1" 2>/dev/null && pwd) || die "no folder $1"
 [ -f "$B/SHA256SUMS" ] || die "$B is not a complete backup (no SHA256SUMS)"
@@ -97,11 +99,10 @@ docker compose up -d
 echo "The bundle is up. Putting the sign-ins back once the node's first scan is done..."
 
 # --- the sign-ins, through the node's own restore (Settings › Backup) ---------------------------
-TOKEN=$(sed -n 's/^PM_TOKEN=//p' .env | tail -n 1)
-PASS=${PM_BACKUP_PASSPHRASE:-$(sed -n 's/^PM_BACKUP_PASSPHRASE=//p' .env | tail -n 1)}
+TOKEN=$(setting TOKEN)
+PASS=$(setting BACKUP_PASSPHRASE)
 [ -n "$PASS" ] || [ ! -f "$B/node/passphrase" ] || PASS=$(cat "$B/node/passphrase")
-PORT=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NODE" | sed -n 's/^PM_LISTEN=.*:\([0-9][0-9]*\)$/\1/p')
-PORT=${PORT:-7788}
+PORT=$(node_port "$NODE")
 node_api() {
   local mount=() body=()
   if [ -n "${3:-}" ]; then mount=(-v "$3:/in:ro"); body=(--data-binary @/in); fi

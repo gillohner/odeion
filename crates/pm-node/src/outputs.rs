@@ -21,7 +21,7 @@ pub fn discover() -> OutputRegistry {
 pub fn discover_all(cfg: &OutputsConfig) -> OutputRegistry {
     if !cfg.endpoints.is_empty() {
         tracing::warn!(
-            "[outputs] endpoints is no longer used: the Pubky Music app registers its player itself; \
+            "[outputs] endpoints is no longer used: the Odeion app registers its player itself; \
              speakers on a Raspberry Pi run squeezelite"
         );
     }

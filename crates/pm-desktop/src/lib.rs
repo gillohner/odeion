@@ -1,4 +1,4 @@
-//! Pubky Music app: one native window around the node's web UI (the same UI
+//! The Odeion app: one native window around the node's web UI (the same UI
 //! on every platform), built with Tauri 2 for macOS, Windows, Linux and
 //! Android. The window starts on a small connect page (`ui/`): approving in
 //! Pubky Ring lets the app find the node's address and token through the
@@ -499,6 +499,10 @@ fn forget(state: State<'_, AppState>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads.
+    // Not on Android, where the app starts on a thread of a running process and reads no settings.
+    #[cfg(not(target_os = "android"))]
+    let env_compat = pm_model::brand::apply_env_compat();
     crash::install_hook();
     // WebKitGTK's DMA-BUF renderer crashes the web process on some Linux
     // GPU stacks (NVIDIA, some Wayland compositors); the software path is
@@ -517,6 +521,10 @@ pub fn run() {
         .with_ansi(false)
         .without_time()
         .try_init();
+    #[cfg(not(target_os = "android"))]
+    for line in env_compat.log_lines() {
+        tracing::info!("{line}");
+    }
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
@@ -544,7 +552,7 @@ pub fn run() {
                 crash::set_dir(dir);
             }
             let path = app.path().app_config_dir()?.join("node.json");
-            // PM_NODE/PM_TOKEN for scripts, then this app's file, then the
+            // ODEION_NODE/ODEION_TOKEN (or PM_NODE/PM_TOKEN) for scripts, then this app's file, then the
             // wry shell's file from before.
             let initial = std::env::var("PM_NODE")
                 .ok()
@@ -603,7 +611,7 @@ pub fn run() {
                     tauri::webview::NewWindowResponse::Deny
                 });
                 builder = builder
-                    .title("Pubky Music")
+                    .title("Odeion")
                     .inner_size(1280.0, 840.0)
                     .min_inner_size(420.0, 600.0);
             }

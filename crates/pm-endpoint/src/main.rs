@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "pm-endpoint",
     version,
-    about = "Pubky Music endpoint (the app's player, headless)"
+    about = "Odeion endpoint (the app's player, headless)"
 )]
 struct Cli {
     /// Name shown in the node's output list.
@@ -42,10 +42,15 @@ fn default_name() -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
+    let env_compat = pm_model::brand::apply_env_compat();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
+    for line in env_compat.log_lines() {
+        tracing::info!("{line}");
+    }
     let cli = Cli::parse();
     let outputs = pm_endpoint::local_outputs();
     if cli.outputs {

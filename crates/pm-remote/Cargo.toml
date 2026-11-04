@@ -1,6 +1,6 @@
 [package]
 name = "pm-remote"
-description = "Reach a Pubky Music node from anywhere: an iroh tunnel to its HTTP API (ADR 0013)"
+description = "Reach an Odeion node from anywhere: an iroh tunnel to its HTTP API (ADR 0013)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

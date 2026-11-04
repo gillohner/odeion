@@ -1,4 +1,4 @@
-"""A small client for the Pubky Music node's HTTP API and its `/v1/events` websocket."""
+"""A small client for the Odeion node's HTTP API and its `/v1/events` websocket."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-# Pubky Music Node with its own Pubky homeserver (STEWARD-BUNDLED-HOMESERVER.md, docs/deploy.md).
+# The Odeion node with its own Pubky homeserver (STEWARD-BUNDLED-HOMESERVER.md, docs/deploy.md).
 #
 #   ./setup.sh            # once: writes .env with generated passwords (never printed)
 #   docker compose up -d
@@ -90,15 +90,19 @@ services:
       start_period: 120s
 
   music:
-    image: ${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}:${PM_TAG:-edge}
+    # Settings in .env may be spelled ODEION_ (preferred) or PM_ (from before Odeion; setup.sh still
+    # writes these); the ODEION_ one wins, also when set to empty, except for the image, the tag and
+    # the token, where empty is never valid and counts as unset. The node itself still gets the PM_
+    # names below, which every image version reads (docs/branding-compatibility.md).
+    image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}}:${ODEION_TAG:-${PM_TAG:-edge}}
     restart: unless-stopped
     network_mode: host
     environment:
       PM_LISTEN: "0.0.0.0:7788"
-      PM_PUBLIC_URL: ${PM_PUBLIC_URL:-}
-      PM_TOKEN: ${PM_TOKEN:?run ./setup.sh first}
-      PM_CONTACT: ${PM_CONTACT:-}
-      PM_NAME: ${PM_NAME:-Pubky Music}
+      PM_PUBLIC_URL: ${ODEION_PUBLIC_URL-${PM_PUBLIC_URL:-}}
+      PM_TOKEN: ${ODEION_TOKEN:-${PM_TOKEN:?run ./setup.sh first}}
+      PM_CONTACT: ${ODEION_CONTACT-${PM_CONTACT:-}}
+      PM_NAME: ${ODEION_NAME-${PM_NAME:-Odeion}}
       PM_FOLDERS: "/music"
       PM_HOMESERVER_ADMIN_URL: "http://127.0.0.1:6288"
       PM_HOMESERVER_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?run ./setup.sh first}

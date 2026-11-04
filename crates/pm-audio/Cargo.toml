@@ -1,6 +1,6 @@
 [package]
 name = "pm-audio"
-description = "Decoding (symphonia), DSD readers, the DSP pipeline skeleton with signal-path tracing, probing and a blocking play helper for the Pubky Music Node"
+description = "Decoding (symphonia), DSD readers, the DSP pipeline skeleton with signal-path tracing, probing and a blocking play helper for the Odeion node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

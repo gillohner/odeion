@@ -32,9 +32,9 @@ const scrobbler = new Scrobbler(api);
 
 const roon = new RoonApi({
   extension_id: "org.pubky.music.bridge",
-  display_name: "Pubky Music Bridge",
+  display_name: "Odeion Bridge",
   display_version: "0.1.0",
-  publisher: "Pubky Music",
+  publisher: "Odeion",
   email: "bridge@pubky.music.invalid",
   website: "https://github.com/gillohner/pubky-music-node",
   core_paired(core) {

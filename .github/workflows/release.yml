@@ -7,8 +7,9 @@ name: release
 # - the app (pm-desktop, Tauri 2): macOS universal .dmg, Windows .msi and
 #   setup .exe, Linux .AppImage and .deb for x86_64 and arm64, Android .apk
 #   (arm64-v8a and universal) and .aab, signed with the repo's release key;
-# - pm-node for Linux x86_64, arm64 and armv7 (Raspberry Pi), plus Windows and
-#   macOS (pm-endpoint is the app's built-in player and is not shipped alone);
+# - the node, odeiond (and pm-node, its pre-Odeion name: the same program), for Linux x86_64,
+#   arm64 and armv7 (Raspberry Pi), plus Windows and macOS (pm-endpoint is the app's built-in
+#   player and is not shipped alone); downloads keep their pubky-music-* names;
 # - the multi-arch node image on GHCR.
 #
 # Builds are unsigned until the owner provides an Apple Developer ID and a
@@ -29,7 +30,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   # Built-in apps (public ids, repository variables) and the built-in TIDAL device client (secrets,
-  # compiled in masked by crates/pm-api/build.rs); see docs/STREAMING-PROVIDERS.md
+  # compiled in masked by crates/pm-api/build.rs); see docs/STREAMING-PROVIDERS.md. The repository
+  # variables keep their PM_ names; the build also reads ODEION_PROJECT_* first (docs/branding-compatibility.md).
   PM_PROJECT_TIDAL_CLIENT_ID: ${{ vars.PM_PROJECT_TIDAL_CLIENT_ID }}
   PM_PROJECT_JAMENDO_CLIENT_ID: ${{ vars.PM_PROJECT_JAMENDO_CLIENT_ID }}
   PM_PROJECT_ACOUSTID_KEY: ${{ vars.PM_PROJECT_ACOUSTID_KEY }}
@@ -296,27 +298,27 @@ jobs:
             os: ubuntu-22.04
             build: cargo build --release --locked -p pm-node --features alsa
             dir: target/release
-            bins: pm-node
+            bins: odeiond pm-node
           - platform: linux-arm64
             os: ubuntu-22.04-arm
             build: cargo build --release --locked -p pm-node --features alsa
             dir: target/release
-            bins: pm-node
+            bins: odeiond pm-node
           - platform: linux-armv7
             os: ubuntu-24.04
             build: tools/release/build-armv7.sh
             dir: target/armv7-unknown-linux-gnueabihf/release
-            bins: pm-node
+            bins: odeiond pm-node
           - platform: windows-x86_64
             os: windows-2025
             build: cargo build --release --locked -p pm-node
             dir: target/release
-            bins: pm-node.exe
+            bins: odeiond.exe pm-node.exe
           - platform: macos-arm64
             os: macos-15
             build: cargo build --release --locked -p pm-node
             dir: target/release
-            bins: pm-node
+            bins: odeiond pm-node
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
@@ -442,17 +444,17 @@ jobs:
             if [ "$CHANNEL" = edge ]; then
               echo "The latest build of \`main\` ($short), replaced on every push. Not a release: expect rough edges."
             else
-              echo "Pubky Music $CHANNEL. What changed: [docs/CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$CHANNEL/docs/CHANGELOG.md)."
+              echo "Odeion $CHANNEL. What changed: [docs/CHANGELOG.md](https://github.com/$GITHUB_REPOSITORY/blob/$CHANNEL/docs/CHANGELOG.md)."
             fi
             echo
             echo "| Download | For |"
             echo "| :-- | :-- |"
-            echo "| \`pubky-music-macos-universal.dmg\` | the app on macOS (Apple silicon and Intel); unsigned: right-click → Open the first time |"
+            echo "| \`pubky-music-macos-universal.dmg\` | the Odeion app on macOS (Apple silicon and Intel); unsigned: right-click → Open the first time |"
             echo "| \`pubky-music-windows-x86_64-setup.exe\` or \`.msi\` | the app on Windows; unsigned: SmartScreen → More info → Run anyway |"
             echo "| \`pubky-music-linux-x86_64.AppImage\` or \`.deb\` (also \`arm64\`) | the app on Linux |"
             echo "| \`pubky-music-android-arm64.apk\` (most phones), \`-universal.apk\`, \`.aab\` | the app on Android and Google TV |"
-            echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node and endpoint (armv7: 32-bit Raspberry Pi OS) |"
-            echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the node image (amd64, arm64) |"
+            echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node, \`odeiond\` (also as \`pm-node\`, its old name; armv7: 32-bit Raspberry Pi OS) |"
+            echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the Odeion node image (amd64, arm64) |"
             echo
             echo "Check downloads against \`SHA256SUMS\`."
           } > notes.md
@@ -515,7 +517,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Pubky Music $GITHUB_REF_NAME" --notes-file notes.md
+            gh release create "$GITHUB_REF_NAME" --verify-tag --title "Odeion $GITHUB_REF_NAME" --notes-file notes.md
           fi
           for i in 1 2 3 4 5; do
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber && exit 0
