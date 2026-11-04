@@ -87,7 +87,8 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       await page.route(/\/v1\/profiles\/[^/]+\/avatar/, (r) => r.fulfill({ body: PNG, contentType: 'image/png' }));
       await page.route(/\/v1\/me(\?.*)?$/, (r) => (me ? r.fulfill({ json: me }) : r.fallback()));
       const folder = (key, id) => ({ key, album: 'Frenchcore Worldwide 05', artist: 'Various', songs: [{ track: { id, title: 'Track one', artists: [{ name: 'Various' }], track_no: 1, duration_ms: 200000, file: { path: `/music/${key}/01.flac` } }, options: [{ id: id * 10, recording_mbid: '0c9b1d6e-4e5f-4f3a-9c11-5b7d0a6e2f41', title: 'Track one', artists: [{ name: 'Various' }], source: 'album', score: 0.9 }], status: 'single' }], ready: 1, conflicts: 0 });
-      await page.route(/\/v1\/library\/suggestions\/albums(\?.*)?$/, (r) => r.fulfill({ json: { albums: [folder('a', 300), folder('b', 400), folder('c', 501)], songs: 3, total_albums: 3, offset: 0 } }));
+      let folders = null; // null: lib-137's folder is on the first page; else these, with more to come
+      await page.route(/\/v1\/library\/suggestions\/albums(\?.*)?$/, (r) => r.fulfill({ json: folders ? { albums: folders, songs: folders.length, total_albums: 60, offset: 0, next_after: 'b' } : { albums: [folder('a', 300), folder('b', 400), folder('c', 501)], songs: 3, total_albums: 3, offset: 0 } }));
       const go = async (p) => { await page.goto(BASE + p); await page.locator('#main .hero').first().waitFor({ timeout: 20000 }); await sleep(400); };
       const hero = () => page.locator('#main .hero');
       const group = (scope) => page.locator(`#htags [data-tag-scope="${scope}"]`);
@@ -258,7 +259,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       await shot('artist');
 
       // ---- G: the screenshot's case: a library album with no MusicBrainz match ----
-      pages['album/lib-137'] = item('album', 'lib-137', { target: { album_id: 137 }, songs: [{ id: 501, title: 'Track one', artist: 'Various', duration_ms: 200000, track_no: 1 }], on_pubky: { uri: GUESS, indexed: true, tags: [['guessed', 9]], taggers: 9 } });
+      pages['album/lib-137'] = item('album', 'lib-137', { target: { album_id: 137 }, songs: [{ id: 'lib-501', track_id: 501, title: 'Track one', artist: 'Various', duration_ms: 200000, no: 1 }], on_pubky: { uri: GUESS, indexed: true, tags: [['guessed', 9]], taggers: 9 } });
       own = { 'album:137': 'needs_match' }; pub = { 'album:137': 422 }; uris = {};
       await go('/album/lib-137'); await page.locator('#htags').waitFor(); await sleep(400);
       assert.doesNotMatch(await page.locator('#htags').innerText(), /guessed/, 'a guessed identity\'s tags never show');
@@ -270,6 +271,17 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor();
       await page.waitForFunction(() => document.activeElement && document.activeElement.closest && !!document.activeElement.closest('.idalbum'), null, { timeout: 5000 }).catch(() => {});
       assert.equal(await page.evaluate(() => { const a = document.activeElement; const sec = a && a.closest('.idalbum'); return sec ? sec.querySelector('[data-track]').dataset.track : null; }), '501', 'straight to this album\'s folder');
+      // Once only: a redraw of the list (here: back and forward) stays put and says nothing more
+      await page.evaluate(() => { document.querySelector('#toast').textContent = ''; window.scrollTo(0, 0); });
+      await page.goBack(); await page.locator('#htags [data-htag-match]').waitFor(); await page.goForward();
+      await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor(); await sleep(500);
+      assert.equal(await page.locator('#toast').textContent(), '', 'no second jump or message');
+      // Its folder further down the list: the page says how to get there
+      folders = [folder('a', 300), folder('b', 400)];
+      await go('/album/lib-137'); await page.locator('#htags [data-htag-match]').click();
+      await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor(); await sleep(400);
+      assert.match(await page.locator('#toast').textContent(), /Show more/);
+      folders = null;
       // A matched library album: the node's URI for its tags, and on_pubky about exactly that one (no second lookup)
       pages['album/lib-7'] = item('album', 'lib-7', { target: { album_id: 7 }, on_pubky: { uri: RELEASE, indexed: true, tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } } });
       own = { 'album:7': [] }; uris = { 'album:7': RELEASE }; pub = { 'album:7': { tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } }, 'album:137': 422 };

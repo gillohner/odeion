@@ -4876,11 +4876,13 @@
           };
           draw();
           // From an album page ("Match this album to tag it"): to its folder, when it waits here
+          // (once: a later redraw of the list stays where the owner is)
           const want = state.viewArg && state.viewArg.tracks;
           if (want && want.length) {
+            state.viewArg = { ...state.viewArg, tracks: null };
             const row = want.map((t) => $(`.idrow[data-track="${Number(t)}"]`, main)).find(Boolean); const sec = row && row.closest('.idalbum');
             if (sec) { sec.scrollIntoView({ block: 'start' }); const h = $('h3', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
-            else toast('This album has no matches waiting to be confirmed here. Identify (Settings) looks for it again.');
+            else toast(next != null ? 'This album isn\'t among the first folders here: Show more at the end lists the rest.' : 'This album has no matches waiting to be confirmed. Identify (Settings) looks for it again.');
           }
           break;
         }
@@ -5683,7 +5685,7 @@
           const htKey = `${kind}:${id}:${++heroTagsGen}`;
           const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
           // No identity: say so; the owner's album leads to its folder in the matches to confirm
-          const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.id).filter((x) => x != null) } : null; };
+          const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.track_id).filter((x) => x != null) } : null; };
           if (localRef && songOwn.needsMatch) unmatched();
           else if (!songRef && linkRef) ht.note = `Tags here go on this ${linkName} link only: no MusicBrainz ${kind} is known for it here.`;
           state.heroTagsOpen = { page: `${kind}:${id}`, set: ht.open };
