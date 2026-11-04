@@ -22,6 +22,40 @@ B=$(cd "$1" 2>/dev/null && pwd) || die "no folder $1"
 CURL=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
 ALPINE=$(sed -n 's/^ *image: *\(alpine:[^ ]*\).*/\1/p' docker-compose.yml | head -n 1)
 
+# --- before anything is changed: the token and the passphrases ------------------------------------
+# The backup's .env is the one this install will use (copied below); a folder's own .env otherwise
+ENVSRC="$B/config/.env"
+[ -f "$ENVSRC" ] || ENVSRC=.env
+# The API token the restored node will use: ODEION_TOKEN (or PM_TOKEN) from the shell, else the one in
+# the backup's own data (its node.toml's [api] token, else the one it made: node_token_from), else the
+# backup's .env. Never shown.
+TOKEN=
+for k in ODEION_TOKEN PM_TOKEN; do
+  eval "v=\${$k-}"
+  if [ -n "$v" ]; then TOKEN=$v; break; fi
+done
+if [ -z "$TOKEN" ] && [ -f "$B/node/data.tar.gz" ]; then
+  tok_dir=$(mktemp -d)
+  tar -xzf "$B/node/data.tar.gz" -C "$tok_dir" ./node.toml ./api-token 2>/dev/null || true
+  TOKEN=$(node_token_from "$tok_dir/node.toml" "$tok_dir")
+  rm -rf "$tok_dir"
+fi
+[ -n "$TOKEN" ] || TOKEN=$(setting TOKEN "$ENVSRC")
+[ -n "$TOKEN" ] || die "no API token: the backup's node has none and its .env none either; pass the old node's token: ODEION_TOKEN=… ./restore.sh $1 (nothing was changed)"
+# The sign-ins' passphrase, the ways a backup may have been locked, tried in this order (only on the
+# node's "That passphrase does not open this backup" the next): as compose reads .env; as written in
+# .env, which backup.sh read up to v0.2.2 (quotes and comment included); the one backup.sh made when
+# it found none (node/passphrase). None at all: the backup goes back without the sign-ins.
+PASSES=()
+for p in "$(setting BACKUP_PASSPHRASE "$ENVSRC")" \
+  "${PM_BACKUP_PASSPHRASE:-$(sed -n 's/^PM_BACKUP_PASSPHRASE=//p' "$ENVSRC" 2>/dev/null | tail -n 1)}" \
+  "$([ ! -f "$B/node/passphrase" ] || cat "$B/node/passphrase")"; do
+  [ -n "$p" ] || continue
+  seen=
+  for c in "${PASSES[@]}"; do [ "$c" != "$p" ] || seen=1; done
+  [ -n "$seen" ] || PASSES+=("$p")
+done
+
 # --- config -----------------------------------------------------------------------------------
 for f in .env docker-compose.override.yml; do
   [ -f "$B/config/$f" ] || continue
@@ -31,9 +65,6 @@ for f in .env docker-compose.override.yml; do
   cp "$B/config/$f" "$f"
 done
 chmod 600 .env
-# The node's API token, before anything is changed: the sign-ins go back through the node's API
-TOKEN=$(setting TOKEN)
-[ -n "$TOKEN" ] || die "no API token in .env (ODEION_TOKEN or PM_TOKEN): run ./setup.sh, or put the old node's token there, then ./restore.sh again"
 PROJECT=$(docker compose config 2>/dev/null | sed -n 's/^name: *//p' | head -n 1)
 [ -n "$PROJECT" ] || die "docker compose cannot read this folder's compose files"
 [ -z "$(docker compose ps -aq)" ] || die "the bundle $PROJECT already has containers: this restores into a fresh install only"
@@ -102,8 +133,7 @@ docker compose up -d
 echo "The bundle is up. Putting the sign-ins back once the node's first scan is done..."
 
 # --- the sign-ins, through the node's own restore (Settings › Backup) ---------------------------
-PASS=$(setting BACKUP_PASSPHRASE)
-[ -n "$PASS" ] || [ ! -f "$B/node/passphrase" ] || PASS=$(cat "$B/node/passphrase")
+PASS=${PASSES[0]:-}
 PORT=$(node_port "$NODE")
 node_api() {
   local mount=() body=()
@@ -114,11 +144,8 @@ node_api() {
       printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" > /tmp/h
       exec curl -sS --fail-with-body -H @/tmp/h "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
 }
-# --- sign-ins: begin (tools/bundle-settings-check.py runs this block with a stand-in API)
-# backup.sh before Odeion (v0.2.x) read the passphrase from .env as written, quotes and an inline
-# comment included, and locked the sign-ins under that: when the node refuses the value read now,
-# try it as written once
-RAW_PASS=${PM_BACKUP_PASSPHRASE:-$(sed -n 's/^PM_BACKUP_PASSPHRASE=//p' .env 2>/dev/null | tail -n 1)}
+# --- sign-ins: begin
+tried=0
 if [ -n "$PASS" ]; then q=''; else q='?skip_secrets=true'; fi
 # The node scans its folders when it starts and refuses a restore meanwhile (409): wait for two
 # idle answers in a row (the scan may not have begun at the first), and try again after a 409
@@ -131,11 +158,11 @@ for i in $(seq 720); do
     if report=$(node_api POST "/v1/restore$q" "$B/node/library.pmbackup" 2>&1); then break; fi
     case $report in
       *scan*) idle=0 ;;
-      *"does not open"*)
-        if [ -n "$RAW_PASS" ] && [ "$RAW_PASS" != "$PASS" ]; then
-          echo "  the passphrase as read does not open this backup; trying it as written in .env (a backup from before Odeion)"
-          PASS=$RAW_PASS
-          RAW_PASS=
+      *"That passphrase does not open this backup"*)
+        tried=$(( tried + 1 ))
+        if [ "$tried" -lt "${#PASSES[@]}" ]; then
+          echo "  that passphrase does not open this backup; trying the next way it may have been locked"
+          PASS=${PASSES[$tried]}
           idle=0
         else
           die "the node did not take $B/node/library.pmbackup ($report): restore it in Settings › Backup"

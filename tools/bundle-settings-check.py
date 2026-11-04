@@ -211,62 +211,201 @@ esac
         got = rr.stdout if rr.returncode == 0 else f"<error {rr.stderr.strip()[:80]}>"
         check(got == want, f"setting TOKEN matches compose: shell {shell}, .env {envtext.strip()!r} (compose {want!r}, setting {got!r})")
 
-    # No token in .env: backup.sh and restore.sh stop at once and say to run setup.sh, before docker
-    for script, args in (("backup.sh", []), ("restore.sh", ["fixture-backup"])):
-        d = base / f"notoken-{script}"
-        shutil.copytree(BUNDLE, d, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
-        (d / ".env").write_text("ADMIN_PASSWORD=fixture-admin\nODEION_TOKEN=\nPM_TOKEN=\n")
-        fb = d / "fixture-backup"
-        (fb / "config").mkdir(parents=True)
-        (fb / "config" / ".env").write_text((d / ".env").read_text())
-        subprocess.run("sha256sum config/.env > SHA256SUMS", shell=True, cwd=fb, check=True)
-        calls = d / "docker-calls"
-        stubdir = d / "stub"
-        stubdir.mkdir()
-        (stubdir / "docker").write_text(f'#!/bin/sh\necho "docker $*" >> "{calls}"\nexit 0\n')
-        (stubdir / "docker").chmod(0o755)
-        r = subprocess.run(["bash", str(d / script), *args], cwd=d, capture_output=True, text=True,
-                           env={"PATH": f"{stubdir}:/usr/bin:/bin", "HOME": str(base)})
-        check(r.returncode != 0 and "run ./setup.sh" in r.stderr and not calls.exists(),
-              f"{script} without a token stops at once and says to run ./setup.sh ({r.stderr.strip()[-120:]!r})")
+    # ---- the API token and the passphrase for backup.sh and restore.sh ----------------------------
+    # The node's real token is its config's [api] token, else the one it made (/data/api-token): an
+    # existing node.toml is never rewritten, so a token setup.sh adds later is not the node's.
+    check("run ./setup.sh" not in (BUNDLE / "backup.sh").read_text() + (BUNDLE / "restore.sh").read_text(),
+          "no stop message recommends ./setup.sh for a node that has started (its node.toml is kept)")
 
-    # restore.sh: a backup made by v0.2.x locked its sign-ins under the raw .env value (quotes and all);
-    # when the node refuses the read value, restore.sh tries the raw one once (the real block, a stand-in API)
-    rs = (BUNDLE / "restore.sh").read_text()
-    blk = rs[rs.find("# --- sign-ins: begin"):rs.find("# --- sign-ins: end")]
-    check(bool(blk.strip()), "restore.sh marks its sign-ins block")
-    for envtext, expect, want_ok in (('PM_BACKUP_PASSPHRASE="two words"\n', '"two words"', True),
-                                     ('PM_BACKUP_PASSPHRASE="two words"\n', "two words", True),
-                                     ("PM_BACKUP_PASSPHRASE=plain\n", "other", False)):
+    def node_token(files, cenv=""):
         d = Path(tempfile.mkdtemp(dir=base))
-        (d / ".env").write_text(envtext)
-        prog = f'''set -euo pipefail
-. "{BUNDLE}/settings.sh"
-die() {{ echo "restore: $*" >&2; exit 1; }}
-sleep() {{ :; }}
-B=/fixture
-PASS=$(setting BACKUP_PASSPHRASE)
-node_api() {{
-  case $2 in
-    /v1/info) echo '{{"scanning":false}}' ;;
-    /v1/restore*) if [ "$PASS" = "$EXPECT" ]; then echo '{{"restored":true}}'; else echo "That passphrase does not open this backup"; return 22; fi ;;
-  esac
-}}
-{blk}
-echo "used=[$PASS]"
+        data = d / "data"
+        data.mkdir()
+        for name, body in files.items():
+            (data / name).write_text(body)
+        envs = [f"PM_DATA_DIR={data}"] + [l for l in cenv.splitlines() if l]
+        r = subprocess.run(["env", "-i", "PATH=/usr/bin:/bin", *envs, "sh", "-c",
+                            f'. "{BUNDLE}/settings.sh"; sh -c "$NODE_TOKEN_SH"'], capture_output=True, text=True)
+        return r.stdout
+    check(node_token({"node.toml": 'data_dir = "/data"\n\n[api]\nlisten = "0.0.0.0:7788"\ntoken = "cfg-token"\n'}) == "cfg-token",
+          "the node's token: [api] token from its config")
+    check(node_token({"node.toml": '[api]\ntoken = ""\n', "api-token": "own-token\n"}) == "own-token",
+          "the node's token: the one it made when its config has none")
+    check(node_token({"node.toml": '[tidal]\ntoken = "not-this"\n[api]\nlisten = "x"\n', "api-token": "own\n"}) == "own",
+          "the node's token: only [api]'s token line counts")
+    check(node_token({"node.toml": '[api]\ntoken = "Change-Me"\n', "api-token": "own\n"}) == "own",
+          "the node's token: a placeholder in the config counts as none (as api_token.rs)")
+    check(node_token({"node.toml": '[api]\ntoken = "  spaced  "\n'}) == "spaced", "the node's token: trimmed (as api_token.rs)")
+    check(node_token({}) == "", "the node's token: none")
+
+    # backup.sh: the running node's own token when .env has none; a clear stop when there is none at all
+    def backup_until_inspect(envtext, files):
+        d = base / f"bk-{len(list(base.glob('bk-*')))}"
+        shutil.copytree(BUNDLE, d, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
+        (d / ".env").write_text("ADMIN_PASSWORD=fixture-admin\n" + envtext)
+        data = d / "nodedata"
+        data.mkdir()
+        for name, body in files.items():
+            (data / name).write_text(body)
+        stub = d / "stub"
+        stub.mkdir()
+        (stub / "docker").write_text(f'''#!/bin/bash
+echo "docker $*" >> "{d}/calls"
+case "$1" in
+  compose) [ "$2" = ps ] && echo "ctr-${{@: -1}}" ;;
+  exec) shift; ctr=$1; shift; [ "$1" = sh ] && [ "$2" = -c ] && exec env -i PATH=/usr/bin:/bin PM_DATA_DIR="{data}" sh -c "$3" ;;
+  inspect) exit 1 ;;
+esac
+''')
+        (stub / "docker").chmod(0o755)
+        r = subprocess.run(["bash", str(d / "backup.sh"), str(d / "out")], cwd=d, capture_output=True, text=True,
+                           env={"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(base)})
+        calls = (d / "calls").read_text() if (d / "calls").exists() else ""
+        return r, calls
+    for label, envtext, files in (("the node's own token", "", {"api-token": "fixture-own-token\n"}),
+                                  ("the node's config token", "PM_TOKEN=\n", {"node.toml": '[api]\ntoken = "fixture-cfg-token"\n'}),
+                                  ("the .env token when the node keeps none", "ODEION_TOKEN=fixture-env-token\n", {})):
+        r, calls = backup_until_inspect(envtext, files)
+        check("docker inspect" in calls and "no API token" not in r.stderr and "fixture-" not in r.stdout + r.stderr + calls,
+              f"backup.sh goes on with {label}, never showing it")
+    r, calls = backup_until_inspect("", {})
+    check(r.returncode != 0 and "no API token" in r.stderr and "ODEION_TOKEN" in r.stderr and "docker inspect" not in calls,
+          f"backup.sh without any token stops before it starts, saying where the token is ({r.stderr.strip()[-160:]!r})")
+
+    # restore.sh, the whole script, against a stand-in docker that answers its steps and the node's API
+    # (with skip_secrets: no sign-ins restored), a fresh folder and made-up backups
+    import hashlib
+
+    def make_backup(envtext, data_files, passphrase_file=None):
+        b = Path(tempfile.mkdtemp(dir=base, prefix="backup-"))
+        for sub in ("config", "node", "homeserver"):
+            (b / sub).mkdir()
+        (b / "config" / ".env").write_text("ADMIN_PASSWORD=fixture-admin\nDB_PASSWORD=fixture-db\n" + envtext)
+        (b / "config" / "recreate-volumes.sh").write_text("")
+        (b / "config" / "music-mounts.tsv").write_text("")
+        for f in ("node/library.pmbackup", "node/library.db", "homeserver/database.dump"):
+            (b / f).write_text("fixture")
+        dd = b / "nodedata"
+        dd.mkdir()
+        for name, body in data_files.items():
+            (dd / name).write_text(body)
+        subprocess.run(["tar", "czf", str(b / "node" / "data.tar.gz"), "-C", str(dd), "."], check=True)
+        shutil.rmtree(dd)
+        subprocess.run(["tar", "czf", str(b / "homeserver" / "data.tar.gz"), "-C", str(b / "config"), "."], check=True)
+        if passphrase_file is not None:
+            (b / "node" / "passphrase").write_text(passphrase_file + "\n")
+        subprocess.run("find . -type f ! -name SHA256SUMS -printf '%P\\n' | sort | xargs sha256sum > SHA256SUMS",
+                       shell=True, cwd=b, check=True)
+        return b
+
+    RESTORE_STUB = r'''#!/bin/bash
+echo "docker $*" >> "$CALLS"
+case "$1" in
+  compose)
+    case "$2" in
+      config) echo "name: pubky-music" ;;
+      ps) [ "${4:-}" ] && echo "ctr-$4" ;;
+    esac ;;
+  volume) : ;;
+  inspect) case "$*" in *Config.Env*) echo "PM_LISTEN=0.0.0.0:7788" ;; *) echo "vol-${@: -1}" ;; esac ;;
+  logs) echo "init process complete" ;;
+  exec) case " $* " in *" -i "*) cat > /dev/null ;; esac ;;
+  run)
+    if [[ " $* " == *" --network "* ]]; then
+      read -r T; read -r P
+      url=${@: -1}
+      [ "$T" = "$WANT_TOKEN" ] || { echo '{"error":"unauthorized"}'; exit 22; }
+      case $url in
+        */v1/info) echo '{"scanning":false}' ;;
+        */v1/restore*)
+          echo "restore $url" >> "$CALLS.restores"
+          if [[ $url == *skip_secrets=true* ]]; then echo '{"restored":true,"signins_restored":0}'
+          elif [ "$WANT_PASS" = NOT-A-BACKUP ]; then echo 'This is not an Odeion backup (the library in it does not open)'; exit 22
+          elif [ "$P" = "$WANT_PASS" ]; then echo '{"restored":true,"signins_restored":3}'
+          else echo 'That passphrase does not open this backup'; exit 22; fi ;;
+      esac
+    else
+      case " $* " in *" -i "*) cat > /dev/null ;; esac
+    fi ;;
+esac
+exit 0
 '''
-        r = subprocess.run(["bash", "-c", prog], cwd=d, capture_output=True, text=True,
-                           env={"PATH": "/usr/bin:/bin", "EXPECT": expect})
-        if want_ok:
-            check(r.returncode == 0 and f"used=[{expect}]" in r.stdout,
-                  f"restore with {envtext.strip()!r}, backup locked under {expect!r}: taken ({(r.stdout + r.stderr).strip()[-120:]!r})")
-        else:
-            check(r.returncode != 0 and "does not open" in r.stderr, "a passphrase that is wrong either way still stops, saying why")
+
+    def restore(b, want_token, want_pass, shell_env=None, folder=None):
+        d = folder or Path(tempfile.mkdtemp(dir=base, prefix="restore-"))
+        if folder is None:
+            shutil.copytree(BUNDLE, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
+        stub = d / "stub"
+        stub.mkdir(exist_ok=True)
+        (stub / "docker").write_text(RESTORE_STUB)
+        (stub / "sleep").write_text("#!/bin/sh\n:\n")
+        for f in ("docker", "sleep"):
+            (stub / f).chmod(0o755)
+        calls = d / "calls"
+        for f in (calls, Path(str(calls) + ".restores")):
+            if f.exists():
+                f.unlink()
+        env = {"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(base), "CALLS": str(calls),
+               "WANT_TOKEN": want_token, "WANT_PASS": want_pass, **(shell_env or {})}
+        r = subprocess.run(["bash", str(d / "restore.sh"), str(b)], cwd=d, capture_output=True, text=True, env=env)
+        restores = Path(str(calls) + ".restores")
+        return d, r, (calls.read_text() if calls.exists() else ""), (restores.read_text().count("restore ") if restores.exists() else 0)
+
+    def snapshot(d):
+        return sorted((str(p.relative_to(d)), hashlib.sha256(p.read_bytes()).hexdigest())
+                      for p in d.rglob("*") if p.is_file() and "stub" not in p.parts and p.name not in ("calls",))
+
+    # No token anywhere: stops before changing anything; the shell's ODEION_TOKEN then restores
+    b = make_backup("", {"node.toml": '[api]\ntoken = ""\n'})
+    d = Path(tempfile.mkdtemp(dir=base, prefix="restore-"))
+    shutil.copytree(BUNDLE, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
+    before = snapshot(d)
+    d, r, calls, n = restore(b, "old-node-token", "", folder=d)
+    check(r.returncode != 0 and "ODEION_TOKEN=" in r.stderr and "./restore.sh" in r.stderr and not calls
+          and snapshot(d) == before and not (d / ".env").exists(),
+          f"restore.sh without any token stops before it changes anything ({r.stderr.strip()[-150:]!r})")
+    d, r, calls, n = restore(b, "old-node-token", "", {"ODEION_TOKEN": "old-node-token"}, folder=d)
+    check(r.returncode == 0 and '"restored":true' in r.stdout,
+          f"rerun with ODEION_TOKEN=… in the shell restores ({(r.stdout + r.stderr).strip()[-150:]!r})")
+
+    # The token from the backup's own data: its config's [api] token, else the one the node made
+    for label, files in (("config token", {"node.toml": '[api]\ntoken = "data-cfg-token"\n'}),
+                         ("own token", {"node.toml": '[api]\ntoken = ""\n', "api-token": "data-cfg-token\n"})):
+        b = make_backup("PM_TOKEN=stale-env-token\n", files)
+        d, r, calls, n = restore(b, "data-cfg-token", "")
+        check(r.returncode == 0 and '"restored":true' in r.stdout, f"restore.sh uses the backup's {label}, not a stale .env one")
+
+    # Passphrases, in order: as compose reads .env, as v0.2.x read it (raw), the backup's node/passphrase
+    tok = {"node.toml": '[api]\ntoken = "t"\n'}
+    for label, envtext, pfile, locked in (
+        ("quoted empty (v0.2.x locked under \"\")", 'PM_BACKUP_PASSPHRASE=""\n', None, '""'),
+        ("single-quoted empty", "PM_BACKUP_PASSPHRASE=''\n", None, "''"),
+        ("quoted words", 'PM_BACKUP_PASSPHRASE="two words"\n', None, '"two words"'),
+        ("export line (v0.2.x made one: node/passphrase)", "export PM_BACKUP_PASSPHRASE=x\n", "made-1", "made-1"),
+        ("colon line", "PM_BACKUP_PASSPHRASE: x\n", "made-2", "made-2"),
+        ("leading space", " PM_BACKUP_PASSPHRASE=x\n", "made-3", "made-3"),
+        ("today's ODEION_ name", "ODEION_BACKUP_PASSPHRASE=new-pass\n", None, "new-pass"),
+        ("only node/passphrase", "", "made-4", "made-4"),
+    ):
+        b = make_backup(envtext, tok, pfile)
+        d, r, calls, n = restore(b, "t", locked)
+        check(r.returncode == 0 and '"signins_restored":3' in r.stdout,
+              f"passphrase {label}: the sign-ins come back ({(r.stdout + r.stderr).strip()[-140:]!r})")
+    b = make_backup("", tok)
+    d, r, calls, n = restore(b, "t", "never")
+    check(r.returncode == 0 and '"signins_restored":0' in r.stdout and n == 1,
+          "no passphrase anywhere: restored without the sign-ins (skip_secrets), as before")
+    b = make_backup("PM_BACKUP_PASSPHRASE=a\n", tok, "b")
+    d, r, calls, n = restore(b, "t", "wrong-everywhere")
+    check(r.returncode != 0 and "does not open" in r.stderr and n == 2, "wrong every way: both tried once, then a stop saying why")
+    b = make_backup('PM_BACKUP_PASSPHRASE="q"\n', tok, "f")
+    d, r, calls, n = restore(b, "t", "NOT-A-BACKUP")
+    check(r.returncode != 0 and n == 1, "a backup the node cannot read is not retried with other passphrases")
 
     for script in ("backup.sh", "restore.sh"):
         s = (BUNDLE / script).read_text()
         check('. ./settings.sh' in s, f"{script} uses settings.sh")
-        check("TOKEN=$(setting TOKEN)" in s and "setting BACKUP_PASSPHRASE" in s and 'node_port "$NODE"' in s,
+        check("setting TOKEN" in s and "setting BACKUP_PASSPHRASE" in s and 'node_port "$NODE"' in s,
               f"{script} reads the token, passphrase and port through it")
         check("sed -n 's/^PM_LISTEN=" not in s and "env_get PM_TOKEN" not in s and "s/^PM_TOKEN=//p" not in s,
               f"{script} has no PM_-only reading left")

@@ -305,6 +305,12 @@ if SELF_TEST:
     _cut = _bu.replace(rollback_section(_bu), _rb_old)
     check("ODEION_TAG" in update_section(_cut) and "ODEION_TAG" not in rollback_section(_cut),
           "self-test: the rollback losing ODEION_TAG is seen, the update keeping it too")
+    # and each slice stops at its own paragraph, so a section taking in the next one is caught too
+    check(rollback_section(_bu).count("\n\n") == 1 and "Set the image tag back" in rollback_section(_bu)
+          and "When the newer version" not in rollback_section(_bu),
+          "self-test: the rollback slice is its heading and one paragraph, not the text after it")
+    check(update_section(_bu).count("\n\n") == 0 and "ODEION_TAG" in update_section(_bu),
+          "self-test: the update slice is one paragraph")
     _up_old = update_section(_bu).replace("ODEION_TAG", "PM_TAG")
     _cut = _bu.replace(update_section(_bu), _up_old)
     check("ODEION_TAG" not in update_section(_cut) and "ODEION_TAG" in rollback_section(_cut),

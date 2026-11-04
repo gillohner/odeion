@@ -28,9 +28,9 @@ dotenv_get() {
   printf '%s' "$v"
 }
 
-# setting <NAME>: ODEION_<NAME>, else PM_<NAME>, exactly as compose resolves them: each name from the
-# shell's environment when the shell has it (even empty: then .env is not read for that name), else
-# from .env (dotenv_get). Only for the token and the backup passphrase, where empty is never valid, so
+# setting <NAME> [env file]: ODEION_<NAME>, else PM_<NAME>, exactly as compose resolves them: each name
+# from the shell's environment when the shell has it (even empty: then the file is not read for that
+# name), else from .env or the file given (dotenv_get). Only for the token and the backup passphrase, where empty is never valid, so
 # an empty value goes on to the next name (compose's `${ODEION_TOKEN:-${PM_TOKEN…}}`).
 setting() {
   local k v isset
@@ -39,7 +39,7 @@ setting() {
     if [ "$isset" = set ]; then
       eval "v=\${$k}"
     else
-      v=$(dotenv_get "$k") || v=
+      v=$(dotenv_get "$k" "${2:-.env}") || v=
     fi
     if [ -n "$v" ]; then
       printf '%s' "$v"
@@ -72,3 +72,34 @@ if [ "${ODEION_DATA_DIR+set}" = set ]; then d=$ODEION_DATA_DIR; else d=${PM_DATA
 if [ "${ODEION_CONFIG+set}" = set ]; then c=$ODEION_CONFIG; else c=${PM_CONFIG-}; fi
 c=${c:-${d:-/data}/node.toml}
 pm-node -c "$c" backup --force /tmp/pm-backup-library.db >/dev/null'
+
+# node_token_from <config file> <data dir>: the API token a node with these uses, as the node picks
+# it (crates/pm-node/src/api_token.rs): its config's [api] token, trimmed, unless empty or a
+# placeholder; else the one it made, <data dir>/api-token. Nothing printed but the token itself.
+# Kept as text too, so the same function runs inside the node's container (NODE_TOKEN_SH).
+NODE_TOKEN_FN=$(cat <<'EOF_FN'
+node_token_from() {
+  local t
+  t=$(sed -n '/^\[api\]/,/^\[/s/^[[:space:]]*token[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -n 1)
+  t=${t#"${t%%[![:space:]]*}"}
+  t=${t%"${t##*[![:space:]]}"}
+  case $(printf '%s' "$t" | tr 'A-Z' 'a-z') in '' | change-me | changeme | change-me-to-a-long-random-secret) t= ;; esac
+  if [ -z "$t" ] && [ -f "$2/api-token" ]; then
+    t=$(cat "$2/api-token")
+    t=${t#"${t%%[![:space:]]*}"}
+    t=${t%"${t##*[![:space:]]}"}
+  fi
+  printf '%s' "$t"
+}
+EOF_FN
+)
+eval "$NODE_TOKEN_FN"
+
+# Run in the node's container with `docker exec`: the token the node uses, with the config and the
+# data folder picked as the entrypoint picks them. Never shown: the caller keeps it.
+# shellcheck disable=SC2016
+NODE_TOKEN_SH="$NODE_TOKEN_FN"'
+if [ "${ODEION_DATA_DIR+set}" = set ]; then d=$ODEION_DATA_DIR; else d=${PM_DATA_DIR-}; fi
+if [ "${ODEION_CONFIG+set}" = set ]; then c=$ODEION_CONFIG; else c=${PM_CONFIG-}; fi
+d=${d:-/data}
+node_token_from "${c:-$d/node.toml}" "$d"'

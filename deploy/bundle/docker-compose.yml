@@ -92,8 +92,9 @@ services:
   music:
     # Settings in .env may be spelled ODEION_ (preferred) or PM_ (from before Odeion; setup.sh still
     # writes these); the ODEION_ one wins, also when set to empty, except for the image, the tag and
-    # the token, where empty is never valid and counts as unset. Works the same on Compose v2 and v5. The node itself still gets the PM_
-    # names below, which every image version reads (docs/branding-compatibility.md).
+    # the token, where empty is never valid and counts as unset. Works the same on Compose v2 and v5.
+    # The node itself still gets the PM_ names below, which every image version reads
+    # (docs/branding-compatibility.md).
     image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}}:${ODEION_TAG:-${PM_TAG:-edge}}
     restart: unless-stopped
     network_mode: host

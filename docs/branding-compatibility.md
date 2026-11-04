@@ -131,12 +131,18 @@ Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the n
 - **The token in the bundle:** `${ODEION_TOKEN:-${PM_TOKEN:-}}`, with no `:?` inside (Compose v2 checks
   an inner `:?` before the outer name). With no token at all the node makes its own and keeps it in
   its data folder, because it listens beyond localhost, so the API is never open
-  (`crates/pm-node/src/api_token.rs`). `ADMIN_PASSWORD` still requires `setup.sh`. `backup.sh` and
-  `restore.sh` stop at once without a token in `.env`, saying to run `./setup.sh`. CI checks all
-  this on the runner's Compose v2; it was also checked locally on v5.5.1 and v2.40.3.
-- **Backups from before Odeion:** `backup.sh` up to v0.2.2 read the passphrase from `.env` as
-  written, quotes and comment included. When the node refuses the passphrase as read now,
-  `restore.sh` tries it as written once.
+  (`crates/pm-node/src/api_token.rs`). `ADMIN_PASSWORD` still requires `setup.sh`. The node writes its
+  `node.toml` once, so a token added to `.env` later is not the node's; the scripts therefore use the
+  token the node uses (its config's `[api] token`, else the one it made), read without showing it:
+  `backup.sh` asks the running node, then `.env`; `restore.sh` takes `ODEION_TOKEN=… ./restore.sh
+  <folder>` from the shell, else the backup's own data, else its `.env`. Without any it stops before
+  changing anything and says where the token is. CI checks this on the runner's Compose v2; it was
+  also checked locally on v5.5.1 and v2.40.3.
+- **Backups from before Odeion:** `restore.sh` tries the passphrase as compose reads `.env`, then as
+  written there (how `backup.sh` read it up to v0.2.2: quotes and comment included), then the one
+  `backup.sh` made when it found none (`node/passphrase`). It moves on only when the node answers
+  "That passphrase does not open this backup", and restores without the sign-ins only when there is
+  no passphrase at all.
   Other `.env` keys (`ADMIN_PASSWORD`, `MUSIC_DIR`, …) never had a `PM_` name and are unchanged.
 - **TrueNAS:** its settings are written under `environment:` in the YAML; an `ODEION_` key there
   works as in `docker run -e`.

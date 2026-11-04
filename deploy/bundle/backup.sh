@@ -31,9 +31,6 @@ ALPINE=$(sed -n 's/^ *image: *\(alpine:[^ ]*\).*/\1/p' docker-compose.yml | head
 
 # setting, node_port, NODE_BACKUP_SH: ODEION_ settings first, then PM_ ones
 . ./settings.sh
-# The node's API token, before anything else: without one in .env the node made its own
-TOKEN=$(setting TOKEN)
-[ -n "$TOKEN" ] || die "no API token in .env (ODEION_TOKEN or PM_TOKEN): run ./setup.sh, or put the node's own there (docker compose exec music cat /data/api-token)"
 cid() { docker compose ps -q "$1" 2>/dev/null; }
 # The volume (or host folder) a container has at a path
 vol_of() {
@@ -49,6 +46,12 @@ PG=$(cid postgres)
 HS=$(cid homeserver)
 NODE=$(cid music)
 [ -n "$PG" ] && [ -n "$HS" ] && [ -n "$NODE" ] || die "the bundle is not running: docker compose up -d first"
+# The API token the node uses, before anything else: its config's [api] token, else the one it made
+# for itself (read in its container, never shown; its node.toml is written once, so a token added to
+# .env later is not the node's); else .env's
+TOKEN=$(docker exec "$NODE" sh -c "$NODE_TOKEN_SH" 2>/dev/null) || TOKEN=
+[ -n "$TOKEN" ] || TOKEN=$(setting TOKEN)
+[ -n "$TOKEN" ] || die "no API token: the node has none in its config ([api] token in /data/node.toml) or its data folder (/data/api-token), and .env has no ODEION_TOKEN (or PM_TOKEN): put the node's token in .env as ODEION_TOKEN=…"
 PROJECT=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$NODE")
 NODE_DATA=$(vol_of "$NODE" /data)
 TUNNEL=$(vol_of "$NODE" /tunnel)
