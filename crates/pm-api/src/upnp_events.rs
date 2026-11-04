@@ -5,8 +5,8 @@
 //! renderer calls `/v1/upnp/events/{token}` (no bearer token, LAN only); the token is random per
 //! zone and names it.
 //!
-//! The 10 s volume poll leaves a zone alone only while its events demonstrably arrive
-//! (`Following::live`, set by a NOTIFY, cleared on every new subscription and when one is lost).
+//! The 10 s volume poll leaves a zone alone once its events arrive (`Following::live`, set by a
+//! NOTIFY the node could read, cleared on every new subscription and when one is lost).
 //! A renderer that accepts the subscription but whose events never reach the node (a callback
 //! behind a proxy, an https address) stays on the poll.
 
@@ -25,8 +25,8 @@ struct Sub {
     /// on another output must not get this renderer's level).
     zone: Weak<Zone>,
     source: Source,
-    /// The subscription held now; `None` while subscribing (the renderer's first NOTIFY may come
-    /// before its answer), when the first NOTIFY's SID is taken.
+    /// The subscription held now, from the SUBSCRIBE answer; `None` while subscribing (the
+    /// renderer's first NOTIFY may come before the answer, and is taken).
     sid: Option<String>,
     /// The last `SEQ` applied for `sid`: an older event arriving late is dropped.
     seq: Option<u32>,
@@ -86,27 +86,32 @@ pub(crate) async fn notify(
     let Some(sub) = subs.get_mut(&token) else {
         return StatusCode::PRECONDITION_FAILED;
     };
-    match (&sub.sid, &sid) {
-        // An event of a subscription given up (renewal failed, subscribed again)
-        (Some(have), Some(got)) if have != got => return StatusCode::PRECONDITION_FAILED,
-        (None, Some(got)) => sub.sid = Some(got.clone()),
-        _ => {}
+    // An event of a subscription given up (renewal failed, subscribed again). While the
+    // SUBSCRIBE is unanswered the SID isn't known yet: the event is taken, its SID not kept
+    if let (Some(have), Some(got)) = (&sub.sid, &sid) {
+        if have != got {
+            return StatusCode::PRECONDITION_FAILED;
+        }
     }
     if let Some(n) = seq {
-        if sub.seq.is_some_and(|prev| n <= prev) {
+        // 0 is a subscription's first event: the count starts again
+        if n != 0 && sub.seq.is_some_and(|prev| n <= prev) {
             return StatusCode::OK;
         }
         sub.seq = Some(n);
     }
     let change = gena::read_notify(sub.source, &body);
+    if change.percent.is_none() && change.muted.is_none() {
+        // Nothing the node could read (a channel it doesn't follow): the poll stays on
+        return StatusCode::OK;
+    }
     sub.following.live.store(true, Ordering::Relaxed);
     let was = sub.last.or(z.state().volume);
     if let Some(v) = merge(was, change) {
-        if sub.last != Some(v) {
-            sub.last = Some(v);
-            // Still under the lock: events reach the zone in the order the renderer sent them
-            z.announce_volume(v);
-        }
+        sub.last = Some(v);
+        // Still under the lock: events reach the zone in the order the renderer sent them (the
+        // engine leaves an unchanged level alone)
+        z.announce_volume(v);
     }
     StatusCode::OK
 }
@@ -163,7 +168,7 @@ pub(crate) fn follow(
             following.live.store(false, Ordering::Relaxed);
             if let Some(n) = weak.upgrade() {
                 if let Some(sub) = n.gena.subs.lock().expect("gena subs").get_mut(&token) {
-                    (sub.sid, sub.seq) = (None, None);
+                    (sub.sid, sub.seq, sub.last) = (None, None, None);
                 }
             }
         };
@@ -177,11 +182,8 @@ pub(crate) fn follow(
                     tracing::debug!(renderer = %name, ?source, "subscribed to its volume events");
                     if let Some(n) = weak.upgrade() {
                         if let Some(held) = n.gena.subs.lock().expect("gena subs").get_mut(&token) {
-                            // An event taken meanwhile came from another (an old) subscription
-                            if held.sid.as_deref() != Some(&sub.sid) {
-                                held.seq = None;
-                                following.live.store(false, Ordering::Relaxed);
-                            }
+                            // From now on only this subscription's events count (one taken before
+                            // the answer is most likely its first)
                             held.sid = Some(sub.sid.clone());
                         }
                     }

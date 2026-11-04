@@ -5487,6 +5487,30 @@ mod tests {
             zone.state().volume.map(|v| v.level),
             Some(pm_model::VolumeLevel::Percent(40))
         );
+        // SEQ 0 is a subscription's first event: the count starts again, the level is taken
+        app.clone().oneshot(notify(&token, 0, &level(33))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33))
+        );
+        // An event with nothing the node reads (left channel only) changes nothing
+        let lf = event(r#"&lt;Volume channel="LF" val="5"/&gt;"#);
+        assert_eq!(
+            app.clone()
+                .oneshot(notify(&token, 1, &lf))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33))
+        );
+        app.clone().oneshot(notify(&token, 2, &level(40))).await.unwrap();
+        zone.wait_acked().await;
         // An event of a subscription the node gave up: 412, nothing moves
         let resp = app
             .clone()
