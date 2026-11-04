@@ -145,10 +145,13 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await page.screenshot({ path: path.join(SHOTS, 'album-820x1180-touch.png') });
     await context.close();
   }
-  // 390 px is still the phone
-  {
-    const { page, context } = await open(browser, 390, 844);
+  // Phones are still the phone, their mini player untouched by the desktop bar's rules
+  for (const [w, h, touch] of [[360, 780, true], [375, 812, true], [390, 844, false], [390, 844, true]]) {
+    const { page, context } = await open(browser, w, h, { touch });
     await fx.go(page, '/album/lib-7'); await page.waitForTimeout(800);
+    const bar = await page.evaluate(barReport);
+    check(!bar.overlaps.length && !bar.outside.length, `${w}${touch ? ' touch' : ''}: the mini player's parts don't overlap or leave it${bar.overlaps.length || bar.outside.length ? ': ' + [...bar.overlaps, ...bar.outside].slice(0, 4).join('; ') : ''}`);
+    if (w !== 390 || touch) { await context.close(); continue; }
     const p = await page.evaluate(() => ({ shell: document.documentElement.dataset.shell, tabs: [...document.querySelectorAll('.bottomnav .bnav')].filter((b) => b.getBoundingClientRect().width > 0).map((b) => b.dataset.bnav).join(',') }));
     check(p.shell === 'phone' && p.tabs === 'home,search,library,zones', `390: the phone, with its four tabs (${p.shell}: ${p.tabs})`);
     check(!(await visible(page, '#sidebar')), '390: no sidebar');

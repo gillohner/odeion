@@ -244,11 +244,11 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .player-right { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
 /* The right group never spills over the transport (a long zone name, a long sound line): its parts
    keep their size, except the sound pill's words and the zone's name, which shrink to an ellipsis */
-.player-right > * { flex: none; }
-.player-right > .quality, .player-right > .zone-btn { flex: 0 1 auto; min-width: 0; }
-.player-right > .quality .qtext { min-width: 4em; }
-.player-right > .quality .qdot { flex: none; }
-.player-right > .zone-btn span { min-width: 4em; }
+html:not([data-shell="phone"]) .player-right > * { flex: none; }
+html:not([data-shell="phone"]) .player-right > :is(.quality, .zone-btn) { flex: 0 1 auto; min-width: 0; }
+html:not([data-shell="phone"]) .player-right > .quality .qtext { min-width: 4em; }
+html:not([data-shell="phone"]) .player-right > .quality .qdot { flex: none; }
+html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; }
 .quality { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; color: var(--fg-2); white-space: nowrap; }
 .quality:hover { border-color: var(--line-strong); }
 .qdot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
@@ -525,7 +525,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .shell.collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
 .shell.collapsed .nav-item { justify-content: center; padding: 10px 0; }
 .shell.collapsed .node-status { justify-content: center; }
-@media (max-width: 1100px) and (min-width: 600px) {
+@media (max-width: 1100px) {
   .shell.expanded { --sidebar: 232px; }
   .shell.expanded .brand-name, .shell.expanded .nav-label, .shell.expanded .nav-item span, .shell.expanded .node-text { display: initial; }
   .shell.expanded .brand { justify-content: flex-start; padding: 2px 10px 18px; }

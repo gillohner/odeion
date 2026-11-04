@@ -195,7 +195,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // Phone arrangement (Layout: Compact): tabs Home, Search, Library, Zones; Library opens the library
   // with its sections as chips; the account button's menu has Settings (and Log out); back returns.
   w2.localStorage.setItem('pm.layout', 'phone'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
-  const tabs = [...w2.document.querySelectorAll('.bnav')].filter((b) => !b.classList.contains('rail-only')).map((b) => b.dataset.bnav).join(',');
+  const tabs = [...w2.document.querySelectorAll('.bnav')].map((b) => b.dataset.bnav).join(',');
   w2.document.querySelector('[data-bnav="library"]').click(); await sleep(1500);
   const libChips = [...w2.document.querySelectorAll('#main .libnav [data-libnav]')].map((b) => b.dataset.libnav);
   const chip = w2.document.querySelector('#main .libnav [data-libnav="artists"]'); if (chip) chip.click(); await sleep(1500);
