@@ -320,6 +320,16 @@ impl Inbox {
         }
         let mut conn = Connection::open(&path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // What the inbox lets go of (a purged report, a cleared digest) is overwritten in this
+        // file, not left in its free space: whoever copies the file has its key too. It is set per
+        // connection, so every opener comes through here. SQLite's journal and the disk itself are
+        // beyond it (docs/api.md)
+        let overwrites: i64 = conn.pragma_update_and_check(None, "secure_delete", true, |r| r.get(0))?;
+        if overwrites != 1 {
+            return Err(InboxError::Store(
+                "SQLite won't overwrite what the inbox deletes".into(),
+            ));
+        }
         conn.execute_batch(SCHEMA)?;
         // An inbox made before the digest column: looked at and changed in one go, so two first
         // opens at once can't both try to add it
@@ -368,6 +378,9 @@ impl Inbox {
             .filter(|d| **d != Details::default())
             .map(|d| serde_json::to_string(d).expect("serializes"));
         let digest = self.digest(r, details.as_deref());
+        // What is past keeping goes first, in a write of its own: the report's write below is
+        // undone when it is turned away, and must not take the expiry with it
+        self.purge(now)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -376,11 +389,6 @@ impl Inbox {
         if !still() {
             return Err(InboxError::SignedOut);
         }
-        tx.execute(
-            "DELETE FROM report WHERE sent_at < ?1 OR (reviewed_at IS NOT NULL AND reviewed_at < ?2)",
-            params![now - KEEP, now - KEEP_REVIEWED],
-        )?;
-        forget_digests(&tx, now)?;
         let kind = serde_json::to_value(r.kind).expect("serializes");
         let before: Option<(String, Option<String>)> = tx
             .query_row(
@@ -552,9 +560,9 @@ impl Inbox {
 /// How long a report can be sent again after a lost answer and still be told from an edit.
 const RESEND: i64 = DAY;
 
-/// A digest is only for telling a resend from an edit: once a report is received, or a day old,
-/// none is kept, so the inbox holds no lasting check on what was written before tokens came out.
-/// A report sent again after that is a new one (409).
+/// A digest is only for telling a resend from an edit: once a report is received or reviewed, or
+/// a day old, none is kept, so the inbox holds no lasting check on what was written before tokens
+/// came out. A report sent again after that is a new one (409).
 fn forget_digests(conn: &Connection, now: i64) -> Result<(), InboxError> {
     conn.execute(
         "UPDATE report SET digest = NULL WHERE digest IS NOT NULL AND (state != 'saved' OR sent_at < ?1)",
