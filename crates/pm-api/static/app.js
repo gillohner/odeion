@@ -1480,7 +1480,10 @@
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
     if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
     if (choosing) {
-      const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`).join('');
+      const wayHtml = (w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`;
+      // The everyday ways first; the rest under Advanced (open when one of them is picked)
+      const adv = si.ways.filter((w) => w.advanced);
+      const ways = si.ways.filter((w) => !w.advanced).map(wayHtml).join('') + (adv.length ? `<details class="ways-adv" data-sg="advanced" ${adv.some((w) => w.id === pick) ? 'open' : ''}><summary>Advanced</summary><div class="ways">${adv.map(wayHtml).join('')}</div></details>` : '');
       rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
     }
     if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
@@ -1529,62 +1532,102 @@
     const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
     if (cfg.after) cfg.after(si, h, el);
   };
-  // TIDAL: the official app in the browser, a device code with your own client; quality and
-  // health under the device way, which is what the Full tracks switch used to turn on (STEWARD-TIDAL-FULL.md).
+  // TIDAL (owner, 2026-11-04): Sign in with TIDAL (the browser sign-in, Recommended: full tracks
+  // lossless and hi-res), the code sign-in as the fallback, and under Advanced the official app,
+  // your own device client and a pasted token; quality and health under the full-tracks sign-in.
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
+  // Sign in with TIDAL: TIDAL's sign-in in a new tab (opened at the click, so no popup blocker
+  // stops it), then the page here asks for the address TIDAL lands on
+  const tidalPkceStart = async (h, btn) => {
+    if (btn) btn.disabled = true;
+    const tab = window.open('about:blank', '_blank');
+    try {
+      if (!(await h.choose('browser'))) { if (tab) tab.close(); return; }
+      const r = await api('POST', '/sources/tidal/unofficial/browser');
+      h.m.browserUrl = r.url; h.m.way = 'browser';
+      if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
+    } catch (e) { if (tab) tab.close(); toast(e.message, 'error'); }
+    h.refill();
+  };
+  const tidalPkceSteps = (u, h) => {
+    const waiting = !!u.browser_pending;
+    const open = h.m.browserUrl ? `<a class="btn ghost sm" href="${esc(h.m.browserUrl)}" target="_blank" rel="noopener">${icon('external')} Open TIDAL’s sign-in again</a>` : '';
+    return stepCard(1, 'Sign in at TIDAL', waiting, 'Opens TIDAL’s sign-in in a new tab. Sign in there; TIDAL then shows a page that may say “Oops” or look empty. That is the one: keep it open.',
+      `<div class="toolbar"><button class="btn primary" id="tbin">${icon('external')} ${waiting ? 'Sign in with TIDAL again' : 'Sign in with TIDAL'}</button>${open}</div>`)
+      + (waiting ? stepCard(2, 'Paste its address', false, 'Copy the whole address of that TIDAL page from the address bar and paste it here.',
+        `<form class="stack" id="tbfinish" autocomplete="off"><div class="toolbar"><input class="input" name="text" type="text" inputmode="url" placeholder="https://tidal.com/android/login/auth?code=…" aria-label="Address of the TIDAL page" autocomplete="off" spellcheck="false" required><button class="btn primary" type="submit">Done</button></div><p class="check-out small bad" id="tbfinisherr" role="alert" hidden></p></form>`) : '');
+  };
   const tidalSigninCfg = (el) => ({
     source: 'tidal', name: 'TIDAL', el,
     actions: (pick, si, h) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
+      const own = !u.from && u.signed_in;
+      if (pick === 'browser') return own && u.session_client === 'pkce' ? h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') : tidalPkceSteps(u, h);
       if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
-        const client = u.client_from ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
-        // No device client yet: the step card first (the node never ships another party's)
-        if (!u.client_from) return stepCard(1, 'Device client ID and secret', false, `Full tracks need a TIDAL device client: enter one you are allowed to use; the node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
-          `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
         if (u.pending) return tidalCodeBox(u.pending);
-        if (u.signed_in) return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') + client;
-        return `<div class="toolbar"><button class="btn primary" id="tfin">${h.m.codeExpired ? 'New code' : 'Sign in with a code'}</button><span class="muted small">${h.m.codeExpired ? 'The code expired before it was entered. ' : ''}A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>${client}`;
+        if (own && u.session_client === 'device') return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '');
+        return `<div class="toolbar"><button class="btn primary" id="tfin">${h.m.codeExpired ? 'New code' : 'Sign in with a code'}</button><span class="muted small">${h.m.codeExpired ? 'The code expired before it was entered. ' : ''}A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>`;
+      }
+      if (pick === 'own-device') {
+        const now = u.client_from === 'settings' ? '<p class="muted small">Your device client is set here and used for the code sign-in. <button class="btn ghost sm" id="tfclientforget">Forget it</button></p>'
+          : u.client_from === 'config' ? '<p class="muted small">A device client is set in the node config; one entered here is used instead.</p>' : '';
+        return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `A TIDAL device client you are allowed to use, for the code sign-in; it replaces the built-in one for everyone here. The node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
+          `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
       }
       if (pick === 'import') return h.importArea({ fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json' });
-      if (pick === 'paste') return h.pasteArea({ label: 'Token file contents or access token', placeholder: 'Token file contents, or an access token (a refresh token on the next line)' });
+      if (pick === 'paste') return h.importArea({ withPaste: true, fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json', label: 'Token file contents or access token', placeholder: 'Token file contents, or an access token (a refresh token on the next line)' });
       return null;
     },
     wire: (pick, si, h, act) => {
-      const u = si.details.unofficial || {};
       const a = $('#tidalin'); if (a) a.onclick = async () => { if (await h.choose('app')) tidalBrowserSignIn(a); };
       wirePasteBack('tidal', 'TIDAL signed in');
+      const tb = $('#tbin'); if (tb) tb.onclick = () => tidalPkceStart(h, tb);
+      const tf = $('#tbfinish'); if (tf) tf.onsubmit = async (e) => {
+        e.preventDefault(); const btn = tf.querySelector('button[type=submit]'); const err = $('#tbfinisherr'); btn.disabled = true; err.hidden = true;
+        try { await api('POST', '/sources/tidal/unofficial/browser/finish', { text: new FormData(tf).get('text') }); h.m.browserUrl = null; toast('TIDAL signed in: full tracks, lossless'); h.done(); }
+        catch (er) { err.textContent = er.message; err.hidden = false; btn.disabled = false; }
+      };
       const d = $('#tfin'); if (d) d.onclick = async () => { d.disabled = true; h.m.codeExpired = false; if (await h.choose('device')) { try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } } h.refill(); };
       const cf = $('#tfclient'); if (cf) {
         wireSecretToggles(cf); wireAppPaste(cf, 'tidal');
         const tc = $('#tfcheck'); if (tc) tc.onclick = () => { const f = new FormData(cf); runCheck(tc, $('#tfcheckout'), '/sources/tidal/unofficial/client/check', { client_id: f.get('id'), client_secret: f.get('secret') }); };
-        cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button[type=submit]').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
+        cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button[type=submit]').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); h.m.way = 'device'; if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
       }
       const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast('Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
     },
     // The full-tracks status at the top: Off / Needs a device client / Needs sign-in / Working
     before: (si) => {
-      const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok;
+      const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok; const lossy = !!(u.health && u.health.ok && u.health.lossy);
       // A session first (also one imported or pasted, which needs no device client here), then
       // a code waiting, then what is missing
       const st = u.signed_in
         ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-          : !u.enabled ? { cls: '', label: 'Off', text: `Signed in, switched off here (pick ${u.client_from ? 'the code sign-in' : 'the way it came from'} below to use it).` }
+          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the way it came from below to use it).' }
+          : lossy ? { cls: 'warn', label: 'AAC only', text: 'Full tracks, but TIDAL sends them as AAC (lossy).' }
           : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
-        : !u.client_from ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (pick the code sign-in below).' }
-        : { cls: '', label: 'Needs sign-in', text: 'Needs your TIDAL sign-in with a code (pick it below).' };
+        : u.browser_pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the address of the TIDAL page you landed on (step 2 below).' }
+        : !u.client_from && !u.browser_available ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (Advanced › Your own device client below).' }
+        : { cls: '', label: 'Needs sign-in', text: `Needs your TIDAL sign-in (${u.browser_available ? 'Sign in with TIDAL' : 'the code sign-in'} below).` };
       return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your TIDAL account. ${guideLink('tidal-full-tracks.md')}`, u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : '')];
     },
     extra: (si) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const rows = [];
       const deviceOn = !!(si.in_use && si.in_use.way !== 'app');
+      // A code sign-in where the browser one is possible: one line, with the button
+      const codeSession = u.signed_in && u.enabled && !u.from && u.session_client === 'device' && u.browser_available;
+      const again = '<button class="btn primary sm" id="tbagain">Sign in with TIDAL</button>';
       if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Full tracks switched themselves off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.${u.from ? ' That sign-in came from ' + esc(u.from === 'pasted' ? 'a pasted token' : u.from) + '; pick another way below, or a newer file.' : ''}<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
       if (deviceOn) {
         rows.push(sgRow('Quality', 'Max plays up to 24-bit/192 kHz where TIDAL has it.', `<select class="input" id="tfq" aria-label="TIDAL full track quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="high" ${u.quality === 'high' ? 'selected' : ''}>High (16-bit/44.1 kHz)</option></select>`));
-        if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+        if (u.health && u.health.ok && u.health.lossy) rows.push(sgRow('Health', `${esc(u.health.detail)}.`, `<span class="pill warn">AAC</span>${codeSession ? again : ''}`));
+        else {
+          if (codeSession) rows.push(sgRow('Lossless', 'Sign in with TIDAL again for lossless.', again));
+          if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+        }
         if (!st.signed_in) rows.push(sgRow('Your collection', `Collection and playlist imports go through ${esc((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
-      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to the device sign-in.`, '<span class="pill warn">previews</span>'));
+      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to Sign in with TIDAL.`, '<span class="pill warn">previews</span>'));
       // The page has no general Status row (the full-tracks status leads): a problem with the
       // sign-in in use still shows, as a phone has no source list beside it
       const src = (state.sources || []).find((x) => x.id === 'tidal'); const ss = src && srcState({ ...src, enabled: true });
@@ -1597,7 +1640,9 @@
       const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
       const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
       const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
-      const out = $('#tfout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); h.m.change = false; h.m.codeExpired = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
+      // From a code sign-in to the browser one: the chooser opens on it and TIDAL's tab opens
+      const ag = $('#tbagain'); if (ag) ag.onclick = () => { h.m.change = true; h.m.way = 'browser'; tidalPkceStart(h, ag); };
+      const out = $('#tfout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); h.m.change = false; h.m.codeExpired = false; h.m.browserUrl = null; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
       clearTimeout(state.tidalFullPoll); clearInterval(state.tidalCountdown);
       if (u.pending) {
         // The time left, each second; gone, the page says so and offers a new code
