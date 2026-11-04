@@ -15,7 +15,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 MIRROR=${DEBIAN_CD_MIRROR:-https://cdimage.debian.org/debian-cd/current/amd64/iso-cd}
-OUT=odeion-amd64.iso TAG=edge ANSWERS= NETINST= SUMS= KEYRING=/usr/share/keyrings/debian-role-keys.gpg
+OUT=odeion-amd64.iso TAG=edge ANSWERS='' NETINST='' SUMS='' KEYRING=/usr/share/keyrings/debian-role-keys.gpg
 die() { echo "build-iso: $*" >&2; exit 1; }
 while [ $# -gt 0 ]; do
   case $1 in
