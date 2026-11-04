@@ -31,6 +31,10 @@ pub enum Confidence {
     AlbumFit { score: f32 },
     /// The owner confirmed a suggestion.
     ConfirmedByUser,
+    /// A search by the file's tags found its song exactly (title and version, artist, length
+    /// within 3 s), on one or several MusicBrainz recordings, the most logical one taken from the
+    /// releases (owner, 2026-11-04). With this score (0–1).
+    TagMatch { score: f32 },
     /// Artist / title / duration match with this score (0–1). A suggestion
     /// only: never canonical, never published (identify brief).
     Fuzzy { score: f32 },
@@ -49,6 +53,7 @@ impl Confidence {
             Confidence::Fingerprint { score }
             | Confidence::FingerprintRelease { score }
             | Confidence::AlbumFit { score }
+            | Confidence::TagMatch { score }
             | Confidence::Fuzzy { score } => *score,
         }
     }
@@ -62,7 +67,7 @@ impl Confidence {
 
     /// The identify brief's name for this level: `tagged_mbid`,
     /// `tagged_isrc`, `fingerprint`, `fingerprint+release`, `album_fit`,
-    /// `confirmed_by_user`, `suggested`.
+    /// `confirmed_by_user`, `tag_match`, `suggested`.
     pub fn label(&self) -> &'static str {
         match self {
             Confidence::TaggedMbid => "tagged_mbid",
@@ -71,6 +76,7 @@ impl Confidence {
             Confidence::FingerprintRelease { .. } => "fingerprint+release",
             Confidence::AlbumFit { .. } => "album_fit",
             Confidence::ConfirmedByUser => "confirmed_by_user",
+            Confidence::TagMatch { .. } => "tag_match",
             Confidence::Fuzzy { .. } => "suggested",
         }
     }

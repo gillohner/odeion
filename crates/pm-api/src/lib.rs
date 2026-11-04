@@ -427,6 +427,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/identify/write", post(identify::write_now))
         .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
+        .route("/library/suggestions/albums", get(identify::review_albums))
+        .route("/library/suggestions/confirm", post(identify::confirm))
         .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))
@@ -14829,10 +14831,19 @@ exec sleep 300
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let after = std::time::Duration::from_millis(1500);
         assert!(s.begin_scan());
+        // The scan ends whatever happens in the thread below: a failed assertion there fails the
+        // test instead of leaving the run waiting for a scan that never ends
+        struct EndScan(Arc<NodeState>);
+        impl Drop for EndScan {
+            fn drop(&mut self) {
+                self.0.end_scan();
+            }
+        }
         let other = {
             let db = dir.path().join("lib.sqlite");
             let s = s.clone();
             std::thread::spawn(move || {
+                let _end = EndScan(s.clone());
                 let other = Library::open(&db).unwrap();
                 other.begin_batch().unwrap();
                 locked_tx.send(()).unwrap();
@@ -14865,9 +14876,12 @@ exec sleep 300
             })
         };
         locked_rx.recv().unwrap();
-        identify::run(&s, false).await.unwrap();
+        tokio::time::timeout(10 * pm_library::db::BUSY_TIMEOUT, identify::run(&s, false))
+            .await
+            .expect("the run ends")
+            .unwrap();
         let finished = std::time::Instant::now();
-        let scan_ended = other.join().unwrap();
+        let scan_ended = other.join().expect("the scan's thread ran to its end");
         assert!(
             finished >= scan_ended,
             "the retry waits for the scan to end, not for the lock alone"
@@ -15226,9 +15240,10 @@ exec sleep 300
         assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
     }
 
-    /// A song whose identity was stored but whose state write then failed (a disk error) still
-    /// gets its IDs written into the file ("Write IDs" on): later runs skip it, so this run is
-    /// its only chance.
+    /// A song's identity and state are stored together or not at all (identification review,
+    /// fix round 1): a disk error on the state write leaves no identity behind, so no file gets
+    /// the IDs of an identity that isn't stored, and the song is checked again. Once the disk is
+    /// back, the next run stores it and writes its IDs into the file ("Write IDs" on).
     #[tokio::test]
     async fn an_identity_stored_before_a_failed_write_still_gets_its_ids_written() {
         let dir = tempfile::tempdir().unwrap();
@@ -15269,16 +15284,29 @@ exec sleep 300
                 "score": 0.95, "recordings": [{"id": mbid, "title": "Bohemian Rhapsody"}]}]});
             lib.save_lookup(&key, &answer.to_string()).unwrap();
         }
-        // The song's state write fails after its identity is stored
-        rusqlite::Connection::open(dir.path().join("lib.sqlite"))
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER fail_state BEFORE INSERT ON identify_state
-                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
-            )
-            .unwrap();
+        // The song's state write fails (with its identity, in one transaction)
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_state BEFORE INSERT ON identify_state
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
         let e = identify::run(&s, false).await.unwrap_err();
         assert!(e.message.contains("disk I/O error"), "{}", e.message);
+        let track = |s: &Arc<NodeState>| s.library.lock().unwrap().all_tracks().unwrap().remove(0);
+        assert!(track(&s).canonical.is_none(), "no identity without its state");
+        let (_, tags) = pm_library::probe_and_read(&f).unwrap();
+        assert_eq!(
+            tags.recording_mbid, None,
+            "no IDs for an identity that isn't stored"
+        );
+        // The disk is back: the next run stores it and its IDs reach the file
+        db.execute_batch("DROP TRIGGER fail_state;").unwrap();
+        identify::run(&s, false).await.unwrap();
+        assert_eq!(
+            track(&s).canonical.map(|(u, _)| u.to_url()),
+            Some(format!("https://musicbrainz.org/recording/{mbid}"))
+        );
         let (_, tags) = pm_library::probe_and_read(&f).unwrap();
         assert_eq!(
             tags.recording_mbid,
@@ -17269,4 +17297,7 @@ exec sleep 300
         let r = app.clone().oneshot(req).await.unwrap();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
     }
+
+    // Identification review, completion and reuse (their own file: fewer shared lines here)
+    mod identify_review;
 }

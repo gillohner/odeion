@@ -76,6 +76,12 @@ pub struct AcReleaseGroup {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// The group's primary type (`Album`, `Single`, `EP`…), when AcoustID says.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Its secondary types (`Compilation`, `Live`…).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secondarytypes: Vec<String>,
     #[serde(default)]
     pub releases: Vec<AcRelease>,
 }
@@ -207,6 +213,101 @@ pub fn best_folder_release(files: &[(FileFacts, &[AcoustIdResult])], folder_len:
     (n >= need).then(|| best.to_string())
 }
 
+/// The releases the folder may be: the one of [`best_folder_release`]; or, when several tie,
+/// all of them provided they put the same recordings at every file's place (editions that differ
+/// only in what doesn't change the recordings: a remaster, another country's pressing). Tied
+/// editions that disagree on any file decide nothing (empty).
+pub fn best_folder_releases(files: &[(FileFacts, &[AcoustIdResult])], folder_len: usize) -> Vec<String> {
+    if let Some(one) = best_folder_release(files, folder_len) {
+        return vec![one];
+    }
+    let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    for (facts, results) in files {
+        let mut seen: std::collections::BTreeSet<&str> = Default::default();
+        for rec in strong_fitting(results, facts) {
+            for rel in rec.all_releases() {
+                if release_fits(rel, facts, folder_len) && seen.insert(rel.id.as_str()) {
+                    *counts.entry(rel.id.as_str()).or_default() += 1;
+                }
+            }
+        }
+    }
+    let Some(top) = counts.values().max().copied() else {
+        return Vec::new();
+    };
+    if top < folder_len.div_ceil(2).max(1) {
+        return Vec::new();
+    }
+    let tied: Vec<&str> = counts
+        .iter()
+        .filter(|(_, n)| **n == top)
+        .map(|(r, _)| *r)
+        .collect();
+    // The recordings each tied release puts at each file's place
+    let at =
+        |rel: &str, facts: &FileFacts, results: &[AcoustIdResult]| -> std::collections::BTreeSet<String> {
+            strong_fitting(results, facts)
+                .filter(|rec| {
+                    rec.all_releases()
+                        .any(|r| r.id == rel && release_fits(r, facts, folder_len))
+                })
+                .map(|rec| rec.id.clone())
+                .collect()
+        };
+    let same = files.iter().all(|(facts, results)| {
+        let first = at(tied[0], facts, results);
+        tied[1..].iter().all(|r| at(r, facts, results) == first)
+    });
+    if same {
+        tied.into_iter().map(str::to_string).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The strong recordings whose length fits the file.
+fn strong_fitting<'a>(
+    results: &'a [AcoustIdResult],
+    facts: &'a FileFacts,
+) -> impl Iterator<Item = &'a AcRecording> {
+    results
+        .iter()
+        .filter(|r| r.score >= Confidence::FINGERPRINT_ACCEPT)
+        .flat_map(|r| r.recordings.iter())
+        .filter(move |rec| duration_fits(rec, facts))
+}
+
+/// Bump when identification's decisions change enough that "not found" songs are worth checking
+/// again (part of [`input_key`]).
+pub const INPUT_VERSION: u32 = 2;
+
+/// What a song looked like to identification: its file (path, size, time), the tags it is matched
+/// by, and the node's services as the caller describes them (`services`: their addresses, whether
+/// MusicBrainz can be asked, a hash of the AcoustID key, never the key). Only this hash is stored.
+/// A "not found" song whose key changes is checked again by a plain run.
+pub fn input_key(t: &pm_model::Track, services: &str) -> String {
+    let artists: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+    let album = t.album.as_ref();
+    let text = format!(
+        "v{INPUT_VERSION}|{services}|{}|{}|{}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}",
+        t.file.path.display(),
+        t.file.size_bytes,
+        t.file.mtime_unix,
+        t.title,
+        artists.join("\u{1f}"),
+        album.map(|a| a.title.as_str()).unwrap_or_default(),
+        album.and_then(|a| a.album_artist.as_deref()).unwrap_or_default(),
+        album
+            .and_then(|a| a.release_mbid)
+            .map(|m| m.to_string())
+            .unwrap_or_default(),
+        t.disc_no,
+        t.track_no,
+        t.duration_ms.or(t.file.duration_ms),
+    );
+    blake3::hash(text.as_bytes()).to_hex()[..32].to_string()
+}
+
 // ---- the decision ----
 
 /// One candidate recording for the owner to confirm.
@@ -274,23 +375,35 @@ fn distinct(results: &[AcoustIdResult], min: f32) -> Vec<Seen<'_>> {
     out
 }
 
+/// Whether the recording fits the file's place on some release (`None`: on none), and the
+/// release when that is settled: the folder's when the recording is on it, else the only one
+/// that fits. Several that fit and none preferred: the release stays open (the first in
+/// AcoustID's answer is no evidence).
 fn fitting_release<'a>(
     rec: &'a AcRecording,
     file: &FileFacts,
     folder_len: usize,
     preferred: Option<&str>,
-) -> Option<&'a AcRelease> {
+) -> Option<Option<&'a AcRelease>> {
     if !duration_fits(rec, file) {
         return None;
     }
-    let fits: Vec<&AcRelease> = rec
+    let mut fits: Vec<&AcRelease> = Vec::new();
+    for rel in rec
         .all_releases()
         .filter(|rel| release_fits(rel, file, folder_len))
-        .collect();
-    match preferred {
-        Some(p) => fits.into_iter().find(|rel| rel.id == p),
-        None => fits.into_iter().next(),
+    {
+        if !fits.iter().any(|f| f.id == rel.id) {
+            fits.push(rel);
+        }
     }
+    if fits.is_empty() {
+        return None;
+    }
+    if let Some(on) = preferred.and_then(|p| fits.iter().find(|rel| rel.id == p)) {
+        return Some(Some(*on));
+    }
+    Some((fits.len() == 1).then(|| fits[0]))
 }
 
 fn candidate(s: &Seen, release: Option<&AcRelease>) -> Candidate {
@@ -314,6 +427,18 @@ pub fn decide(
     folder_len: usize,
     preferred_release: Option<&str>,
 ) -> Decision {
+    decide_core(results, file, folder_len, preferred_release, None)
+}
+
+/// [`decide`], and with the file's tags: several strong recordings that are all the file's song
+/// (one audio, several MusicBrainz recordings) are not a question ([`same_audio`]).
+fn decide_core(
+    results: &[AcoustIdResult],
+    file: &FileFacts,
+    folder_len: usize,
+    preferred_release: Option<&str>,
+    tags: Option<&crate::same_song::FileTags>,
+) -> Decision {
     let strong = distinct(results, Confidence::FINGERPRINT_ACCEPT);
     if strong.is_empty() {
         let weak = distinct(results, 0.5);
@@ -322,18 +447,17 @@ pub fn decide(
         }
         return Decision::Suggest(weak.iter().take(5).map(|s| candidate(s, None)).collect());
     }
-    let with_release: Vec<(&Seen, Option<&AcRelease>)> = strong
+    // Each recording: whether it fits the file's place on a release, and which release when
+    // that is settled
+    type Fit<'a> = Option<Option<&'a AcRelease>>;
+    let with_release: Vec<(&Seen, Fit)> = strong
         .iter()
-        .map(|s| {
-            let rel = fitting_release(s.rec, file, folder_len, preferred_release)
-                .or_else(|| preferred_release.and(fitting_release(s.rec, file, folder_len, None)));
-            (s, rel)
-        })
+        .map(|s| (s, fitting_release(s.rec, file, folder_len, preferred_release)))
         .collect();
-    let identified = |s: &Seen, rel: Option<&AcRelease>| Decision::Identified {
+    let identified = |s: &Seen, fit: Fit| Decision::Identified {
         recording: Mbid::parse(&s.rec.id).expect("filtered"),
-        release: rel.and_then(|r| Mbid::parse(&r.id).ok()),
-        confidence: if rel.is_some() {
+        release: fit.flatten().and_then(|r| Mbid::parse(&r.id).ok()),
+        confidence: if fit.is_some() {
             Confidence::FingerprintRelease { score: s.score }
         } else {
             Confidence::Fingerprint { score: s.score }
@@ -341,31 +465,165 @@ pub fn decide(
         acoustid: s.acoustid.to_string(),
     };
     if with_release.len() == 1 {
-        let (s, rel) = with_release[0];
-        return identified(s, rel);
+        let (s, fit) = with_release[0];
+        return identified(s, fit);
     }
     // Several recordings fit the audio: the folder decides, when it can.
-    let on_preferred: Vec<&(&Seen, Option<&AcRelease>)> = with_release
+    let on_preferred: Vec<&(&Seen, Fit)> = with_release
         .iter()
-        .filter(|(_, rel)| rel.is_some_and(|r| Some(r.id.as_str()) == preferred_release))
+        .filter(|(_, fit)| {
+            fit.flatten()
+                .is_some_and(|r| Some(r.id.as_str()) == preferred_release)
+        })
         .collect();
     if on_preferred.len() == 1 {
-        let (s, rel) = on_preferred[0];
-        return identified(s, *rel);
+        let (s, fit) = on_preferred[0];
+        return identified(s, *fit);
     }
-    let fitting: Vec<&(&Seen, Option<&AcRelease>)> =
-        with_release.iter().filter(|(_, rel)| rel.is_some()).collect();
+    let fitting: Vec<&(&Seen, Fit)> = with_release.iter().filter(|(_, fit)| fit.is_some()).collect();
     if fitting.len() == 1 {
-        let (s, rel) = fitting[0];
-        return identified(s, *rel);
+        let (s, fit) = fitting[0];
+        return identified(s, *fit);
+    }
+    // One audio under several recordings of the file's song: the most logical one
+    if let Some(s) = tags.and_then(|t| same_audio(&strong, file, folder_len, t)) {
+        let fit = fitting_release(s.rec, file, folder_len, preferred_release);
+        return identified(s, fit);
     }
     Decision::Suggest(
         with_release
             .iter()
             .take(5)
-            .map(|(s, rel)| candidate(s, *rel))
+            .map(|(s, fit)| candidate(s, fit.flatten()))
             .collect(),
     )
+}
+
+/// [`decide`] with the folder's releases from [`best_folder_releases`]: with tied editions that
+/// agree on the recordings, the one strong recording at the file's place on them is identified
+/// (`fingerprint+release`, the edition left open); anything else is decided as before.
+pub fn decide_among(
+    results: &[AcoustIdResult],
+    file: &FileFacts,
+    folder_len: usize,
+    preferred: &[String],
+) -> Decision {
+    if preferred.len() <= 1 {
+        return decide(results, file, folder_len, preferred.first().map(String::as_str));
+    }
+    let strong = distinct(results, Confidence::FINGERPRINT_ACCEPT);
+    let on: Vec<&Seen> = strong
+        .iter()
+        .filter(|s| {
+            duration_fits(s.rec, file)
+                && s.rec
+                    .all_releases()
+                    .any(|r| preferred.contains(&r.id) && release_fits(r, file, folder_len))
+        })
+        .collect();
+    if let [s] = on[..] {
+        return Decision::Identified {
+            recording: Mbid::parse(&s.rec.id).expect("filtered"),
+            release: None,
+            confidence: Confidence::FingerprintRelease { score: s.score },
+            acoustid: s.acoustid.to_string(),
+        };
+    }
+    decide(results, file, folder_len, None)
+}
+
+/// [`decide_among`] with the file's tags: several strong recordings that are all the file's song
+/// (one audio under several MusicBrainz recordings) are not a question; the most logical one is
+/// identified.
+pub fn decide_with_tags(
+    results: &[AcoustIdResult],
+    file: &FileFacts,
+    folder_len: usize,
+    preferred: &[String],
+    tags: Option<&crate::same_song::FileTags>,
+) -> Decision {
+    if preferred.len() <= 1 {
+        return decide_core(
+            results,
+            file,
+            folder_len,
+            preferred.first().map(String::as_str),
+            tags,
+        );
+    }
+    match decide_among(results, file, folder_len, preferred) {
+        d @ Decision::Identified { .. } => d,
+        _ => decide_core(results, file, folder_len, None, tags),
+    }
+}
+
+/// The recording to identify when every strong recording is the file's song (its title, version
+/// and artist, a length within 3 s): one audio under several MusicBrainz recordings. A recording
+/// only on live releases is set aside for a file that isn't live. In order: one that fits the
+/// folder at the file's place, one on a release named like the file's album, one on the plainest
+/// release (studio album, then single or EP), one on most releases, the lowest id. `None` when
+/// any strong recording is another song, another version or another artist, or has no title.
+fn same_audio<'a>(
+    strong: &'a [Seen<'a>],
+    file: &FileFacts,
+    folder_len: usize,
+    tags: &crate::same_song::FileTags,
+) -> Option<&'a Seen<'a>> {
+    use crate::same_song::{file_is_live, plain_kind, same_artist, same_song};
+    let live_ok = file_is_live(tags);
+    let album = tags
+        .album
+        .as_deref()
+        .map(crate::matching::plain_title)
+        .filter(|a| !a.is_empty());
+    let mut pool: Vec<&Seen> = Vec::new();
+    for s in strong {
+        let title = s.rec.title.as_deref()?;
+        if !same_song(tags, title) || !duration_fits(s.rec, file) {
+            return None;
+        }
+        if let Some(a) = s.rec.artist() {
+            if !tags.artist.trim().is_empty() && !same_artist(&tags.artist, &a) {
+                return None;
+            }
+        }
+        let groups = &s.rec.releasegroups;
+        let live_only = !groups.is_empty()
+            && groups
+                .iter()
+                .all(|g| g.secondarytypes.iter().any(|t| t.eq_ignore_ascii_case("live")));
+        if live_only && !live_ok {
+            continue;
+        }
+        pool.push(s);
+    }
+    let key = |s: &Seen| {
+        let fits = fitting_release(s.rec, file, folder_len, None).is_some();
+        let named = album.as_ref().is_some_and(|a| {
+            s.rec
+                .all_releases()
+                .any(|r| r.title.as_deref().map(crate::matching::plain_title).as_ref() == Some(a))
+                || s.rec
+                    .releasegroups
+                    .iter()
+                    .any(|g| g.title.as_deref().map(crate::matching::plain_title).as_ref() == Some(a))
+        });
+        let plain = s
+            .rec
+            .releasegroups
+            .iter()
+            .map(|g| plain_kind(g.kind.as_deref(), &g.secondarytypes))
+            .max()
+            .unwrap_or(0);
+        (
+            std::cmp::Reverse(fits),
+            std::cmp::Reverse(named),
+            std::cmp::Reverse(plain),
+            std::cmp::Reverse(s.rec.all_releases().count()),
+        )
+    };
+    pool.into_iter()
+        .min_by(|a, b| key(a).cmp(&key(b)).then_with(|| a.rec.id.cmp(&b.rec.id)))
 }
 
 // ---- the AcoustID web service ----
@@ -638,9 +896,10 @@ mod tests {
         }
     }
 
-    /// A real AcoustID answer (recorded with the node's key): it parses, and
-    /// a file at track 11 of a 12-file folder lands on a real 12-track
-    /// release of A Night at the Opera.
+    /// A real AcoustID answer (recorded with the node's key): it parses, and a file at track 11
+    /// of a 12-file folder is that recording on a 12-track release of A Night at the Opera. Many
+    /// 12-track editions have it at 11, so which one stays open (owner, 2026-11-03: the first in
+    /// AcoustID's answer is no evidence); the folder's other songs settle it ([`decide_among`]).
     #[test]
     fn a_recorded_answer_parses_and_finds_the_release() {
         let r = fixture("recorded-bohemian-trackid.json");
@@ -653,6 +912,14 @@ mod tests {
             disc_no: Some(1),
             duration_secs: Some(355.0),
         };
+        let mut fitting: Vec<&str> = rec
+            .all_releases()
+            .filter(|x| release_fits(x, &file, 12))
+            .map(|x| x.id.as_str())
+            .collect();
+        fitting.sort_unstable();
+        fitting.dedup();
+        assert!(fitting.len() > 1, "several 12-track editions: {}", fitting.len());
         match decide(&r, &file, 12, None) {
             Decision::Identified {
                 recording,
@@ -663,19 +930,13 @@ mod tests {
                 assert_eq!(recording.to_string(), BOHEMIAN);
                 assert!(matches!(confidence, Confidence::FingerprintRelease { .. }));
                 assert_eq!(acoustid, "84eed5cd-5b1f-4f5c-8c92-2686d2877862");
-                let rel = release.unwrap().to_string();
-                let on_opera = rec
-                    .releasegroups
-                    .iter()
-                    .filter(|g| g.title.as_deref() == Some("A Night at the Opera"))
-                    .flat_map(|g| g.releases.iter())
-                    .any(|x| x.id == rel);
-                let any_12 = rec
-                    .all_releases()
-                    .any(|x| x.id == rel && x.total_tracks() == Some(12));
-                assert!(any_12, "the release fits the 12-file folder");
-                let _ = on_opera;
+                assert_eq!(release, None, "which edition stays open");
             }
+            other => panic!("{other:?}"),
+        }
+        // The folder pointing at one of them settles it
+        match decide(&r, &file, 12, Some(fitting[0])) {
+            Decision::Identified { release, .. } => assert_eq!(release.unwrap().to_string(), fitting[0]),
             other => panic!("{other:?}"),
         }
     }
@@ -691,5 +952,280 @@ mod tests {
             Confidence::FingerprintRelease { score: 0.92 }.label(),
             "fingerprint+release"
         );
+    }
+
+    const R1: &str = "11111111-1111-4111-8111-111111111111";
+    const R2: &str = "22222222-2222-4222-8222-222222222222";
+    const R9: &str = "99999999-9999-4999-8999-999999999999";
+
+    fn on(id: &str, total: u32, pos: u32) -> AcRelease {
+        AcRelease {
+            id: id.into(),
+            title: Some(format!("Release {}", &id[..2])),
+            track_count: Some(total),
+            mediums: vec![AcMedium {
+                position: 1,
+                track_count: Some(total),
+                tracks: vec![AcTrack {
+                    position: pos,
+                    id: None,
+                }],
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn recording(i: u32, releases: Vec<AcRelease>) -> AcRecording {
+        AcRecording {
+            id: format!("00000000-0000-4000-8000-{i:012}"),
+            title: Some(format!("Song {i}")),
+            duration: Some(200.0 + i as f64),
+            releases,
+            ..Default::default()
+        }
+    }
+
+    fn facts(i: u32) -> FileFacts {
+        FileFacts {
+            track_no: Some(i),
+            disc_no: Some(1),
+            duration_secs: Some(200.0 + i as f64),
+        }
+    }
+
+    /// Two editions tie for the folder (every file sits at its place on both): when both put the
+    /// same recording at every file's place, the folder still says which recording each file is,
+    /// and a third release that only fits by chance is ruled out. When the editions disagree on
+    /// any file, nothing is decided by them.
+    #[test]
+    fn tied_editions_with_the_same_recordings_still_decide() {
+        let folder = |second: &dyn Fn(u32) -> u32| -> Vec<Vec<AcoustIdResult>> {
+            (1..=4)
+                .map(|i| {
+                    let mut recs = vec![recording(i, vec![on(R1, 4, i)])];
+                    let j = second(i);
+                    if j == i {
+                        recs[0].releases.push(on(R2, 4, i));
+                    } else {
+                        // Another recording as long, at the same place on the second edition
+                        let mut other = recording(j, vec![on(R2, 4, i)]);
+                        other.duration = Some(200.0 + i as f64);
+                        recs.push(other);
+                    }
+                    if i == 1 {
+                        // Another recording as long, first on a 4-track best-of
+                        let mut chance = recording(50, vec![on(R9, 4, 1)]);
+                        chance.duration = Some(201.0);
+                        recs.push(chance);
+                    }
+                    vec![AcoustIdResult {
+                        id: format!("acoustid-{i}"),
+                        score: 0.95,
+                        recordings: recs,
+                    }]
+                })
+                .collect()
+        };
+        let same = folder(&|i| i);
+        let pairs: Vec<(FileFacts, &[AcoustIdResult])> = same
+            .iter()
+            .enumerate()
+            .map(|(k, r)| (facts(k as u32 + 1), &r[..]))
+            .collect();
+        // The old rule: a tie decides nothing
+        assert_eq!(best_folder_release(&pairs, 4), None);
+        let preferred = best_folder_releases(&pairs, 4);
+        assert_eq!(preferred, vec![R1.to_string(), R2.to_string()]);
+        match decide_among(&same[0], &facts(1), 4, &preferred) {
+            Decision::Identified {
+                recording,
+                release,
+                confidence,
+                ..
+            } => {
+                assert_eq!(recording.to_string(), "00000000-0000-4000-8000-000000000001");
+                assert_eq!(release, None, "which edition stays open");
+                assert!(matches!(confidence, Confidence::FingerprintRelease { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Without the folder the chance fit makes it a choice (as before)
+        assert!(matches!(
+            decide(&same[0], &facts(1), 4, None),
+            Decision::Suggest(_)
+        ));
+        // The second edition has another recording at place 3: the tie decides nothing
+        let differ = folder(&|i| if i == 3 { 33 } else { i });
+        let pairs: Vec<(FileFacts, &[AcoustIdResult])> = differ
+            .iter()
+            .enumerate()
+            .map(|(k, r)| (facts(k as u32 + 1), &r[..]))
+            .collect();
+        assert!(best_folder_releases(&pairs, 4).is_empty());
+        assert!(matches!(
+            decide_among(&differ[0], &facts(1), 4, &[]),
+            Decision::Suggest(_)
+        ));
+        assert!(matches!(
+            decide_among(&differ[2], &facts(3), 4, &[]),
+            Decision::Suggest(_)
+        ));
+        // One release ahead: as before
+        let one: Vec<(FileFacts, &[AcoustIdResult])> =
+            vec![(facts(1), &same[0][..]), (facts(2), &same[1][..])];
+        assert_eq!(
+            best_folder_releases(&one, 2),
+            Vec::<String>::new(),
+            "a 4-track release is no 2-file folder"
+        );
+    }
+
+    /// Without a release the folder points at, a recording on several releases that each fit the
+    /// file's place gets no release: the first in AcoustID's answer is no evidence.
+    #[test]
+    fn several_fitting_releases_leave_the_release_open() {
+        let results = vec![AcoustIdResult {
+            id: "a".into(),
+            score: 0.97,
+            recordings: vec![recording(1, vec![on(R1, 4, 1), on(R2, 4, 1)])],
+        }];
+        match decide(&results, &facts(1), 4, None) {
+            Decision::Identified {
+                release, confidence, ..
+            } => {
+                assert_eq!(release, None);
+                assert!(matches!(confidence, Confidence::FingerprintRelease { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+        // One that fits: that one
+        let results = vec![AcoustIdResult {
+            id: "a".into(),
+            score: 0.97,
+            recordings: vec![recording(1, vec![on(R1, 4, 1), on(R2, 5, 1)])],
+        }];
+        assert!(matches!(
+            decide(&results, &facts(1), 4, None),
+            Decision::Identified { release: Some(r), .. } if r.to_string() == R1
+        ));
+    }
+
+    fn grouped(
+        i: u32,
+        title: &str,
+        kind: &str,
+        secondary: &[&str],
+        rel_title: &str,
+        total: u32,
+        pos: u32,
+    ) -> AcRecording {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("00000000-0000-4000-8000-{i:012}"), "title": title, "duration": 232.0,
+            "artists": [{"name": "Mike + The Mechanics"}],
+            "releasegroups": [{"id": format!("g{i}"), "title": rel_title, "type": kind, "secondarytypes": secondary,
+                "releases": [{"id": format!("00000000-0000-4000-9000-{i:012}"), "title": rel_title, "track_count": total,
+                    "mediums": [{"position": 1, "track_count": total, "tracks": [{"position": pos}]}]}]}]
+        }))
+        .unwrap()
+    }
+
+    /// REV2: one fingerprint, several recordings of the same song (same title, version and
+    /// artist as the file): not a question for the owner. The most logical one is identified;
+    /// recordings of other songs keep it a question; a live-only one is not the studio file's.
+    #[test]
+    fn one_audio_under_several_recordings_is_identified() {
+        let tags = crate::same_song::FileTags {
+            title: "Over My Shoulder".into(),
+            artist: "Mike + The Mechanics".into(),
+            album: Some("Beggar on a Beach of Gold".into()),
+            duration_ms: Some(232_000),
+        };
+        let file = FileFacts {
+            track_no: Some(2),
+            disc_no: Some(1),
+            duration_secs: Some(232.0),
+        };
+        let answer = |recs: Vec<AcRecording>| {
+            vec![AcoustIdResult {
+                id: "a".into(),
+                score: 0.96,
+                recordings: recs,
+            }]
+        };
+        let same = answer(vec![
+            grouped(3, "Over My Shoulder", "Album", &["Compilation"], "Hits", 18, 3),
+            grouped(
+                2,
+                "Over My Shoulder",
+                "Album",
+                &[],
+                "Beggar on a Beach of Gold",
+                10,
+                2,
+            ),
+            grouped(1, "Over My Shoulder", "Single", &[], "Over My Shoulder", 2, 1),
+        ]);
+        // Without the file's tags: a question, as before
+        assert!(matches!(decide(&same, &file, 12, None), Decision::Suggest(_)));
+        match decide_with_tags(&same, &file, 12, &[], Some(&tags)) {
+            Decision::Identified {
+                recording,
+                release,
+                confidence,
+                ..
+            } => {
+                assert_eq!(
+                    recording.to_string(),
+                    "00000000-0000-4000-8000-000000000002",
+                    "the one on the file's album"
+                );
+                assert_eq!(release, None, "no release fits a folder of 12");
+                assert!(matches!(confidence, Confidence::Fingerprint { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+        // A live-only recording among them is set aside; the studio ones still decide
+        let with_live = answer(vec![
+            grouped(4, "Over My Shoulder", "Album", &["Live"], "Live", 15, 7),
+            grouped(
+                2,
+                "Over My Shoulder",
+                "Album",
+                &[],
+                "Beggar on a Beach of Gold",
+                10,
+                2,
+            ),
+            grouped(5, "Over My Shoulder", "Album", &["Compilation"], "Hits", 18, 3),
+        ]);
+        assert!(
+            matches!(decide_with_tags(&with_live, &file, 12, &[], Some(&tags)), Decision::Identified { recording, .. } if recording.to_string().ends_with("000000000002"))
+        );
+        // Another song among them: a question
+        let other = answer(vec![
+            grouped(
+                2,
+                "Over My Shoulder",
+                "Album",
+                &[],
+                "Beggar on a Beach of Gold",
+                10,
+                2,
+            ),
+            grouped(6, "Silent Running", "Album", &[], "Mike + The Mechanics", 9, 1),
+        ]);
+        assert!(matches!(
+            decide_with_tags(&other, &file, 12, &[], Some(&tags)),
+            Decision::Suggest(_)
+        ));
+        // Only live recordings for a studio file: a question
+        let live_only = answer(vec![
+            grouped(4, "Over My Shoulder", "Album", &["Live"], "Live", 15, 7),
+            grouped(7, "Over My Shoulder", "Album", &["Live"], "Live Too", 15, 7),
+        ]);
+        assert!(matches!(
+            decide_with_tags(&live_only, &file, 12, &[], Some(&tags)),
+            Decision::Suggest(_)
+        ));
     }
 }

@@ -85,9 +85,22 @@ pub fn release_query(a: &FolderAlbum) -> String {
 /// Releases from a search answer worth a lookup, best first: the album's title and artist, with
 /// as many tracks as the folder has files first, then the nearest counts. At most `max`.
 pub fn release_candidates(a: &FolderAlbum, files: usize, answer: &Value, max: usize) -> Vec<Mbid> {
+    release_candidates_ranked(a, files, answer, max)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// [`release_candidates`] with how far each one's track count is from the folder's.
+pub fn release_candidates_ranked(
+    a: &FolderAlbum,
+    files: usize,
+    answer: &Value,
+    max: usize,
+) -> Vec<(Mbid, u64)> {
     let title = plain_title(&a.title);
     let artist = plain_name(&a.artist);
-    let mut found: Vec<(u64, i64, Mbid)> = Vec::new();
+    let mut found: Vec<(u64, u8, i64, Mbid)> = Vec::new();
     for r in answer["releases"].as_array().into_iter().flatten() {
         let Some(id) = r["id"].as_str().and_then(|s| Mbid::parse(s).ok()) else {
             continue;
@@ -124,18 +137,90 @@ pub fn release_candidates(a: &FolderAlbum, files: usize, answer: &Value, max: us
                 .sum()
         });
         let off = count.abs_diff(files as u64);
-        found.push((off, -r["score"].as_i64().unwrap_or(0), id));
+        // Of the kind the folder says it is first, then unknown kinds, then other kinds
+        let kind = match ReleaseType::of(r).fits(a) {
+            Some(true) => 0,
+            None => 1,
+            Some(false) => 2,
+        };
+        found.push((off, kind, -r["score"].as_i64().unwrap_or(0), id));
     }
-    // Nearest track count, then MusicBrainz's score, then its order (a stable sort)
-    found.sort_by_key(|(off, score, _)| (*off, *score));
-    let mut out: Vec<Mbid> = Vec::new();
-    for (_, _, id) in found {
-        if !out.contains(&id) {
-            out.push(id);
+    // Nearest track count, then the kind, then MusicBrainz's score, then its order (a stable sort)
+    found.sort_by_key(|(off, kind, score, _)| (*off, *kind, *score));
+    let mut out: Vec<(Mbid, u64)> = Vec::new();
+    for (off, _, _, id) in found {
+        if !out.iter().any(|(x, _)| *x == id) {
+            out.push((id, off));
         }
     }
     out.truncate(max);
     out
+}
+
+/// What identification reads of a MusicBrainz answer, for keeping it small: of a release lookup
+/// its id, title, release group (its types) and tracklist; of a release search each release's
+/// id, score, title, track count, artist credit and release-group types; any other answer whole.
+pub fn compact_answer(v: &Value) -> Value {
+    let pick = |v: &Value, keys: &[&str]| -> Value {
+        let mut out = serde_json::Map::new();
+        for k in keys {
+            if let Some(x) = v.get(*k).filter(|x| !x.is_null()) {
+                out.insert((*k).to_string(), x.clone());
+            }
+        }
+        Value::Object(out)
+    };
+    let group = |v: &Value| {
+        pick(
+            &v["release-group"],
+            &["id", "title", "primary-type", "secondary-types"],
+        )
+    };
+    if v.get("media").is_some() {
+        let media: Vec<Value> = v["media"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                let tracks: Vec<Value> = m["tracks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|t| {
+                        let mut x = pick(t, &["position", "number", "title", "length"]);
+                        x["recording"] = pick(&t["recording"], &["id", "title", "length"]);
+                        x
+                    })
+                    .collect();
+                let mut x = pick(m, &["position", "track-count"]);
+                x["tracks"] = Value::Array(tracks);
+                x
+            })
+            .collect();
+        let mut out = pick(v, &["id", "title"]);
+        out["release-group"] = group(v);
+        out["media"] = Value::Array(media);
+        return out;
+    }
+    if let Some(list) = v.get("releases").and_then(Value::as_array) {
+        let releases: Vec<Value> = list
+            .iter()
+            .map(|r| {
+                let mut x = pick(r, &["id", "score", "title", "track-count"]);
+                if let Some(m) = r["media"].as_array() {
+                    x["media"] = Value::Array(m.iter().map(|m| pick(m, &["track-count"])).collect());
+                }
+                if let Some(c) = r["artist-credit"].as_array() {
+                    x["artist-credit"] =
+                        Value::Array(c.iter().map(|c| pick(c, &["name", "joinphrase"])).collect());
+                }
+                x["release-group"] = group(r);
+                x
+            })
+            .collect();
+        return serde_json::json!({ "releases": releases });
+    }
+    v.clone()
 }
 
 /// One track of a release.
@@ -206,6 +291,52 @@ pub struct Matched {
     pub title: String,
 }
 
+/// A release's kind, from its release group in MusicBrainz (never guessed from a track count or
+/// a title): the primary type (Album, Single, EP, Broadcast, Other) and secondary types
+/// (Compilation, Live, Remix, Soundtrack, …). No primary type: unknown.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReleaseType {
+    pub primary: Option<String>,
+    pub secondary: Vec<String>,
+}
+
+impl ReleaseType {
+    /// The types of a release lookup (`inc=release-groups`) or a release in a search answer.
+    pub fn of(release: &Value) -> Self {
+        let g = &release["release-group"];
+        Self {
+            primary: g["primary-type"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
+            secondary: g["secondary-types"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.as_str().map(str::to_string))
+                .collect(),
+        }
+    }
+
+    /// Whether this kind of release is what the folder says it is: `None` when MusicBrainz gives
+    /// no type. A compilation, live, remix, DJ-mix, mixtape or demo release fits only a folder
+    /// that says so (Various Artists, "Live …" in its album name); Album, Single, EP and the
+    /// other kinds fit any folder (a folder named like a single and as long as it is that single).
+    pub fn fits(&self, folder: &FolderAlbum) -> Option<bool> {
+        self.primary.as_ref()?;
+        let various = plain_name(&folder.artist) == "various artists";
+        let marks = marks_in(&folder.title);
+        Some(self.secondary.iter().all(|t| match t.to_lowercase().as_str() {
+            "compilation" => various,
+            "live" => marks.contains(&"live"),
+            "remix" | "dj-mix" => marks.contains(&"remix") || marks.contains(&"mix"),
+            "demo" => marks.contains(&"demo"),
+            "mixtape/street" => false,
+            _ => true,
+        }))
+    }
+}
+
 /// How a folder fits a release.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlbumFit {
@@ -215,6 +346,13 @@ pub struct AlbumFit {
     /// How well the folder and the release cover each other (0–1): matched files over the
     /// larger of the folder and the release's discs the folder holds.
     pub fit: f32,
+    /// Files the editions that fit as well as this one name different recordings for.
+    pub conflicts: Vec<EditionConflict>,
+    /// How many editions the folder may still be (1: the release is known; more: only the
+    /// recordings are, and the release stays open).
+    pub editions: usize,
+    /// The release's kind ([`ReleaseType`]).
+    pub release_type: ReleaseType,
 }
 
 impl AlbumFit {
@@ -223,6 +361,240 @@ impl AlbumFit {
     pub fn score(&self) -> f32 {
         0.75 + 0.2 * self.fit
     }
+}
+
+/// One recording an edition puts at a file's place, when equal editions disagree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditionOption {
+    pub recording: Mbid,
+    pub release: Mbid,
+    pub release_title: Option<String>,
+    pub title: String,
+}
+
+/// A file equally fitting editions name different recordings for: the owner chooses.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditionConflict {
+    pub track: i64,
+    pub options: Vec<EditionOption>,
+}
+
+/// The folder's release among several fits (best first as MusicBrainz ranked them): the best fit
+/// wins, as before. When other editions fit exactly as well, a file whose recording they all
+/// agree on keeps it (whichever edition the folder is); a file they name different recordings
+/// for becomes an [`EditionConflict`] (the release's kind never decides between recordings); a
+/// file only some of them place is left for the fingerprint. The release is said only when one
+/// tied edition is of the kind the folder says it is and every tied edition's kind is known
+/// ([`ReleaseType::fits`]); otherwise `editions` counts them and the release stays open.
+pub fn settle_editions(fits: Vec<AlbumFit>, folder: &FolderAlbum) -> Option<AlbumFit> {
+    let best = fits.iter().map(|f| f.fit).fold(f32::MIN, f32::max);
+    let equal: Vec<AlbumFit> = fits.into_iter().filter(|f| (f.fit - best).abs() < 1e-6).collect();
+    let mut base = equal.first()?.clone();
+    if equal.len() == 1 {
+        return Some(base);
+    }
+    let kinds: Option<Vec<bool>> = equal.iter().map(|f| f.release_type.fits(folder)).collect();
+    let typed_one = kinds
+        .filter(|k| k.iter().filter(|x| **x).count() == 1)
+        .and_then(|k| k.iter().position(|x| *x));
+    let mut order: Vec<i64> = Vec::new();
+    for m in equal.iter().flat_map(|f| f.matched.iter()) {
+        if !order.contains(&m.track) {
+            order.push(m.track);
+        }
+    }
+    let (mut matched, mut conflicts) = (Vec::new(), Vec::new());
+    for track in order {
+        let hits: Vec<(&AlbumFit, &Matched)> = equal
+            .iter()
+            .filter_map(|f| f.matched.iter().find(|m| m.track == track).map(|m| (f, m)))
+            .collect();
+        if hits.len() < equal.len() {
+            continue;
+        }
+        let mut options: Vec<EditionOption> = Vec::new();
+        for (f, m) in &hits {
+            if !options.iter().any(|o| o.recording == m.recording) {
+                options.push(EditionOption {
+                    recording: m.recording,
+                    release: f.release,
+                    release_title: f.release_title.clone(),
+                    title: m.title.clone(),
+                });
+            }
+        }
+        if options.len() == 1 {
+            matched.push(hits[0].1.clone());
+        } else {
+            conflicts.push(EditionConflict { track, options });
+        }
+    }
+    let editions = match typed_one {
+        Some(k) => {
+            // Its release, with the recordings every tied edition agrees on
+            let one = &equal[k];
+            base.release = one.release;
+            base.release_title = one.release_title.clone();
+            base.release_type = one.release_type.clone();
+            1
+        }
+        None => equal.len(),
+    };
+    base.matched = matched;
+    base.conflicts = conflicts;
+    base.editions = editions;
+    Some(base)
+}
+
+/// Words that make a track another recording of a song (a live take, a remix, an edit, a mono
+/// mix…), from what a title adds in brackets or after " - " ("Song (Live at Wembley)",
+/// "Song - Radio Edit"); words of the name itself ("Live Forever") are not counted, nor a remaster
+/// or an "Original Mix". Sorted, each once.
+pub fn version_marks(title: &str) -> Vec<&'static str> {
+    marks_in(&decoration(title))
+}
+
+const VERSION_WORDS: &[(&str, &str)] = &[
+    ("live", "live"),
+    ("remix", "remix"),
+    ("remixed", "remix"),
+    ("rmx", "remix"),
+    ("mix", "mix"),
+    ("edit", "edit"),
+    ("acoustic", "acoustic"),
+    ("demo", "demo"),
+    ("instrumental", "instrumental"),
+    ("unplugged", "unplugged"),
+    ("karaoke", "karaoke"),
+    ("acapella", "acapella"),
+    ("cappella", "acapella"),
+    ("mono", "mono"),
+    ("extended", "extended"),
+    ("rehearsal", "rehearsal"),
+];
+
+/// What a title adds to the name: the text in brackets and after the first " - ".
+fn decoration(title: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0u32;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => {
+                depth += 1;
+                out.push(' ');
+            }
+            ')' | ']' => depth = depth.saturating_sub(1),
+            c if depth > 0 => out.push(c),
+            _ => {}
+        }
+    }
+    if let Some((_, rest)) = title.split_once(" - ") {
+        out.push(' ');
+        out.push_str(rest);
+    }
+    out
+}
+
+/// The bracketed or " - " parts of a title that name a version (with a [`version_marks`] word),
+/// each as its sorted words without filler ("at", "the", "version"…): "Song (Live at Wembley)
+/// [Remastered]" is `["live wembley"]`. Parts naming a featured artist or a remaster are left out.
+fn version_groups(title: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0u32;
+    let mut cur = String::new();
+    for c in title.chars() {
+        match c {
+            '(' | '[' => {
+                if depth == 0 {
+                    cur.clear();
+                }
+                depth += 1;
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    if let Some((_, rest)) = title.split_once(" - ") {
+        // Without what is in brackets there (counted above)
+        let mut plain = String::new();
+        let mut d = 0u32;
+        for c in rest.chars() {
+            match c {
+                '(' | '[' => d += 1,
+                ')' | ']' => d = d.saturating_sub(1),
+                c if d == 0 => plain.push(c),
+                _ => {}
+            }
+        }
+        parts.push(plain);
+    }
+    const FILLER: &[&str] = &["at", "the", "a", "an", "in", "on", "of", "and", "version", "from"];
+    let mut out: Vec<String> = parts
+        .iter()
+        .filter(|p| !marks_in(p).is_empty())
+        .map(|p| {
+            let lower = p.to_lowercase();
+            let mut words: Vec<&str> = lower
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty() && !FILLER.contains(w))
+                .collect();
+            words.sort_unstable();
+            words.dedup();
+            words.join(" ")
+        })
+        .filter(|g| {
+            let first = g.split(' ').next().unwrap_or_default();
+            !["feat", "ft", "featuring", "with"].contains(&first)
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+pub(crate) fn marks_in(text: &str) -> Vec<&'static str> {
+    let lower = text.to_lowercase();
+    let words: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    let original = words.contains(&"original");
+    let mut out: Vec<&'static str> = words
+        .iter()
+        .filter_map(|w| VERSION_WORDS.iter().find(|(word, _)| word == w).map(|(_, m)| *m))
+        .filter(|m| !(original && *m == "mix"))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Whether a file and a track are the same version: each side's marks are on the other side, or
+/// said by its album as a whole (every song of "Live in Paris" is live).
+pub(crate) fn versions_agree(
+    file: &str,
+    file_album: Option<&str>,
+    track: &str,
+    release_title: Option<&str>,
+) -> bool {
+    // Both name their version: the words naming it must be the same (Alice's remix is not Bob's,
+    // a take at Wembley is not one at Knebworth), not only its kind
+    let (fg, tg) = (version_groups(file), version_groups(track));
+    if !fg.is_empty() && !tg.is_empty() && fg != tg {
+        return false;
+    }
+    let (fm, tm) = (version_marks(file), version_marks(track));
+    let (fa, ra) = (
+        marks_in(file_album.unwrap_or_default()),
+        marks_in(release_title.unwrap_or_default()),
+    );
+    tm.iter().all(|m| fm.contains(m) || fa.contains(m)) && fm.iter().all(|m| tm.contains(m) || ra.contains(m))
 }
 
 /// A fit below this leaves the whole folder to the fingerprint.
@@ -235,6 +607,7 @@ pub const MIN_FIT: f32 = 0.6;
 /// same track would match two files.
 pub fn fit_release(files: &[FolderFile], release: &Value) -> Option<AlbumFit> {
     let id = release["id"].as_str().and_then(|s| Mbid::parse(s).ok())?;
+    let release_title = release["title"].as_str();
     let tracks = release_tracks(release);
     if tracks.is_empty() || files.is_empty() {
         return None;
@@ -255,9 +628,11 @@ pub fn fit_release(files: &[FolderFile], release: &Value) -> Option<AlbumFit> {
                 (agree.len() == 1).then(|| agree[0])
             }
         };
-        let Some(t) =
-            hit.filter(|t| lengths_agree(f.duration_ms, t.length_ms) && titles_agree(&f.title, &t.title))
-        else {
+        let Some(t) = hit.filter(|t| {
+            lengths_agree(f.duration_ms, t.length_ms)
+                && titles_agree(&f.title, &t.title)
+                && versions_agree(&f.title, f.album.as_deref(), &t.title, release_title)
+        }) else {
             continue;
         };
         if used.contains(&(t.disc, t.position)) {
@@ -281,6 +656,9 @@ pub fn fit_release(files: &[FolderFile], release: &Value) -> Option<AlbumFit> {
         release_title: release["title"].as_str().map(str::to_string),
         matched,
         fit,
+        conflicts: Vec::new(),
+        editions: 1,
+        release_type: ReleaseType::of(release),
     })
 }
 
@@ -488,5 +866,159 @@ mod tests {
             release_candidates(&a, 12, &answer, 3),
             vec![Mbid::parse(REL).unwrap(), Mbid::parse(REL2).unwrap()]
         );
+    }
+
+    fn edition(id: &str, n: u32, other: &[u32]) -> Value {
+        let mut r = release(n);
+        r["id"] = json!(id);
+        r["title"] = json!(format!("Album ({id})"));
+        for i in other {
+            r["media"][0]["tracks"][(*i - 1) as usize]["recording"]["id"] = json!(rec(100 + i));
+        }
+        r
+    }
+
+    /// Two editions fit the folder equally well (a remaster and the original, say): where they
+    /// name the same recording for a file it is that recording, whichever edition the folder is;
+    /// where they name different recordings the file stays a choice for the owner, never one of
+    /// them picked silently.
+    #[test]
+    fn equal_editions_share_only_the_recordings_they_agree_on() {
+        let files: Vec<FolderFile> = (1..=4).map(file).collect();
+        let a = fit_release(&files, &edition(REL, 4, &[])).unwrap();
+        let same = fit_release(&files, &edition(REL2, 4, &[])).unwrap();
+        let m = settle_editions(vec![a.clone(), same], &folder_album(&files).unwrap()).unwrap();
+        assert_eq!(m.matched.len(), 4);
+        assert!(m.conflicts.is_empty());
+        assert_eq!(m.editions, 2);
+        assert_eq!(m.release, Mbid::parse(REL).unwrap());
+        // Songs 3 and 4 are other recordings on the second edition
+        let other = fit_release(&files, &edition(REL2, 4, &[3, 4])).unwrap();
+        let m = settle_editions(vec![a.clone(), other], &folder_album(&files).unwrap()).unwrap();
+        let tracks: Vec<i64> = m.matched.iter().map(|x| x.track).collect();
+        assert_eq!(tracks, vec![1, 2]);
+        assert_eq!(m.conflicts.len(), 2);
+        let c = &m.conflicts[0];
+        assert_eq!(c.track, 3);
+        let recs: Vec<String> = c.options.iter().map(|o| o.recording.to_string()).collect();
+        assert_eq!(recs, vec![rec(3), rec(103)]);
+        assert_eq!(c.options[1].release, Mbid::parse(REL2).unwrap());
+        assert_eq!(
+            c.options[1].release_title.as_deref(),
+            Some("Album (2b6c7b5a-5d5a-4e29-8f4e-2d5e2c1b8b4f)")
+        );
+        // A better fit wins as before: the other edition lacks a song, so it is no rival
+        let files5: Vec<FolderFile> = (1..=5).map(file).collect();
+        let whole = fit_release(&files5, &edition(REL, 5, &[])).unwrap();
+        let short = fit_release(&files5, &edition(REL2, 4, &[2])).unwrap();
+        assert!(short.fit < whole.fit);
+        let m = settle_editions(vec![short, whole], &folder_album(&files5).unwrap()).unwrap();
+        assert_eq!((m.editions, m.matched.len(), m.conflicts.len()), (1, 5, 0));
+        assert_eq!(m.release, Mbid::parse(REL).unwrap());
+        assert_eq!(settle_editions(vec![], &folder_album(&files).unwrap()), None);
+    }
+
+    /// A live take, a remix, an edit or a mono mix is another recording: one at the right place
+    /// and length doesn't fit a file whose title doesn't say so (and the other way round), unless
+    /// the album itself says it (a live album). A remaster's words change nothing.
+    #[test]
+    fn versions_must_agree_between_the_file_and_the_track() {
+        let mut files: Vec<FolderFile> = (1..=10).map(file).collect();
+        files[4].title = "Song 5 (Radio Edit)".into();
+        files[5].title = "Song 6 - 2011 Remaster".into();
+        let mut r = release(10);
+        r["media"][0]["tracks"][1]["title"] = json!("Song 2 (Live)");
+        r["media"][0]["tracks"][2]["title"] = json!("Song 3 - Remix");
+        r["media"][0]["tracks"][3]["title"] = json!("Song 4 [Mono]");
+        let fit = fit_release(&files, &r).unwrap();
+        let tracks: Vec<i64> = fit.matched.iter().map(|m| m.track).collect();
+        assert_eq!(tracks, vec![1, 6, 7, 8, 9, 10]);
+        assert!((fit.fit - 0.6).abs() < 1e-6, "{}", fit.fit);
+        // A live album: its tracks may say (Live) when the files don't
+        let live: Vec<FolderFile> = (1..=4)
+            .map(|i| FolderFile {
+                album: Some("Live in Paris".into()),
+                ..file(i)
+            })
+            .collect();
+        let mut r = release(4);
+        r["title"] = json!("Live in Paris");
+        for i in 0..4 {
+            r["media"][0]["tracks"][i]["title"] = json!(format!("Song {} (live)", i + 1));
+        }
+        assert_eq!(fit_release(&live, &r).unwrap().matched.len(), 4);
+        // Words that are part of a song's name are no version: "Live Forever" is not live
+        assert!(titles_agree("Live Forever", "Live Forever"));
+        assert_eq!(version_marks("Live Forever"), Vec::<&str>::new());
+        assert_eq!(version_marks("Song (Live at Wembley)"), vec!["live"]);
+        assert_eq!(version_marks("Song - Original Mix"), Vec::<&str>::new());
+        assert_eq!(version_marks("Song (Extended Mix)"), vec!["extended", "mix"]);
+    }
+
+    /// Numbers: a file without one fits by title and length only when exactly one track agrees;
+    /// two files at one number, or two numberless files on one track, are not this release.
+    #[test]
+    fn missing_and_duplicate_numbers() {
+        let mut r = release(6);
+        // Two tracks of the same name and length (an intro and its reprise)
+        r["media"][0]["tracks"][5]["title"] = json!("Song 1");
+        r["media"][0]["tracks"][5]["length"] = json!(201_000);
+        let mut files: Vec<FolderFile> = (1..=6).map(file).collect();
+        files[0].track_no = None;
+        let fit = fit_release(&files, &r).unwrap();
+        let tracks: Vec<i64> = fit.matched.iter().map(|m| m.track).collect();
+        assert_eq!(
+            tracks,
+            vec![2, 3, 4, 5],
+            "the numberless song 1 could be either: left"
+        );
+        // Two numberless files with one title and length: the second has no track of its own
+        let mut files: Vec<FolderFile> = (1..=5).map(file).collect();
+        files.iter_mut().for_each(|f| f.track_no = None);
+        files.push(FolderFile {
+            track: 99,
+            ..files[1].clone()
+        });
+        assert_eq!(fit_release(&files, &release(5)), None);
+        // Two files at one number
+        let mut files: Vec<FolderFile> = (1..=5).map(file).collect();
+        files[4].track_no = Some(4);
+        files[4].title = "Song 4".into();
+        files[4].duration_ms = files[3].duration_ms;
+        assert_eq!(fit_release(&files, &release(5)), None);
+        // Most of an album: the songs it has are matched, the fit says how much
+        let files: Vec<FolderFile> = (1..=12).filter(|i| i % 4 != 0).map(file).collect();
+        let fit = fit_release(&files, &release(12)).unwrap();
+        assert_eq!(fit.matched.len(), 9);
+        assert!((fit.fit - 0.75).abs() < 1e-6);
+    }
+
+    /// Fix round 1, item 4: the words that name a version count, not only its kind: Alice's
+    /// remix is not Bob's, a live take at Wembley is not one at Knebworth. Brackets, a featured
+    /// artist or a remaster note change nothing.
+    #[test]
+    fn named_versions_must_be_the_same_version() {
+        let agree = |f: &str, t: &str| versions_agree(f, None, t, None);
+        assert!(!agree("Song (Alice Remix)", "Song (Bob Remix)"));
+        assert!(!agree("Song (Live at Wembley)", "Song (Live at Knebworth)"));
+        assert!(!agree("Song (Radio Edit)", "Song (Club Edit)"));
+        assert!(agree("Song (Alice Remix)", "Song [Alice Remix]"));
+        assert!(agree("Song - Alice Remix", "Song (Alice remix)"));
+        assert!(agree("Song (feat. Carol) [Alice Remix]", "Song (Alice Remix)"));
+        assert!(agree("Song (2011 Remaster)", "Song"));
+        assert!(agree(
+            "Song (Live at Wembley) [Remastered]",
+            "Song (Live at Wembley)"
+        ));
+        // At the job's boundary: same place, same length, another remix is no fit
+        let mut files: Vec<FolderFile> = (1..=5).map(file).collect();
+        files[1].title = "Song 2 (Alice Remix)".into();
+        files[2].title = "Song 3 (Live at Wembley)".into();
+        let mut r = release(5);
+        r["media"][0]["tracks"][1]["title"] = json!("Song 2 (Bob Remix)");
+        r["media"][0]["tracks"][2]["title"] = json!("Song 3 (Live at Knebworth)");
+        let fit = fit_release(&files, &r).unwrap();
+        let tracks: Vec<i64> = fit.matched.iter().map(|m| m.track).collect();
+        assert_eq!(tracks, vec![1, 4, 5]);
     }
 }

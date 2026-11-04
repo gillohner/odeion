@@ -4,6 +4,28 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-04
+
+- **Most songs waiting for review now match on their own, and Confirm matches opens at once** (owner's ask: the page took long with no answer, and most songs could be matched without asking).
+  - One fingerprint often names the same audio under several MusicBrainz recordings, and a search by a file's exact title, artist and length often finds the same song on several releases. That is no question for you any more. When every candidate is the file's song in the file's version, by its artist, the most logical recording is taken: the one that fits the folder, else the one on a release named like the file's album, else the one on a studio album, then a single or EP, else the one on most releases. Songs found this way count "by their exact title, artist and length" (or "by how they sound").
+  - What really differs still waits for you: a live take for a studio file, a remix or other version, another artist, a length more than 3 seconds off, another title, or a fingerprint that names different songs. Your confirmed and rejected choices stay as they are.
+  - With "Write IDs into my files" on, songs matched this way get their IDs written into the files too, as with the other ways Identify matches.
+  - Songs left waiting by the earlier version are checked again once by the next Identify. In a replay of 7,412 songs shaped like a real backlog, 6,352 matched on their own and 1,060 stayed for review (the live, remix, other-artist and length cases).
+  - Confirm matches shows that it is loading at once, then a page of albums (about 200 songs) instead of the whole backlog, and its first answer is small. Confirming or rejecting updates that album where it is, without loading the page again. Your choices stay when more albums load, and an answer that comes after you left the page draws nothing.
+  - The page says what Confirm does to your files: with "Write IDs into my files" on, the IDs are written into them; off, the files stay as they are. Files the IDs couldn't be written to are named after a confirm. An album with more than 500 songs chosen is confirmed 500 at a time.
+
+### 2026-11-03
+
+- **Identify says when it is finished, and reviewing its matches goes album by album** (owner's ask).
+  - The Identify card starts with one line: "Finished — 1,863 matches need your review" (with Review as the main button), "Finished — nothing to review", "Working: 120 of 3,022…", songs not checked yet, a run cut off when the node stopped, or a run that stopped on an error and why. The last run is remembered across restarts. `GET /v1/library/identify` has the same as `phase`; its other fields are as they were.
+  - Confirm matches lists each folder as an album, every song with its own options and where each comes from. A song with one strong option from its folder or its fingerprint is offered ticked; a song whose options disagree is never picked for you; a match found only by title and artist, a weak one, or one on another release than the rest is shown but not ticked. Confirm stores an album's choices together or not at all: when a song changed meanwhile (identified elsewhere, its suggestion gone), nothing is stored and that song is marked. "Accept all matching", which took the release most suggestions named, is gone.
+  - "Not this" is remembered: a later run or a retry never suggests that recording for the song again. Nothing a run finds replaces a match you confirmed, and confirming a song that got an identity meanwhile is refused.
+- **Matching by album is more careful, and stops asking about editions.**
+  - The recording is the identity. When several editions of an album fit the folder equally (a remaster, another country's pressing) and name the same recordings, the songs are identified and which edition stays open, unless MusicBrainz's release types single one out (the album rather than a compilation of the same name). Editions that name different recordings for a song leave that song for you, with both. The first edition in MusicBrainz's or AcoustID's answer is never taken as the release on its own.
+  - A live take, remix, edit or mono mix on the release no longer matches a file whose title doesn't say so (and the other way round), unless the album itself is live; a remaster's words change nothing.
+  - A fingerprint from an earlier run that names a different recording than the folder (a live take of the same song, say) makes both a choice for you instead of the folder winning.
+- **Identify again is quick when little changed.** MusicBrainz answers, files' content keys and AcoustID answers are kept, so a retry asks nothing, reads nothing and decodes nothing for songs that didn't change, and audio that can't be fingerprinted isn't decoded again. A song not found before is checked again by a plain Identify once its tags or file change, or once an AcoustID key or MusicBrainz contact is added. In a replay of a 19,452-song library against stand-in services, a cold run sent 2,668 MusicBrainz and 1,300 AcoustID requests and decoded 1,300 files; a retry with nothing changed sent none and decoded none; after 50 songs' tags were fixed, a plain run checked those 50 only (81 MusicBrainz requests, nothing decoded). MusicBrainz still gets one request a second from the whole node.
+
 ### 2026-11-02
 
 - **Copies to the homeserver: the disk guards, tightened.**

@@ -298,17 +298,8 @@ impl MusicBrainzClient {
         title: &str,
         duration_ms: Option<u64>,
     ) -> Result<Vec<RecordingHit>> {
-        let base = if artist.trim().is_empty() {
-            format!("recording:\"{}\"", lucene_escape(title))
-        } else {
-            format!(
-                "recording:\"{}\" AND artist:\"{}\"",
-                lucene_escape(title),
-                lucene_escape(artist)
-            )
-        };
-        if let Some(d) = duration_ms {
-            let q = format!("{base} AND dur:[{} TO {}]", d.saturating_sub(2000), d + 2000);
+        let (narrow, base) = recording_hit_queries(artist, title, duration_ms);
+        if let Some(q) = narrow {
             let v = self.get("recording", &[("query", &q), ("limit", "10")]).await?;
             let hits = v.map(|v| parse_search_hits(&v)).unwrap_or_default();
             if !hits.is_empty() {
@@ -492,6 +483,26 @@ impl HitRelease {
                     .contains(&k.to_lowercase().as_str())
             })
     }
+}
+
+/// The recording searches of [`MusicBrainzClient::search_recording_hits`]: with the length (± 2 s)
+/// when there is one, and without.
+pub fn recording_hit_queries(
+    artist: &str,
+    title: &str,
+    duration_ms: Option<u64>,
+) -> (Option<String>, String) {
+    let base = if artist.trim().is_empty() {
+        format!("recording:\"{}\"", lucene_escape(title))
+    } else {
+        format!(
+            "recording:\"{}\" AND artist:\"{}\"",
+            lucene_escape(title),
+            lucene_escape(artist)
+        )
+    };
+    let narrow = duration_ms.map(|d| format!("{base} AND dur:[{} TO {}]", d.saturating_sub(2000), d + 2000));
+    (narrow, base)
 }
 
 pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {

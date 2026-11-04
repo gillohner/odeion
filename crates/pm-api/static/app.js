@@ -197,7 +197,7 @@
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
     // The node refused this browser's token (its own answer, not a service refusing a sign-in typed here)
     if (r.status === 401 && json && json.error === NODE_REFUSED) { sessionEnded(sent); throw new Error('Log in to use the node.'); }
-    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; throw err; }
+    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; err.body = json; throw err; }
     return json;
   };
 
@@ -3370,7 +3370,8 @@
     const mins = (ms) => (ms ? fmt(ms) : '');
     const pick = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song by its entry in MusicBrainz (the open music encyclopedia). Pick the one that is ${about}${t.duration_ms ? ` (${mins(t.duration_ms)})` : ''}; it is remembered for this file.`, choices: c.suggestions.map((x, k) => ({ label: `${x.title || t.title}${x.artist ? ` · ${x.artist}` : ''}`, note: [x.release_title, `${Math.round(x.score * 100)}% match`].filter(Boolean).join(' · '), value: x.id, primary: k === 0 })) });
     if (pick == null) return null;
-    try { const done = await api('POST', `/library/suggestions/${pick}/accept`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
+    const picked = c.suggestions.find((x) => x.id === pick);
+    try { const done = await api('POST', `/library/suggestions/${pick}/accept?track_id=${encodeURIComponent(t.id)}${picked ? `&recording_mbid=${encodeURIComponent(picked.recording_mbid)}` : ''}`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
   };
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
@@ -4668,28 +4669,105 @@
           break;
         }
         case 'identify': {
-          const sug = await api('GET', '/library/suggestions');
-          if (state.view !== 'identify') return;
-          const byTrack = new Map(); for (const x of sug) { if (!byTrack.has(x.track_id)) byTrack.set(x.track_id, { track: x.track, options: [] }); byTrack.get(x.track_id).options.push(x); }
-          const byFolder = new Map(); for (const g of byTrack.values()) { const f = (g.track.file.path || '').replace(/[^/]*$/, ''); if (!byFolder.has(f)) byFolder.set(f, []); byFolder.get(f).push(g); }
-          // The release most suggestions in a folder point at (the folder as an album).
-          const releaseOf = (groups) => { const n = new Map(); groups.forEach((g) => g.options.forEach((o) => { if (o.release_mbid) n.set(o.release_mbid, (n.get(o.release_mbid) || 0) + 1); })); let best = null; n.forEach((c, r) => { if (!best || c > best[1]) best = [r, c]; }); return best && best[0]; };
-          main.innerHTML = pageHead('Confirm matches', byTrack.size) + (byTrack.size ? `<p class="muted small" style="margin-top:-6px">Each file, with what MusicBrainz knows about it. A confirmed match becomes the file's identity (stored in the node, your files stay as they are).</p>` + [...byFolder.entries()].map(([folder, groups]) => `<section class="section" data-folder="${esc(folder)}"><div class="section-head"><h3>${esc(folder.split('/').filter(Boolean).slice(-2).join(' / ') || 'Library')}</h3><span class="muted small">${groups.length} file${groups.length === 1 ? '' : 's'}</span>${releaseOf(groups) ? `<button class="btn sm" data-align="${esc(folder)}">Compare with the album</button>` : ''}</div><div class="alignbox" hidden></div><div class="list">${groups.map((g) => `<div class="idrow"><div class="idfile"><div class="name">${g.track.track_no ? `<span class="muted">${g.track.track_no}.</span> ` : ''}${esc(g.track.title)}</div><div class="sub">${esc([artists(g.track), fmt(g.track.duration_ms), (g.track.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div></div><div class="idopts">${g.options.map((o) => `<div class="idopt"><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags'} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn primary sm" data-accept="${o.id}">This one</button><button class="btn ghost sm" data-reject="${o.id}">Not this</button></div>`).join('')}</div></div>`).join('')}</div></section>`).join('') : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
-          // Side by side: the folder's files and the MusicBrainz release's tracklist, aligned by position.
-          $$('[data-align]', main).forEach((b) => b.onclick = async () => {
-            const sec = b.closest('[data-folder]'); const box = $('.alignbox', sec); const groups = byFolder.get(b.dataset.align) || [];
-            if (!box.hidden) { box.hidden = true; return; }
-            const rel = releaseOf(groups); box.hidden = false; box.innerHTML = '<p class="muted small">Loading the album from MusicBrainz…</p>';
-            let r; try { const res = await fetch(`/mb/ws/2/release/${encodeURIComponent(rel)}?inc=recordings+artist-credits&fmt=json`); if (!res.ok) throw new Error(`MusicBrainz answered ${res.status}`); r = await res.json(); } catch (e) { box.innerHTML = `<div class="notice">${esc(e.message)}</div>`; return; }
-            const tracks = (r.media || []).flatMap((m) => (m.tracks || []).map((t) => ({ disc: m.position || 1, pos: t.position, title: t.title, len: t.length, rec: t.recording && t.recording.id })));
-            const fileAt = (disc, pos) => groups.find((g) => (g.track.track_no === pos) && ((g.track.disc_no || 1) === disc));
-            const matches = [];
-            const rows = tracks.map((t) => { const g = fileAt(t.disc, t.pos); const o = g && g.options.find((x) => x.recording_mbid === t.rec); if (o) matches.push(o.id); const dur = g && g.track.duration_ms && t.len ? Math.abs(g.track.duration_ms - t.len) <= 3000 : null; return `<div class="alignrow ${o ? 'ok' : g ? 'diff' : 'none'}"><span class="muted small">${t.disc > 1 ? t.disc + '.' : ''}${t.pos}</span><div class="aside">${g ? `${esc(g.track.title)} <span class="muted small">${fmt(g.track.duration_ms)}</span>` : '<span class="muted small">no file at this position</span>'}</div><span class="amark">${o ? icon('check') : g ? '≠' : ''}</span><div class="aside">${esc(t.title)} <span class="muted small">${t.len ? fmt(t.len) : ''}${dur === false ? ' · length differs' : ''}</span></div></div>`; }).join('');
-            box.innerHTML = `<div class="alignhead"><span></span><b>Your folder</b><span></span><b>${esc(r.title)} <span class="muted small">${esc((r['artist-credit'] || []).map((a) => a.name).join(', '))} · ${esc(r.date || '')} · ${countOf(tracks.length, 'tracks')}</span></b></div>${rows}<div class="actions" style="margin-top:10px">${matches.length ? `<button class="btn primary sm" data-acceptall="${matches.join(',')}">Accept all ${matches.length} matching</button>` : ''}<a class="btn ghost sm" href="https://musicbrainz.org/release/${esc(rel)}" target="_blank" rel="noopener">On MusicBrainz ${icon('external')}</a></div>`;
-            const all = $('[data-acceptall]', box); if (all) all.onclick = async () => { all.disabled = true; let ok = 0; for (const id of all.dataset.acceptall.split(',')) { try { await api('POST', `/library/suggestions/${id}/accept`); ok++; } catch { /* next */ } } toast(`${ok} file${ok === 1 ? '' : 's'} identified`); render(); };
-          });
-          $$('[data-accept]', main).forEach((b) => b.onclick = async () => { try { await api('POST', `/library/suggestions/${b.dataset.accept}/accept`); toast('Identified'); render(); } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-reject]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/library/suggestions/${b.dataset.reject}`); render(); } catch (e) { toast(e.message, 'error'); } });
+          // Album review: each folder's songs together, every song with its own options and
+          // evidence. A song with one strong option is offered ticked; a song whose options
+          // disagree waits for the owner's pick. Confirm stores the album's choices in one go,
+          // or none when one went stale (409: reload).
+          // Every await checks this is still the view it drew (leaving, or leaving and coming
+          // back, starts a new one): an answer that comes late draws nothing
+          const gen = state.idGen = (state.idGen || 0) + 1;
+          const live = () => state.view === 'identify' && state.idGen === gen;
+          // Something at once while the first page comes (owner, 2026-11-04: no answer for long)
+          main.innerHTML = pageHead('Confirm matches', null) + '<p class="muted small idloading" role="status">Loading the matches to confirm…</p><div class="sk-grid">' + '<div class="skeleton"></div>'.repeat(4) + '</div>';
+          const [page, st] = await Promise.all([api('GET', '/library/suggestions/albums?limit=50'), api('GET', '/library/identify').catch(() => null)]);
+          if (!live()) return;
+          const albums = page.albums.slice(); let next = page.next;
+          // The owner's choice per song, kept while more albums load (a song not touched shows what is offered)
+          const choices = new Map();
+          const MAX_CONFIRM = 500;
+          const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags');
+          const holdWhy = { search: 'found by its title and artist only', weak: 'a weak match', other_release: 'on another release than the rest of the album' };
+          const isChecked = (g, value) => (choices.has(g.track.id) ? choices.get(g.track.id) === value : String(g.pick == null ? '' : g.pick) === value);
+          // What Confirm does to the files depends on "Write IDs into my files": said as it is set
+          const files = !st ? 'With "Write IDs into my files" on (Library › Identify), its MusicBrainz IDs are also written into the file.'
+            : st.write_ids ? '"Write IDs into my files" is on, so its MusicBrainz IDs are also written into the file (its tags are backed up first).'
+              : 'It is stored in the node; your files stay as they are ("Write IDs into my files" is off).';
+          const albumHtml = (a, ai) => {
+            const head = `${esc(a.album || a.key.split('/').filter(Boolean).slice(-1)[0] || 'Library')}${a.artist ? ` <span class="muted small">${esc(a.artist)}</span>` : ''}`;
+            const parts = [countOf(a.songs.length, 'songs'), a.ready ? `${a.ready} ready` : '', a.conflicts ? `${a.conflicts} need${a.conflicts === 1 ? 's' : ''} your pick` : ''].filter(Boolean).join(' · ');
+            const rel = a.release ? `<p class="muted small">${a.release.songs} of ${a.songs.length} have an option on <a href="https://musicbrainz.org/release/${esc(a.release.mbid)}" target="_blank" rel="noopener">${esc(a.release.title || 'one release')} ${icon('external')}</a>. Nothing is chosen for you by it.</p>` : '';
+            const songs = a.songs.map((g) => {
+              const t = g.track; const name = `pick-${t.id}`;
+              const opts = g.options.map((o) => `<label class="idopt idpick"><input type="radio" name="${name}" value="${o.id}" data-rec="${esc(o.recording_mbid)}" ${isChecked(g, String(o.id)) ? 'checked' : ''}><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn ghost sm" type="button" data-reject="${o.id}" data-track="${t.id}" data-rec="${esc(o.recording_mbid)}">Not this</button></label>`).join('');
+              const note = g.status === 'conflict' ? '<p class="small warn-text idhold">These disagree: pick one, or leave it for later.</p>' : g.hold ? `<p class="small muted idhold">Not ticked: ${esc(holdWhy[g.hold] || g.hold)}.</p>` : '';
+              return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<label class="idopt idpick idlater"><input type="radio" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><div class="grow small muted">Leave for later</div></label></div></div>`;
+            }).join('');
+            if (!a.songs.length) return '';
+            return `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${head}</h3><span class="muted small">${parts}</span></div>${rel}<div class="list">${songs}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-confirm="${ai}"></button><span class="small muted" role="status" data-confirm-out="${ai}"></span></div></section>`;
+          };
+          const draw = () => {
+            main.innerHTML = pageHead('Confirm matches', page.songs) + (albums.length ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            $$('[data-album]', main).forEach(wire);
+            const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; try { const p = await api('GET', `/library/suggestions/albums?limit=50&offset=${next}`); if (!live()) return; albums.push(...p.albums); next = p.next; draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
+          };
+          // One album drawn again from what is known here, after a confirm or a "Not this" (the
+          // rest of the page, its choices and where it is scrolled stay; nothing is fetched)
+          const redraw = (ai) => {
+            const sec = $(`[data-album="${ai}"]`, main); if (!sec) return;
+            const html = albumHtml(albums[ai], ai);
+            if (!html) { sec.remove(); } else { sec.insertAdjacentHTML('afterend', html); sec.remove(); wire($(`[data-album="${ai}"]`, main)); }
+            const count = $('.page-head .count', main); if (count) count.textContent = String(page.songs);
+            if (!albums.some((a) => a.songs.length) && next == null) draw();
+          };
+          const chosen = (sec) => $$('.idrow', sec).map((row) => { const r = $('input[type=radio]:checked', row); return r && r.value ? { track_id: Number(row.dataset.track), suggestion_id: Number(r.value), recording_mbid: r.dataset.rec } : null; }).filter(Boolean);
+          const wire = (sec) => {
+            const btn = $('[data-confirm]', sec); const out = $('[data-confirm-out]', sec);
+            // More than one batch takes: the first ones are confirmed (all of them or none), the rest stay
+            const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n; };
+            label(); $$('input[type=radio]', sec).forEach((r) => r.onchange = () => { choices.set(Number(r.name.slice(5)), r.value); label(); });
+            btn.onclick = async () => {
+              const batch = chosen(sec).slice(0, MAX_CONFIRM); if (!batch.length) return; btn.disabled = true; out.textContent = 'Confirming…';
+              try {
+                const r = await api('POST', '/library/suggestions/confirm', { choices: batch });
+                const skipped = (r.files && r.files.skipped) || [];
+                toast(`${countOf(r.count, 'songs')} identified${skipped.length ? `; IDs not written into ${countOf(skipped.length, 'files')} (${skipped[0].reason})` : ''}${r.files && r.files.error ? `; IDs not written: ${r.files.error}` : ''}`, skipped.length || (r.files && r.files.error) ? 'error' : '');
+                if (!live()) return;
+                // The confirmed songs leave this album; the page isn't loaded again
+                const done = new Set(r.confirmed || batch.map((c) => c.track_id));
+                const ai = Number(sec.dataset.album); const a = albums[ai];
+                a.songs = a.songs.filter((g) => !done.has(g.track.id)); done.forEach((id) => choices.delete(id));
+                a.ready = a.songs.filter((g) => g.pick != null).length; a.conflicts = a.songs.filter((g) => g.status === 'conflict').length;
+                page.songs = Math.max(0, page.songs - done.size);
+                redraw(ai);
+              } catch (e) {
+                if (!live()) return;
+                const stale = (e.body && e.body.stale) || [];
+                stale.forEach((x) => { const row = $(`.idrow[data-track="${x.track_id}"]`, sec); if (row) row.classList.add('idstale'); });
+                out.textContent = e.message; out.classList.add('warn-text'); btn.disabled = false;
+                if (stale.length) { btn.textContent = 'Reload this list'; btn.onclick = () => render(); }
+              }
+            };
+            // "Not this" names the song and recording the page shows: one changed meanwhile is refused
+            $$('[data-reject]', sec).forEach((b) => b.onclick = async (ev) => {
+              ev.preventDefault();
+              try {
+                await api('DELETE', `/library/suggestions/${b.dataset.reject}?track_id=${encodeURIComponent(b.dataset.track)}&recording_mbid=${encodeURIComponent(b.dataset.rec)}`);
+                if (!live()) return;
+                // That option leaves its song; a song with none left leaves the album
+                const ai = Number(sec.dataset.album); const a = albums[ai]; const tid = Number(b.dataset.track); const sid = Number(b.dataset.reject);
+                const g = a.songs.find((x) => x.track.id === tid);
+                if (g) {
+                  g.options = g.options.filter((o) => o.id !== sid);
+                  if (choices.get(tid) === String(sid)) choices.delete(tid);
+                  if (g.pick === sid) g.pick = null;
+                  if (g.options.length === 1 && g.status === 'conflict') g.status = 'single';
+                  if (!g.options.length) { a.songs = a.songs.filter((x) => x !== g); page.songs = Math.max(0, page.songs - 1); }
+                }
+                redraw(ai);
+              } catch (e) { toast(e.message, 'error'); }
+            });
+          };
+          draw();
           break;
         }
         case 'genres': {
@@ -6431,16 +6509,30 @@
   // ---- identify library (Settings card and the review view) ----
   let idTimer = null;
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
-  const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
+  const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint'], [n('tag_match'), 'by title, artist and length']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
   const renderIdentify = async () => {
     const box = $('#idbox'); if (!box) return;
     let st; try { st = await api('GET', '/library/identify'); } catch (e) { box.textContent = e.message; return; }
     const c = st.counts; const p = st.progress;
     const pct = c.total ? Math.round((c.identified / c.total) * 100) : 0;
-    box.innerHTML = `<div class="idbar"><span style="width:${pct}%"></span></div>
+    // One line says where identification stands (st.phase), before the numbers
+    const n = (x) => Number(x || 0).toLocaleString(); const matches = (x) => `${n(x)} ${x === 1 ? 'match' : 'matches'}`;
+    const ph = st.phase || (p.running ? 'running' : c.suggested ? 'needs_review' : c.unchecked ? 'new' : 'ready');
+    const head = {
+      running: `Working: ${n(p.done)} of ${n(p.total)}…`,
+      needs_review: `Finished — ${matches(c.suggested)} need${c.suggested === 1 ? 's' : ''} your review`,
+      ready: c.unknown ? `Finished — nothing to review (${n(c.unknown)} not found)` : 'Finished — nothing to review',
+      new: `${n(c.unchecked)} ${c.unchecked === 1 ? 'song' : 'songs'} not checked yet`,
+      interrupted: `The last run was cut off when the node stopped${p.total ? ` (after ${n(p.done)} of ${n(p.total)})` : ''}. Identify carries on from there.`,
+      failed: `It stopped after ${n(p.done)} of ${n(p.total)}: ${esc(p.stopped || 'an error')}. Identify carries on from there.`,
+      empty: 'No songs yet: add music first.',
+    }[ph] || '';
+    const reviewFirst = ph === 'needs_review';
+    box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>
+      <div class="idbar"><span style="width:${pct}%"></span></div>
       <p class="small">${c.identified} of ${c.total} identified${c.suggested ? ` · <a data-view="identify">${c.suggested} to confirm</a>` : ''}${c.unknown ? ` · ${c.unknown} not found` : ''}${c.unchecked ? ` · ${c.unchecked} not checked yet` : ''}</p>
-      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
-      ${p.running ? `<p class="small">Working: ${p.done} of ${p.total}…</p>` : (p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>${p.stopped ? `<p class="small warn-text" role="status">It stopped after ${p.done} of ${p.total}: ${esc(p.stopped)}. Identify carries on from there.</p>` : ''}` : '')}
+      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
+      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : ''}
       ${(() => {
         // The AcoustID key lives here, with its state and a Check (owner, 2026-10-31): Settings
         // keeps no copy. Matching by how songs sound needs it; without it, title and artist only
@@ -6452,7 +6544,7 @@
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
-      <div class="actions"><button class="btn primary" id="idrun" ${p.running ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
+      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
