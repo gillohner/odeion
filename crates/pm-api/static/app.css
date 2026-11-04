@@ -1131,7 +1131,8 @@ html[data-shell="phone"] .ptag-add, html[data-shell="tablet"] .ptag-add { width:
 html[data-shell="phone"] .ptag .chipx, html[data-shell="tablet"] .ptag .chipx { min-width: 40px; }
 html[data-shell="phone"] span.ptag, html[data-shell="tablet"] span.ptag { padding-right: 0; gap: 0; }
 html[data-shell="phone"] span.ptag .chiplink, html[data-shell="tablet"] span.ptag .chiplink { padding-right: 4px; }
-html[data-shell="phone"] .ptag .chiplink, html[data-shell="tablet"] .ptag .chiplink, html[data-shell="phone"] .ptag .chipx, html[data-shell="tablet"] .ptag .chipx { align-self: stretch; height: auto; }
+html[data-shell="phone"] .ptag .chiplink, html[data-shell="tablet"] .ptag .chiplink, html[data-shell="phone"] .ptag .chipx, html[data-shell="tablet"] .ptag .chipx { align-self: stretch; height: auto; min-height: 40px; }
+html[data-shell="phone"] span.ptag, html[data-shell="tablet"] span.ptag { min-height: 42px; }
 .tag-hint { margin: 0; }
 .switch { appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; flex: none; margin: 0 4px; border-radius: 999px; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: background 0.15s; }
 .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg-2); transition: transform 0.15s, background 0.15s; }
