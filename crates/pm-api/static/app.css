@@ -1083,6 +1083,8 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .way-action .toolbar { flex-wrap: wrap; }
 .way-action .toolbar .input { flex: 1 1 220px; min-width: 0; width: auto; }
 .way-more { color: var(--fg-2); margin-top: 2px; }
+.ways-adv > summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 2px; }
+.ways-adv > .ways { margin-top: 6px; }
 /* People › Invite someone: the key field with Paste and Scan QR; its error under it */
 .invite-fields { margin-top: 12px; }
 .invite-fields .input { flex: 1 1 200px; min-width: 0; width: auto; }
@@ -1383,11 +1385,8 @@ body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data
 #impplan:not(:empty) { margin-top: 10px; }
 #impplan .row-btns { margin-top: 8px; }
 
-/* Now playing's quality line and the quality sheet (STEWARD-UX-PLAYER-SOURCES §2) */
+/* Now playing's quality line (STEWARD-UX-PLAYER-SOURCES §2) */
 .npqual { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; font-size: 14px; color: var(--fg-2, var(--fg)); font-variant-numeric: tabular-nums; }
-.qsheet { max-width: 520px; }
-.qsheet .set-rows { border: 1px solid var(--line); border-radius: 12px; margin: 12px 0; }
-.qsheet .chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .quality .qtext { font-variant-numeric: tabular-nums; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The pill's parts: the provider's mark, "DSP" when a DSP stage is in the path, and the phone form
    (device and a quality badge; .qtext is hidden there) */
@@ -1421,14 +1420,11 @@ body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data
 .qp-dsp .btn { margin: 4px 6px 2px; }
 .qp-vol { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
 .qp-vol input[type="range"] { flex: 1; }
-.qp-foot { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
 /* Pressing play answers at once: the pressed control spins, the bar says "Starting on …" */
 .starting .ic { display: none; }
 .starting::after { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 .np-title.np-wait { display: flex; align-items: center; gap: 6px; }
 .npqual .qtext-long { font-weight: 550; }
-.qsheet .qnote { display: block; margin-top: 6px; }
-.qsheet .qjump { display: block; margin-bottom: 8px; font-size: 13px; }
 /* Settings › You › My streaming accounts (a listener): one service per row, its sign-in ways inside */
 details.set-row.svc-own { display: block; }
 .svc-own > summary { display: flex; flex-direction: column; gap: 2px; cursor: pointer; list-style: none; min-height: 40px; justify-content: center; }
@@ -1436,7 +1432,6 @@ details.set-row.svc-own { display: block; }
 .svc-own[open] > summary { margin-bottom: 10px; }
 .svc-body:empty::before { content: ''; display: block; height: 40px; }
 html[data-shell="phone"] #hson, html[data-shell="tablet"] #hson, html[data-shell="phone"] #hsoff, html[data-shell="tablet"] #hsoff, html[data-shell="phone"] [data-hsconnect], html[data-shell="tablet"] [data-hsconnect] { min-height: 40px; }
-.set-row.flash, .flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; transition: outline-color 1.2s ease; }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
 .nav-item.nav-offline, .bnav.nav-offline { display: none; }
 body.offline .nav-item.nav-offline, html[data-shell="tablet"] body.offline .bnav.nav-offline { display: flex; }

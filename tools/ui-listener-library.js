@@ -51,8 +51,8 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
         { source: 'tidal', name: 'TIDAL', connected: false, available: true, setup: '/v1/sources/tidal/signin' },
         { source: 'qobuz', name: 'Qobuz', connected: false, available: false, reason: 'the owner hasn’t set up a Qobuz app', setup: '/v1/sources/qobuz/signin' },
         { source: 'spotify', name: 'Spotify', connected: true, user: 'ann-spot', way: 'app', available: true, setup: '/v1/sources/spotify/signin' }] }) : r.fallback()));
-      await page.route(/\/v1\/sources\/tidal\/signin$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { source: 'tidal', chosen: 'device', in_use: null, ways: [
-        { id: 'app', label: 'TIDAL’s own sign-in', available: true }, { id: 'device', label: 'A device code', available: true, recommended: true }],
+      await page.route(/\/v1\/sources\/tidal\/signin$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { source: 'tidal', chosen: 'own-device', in_use: null, ways: [
+        { id: 'app', label: 'TIDAL’s own sign-in', available: true }, { id: 'device', label: 'A device code', available: true, recommended: true }, { id: 'own-device', label: 'A device client of your own', available: true }],
         details: { unofficial: { client_from: null }, status: { signed_in: false } }, imports: [], places: [] } }) : r.fallback()));
       const go = async (p) => { await page.goto(BASE + p); await page.locator('#main h1, #main h2').first().waitFor({ timeout: 20000 }); await sleep(400); };
 

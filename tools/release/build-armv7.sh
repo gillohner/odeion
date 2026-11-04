@@ -12,6 +12,8 @@ docker run --rm \
   -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR=always \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   -e PM_NODE_VERSION="${PM_NODE_VERSION:-}" -e ODEION_NODE_VERSION \
+  -e PM_TIDAL_PKCE_CLIENT_ID -e PM_TIDAL_PKCE_CLIENT_SECRET \
+  -e PM_TIDAL_DEVICE_CLIENT_ID -e PM_TIDAL_DEVICE_CLIENT_SECRET \
   rust:1-bookworm bash -euo pipefail -c '
     dpkg --add-architecture armhf
     apt-get update -qq
