@@ -6,13 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
-- **Problem reports to a private inbox on the node** (not in the app's menus yet). The owner and listeners can send a problem, an idea or a question (`POST /v1/feedback`), and see their own reports and where each is (`GET /v1/feedback/mine`: saved, received, reviewed). A report carries only what its sender wrote, and the technical details they ticked (app version, page, phone/tablet/desktop, browser); nothing is collected on its own.
+- **Problem reports to a private inbox on the node, from a "?" in the top bar** (owner's ask). The owner and listeners can send a problem, an idea or a question (`POST /v1/feedback`), and see their own reports and where each is (`GET /v1/feedback/mine`: saved, received, reviewed). A report carries only what its sender wrote, and the technical details they ticked (app version, page, phone/tablet/desktop, browser); nothing is collected on its own.
   - Reports are kept on the node in their own file, readable by the node's user only, never in a backup or on the homeserver. The node's owner, and the tools they use to look after it, read them and can tell who sent each; the dialog says so. Tokens pasted into one are taken out, and no report's text is logged.
   - The node's operator reads new reports with `pm-node feedback pending` and records receipts with `pm-node feedback receipt`; `tools/feedback-intake.py` keeps a whole copy of each in a private folder, marked as untrusted text, before it sends a receipt.
   - Limits: 4000 characters, 5 reports an hour and 20 a day per person, 100 a day for the node, 500 reports waiting in the inbox. Reviewed reports go after 90 days, any after a year, and are overwritten in the inbox file itself (not a guarantee against recovery from the disk).
   - A draft belongs to the sign-in that wrote it: someone else signing in on the same page never sees or sends it.
   - Reports need the node's API token to be at least 16 characters (the length the node already warns below): a shorter one could be guessed from how reports are taken.
-  - `feedback.js` is the Help "?" menu with "Report a problem" and "My reports", ready for the page to mount.
+  - The "?" next to your account button opens Help with "Report a problem" and "My reports", on phones, tablets and desktops. Party guests don't have it.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".
