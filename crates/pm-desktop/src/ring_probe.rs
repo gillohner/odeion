@@ -15,7 +15,8 @@
 //!   homeserver key, and the transport (`GET /info`) the default client then picks.
 
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -61,6 +62,10 @@ pub async fn run() {
     // The sign-in's own client, used as `ring_connect` uses it: the relay poll runs on it while
     // the app is away, and the grant exchange when the app's wait lets it (`exchange_on_approval`).
     let flow_client = PubkyHttpClient::new();
+    // A real sign-in flow (nobody approves it, no identity is used) started as ring_connect
+    // starts one: its relay listener runs while the app is away (`relay_restore`).
+    let since_trip = crate::ring_wait::trips();
+    let pending = ProbeFlow::start();
     fixture().await;
     relay_tls().await;
     public_homeserver().await;
@@ -105,6 +110,36 @@ pub async fn run() {
         Err(e) => exchange["error"] = json!(chain(e)),
     }
     emit("exchange_on_approval", exchange);
+    // Back on screen: the app's own wait (ring_wait::approval) on that flow. A listener that died
+    // while away must be resubscribed (resume), not end the sign-in; with no approval coming the
+    // wait is still waiting after 20 s.
+    let restore = match pending {
+        Ok(flow) => {
+            let resumes = flow.resumes.clone();
+            let errors = flow.errors.clone();
+            let relay = crate::ring_wait::relay_host(flow.flow.authorization_url().as_str());
+            let outcome = match tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::ring_wait::approval(flow, since_trip, &relay, 443, |_| {}),
+            )
+            .await
+            {
+                Err(_) => json!("waiting"),
+                Ok(Ok(())) => json!("approved"),
+                Ok(Err(e)) => json!({ "failed": e }),
+            };
+            let errors = errors.lock().map(|e| e.clone()).unwrap_or_default();
+            json!({
+                "relay": relay,
+                "outcome": outcome,
+                "resumes": resumes.load(Ordering::Acquire),
+                "listener_errors": errors,
+                "trips": crate::ring_wait::trips() - since_trip,
+            })
+        }
+        Err(e) => json!({ "error": e }),
+    };
+    emit("relay_restore", restore);
     // The harness brings the app back. As soon as the network answers again, the exchange an
     // approval waiting on return would make: on the held client (its transport decision from the
     // step above is cached for 60 s) and on a client nothing used in the background.
@@ -130,6 +165,59 @@ pub async fn run() {
     }
     emit("after_return", on_return);
     emit("done", json!({ "ms": started.elapsed().as_millis() as u64 }));
+}
+
+/// A sign-in flow for `relay_restore`, polled and resumed the way `ring_connect`'s `RingFlow` is.
+struct ProbeFlow {
+    flow: pubky::PubkyGrantAuthFlow,
+    resumes: Arc<AtomicU32>,
+    errors: Arc<Mutex<Vec<String>>>,
+}
+
+impl ProbeFlow {
+    fn start() -> Result<Self, String> {
+        let client = PubkyHttpClient::new().map_err(|e| chain(&e))?;
+        let caps = "/pub/pubky.music/:r"
+            .parse::<pubky::Capabilities>()
+            .map_err(|e| e.to_string())?;
+        let id = pubky::ClientId::new("odeion-ring-probe").map_err(|e| e.to_string())?;
+        let flow = pubky::Pubky::with_client(client)
+            .start_grant_auth_flow(&caps, pubky::AuthFlowKind::signin(), id)
+            .map_err(|e| chain(&e))?;
+        Ok(Self {
+            flow,
+            resumes: Arc::default(),
+            errors: Arc::default(),
+        })
+    }
+}
+
+impl crate::ring_wait::Pending for ProbeFlow {
+    type Done = ();
+    async fn poll(&self) -> Result<Option<()>, String> {
+        match self.flow.try_poll_once().await {
+            Ok(Some(_)) => Ok(Some(())),
+            Ok(None) => Ok(None),
+            Err(e) => {
+                let c = chain(&e);
+                if let Ok(mut v) = self.errors.lock() {
+                    v.push(c.clone());
+                }
+                Err(c)
+            }
+        }
+    }
+    fn resume(&self) -> Result<Self, String> {
+        let state = self.flow.save_local().ok_or("no saved state")?;
+        let client = PubkyHttpClient::new().map_err(|e| chain(&e))?;
+        let flow = pubky::PubkyGrantAuthFlow::restore(state, client).map_err(|e| chain(&e))?;
+        self.resumes.fetch_add(1, Ordering::AcqRel);
+        Ok(Self {
+            flow,
+            resumes: self.resumes.clone(),
+            errors: self.errors.clone(),
+        })
+    }
 }
 
 /// The app's wait between Ring's approval arriving and the grant exchange (`ring_wait`, which
