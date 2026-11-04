@@ -181,13 +181,15 @@ def main():
     ex = steps.get("exchange_on_approval", {})
     if "exchange_on_approval" not in steps:
         failures.append("the probe made no exchange_on_approval step")
+    # after_return.held (a client that resolved in the background) is SDK evidence only: pubky
+    # 0.16.2 keeps the raw-key choice of an empty lookup for 60 s; the app no longer resolves while
+    # away, and held_clean (unused in the background) must work.
     # A relay listener that died while away is listened to again, not the end of the sign-in.
     rr = steps.get("relay_restore", {})
     if rr.get("outcome") != "waiting":
         failures.append(f"relay_restore: the app's wait ended instead of listening again: {rr}")
     for name, info in (("default client", default.get("info") or {}),
                        ("grant exchange after Ring's approval came in while away", ex.get("info") or {}),
-                       ("held client back in the foreground", (ret.get("held") or {}).get("info") or {}),
                        ("unused held client back in the foreground", (ret.get("held_clean") or {}).get("info") or {})):
         if found_icann and direct.get("reachable") is False and info.get("host") != "homeserver.riginode.xyz":
             failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, "
