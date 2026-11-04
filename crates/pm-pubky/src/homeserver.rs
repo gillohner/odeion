@@ -58,6 +58,26 @@ pub enum HomeserverError {
     Timeout,
 }
 
+impl HomeserverError {
+    /// The server or the network may answer the same request later: a transport failure or a
+    /// 5xx answer.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Transport(_))) => true,
+            _ => self.is_server_error(),
+        }
+    }
+
+    /// The server answered 5xx.
+    pub fn is_server_error(&self) -> bool {
+        matches!(
+            self,
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+                if status.is_server_error()
+        )
+    }
+}
+
 /// Reads in flight at once during a sync.
 pub const FETCH_AT_ONCE: usize = 8;
 
@@ -1221,5 +1241,27 @@ mod object_tests {
             "read {} bytes of the one that didn't",
             sent[2]
         );
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::HomeserverError;
+
+    fn answered(code: u16) -> HomeserverError {
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: pubky::StatusCode::from_u16(code).unwrap(),
+            message: String::new(),
+        }))
+    }
+
+    #[test]
+    fn only_5xx_answers_and_transport_failures_are_transient() {
+        assert!(answered(502).is_transient() && answered(502).is_server_error());
+        assert!(answered(503).is_server_error());
+        assert!(!answered(404).is_transient() && !answered(404).is_server_error());
+        assert!(!answered(408).is_transient());
+        assert!(!HomeserverError::Timeout.is_transient());
+        assert!(!HomeserverError::Transport("x".into()).is_server_error());
     }
 }

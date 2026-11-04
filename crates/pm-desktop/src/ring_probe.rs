@@ -120,7 +120,14 @@ pub async fn run() {
             let relay = crate::ring_wait::relay_host(flow.flow.authorization_url().as_str());
             let outcome = match tokio::time::timeout(
                 Duration::from_secs(20),
-                crate::ring_wait::approval(flow, since_trip, &relay, 443, |_| {}),
+                crate::ring_wait::approval(
+                    flow,
+                    since_trip,
+                    &relay,
+                    443,
+                    crate::ring_wait::Stop::begin(crate::ring_wait::DEADLINE),
+                    |_| {},
+                ),
             )
             .await
             {
@@ -194,8 +201,9 @@ impl ProbeFlow {
 
 impl crate::ring_wait::Pending for ProbeFlow {
     type Done = ();
-    async fn poll(&self) -> Result<Option<()>, String> {
-        match self.flow.try_poll_once().await {
+    async fn poll(&self) -> Result<Option<()>, crate::ring_wait::Failed> {
+        let (r, at_once) = crate::ring_wait::at_once(self.flow.try_poll_once()).await;
+        match r {
             Ok(Some(_)) => Ok(Some(())),
             Ok(None) => Ok(None),
             Err(e) => {
@@ -203,7 +211,14 @@ impl crate::ring_wait::Pending for ProbeFlow {
                 if let Ok(mut v) = self.errors.lock() {
                     v.push(c.clone());
                 }
-                Err(c)
+                let (transient, server) = match &e {
+                    pubky::Error::Request(pubky::errors::RequestError::Transport(_)) => (true, false),
+                    pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }) => {
+                        (status.is_server_error(), status.is_server_error())
+                    }
+                    _ => (false, false),
+                };
+                Err(crate::ring_wait::Failed::sort(c, at_once, transient, server))
             }
         }
     }
@@ -225,7 +240,8 @@ impl crate::ring_wait::Pending for ProbeFlow {
 /// with the app on screen.
 async fn app_wait() -> (Vec<&'static str>, Option<bool>) {
     let mut states = Vec::new();
-    crate::ring_wait::until_ready("httprelay.pubky.app", 443, |s| states.push(s)).await;
+    let stop = crate::ring_wait::Stop::begin(crate::ring_wait::DEADLINE);
+    let _ = crate::ring_wait::until_ready("httprelay.pubky.app", 443, &stop, |s| states.push(s)).await;
     (states, Some(crate::ring_wait::on_screen()))
 }
 

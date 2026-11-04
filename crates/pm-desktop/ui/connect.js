@@ -164,7 +164,8 @@
     try {
       await invoke('ring_connect');
     } catch (e) {
-      if (!askMoved(e)) fail(e);
+      // Cancel (ring_wait::CANCELLED) is not an error.
+      if (String(e) !== 'Sign-in cancelled' && !askMoved(e)) fail(e);
       show('ring-out', false);
     } finally {
       $('ring').disabled = false;
@@ -172,6 +173,8 @@
     }
   };
   $('ring-open').onclick = () => { if (ringUrl) invoke('open_ring', { url: ringUrl }).catch(fail); };
+  // Stops the running sign-in; ring_connect then ends with 'Sign-in cancelled'.
+  $('ring-cancel').onclick = () => { invoke('ring_cancel').catch(fail); };
 
   $('manual').onsubmit = async (ev) => {
     ev.preventDefault();

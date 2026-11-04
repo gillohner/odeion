@@ -454,6 +454,8 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     android::tls_ready().await;
     let hs =
         pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet).map_err(|e| e.to_string())?;
+    // Ends the wait after ring_wait::DEADLINE, or on the page's Cancel (ring_cancel).
+    let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
     let flow = hs
         .start_login_with("pubky-music-desktop", RING_CAPS)
         .map_err(|e| e.to_string())?;
@@ -470,7 +472,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     );
     // Only on screen and online: Android 15+ cuts a backgrounded app's network (see ring_wait).
     let page = app.clone();
-    let session = ring_wait::approval(RingFlow(flow), since_trip, &relay, 443, move |s| {
+    let session = ring_wait::approval(RingFlow(flow), since_trip, &relay, 443, stop, move |s| {
         let _ = page.emit("ring-state", s);
     })
     .await?;
@@ -491,8 +493,18 @@ struct RingFlow(pm_pubky::homeserver::LoginFlow);
 
 impl ring_wait::Pending for RingFlow {
     type Done = pm_pubky::homeserver::PubkySession;
-    async fn poll(&self) -> Result<Option<Self::Done>, String> {
-        self.0.poll().await.map_err(|e| ring_wait::chain(&e))
+    /// An error that came before the poll waited for anything is the relay listener's own (no
+    /// grant was sent): see [`ring_wait::at_once`].
+    async fn poll(&self) -> Result<Option<Self::Done>, ring_wait::Failed> {
+        let (r, at_once) = ring_wait::at_once(self.0.poll()).await;
+        r.map_err(|e| {
+            ring_wait::Failed::sort(
+                ring_wait::chain(&e),
+                at_once,
+                e.is_transient(),
+                e.is_server_error(),
+            )
+        })
     }
     /// A fresh client: nothing it holds comes from the time in the background.
     fn resume(&self) -> Result<Self, String> {
@@ -500,6 +512,13 @@ impl ring_wait::Pending for RingFlow {
             .map_err(|e| e.to_string())?;
         hs.resume_login(&self.0).map(RingFlow).map_err(|e| e.to_string())
     }
+}
+
+/// The connect page's Cancel: the running Ring sign-in stops waiting (`ring_connect` then fails
+/// with [`ring_wait::CANCELLED`]).
+#[tauri::command]
+fn ring_cancel() {
+    ring_wait::cancel();
 }
 
 /// Hand a `pubkyauth://` link to Pubky Ring on this device.
@@ -564,6 +583,7 @@ pub fn run() {
             follow_moved,
             discover_nodes,
             ring_connect,
+            ring_cancel,
             open_ring,
             forget,
             has_downloads,
