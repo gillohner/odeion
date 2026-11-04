@@ -704,11 +704,12 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     }
     // Identify's bar: one segment per state, as wide as its share, the legend in its colours, no
     // wider than the text; the key field a field's width (TASK-identify-bar-and-key)
-    for (const [w, h] of [[390, 844], [820, 1180], [1440, 900]]) {
+    // (the owner's numbers at three widths, then a run in progress with songs not checked yet)
+    for (const [w, h, unchecked] of [[390, 844, 0], [820, 1180, 0], [1440, 900, 0], [1440, 900, 3000]]) {
       const cc = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: w < 1025, isMobile: w < 600 });
       await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
       const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
-      const counts = { total: 19452, identified: 9721, suggested: 7412, unknown: 2319, unchecked: 0, by: { tags: 9000, album: 500, fingerprint: 200, you: 21, title_artist: 0 } };
+      const counts = unchecked ? { total: 19452, identified: 9721, suggested: 4412, unknown: 2319, unchecked, by: { tags: 9000, album: 500, fingerprint: 200, you: 21, title_artist: 0 } } : { total: 19452, identified: 9721, suggested: 7412, unknown: 2319, unchecked: 0, by: { tags: 9000, album: 500, fingerprint: 200, you: 21, title_artist: 0 } };
       await pp.route(/\/v1\/library\/identify$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, counts, phase: 'needs_review', progress: { running: false, total: 0, done: 0, identified: 0, suggested: 0, unknown: 0, errors: 0 }, acoustid_state: 'ok', acoustid: true, acoustid_own: true } }); });
       await pp.goto(BASE + '/library/node'); await pp.waitForSelector('#idbox .idbar', { timeout: 20000 });
       const m = await pp.$eval('#idbox', (box) => {
@@ -721,10 +722,17 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const order = m.segs.map((s) => s.k).join(',');
       const share = (k) => counts[k] / counts.total * (m.bar - 2 * (m.segs.length - 1));
       const widthsOk = m.segs.every((s) => Math.abs(s.w - share(s.k)) <= 1.5);
-      check(order === 'identified,suggested,unknown' && widthsOk, `${w}: three segments in order, each its share of the bar (${m.segs.map((s) => `${s.k} ${Math.round(s.w)}`).join(', ')} of ${m.bar}; not checked has none)`);
-      check(m.role === 'img' && /19.452 songs: 9.721 identified, 7.412 to confirm, 2.319 not found/.test(m.label.replace(/\u202f|\u00a0/g, ' ')), `${w}: the bar is an image that spells the counts (${m.label})`);
-      check(m.keys.length === 3 && m.keys.every((kk) => m.segs.find((s) => s.k === kk.k && s.c === kk.c)) && /7.412 to confirm/.test(m.legend), `${w}: the legend's swatches match the segments' colours`);
-      if (w === 1440) check(m.bar <= 520 && m.input <= 320, `${w}: the bar (${m.bar}) and the key field (${m.input}) keep to their widths`);
+      const want = unchecked ? 'identified,suggested,unknown,unchecked' : 'identified,suggested,unknown';
+      check(order === want && widthsOk, `${w}${unchecked ? ' (a run under way)' : ''}: ${unchecked ? 'four' : 'three'} segments in order, each its share of the bar (${m.segs.map((s) => `${s.k} ${Math.round(s.w)}`).join(', ')} of ${m.bar}${unchecked ? '' : '; not checked has none'})`);
+      const said = m.label.replace(/\u202f|\u00a0/g, ' ');
+      check(m.role === 'img' && (unchecked ? /19.452 songs: 9.721 identified, 4.412 to confirm, 2.319 not found, 3.000 not checked yet/.test(said) : /19.452 songs: 9.721 identified, 7.412 to confirm, 2.319 not found/.test(said)), `${w}: the bar is an image that spells the counts (${m.label})`);
+      check(m.keys.length === m.segs.length && m.keys.every((kk) => m.segs.find((s) => s.k === kk.k && s.c === kk.c)) && /to confirm/.test(m.legend) && (m.legend.match(/identified/g) || []).length === 1 && / 2.319 not found/.test(m.legend.replace(/\u202f|\u00a0/g, ' ')), `${w}: the legend's swatches match the segments' colours, each state named once (${m.legend.replace(/\s+/g, ' ').trim().slice(0, 90)})`);
+      if (w === 1440) {
+        // (the field is taller than the small buttons: their centres share a line, not their tops)
+        const row = await pp.$$eval('#acidform input, #acidform button', (es) => es.filter((e) => e.offsetParent).map((e) => { const r = e.getBoundingClientRect(); return r.top + r.height / 2; }));
+        const oneLine = row.length >= 3 && Math.max(...row) - Math.min(...row) <= 8;
+        check(m.bar <= 520 && m.input <= 320 && oneLine, `${w}: the bar (${m.bar}) and the key field (${m.input}) keep to their widths, the field and its ${row.length - 1} buttons on one row`);
+      }
       if (w === 390) check(m.bar >= 300 && !m.overflow, `${w}: full width on a phone (${m.bar}), no overflow`);
       check(errs.length === 0, `${w}: Identify: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
       await cc.close();

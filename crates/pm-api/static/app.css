@@ -662,7 +662,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 /* Identify: one bar, a segment per state (identified, to confirm, not found, not checked), no wider
    than the text beside it; the legend repeats the colours */
 .idbar { display: flex; gap: 2px; height: 8px; max-width: 520px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin: 6px 0 8px; }
-.idseg { display: block; height: 100%; flex: 0 1 0; min-width: 0; }
+.idseg { display: block; height: 100%; flex: 0 1 auto; min-width: 0; }
 .idseg.identified, .idswatch.identified { background: var(--accent); }
 .idseg.suggested, .idswatch.suggested { background: var(--warn); }
 .idseg.unknown, .idswatch.unknown { background: var(--muted); }
