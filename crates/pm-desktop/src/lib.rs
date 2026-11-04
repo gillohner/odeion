@@ -16,6 +16,7 @@ mod node;
 mod offline;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
+mod ring_wait;
 mod settings;
 #[cfg(desktop)]
 mod update;
@@ -457,6 +458,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .start_login_with("pubky-music-desktop", RING_CAPS)
         .map_err(|e| e.to_string())?;
     let url = flow.url().to_string();
+    let relay = ring_wait::relay_host(&url);
     let _ = app.emit(
         "ring-url",
         RingUrl {
@@ -464,7 +466,12 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
             url,
         },
     );
-    let session = flow.await_approval().await.map_err(|e| e.to_string())?;
+    // Only on screen and online: Android 15+ cuts a backgrounded app's network (see ring_wait).
+    let page = app.clone();
+    let session = ring_wait::approval(RingFlow(flow), &relay, 443, move |s| {
+        let _ = page.emit("ring-state", s);
+    })
+    .await?;
     let record = hs
         .read_node_record(&session)
         .await
@@ -475,6 +482,22 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     let (s, info) = reach(&app, &state, s).await?;
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// A Ring sign-in in progress, for [`ring_wait::approval`].
+struct RingFlow(pm_pubky::homeserver::LoginFlow);
+
+impl ring_wait::Pending for RingFlow {
+    type Done = pm_pubky::homeserver::PubkySession;
+    fn poll(&self) -> impl std::future::Future<Output = Result<Option<Self::Done>, String>> + Send + '_ {
+        async move { self.0.poll().await.map_err(|e| ring_wait::chain(&e)) }
+    }
+    /// A fresh client: nothing it holds comes from the time in the background.
+    fn resume(&self) -> Result<Self, String> {
+        let hs = pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet)
+            .map_err(|e| e.to_string())?;
+        hs.resume_login(&self.0).map(RingFlow).map_err(|e| e.to_string())
+    }
 }
 
 /// Hand a `pubkyauth://` link to Pubky Ring on this device.
@@ -625,7 +648,19 @@ pub fn run() {
         })
         .build(tauri::generate_context!());
     match app {
-        Ok(app) => app.run(|_, _| {}),
+        Ok(app) => app.run(|_, event| {
+            // The Ring sign-in waits for the screen (ring_wait): Android onPause / onResume.
+            #[cfg(mobile)]
+            if let tauri::RunEvent::WindowEvent { event, .. } = &event {
+                match event {
+                    tauri::WindowEvent::Suspended => ring_wait::left(),
+                    tauri::WindowEvent::Resumed => ring_wait::back(),
+                    _ => {}
+                }
+            }
+            #[cfg(not(mobile))]
+            let _ = event;
+        }),
         Err(e) => {
             tracing::error!("cannot start: {e}");
             std::process::exit(1);

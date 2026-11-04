@@ -153,6 +153,9 @@
     show('ring-out');
   });
 
+  // While the sign-in waits for the app to be on screen and online (ring_wait.rs).
+  listen('ring-state', (ev) => { $('ring').textContent = String(ev.payload); });
+
   $('ring').onclick = async () => {
     clearErr();
     $('ring').disabled = true;

@@ -15,7 +15,8 @@
 
 use crate::config::Network;
 use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
-use pubky::{Pubky, PubkySession, PublicKey};
+pub use pubky::PubkySession;
+use pubky::{Pubky, PublicKey};
 use serde::Serialize;
 
 /// The homeserver answers 404 for a directory nobody has written to yet.
@@ -992,6 +993,21 @@ impl NodeHomeserver {
             .start_grant_auth_flow(&caps, pubky::AuthFlowKind::signin(), client_id)?;
         let url = flow.authorization_url().to_string();
         Ok(LoginFlow { flow, url })
+    }
+
+    /// The pending sign-in `flow`, listening again on its relay inbox through this homeserver's
+    /// client: Ring's approval waits in the inbox until it is read, so a relay poll that gave up
+    /// (the app lost the network in the background) can pick it up. No grant has been sent then.
+    pub fn resume_login(&self, flow: &LoginFlow) -> Result<LoginFlow, HomeserverError> {
+        let state = flow
+            .flow
+            .save_local()
+            .ok_or_else(|| HomeserverError::Transport("this sign-in cannot be resumed".into()))?;
+        let resumed = pubky::PubkyGrantAuthFlow::restore(state, self.pubky.client().clone())?;
+        Ok(LoginFlow {
+            flow: resumed,
+            url: flow.url.clone(),
+        })
     }
 
     /// A sign-up on `homeserver` (z32) with `signup_token`: Pubky Ring creates the account there,

@@ -132,11 +132,13 @@ pub async fn run() {
     emit("done", json!({ "ms": started.elapsed().as_millis() as u64 }));
 }
 
-/// The app's wait between Ring's approval arriving and the grant exchange: the shipped app has
-/// none, the exchange runs at once (returns the wait's page states and whether it ends on screen,
-/// unknown here).
+/// The app's wait between Ring's approval arriving and the grant exchange (`ring_wait`, which
+/// `ring_connect` runs before each poll): returns the page states it showed and whether it ended
+/// with the app on screen.
 async fn app_wait() -> (Vec<&'static str>, Option<bool>) {
-    (Vec::new(), None)
+    let mut states = Vec::new();
+    crate::ring_wait::until_ready("httprelay.pubky.app", 443, |s| states.push(s)).await;
+    (states, Some(crate::ring_wait::on_screen()))
 }
 
 /// One plain HTTPS GET to the homeserver's ICANN name (no PKARR), 5 s at most.
