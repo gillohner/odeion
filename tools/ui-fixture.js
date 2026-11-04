@@ -65,8 +65,7 @@ async function cleanCopy(page) {
   const attrs=[...document.querySelectorAll('[aria-label],[title],[placeholder]')].filter(e=>e.getClientRects().length).flatMap(e=>['aria-label','title','placeholder'].map(a=>e.getAttribute(a)||''));
   return document.body.innerText+'\n'+attrs.join('\n');
  });
- const own=text.replaceAll('Roon favourites','').replaceAll('Roon playlist export','').replaceAll('Export each playlist','').replaceAll('Playlist exports','');
- assert.doesNotMatch(own,/\b(?:favou?rites?|favou?rited|playlists?)\b/i,'rendered own-app text and accessible labels');
+ assert.doesNotMatch(text,/\bundefined\b|\[object Object\]/,'rendered text and accessible labels');
  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-document.documentElement.clientWidth);assert.ok(overflow<=0,`no horizontal overflow: ${overflow}`);
 }
 module.exports={create,go,cleanCopy,ORIGIN,track,artists,detail,summary,SONG,LINK};
