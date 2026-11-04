@@ -702,6 +702,33 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(errs.length === 0, `${w}: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
       await cc.close();
     }
+    // Identify's bar: one segment per state, as wide as its share, the legend in its colours, no
+    // wider than the text; the key field a field's width (TASK-identify-bar-and-key)
+    for (const [w, h] of [[390, 844], [820, 1180], [1440, 900]]) {
+      const cc = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: w < 1025, isMobile: w < 600 });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      const counts = { total: 19452, identified: 9721, suggested: 7412, unknown: 2319, unchecked: 0, by: { tags: 9000, album: 500, fingerprint: 200, you: 21, title_artist: 0 } };
+      await pp.route(/\/v1\/library\/identify$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, counts, phase: 'needs_review', progress: { running: false, total: 0, done: 0, identified: 0, suggested: 0, unknown: 0, errors: 0 }, acoustid_state: 'ok', acoustid: true, acoustid_own: true } }); });
+      await pp.goto(BASE + '/library/node'); await pp.waitForSelector('#idbox .idbar', { timeout: 20000 });
+      const m = await pp.$eval('#idbox', (box) => {
+        const bar = box.querySelector('.idbar'); const b = bar.getBoundingClientRect();
+        const segs = [...bar.querySelectorAll('.idseg')].map((s) => ({ k: s.className.replace('idseg ', ''), w: s.getBoundingClientRect().width, c: getComputedStyle(s).backgroundColor }));
+        const keys = [...box.querySelectorAll('.idswatch')].map((s) => ({ k: s.className.replace('idswatch ', ''), c: getComputedStyle(s).backgroundColor }));
+        const input = box.querySelector('#acidkey').getBoundingClientRect();
+        return { bar: Math.round(b.width), label: bar.getAttribute('aria-label'), role: bar.getAttribute('role'), segs, keys, input: Math.round(input.width), legend: box.querySelector('.idlegend').textContent, overflow: document.documentElement.scrollWidth > innerWidth + 1 };
+      });
+      const order = m.segs.map((s) => s.k).join(',');
+      const share = (k) => counts[k] / counts.total * (m.bar - 2 * (m.segs.length - 1));
+      const widthsOk = m.segs.every((s) => Math.abs(s.w - share(s.k)) <= 1.5);
+      check(order === 'identified,suggested,unknown' && widthsOk, `${w}: three segments in order, each its share of the bar (${m.segs.map((s) => `${s.k} ${Math.round(s.w)}`).join(', ')} of ${m.bar}; not checked has none)`);
+      check(m.role === 'img' && /19.452 songs: 9.721 identified, 7.412 to confirm, 2.319 not found/.test(m.label.replace(/\u202f|\u00a0/g, ' ')), `${w}: the bar is an image that spells the counts (${m.label})`);
+      check(m.keys.length === 3 && m.keys.every((kk) => m.segs.find((s) => s.k === kk.k && s.c === kk.c)) && /7.412 to confirm/.test(m.legend), `${w}: the legend's swatches match the segments' colours`);
+      if (w === 1440) check(m.bar <= 520 && m.input <= 320, `${w}: the bar (${m.bar}) and the key field (${m.input}) keep to their widths`);
+      if (w === 390) check(m.bar >= 300 && !m.overflow, `${w}: full width on a phone (${m.bar}), no overflow`);
+      check(errs.length === 0, `${w}: Identify: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
     // The kiosk dashboard fills the screen without a scroll; a playlist whose sources can't be
     // found says so, with Try again, and drops "Still finding…"
     {

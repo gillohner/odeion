@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **The Identify card's bar says what each song's state is** (owner's report: half purple, half dark read as "half done, half empty" while the rest was to confirm and not found). One bar with a segment per state, identified, to confirm, not found and not checked, each as wide as its share and in the legend's colours under it, no wider than the text beside it. The AcoustID key field is a field's width, with Check, Save key and Remove beside it.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".
