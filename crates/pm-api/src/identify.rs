@@ -547,6 +547,9 @@ const RELEASES_PER_FOLDER: usize = 2;
 struct RunCtx {
     found: Mutex<Vec<i64>>,
     inputs: HashMap<i64, String>,
+    /// What each song was when the run read it ([`Library::input_generations`]): an answer for a
+    /// song that changed since is not stored.
+    read: HashMap<i64, String>,
 }
 
 /// A folder that says it is an album, for the album lane.
@@ -617,6 +620,7 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             lib.identify_inputs()?,
         )
     };
+    let read = s.library.lock().expect("library poisoned").input_generations()?;
     // What each song looks like now; a "not found" song that changed since it was checked (its
     // tags, its file, an AcoustID key or a MusicBrainz contact added) is checked again
     let services = services_key(s, &settings, mb.is_some());
@@ -665,6 +669,7 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
     let found = RunCtx {
         found: Mutex::new(Vec::new()),
         inputs,
+        read,
     };
     // Folders that are no album go to the fingerprint at once; albums to the album lane
     let (to_fp, from_albums) = mpsc::unbounded_channel::<Folder>();
@@ -1053,7 +1058,22 @@ async fn fingerprint_lane(
         if folder.len() < meta.songs {
             continue;
         }
-        let looked_up = std::mem::take(&mut folder);
+        let mut looked_up = std::mem::take(&mut folder);
+        // What the owner rejected for a song is no recording to decide on (its same-audio
+        // sibling may still be)
+        {
+            let lib = s.library.lock().expect("library poisoned");
+            for (t, _, r) in looked_up.iter_mut() {
+                let id = t.id.map(|i| i.0).unwrap_or_default();
+                if let Ok(results) = r {
+                    for res in results.iter_mut() {
+                        res.recordings
+                            .retain(|rec| !lib.is_rejected(id, &rec.id).unwrap_or(false));
+                    }
+                    results.retain(|res| !res.recordings.is_empty());
+                }
+            }
+        }
         let pairs: Vec<(FileFacts, &[AcoustIdResult])> = looked_up
             .iter()
             .filter_map(|(_, f, r)| r.as_ref().ok().map(|r| (*f, r.as_slice())))
@@ -1195,7 +1215,8 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
     };
     // One step, against what holds when it is written (the owner may confirm or reject while a
     // busy library makes the run wait): the owner's word stands, and only what was stored counts
-    let settled = write_waiting(s, |lib| lib.settle(id, &answer)).await?;
+    let read = found.read.get(&id).map(String::as_str);
+    let settled = write_waiting(s, |lib| lib.settle_checked(id, &answer, read)).await?;
     if settled == Settled::Stored && matches!(outcome, Outcome::Identified { .. }) {
         // Found once its identity is stored: its IDs may be written into the file
         found.found.lock().expect("found lock").push(id);
@@ -1205,7 +1226,8 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
     let mut p = s.identify.lock().expect("identify lock");
     p.done += 1;
     match (settled, outcome) {
-        (Settled::Kept, _) => {}
+        // Kept: the owner's or another identity; Changed: checked again by the next run
+        (Settled::Kept | Settled::Changed, _) => {}
         (Settled::Rejected | Settled::Empty, _) => p.unknown += 1,
         (Settled::Stored, Outcome::Identified { confidence, .. }) => {
             p.identified += 1;
@@ -1930,6 +1952,9 @@ pub struct ReviewAlbum {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewPage {
     pub albums: Vec<ReviewAlbum>,
+    /// Where the next page starts: ask for `after=` this folder (`None`: no more).
+    #[serde(default)]
+    pub next_after: Option<String>,
     /// Songs waiting, in every album.
     pub songs: usize,
     pub total_albums: usize,
@@ -1940,6 +1965,10 @@ pub struct ReviewPage {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ReviewQuery {
+    /// The albums after this folder (the last one shown): albums confirmed meanwhile make no
+    /// page skip one. Takes the place of `offset`.
+    #[serde(default)]
+    pub after: Option<String>,
     #[serde(default)]
     pub offset: Option<usize>,
     #[serde(default)]
@@ -2015,7 +2044,19 @@ pub(crate) async fn review_albums(
         by_folder.entry(folder).or_default().push(id);
     }
     let total_albums = by_folder.len();
-    let offset = q.offset.unwrap_or(0).min(total_albums);
+    let offset = match &q.after {
+        Some(after) => by_folder
+            .range::<String, _>((
+                std::ops::Bound::Excluded(after.clone()),
+                std::ops::Bound::Unbounded,
+            ))
+            .count(),
+        None => 0,
+    };
+    let offset = match &q.after {
+        Some(_) => total_albums - offset,
+        None => q.offset.unwrap_or(0).min(total_albums),
+    };
     let limit = q.limit.unwrap_or(50).clamp(1, MAX_REVIEW_ALBUMS);
     let mut page: Vec<(String, Vec<i64>)> = Vec::new();
     let mut on_page = 0;
@@ -2026,6 +2067,8 @@ pub(crate) async fn review_albums(
         on_page += ids.len();
         page.push((folder, ids));
     }
+    let page_len = page.len();
+    let last_key = page.last().map(|(k, _)| k.clone());
     let (tracks, rows) = {
         let lib = s.library.lock().expect("library poisoned");
         let ids: Vec<i64> = page.iter().flat_map(|(_, ids)| ids.iter().copied()).collect();
@@ -2081,10 +2124,12 @@ pub(crate) async fn review_albums(
             })
         })
         .collect();
-    let shown = offset + albums.len();
+    let shown = offset + page_len;
     let next = (shown < total_albums).then_some(shown);
+    let next_after = next.and(last_key);
     Ok(Json(ReviewPage {
         albums,
+        next_after,
         songs,
         total_albums,
         offset,
@@ -2211,6 +2256,7 @@ mod tests {
             release: releases.first().map(|r| r.title.clone()),
             release_mbid: releases.first().and_then(|r| r.mbid),
             length_ms: Some(length_ms),
+            disambiguation: None,
             releases,
         }
     }

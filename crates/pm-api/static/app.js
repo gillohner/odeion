@@ -4691,7 +4691,10 @@
           main.innerHTML = pageHead('Confirm matches', null) + '<p class="muted small idloading" role="status">Loading the matches to confirm…</p><div class="sk-grid">' + '<div class="skeleton"></div>'.repeat(4) + '</div>';
           const [page, st] = await Promise.all([api('GET', '/library/suggestions/albums?limit=50'), api('GET', '/library/identify').catch(() => null)]);
           if (!live()) return;
-          const albums = page.albums.slice(); let next = page.next;
+          // Paged by folder: "Show more" asks for the albums after the last one shown, so albums
+          // confirmed meanwhile don't make it skip any (an older node pages by offset)
+          const cursor = (p) => (p.next_after != null ? `after=${encodeURIComponent(p.next_after)}` : p.next != null ? `offset=${p.next}` : null);
+          const albums = page.albums.slice(); let next = cursor(page);
           // The owner's choice per song, kept while more albums load (a song not touched shows what is offered)
           const choices = new Map();
           const MAX_CONFIRM = 500;
@@ -4708,17 +4711,19 @@
             const rel = a.release ? `<p class="muted small">${a.release.songs} of ${a.songs.length} have an option on <a href="https://musicbrainz.org/release/${esc(a.release.mbid)}" target="_blank" rel="noopener">${esc(a.release.title || 'one release')} ${icon('external')}</a>. Nothing is chosen for you by it.</p>` : '';
             const songs = a.songs.map((g) => {
               const t = g.track; const name = `pick-${t.id}`;
-              const opts = g.options.map((o) => `<label class="idopt idpick"><input type="radio" name="${name}" value="${o.id}" data-rec="${esc(o.recording_mbid)}" ${isChecked(g, String(o.id)) ? 'checked' : ''}><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn ghost sm" type="button" data-reject="${o.id}" data-track="${t.id}" data-rec="${esc(o.recording_mbid)}">Not this</button></label>`).join('');
+              // The radio is named by its label, which holds the option alone; the link and
+              // "Not this" sit beside it, not inside it
+              const opts = g.options.map((o) => `<div class="idopt idpick"><input type="radio" id="idopt-${o.id}" name="${name}" value="${o.id}" data-rec="${esc(o.recording_mbid)}" ${isChecked(g, String(o.id)) ? 'checked' : ''}><label class="grow" for="idopt-${o.id}"><span class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></span><span class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round(o.score * 100)}%</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener" aria-label="${esc(`${o.title || 'Recording'} on MusicBrainz`)}">MusicBrainz ${icon('external')}</a><button class="btn ghost sm" type="button" data-reject="${o.id}" data-track="${t.id}" data-rec="${esc(o.recording_mbid)}" aria-label="${esc(`Not ${o.title || 'this recording'}`)}">Not this</button></div>`).join('');
               const note = g.status === 'conflict' ? '<p class="small warn-text idhold">These disagree: pick one, or leave it for later.</p>' : g.hold ? `<p class="small muted idhold">Not ticked: ${esc(holdWhy[g.hold] || g.hold)}.</p>` : '';
-              return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<label class="idopt idpick idlater"><input type="radio" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><div class="grow small muted">Leave for later</div></label></div></div>`;
+              return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<div class="idopt idpick idlater"><input type="radio" id="idlater-${t.id}" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><label class="grow small muted" for="idlater-${t.id}">Leave for later</label></div></div></div>`;
             }).join('');
             if (!a.songs.length) return '';
             return `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${head}</h3><span class="muted small">${parts}</span></div>${rel}<div class="list">${songs}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-confirm="${ai}"></button><span class="small muted" role="status" data-confirm-out="${ai}"></span></div></section>`;
           };
           const draw = () => {
-            main.innerHTML = pageHead('Confirm matches', page.songs) + (albums.length ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            main.innerHTML = pageHead('Confirm matches', page.songs) + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
-            const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; try { const p = await api('GET', `/library/suggestions/albums?limit=50&offset=${next}`); if (!live()) return; albums.push(...p.albums); next = p.next; draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
+            const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live()) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
           };
           // One album drawn again from what is known here, after a confirm or a "Not this" (the
           // rest of the page, its choices and where it is scrolled stay; nothing is fetched)
@@ -4728,6 +4733,7 @@
             if (!html) { sec.remove(); } else { sec.insertAdjacentHTML('afterend', html); sec.remove(); wire($(`[data-album="${ai}"]`, main)); }
             const count = $('.page-head .count', main); if (count) count.textContent = String(page.songs);
             if (!albums.some((a) => a.songs.length) && next == null) draw();
+            else if (!albums.some((a) => a.songs.length)) { const m = $('#idmore'); if (m) m.click(); }
           };
           const chosen = (sec) => $$('.idrow', sec).map((row) => { const r = $('input[type=radio]:checked', row); return r && r.value ? { track_id: Number(row.dataset.track), suggestion_id: Number(r.value), recording_mbid: r.dataset.rec } : null; }).filter(Boolean);
           const wire = (sec) => {
@@ -4772,6 +4778,7 @@
                   if (g.pick === sid) g.pick = null;
                   if (g.options.length === 1 && g.status === 'conflict') g.status = 'single';
                   if (!g.options.length) { a.songs = a.songs.filter((x) => x !== g); page.songs = Math.max(0, page.songs - 1); }
+                  a.ready = a.songs.filter((x) => x.pick != null).length; a.conflicts = a.songs.filter((x) => x.status === 'conflict').length;
                 }
                 redraw(ai);
               } catch (e) { toast(e.message, 'error'); }

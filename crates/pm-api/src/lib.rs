@@ -15315,7 +15315,7 @@ exec sleep 300
     /// the IDs of an identity that isn't stored, and the song is checked again. Once the disk is
     /// back, the next run stores it and writes its IDs into the file ("Write IDs" on).
     #[tokio::test]
-    async fn an_identity_stored_before_a_failed_write_still_gets_its_ids_written() {
+    async fn a_failed_state_write_stores_no_identity_and_the_next_run_writes_the_ids() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("music").join("11 bohemian.flac");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();

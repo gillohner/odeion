@@ -457,6 +457,10 @@ pub struct RecordingHit {
     pub release: Option<String>,
     pub release_mbid: Option<Mbid>,
     pub length_ms: Option<u64>,
+    /// What MusicBrainz says tells it apart from other recordings of the song ("live, 1986",
+    /// "re-recording", "acoustic"), when it says something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disambiguation: Option<String>,
     /// Every release MusicBrainz lists it on, so the caller can pick the one the file is from.
     #[serde(default)]
     pub releases: Vec<HitRelease>,
@@ -563,6 +567,9 @@ pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
                         release: release.and_then(|x| str_at(x, "title")).map(str::to_string),
                         release_mbid: release.and_then(|x| mbid_at(x, "id")),
                         length_ms: r.get("length").and_then(Value::as_u64),
+                        disambiguation: str_at(r, "disambiguation")
+                            .filter(|d| !d.is_empty())
+                            .map(str::to_string),
                         releases,
                     })
                 })

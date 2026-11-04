@@ -29,9 +29,29 @@ pub struct SongPick {
 /// Whether `title` is the file's song in the file's version: the same title once plain, and no
 /// version words (live, remix, edit…) on one side the other doesn't have ([`crate::album_fit`]).
 pub fn same_song(file: &FileTags, title: &str) -> bool {
+    same_song_as(file, title, None)
+}
+
+/// [`same_song`] with what MusicBrainz says tells the candidate apart (its disambiguation):
+/// the same title once plain, and the same version ([`crate::album_fit::same_version`]:
+/// qualifiers and disambiguation that aren't neutral must be on both sides).
+pub fn same_song_as(file: &FileTags, title: &str, disambiguation: Option<&str>) -> bool {
     !file.title.trim().is_empty()
         && plain_title(&file.title) == plain_title(title)
-        && crate::album_fit::versions_agree(&file.title, file.album.as_deref(), title, None)
+        && crate::album_fit::same_version(&file.title, file.album.as_deref(), title, disambiguation, &[])
+}
+
+/// Whether a release is named like the file's album (qualifiers included).
+pub fn named_like_album(file: &FileTags, release_title: &str) -> bool {
+    file.album
+        .as_deref()
+        .is_some_and(|a| crate::album_fit::same_name(release_title, a))
+}
+
+/// Whether the file's album says it is another version than the plain one ("(Re-Recorded)",
+/// "(Taylor's Version)", "(Live)"): then only a release named so is evidence.
+pub fn album_says_version(file: &FileTags) -> bool {
+    !crate::album_fit::qualifiers(file.album.as_deref().unwrap_or_default()).is_empty()
 }
 
 /// Whether a credit is the file's artist: the same name once plain, or that name featuring
@@ -49,8 +69,9 @@ pub fn same_artist(file: &str, credit: &str) -> bool {
 
 /// Whether the file says it is live (its title or its album).
 pub fn file_is_live(file: &FileTags) -> bool {
+    // Only what the file says in a qualifier: a word of a name ("Live Forever") is no evidence
     crate::album_fit::version_marks(&file.title).contains(&"live")
-        || crate::album_fit::marks_in(file.album.as_deref().unwrap_or_default()).contains(&"live")
+        || crate::album_fit::version_marks(file.album.as_deref().unwrap_or_default()).contains(&"live")
 }
 
 /// How plain a release kind is for a song: 2 a studio album, 1 a single or EP, 0 anything with
@@ -75,28 +96,51 @@ pub fn plain_kind(primary: Option<&str>, secondary: &[String]) -> u8 {
 /// file's song, the owner decides.
 #[cfg(feature = "musicbrainz")]
 pub fn pick_exact_hit(file: &FileTags, hits: &[crate::musicbrainz::RecordingHit]) -> Option<SongPick> {
-    let album = file.album.as_deref().map(plain_title).filter(|a| !a.is_empty());
-    let live_ok = file_is_live(file);
-    let has_kind =
-        |r: &crate::musicbrainz::HitRelease, k: &str| r.kinds.iter().any(|x| x.eq_ignore_ascii_case(k));
-    let exact: Vec<&crate::musicbrainz::RecordingHit> = hits
+    use crate::musicbrainz::{HitRelease, RecordingHit};
+    let live_file = file_is_live(file);
+    let has_kind = |r: &HitRelease, k: &str| r.kinds.iter().any(|x| x.eq_ignore_ascii_case(k));
+    // A recording only on live releases is a live take: the file's, only when the file says it is
+    // live, or a live release is named like the file's album
+    let live_ok = |h: &RecordingHit| {
+        h.releases.is_empty()
+            || !h.releases.iter().all(|r| has_kind(r, "live"))
+            || live_file
+            || h.releases
+                .iter()
+                .any(|r| has_kind(r, "live") && named_like_album(file, &r.title))
+    };
+    let exact: Vec<&RecordingHit> = hits
         .iter()
         .filter(|h| h.score >= 90)
-        .filter(|h| same_song(file, &h.title) && same_artist(&file.artist, &h.artist))
+        .filter(|h| same_song_as(file, &h.title, h.disambiguation.as_deref()) && same_artist(&file.artist, &h.artist))
         .filter(|h| matches!((h.length_ms, file.duration_ms), (Some(a), Some(b)) if a.abs_diff(b) <= LENGTH_SLACK_MS))
-        .filter(|h| live_ok || h.releases.is_empty() || !h.releases.iter().all(|r| has_kind(r, "live")))
+        .filter(|h| live_ok(h))
         .collect();
-    fn named<'h>(
-        h: &'h crate::musicbrainz::RecordingHit,
-        album: Option<&str>,
-    ) -> Vec<&'h crate::musicbrainz::HitRelease> {
+    fn named<'h>(h: &'h RecordingHit, file: &FileTags) -> Vec<&'h HitRelease> {
         h.releases
             .iter()
-            .filter(|r| album.is_some_and(|a| plain_title(&r.title) == a))
+            .filter(|r| named_like_album(file, &r.title))
             .collect()
     }
-    let album_ref = album.as_deref();
-    let plain = |h: &crate::musicbrainz::RecordingHit| -> u8 {
+    let any_named = exact.iter().any(|h| !named(h, file).is_empty());
+    // An album that says it is another version: only a recording on that very release
+    if album_says_version(file) && !any_named {
+        return None;
+    }
+    // Several exact hits, none on the file's album: only when they say the same of themselves
+    // (title as written, disambiguation); else they may be different versions
+    if !any_named && exact.len() > 1 {
+        let what = |h: &RecordingHit| {
+            (
+                h.title.to_lowercase(),
+                h.disambiguation.clone().unwrap_or_default().to_lowercase(),
+            )
+        };
+        if exact.iter().any(|h| what(h) != what(exact[0])) {
+            return None;
+        }
+    }
+    let plain = |h: &RecordingHit| -> u8 {
         h.releases
             .iter()
             .filter(|r| !r.status.eq_ignore_ascii_case("bootleg"))
@@ -110,9 +154,9 @@ pub fn pick_exact_hit(file: &FileTags, hits: &[crate::musicbrainz::RecordingHit]
             .unwrap_or(0)
     };
     let best = exact.into_iter().min_by(|a, b| {
-        let key = |h: &crate::musicbrainz::RecordingHit| {
+        let key = |h: &RecordingHit| {
             (
-                std::cmp::Reverse(!named(h, album_ref).is_empty()),
+                std::cmp::Reverse(!named(h, file).is_empty()),
                 std::cmp::Reverse(plain(h)),
                 std::cmp::Reverse(h.releases.len()),
             )
@@ -121,7 +165,7 @@ pub fn pick_exact_hit(file: &FileTags, hits: &[crate::musicbrainz::RecordingHit]
             .cmp(&key(b))
             .then_with(|| a.mbid.to_string().cmp(&b.mbid.to_string()))
     })?;
-    let on_album = named(best, album_ref);
+    let on_album = named(best, file);
     let release = (on_album.len() == 1).then(|| on_album[0]);
     Some(SongPick {
         recording: best.mbid,
@@ -163,6 +207,7 @@ mod tests {
             release: releases.first().map(|r| r.title.clone()),
             release_mbid: releases.first().and_then(|r| r.mbid),
             length_ms: length,
+            disambiguation: None,
             releases,
         }
     }
@@ -324,5 +369,179 @@ mod tests {
             hit(2, "Over My Shoulder", a, Some(232_000), vec![]),
         ];
         assert_eq!(pick_exact_hit(&f, &mixed).unwrap().recording, id(2));
+    }
+
+    fn hit_d(i: u32, title: &str, disamb: &str, releases: Vec<HitRelease>) -> RecordingHit {
+        let mut h = hit(i, title, "Band", Some(232_000), releases);
+        h.disambiguation = (!disamb.is_empty()).then(|| disamb.to_string());
+        h
+    }
+
+    fn tags(title: &str, album: &str) -> FileTags {
+        FileTags {
+            title: title.into(),
+            artist: "Band".into(),
+            album: Some(album.into()),
+            duration_ms: Some(232_000),
+        }
+    }
+
+    /// PR #250 review (high): another version of the song is never picked on its own. A
+    /// recording MusicBrainz marks by its disambiguation, or by a qualifier the file doesn't have
+    /// (re-recorded, "Taylor's Version", an alternate take, a mono mix, anything unknown), is not
+    /// the file's; only remaster, year, featured artist, album/single version and the like are
+    /// neutral. A file whose album says it is another version needs a hit on that very release.
+    #[test]
+    fn other_versions_are_never_picked_on_their_own() {
+        let orig = rel(1, "Greatest Hits", &["Album", "Compilation"]);
+        let rerec = rel(2, "Greatest Hits (Re-Recorded)", &["Album", "Compilation"]);
+        // The original file: the re-recording (marked only by its disambiguation) is not it
+        let hits = vec![
+            hit_d(1, "Song", "", vec![orig.clone()]),
+            hit_d(2, "Song", "re-recording", vec![rerec.clone()]),
+        ];
+        assert_eq!(
+            pick_exact_hit(&tags("Song", "Greatest Hits"), &hits)
+                .unwrap()
+                .recording,
+            id(1)
+        );
+        assert!(pick_exact_hit(
+            &tags("Song", "Greatest Hits"),
+            &[hit_d(2, "Song", "re-recording", vec![])]
+        )
+        .is_none());
+        // The re-recorded album's file: the original's release isn't named like its album
+        assert!(pick_exact_hit(
+            &tags("Song", "Greatest Hits (Re-Recorded)"),
+            &[hit_d(1, "Song", "", vec![orig])]
+        )
+        .is_none());
+        // Taylor's Version: only the hit that says so, on that release
+        let tv = rel(3, "1989 (Taylor's Version)", &["Album"]);
+        let og = rel(4, "1989", &["Album"]);
+        let hits = vec![
+            hit_d(3, "Style (Taylor's Version)", "", vec![tv.clone()]),
+            hit_d(4, "Style", "", vec![og.clone()]),
+        ];
+        assert!(pick_exact_hit(
+            &tags("Style", "1989 (Taylor's Version)"),
+            &[hit_d(4, "Style", "", vec![og.clone()])]
+        )
+        .is_none());
+        assert_eq!(
+            pick_exact_hit(
+                &tags("Style (Taylor's Version)", "1989 (Taylor's Version)"),
+                &hits
+            )
+            .unwrap()
+            .recording,
+            id(3)
+        );
+        assert_eq!(
+            pick_exact_hit(&tags("Style", "1989"), &hits).unwrap().recording,
+            id(4)
+        );
+        // Unknown or one-sided qualifiers
+        for other in [
+            "Song (Alternate Take)",
+            "Song (Rehearsal)",
+            "Song (Mono)",
+            "Song (Explicit)",
+            "Song - Take 2",
+        ] {
+            assert!(
+                pick_exact_hit(&tags("Song", "Album"), &[hit_d(5, other, "", vec![])]).is_none(),
+                "{other}"
+            );
+        }
+        assert!(
+            pick_exact_hit(
+                &tags("Song (Mono)", "Album"),
+                &[hit_d(5, "Song (Mono)", "", vec![])]
+            )
+            .is_some(),
+            "both mono"
+        );
+        assert!(pick_exact_hit(
+            &tags("Song", "Album"),
+            &[hit_d(5, "Song", "alternate take", vec![])]
+        )
+        .is_none());
+        // Neutral qualifiers and disambiguations
+        for same in [
+            "Song (2011 Remaster)",
+            "Song - Remastered 2009",
+            "Song (feat. Someone)",
+            "Song (Album Version)",
+            "Song (Single Version)",
+            "Song (Original Mix)",
+        ] {
+            assert!(
+                pick_exact_hit(&tags("Song", "Album"), &[hit_d(5, same, "", vec![])]).is_some(),
+                "{same}"
+            );
+        }
+        assert!(pick_exact_hit(
+            &tags("Song", "Album"),
+            &[hit_d(5, "Song", "2011 remaster", vec![])]
+        )
+        .is_some());
+        // Several exact hits, none on the file's album, differing in what they say: for the owner
+        let hits = vec![
+            hit_d(6, "Song", "", vec![rel(6, "Hits", &["Album"])]),
+            hit_d(7, "Song (2011 Remaster)", "", vec![rel(7, "More", &["Album"])]),
+        ];
+        assert!(pick_exact_hit(&tags("Song", "Elsewhere"), &hits).is_none());
+        // ... the same, with one on the file's album: that one
+        let hits = vec![
+            hit_d(6, "Song", "", vec![rel(6, "Elsewhere", &["Album"])]),
+            hit_d(7, "Song (2011 Remaster)", "", vec![rel(7, "More", &["Album"])]),
+        ];
+        assert_eq!(
+            pick_exact_hit(&tags("Song", "Elsewhere"), &hits)
+                .unwrap()
+                .recording,
+            id(6)
+        );
+    }
+
+    /// PR #250 review (high): a word in the album's name is no evidence of a live file ("Live
+    /// Forever"); a live-only recording needs the file's own qualifier, or a live release named
+    /// like the file's album.
+    #[test]
+    fn live_needs_real_evidence() {
+        let live_elsewhere = hit_d(1, "Song", "", vec![rel(1, "Live at Wembley", &["Album", "Live"])]);
+        assert!(pick_exact_hit(
+            &tags("Song", "Live Forever"),
+            std::slice::from_ref(&live_elsewhere)
+        )
+        .is_none());
+        assert!(pick_exact_hit(
+            &tags("Song (Live)", "Album"),
+            &[hit_d(
+                1,
+                "Song (Live)",
+                "",
+                vec![rel(1, "Live at Wembley", &["Album", "Live"])]
+            )]
+        )
+        .is_some());
+        let named = hit_d(2, "Song", "", vec![rel(2, "Live in Paris", &["Album", "Live"])]);
+        assert!(
+            pick_exact_hit(&tags("Song", "Live in Paris"), &[named]).is_some(),
+            "the live release named like the album"
+        );
+        assert!(!file_is_live(&tags("Song", "Live Forever")));
+        assert!(file_is_live(&tags("Song", "Hits (Live)")));
+    }
+
+    /// MusicBrainz's disambiguation of a recording is read from a search answer.
+    #[test]
+    fn a_search_answer_carries_the_disambiguation() {
+        let v = serde_json::json!({"recordings": [{"id": "00000000-0000-4000-8000-000000000001", "score": 100,
+            "title": "Song", "disambiguation": "re-recording", "length": 200000, "artist-credit": [{"name": "Band"}]}]});
+        let hits = crate::musicbrainz::parse_search_hits(&v);
+        assert_eq!(hits[0].disambiguation.as_deref(), Some("re-recording"));
     }
 }

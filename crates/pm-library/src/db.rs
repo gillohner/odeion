@@ -159,6 +159,9 @@ pub enum Settled {
     Rejected,
     /// Every suggestion was one the owner rejected: the song is "unknown".
     Empty,
+    /// The song changed since the run read it (a rescan replaced its file or changed its tags):
+    /// the answer is for what it was, so nothing is stored; the next run checks it again.
+    Changed,
 }
 
 /// Whether a suggestion still is what the caller saw.
@@ -2804,7 +2807,19 @@ impl Library {
     /// "unknown" (`Empty`), never "suggested" with nothing to review. Identity, state, release and
     /// what the song looked like are written together or not at all.
     pub fn settle(&self, track: i64, answer: &SettleAnswer) -> Result<Settled> {
+        self.settle_checked(track, answer, None)
+    }
+
+    /// [`Self::settle`], for an answer the run found for the song as it was when it read it
+    /// (`read`, from [`Self::input_generations`]): when a rescan replaced the file or changed the
+    /// tags since, the answer is stale and nothing is stored (`Changed`).
+    pub fn settle_checked(&self, track: i64, answer: &SettleAnswer, read: Option<&str>) -> Result<Settled> {
         immediately(&mut self.lock(), |conn| {
+            if let Some(read) = read {
+                if identify_input_by_track(conn, track)?.as_deref() != Some(read) {
+                    return Ok(Settled::Changed);
+                }
+            }
             let tx = conn.savepoint()?;
             let identified: Option<bool> = tx
                 .query_row(
@@ -2901,6 +2916,27 @@ impl Library {
             tx.commit()?;
             Ok(done)
         })
+    }
+
+    /// What identification goes by for every song (its file's size and time and its tags, see
+    /// [`Self::settle_checked`]), by track, read when a run starts.
+    pub fn input_generations(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let ids: Vec<(i64, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn.prepare("SELECT track_id, path FROM files WHERE missing = 0")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        let conn = self.lock();
+        let mut out = std::collections::HashMap::new();
+        for (id, path) in ids {
+            if let Some(g) = identify_input_of(&conn, id, &path)? {
+                out.insert(id, g);
+            }
+        }
+        Ok(out)
     }
 
     /// Whether suggestion `id` still is what the caller saw: there, and for `track` and
@@ -3478,11 +3514,11 @@ fn rejected(conn: &Connection, track: i64, recording: &str) -> Result<bool> {
 }
 
 /// What identification goes by for a song's file: its size and time, and the tags it is matched
-/// by (title, artists, album, album artist, disc, number, length).
+/// by (title, artists, album, album artist, the album's release id, disc, number, length).
 fn identify_input_of(conn: &Connection, track: i64, path: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-            "SELECT f.size_bytes, f.mtime_unix, t.title, t.track_no, t.disc_no, t.duration_ms, a.title, a.album_artist,
+            "SELECT f.size_bytes, f.mtime_unix, t.title, t.track_no, t.disc_no, t.duration_ms, a.title, a.album_artist, a.release_mbid,
                (SELECT group_concat(name, char(31)) FROM (SELECT ar.name AS name FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id
                   WHERE ta.track_id = t.id ORDER BY ta.position))
              FROM tracks t LEFT JOIN files f ON f.track_id = t.id AND f.path = ?2 LEFT JOIN albums a ON a.id = t.album_id
@@ -3490,7 +3526,7 @@ fn identify_input_of(conn: &Connection, track: i64, path: &str) -> Result<Option
             params![track, path],
             |r| {
                 Ok(format!(
-                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
                     r.get::<_, Option<i64>>(0)?,
                     r.get::<_, Option<i64>>(1)?,
                     r.get::<_, Option<String>>(2)?,
@@ -3500,10 +3536,26 @@ fn identify_input_of(conn: &Connection, track: i64, path: &str) -> Result<Option
                     r.get::<_, Option<String>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
                 ))
             },
         )
         .optional()?)
+}
+
+/// [`identify_input_of`] for a song's present file.
+fn identify_input_by_track(conn: &Connection, track: i64) -> Result<Option<String>> {
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM files WHERE track_id = ?1 AND missing = 0 ORDER BY rowid LIMIT 1",
+            params![track],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match path {
+        Some(p) => identify_input_of(conn, track, &p),
+        None => Ok(None),
+    }
 }
 
 fn recording_uri(mbid: &str) -> Result<MusicUri> {
@@ -5395,5 +5447,68 @@ mod identify_tests {
             panic!("stale expected")
         };
         assert_eq!(why[0].reason, "gone");
+    }
+
+    /// PR #250 review (high): a run's answer is for the song as it was when the run read it. A
+    /// rescan that replaced its file or changed its tags meanwhile makes the answer stale: it is
+    /// not stored (nor written into the new file); the song is checked again.
+    #[test]
+    fn an_answer_for_a_song_that_changed_meanwhile_is_not_stored() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = untagged("/m/G/01.flac", "One");
+        let id = lib.upsert_track(&t).unwrap().0;
+        t.id = Some(TrackId(id));
+        let read = lib.input_generations().unwrap().get(&id).cloned();
+        assert!(read.is_some());
+        let found = SettleAnswer::Identified {
+            recording: rec_uri(R[0]),
+            confidence: Confidence::TagMatch { score: 0.9 },
+            acoustid: None,
+            detail: "tag_match".into(),
+            release: None,
+            input_key: Some("k".into()),
+        };
+        // The file is replaced while the run works on it
+        t.file.size_bytes += 10;
+        t.file.mtime_unix += 1;
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(
+            lib.settle_checked(id, &found, read.as_deref()).unwrap(),
+            Settled::Changed
+        );
+        assert!(lib.get_track(TrackId(id)).unwrap().unwrap().canonical.is_none());
+        assert!(state_of(&lib, id).is_none(), "checked again by the next run");
+        // Its tags change: the same
+        let read = lib.input_generations().unwrap().get(&id).cloned();
+        t.title = "One (fixed)".into();
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(
+            lib.settle_checked(id, &found, read.as_deref()).unwrap(),
+            Settled::Changed
+        );
+        // Nothing changed since it was read: stored
+        let read = lib.input_generations().unwrap().get(&id).cloned();
+        assert_eq!(
+            lib.settle_checked(id, &found, read.as_deref()).unwrap(),
+            Settled::Stored
+        );
+        assert!(lib.get_track(TrackId(id)).unwrap().unwrap().canonical.is_some());
+    }
+
+    /// PR #250 review (low): the release id in a song's tags is part of what identification goes
+    /// by: correcting only it drops the song's open suggestions, as other tag changes do.
+    #[test]
+    fn a_corrected_release_id_drops_open_suggestions() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = untagged("/m/R/01.flac", "Rel");
+        let id = lib.upsert_track(&t).unwrap().0;
+        t.id = Some(TrackId(id));
+        lib.add_suggestions(id, &[cand(R[0], "Rel", 0.9, "fingerprint")])
+            .unwrap();
+        lib.set_identify_state(id, "suggested", None).unwrap();
+        let album = t.album.as_mut().expect("the sample track has an album");
+        album.release_mbid = Some(Mbid::parse(R[3]).unwrap());
+        lib.upsert_track(&t).unwrap();
+        assert!(lib.suggestions_for(id).unwrap().is_empty());
     }
 }

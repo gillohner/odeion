@@ -569,45 +569,55 @@ fn same_audio<'a>(
     folder_len: usize,
     tags: &crate::same_song::FileTags,
 ) -> Option<&'a Seen<'a>> {
-    use crate::same_song::{file_is_live, plain_kind, same_artist, same_song};
-    let live_ok = file_is_live(tags);
-    let album = tags
-        .album
-        .as_deref()
-        .map(crate::matching::plain_title)
-        .filter(|a| !a.is_empty());
+    use crate::same_song::{
+        album_says_version, file_is_live, named_like_album, plain_kind, same_artist, same_song,
+    };
+    let live_file = file_is_live(tags);
+    let named = |s: &Seen| {
+        s.rec
+            .all_releases()
+            .any(|r| r.title.as_deref().is_some_and(|t| named_like_album(tags, t)))
+            || s.rec
+                .releasegroups
+                .iter()
+                .any(|g| g.title.as_deref().is_some_and(|t| named_like_album(tags, t)))
+    };
     let mut pool: Vec<&Seen> = Vec::new();
     for s in strong {
+        // Full evidence for every recording: its title and version, a length within 3 s, the
+        // file's artist; anything missing or different and the owner decides
         let title = s.rec.title.as_deref()?;
-        if !same_song(tags, title) || !duration_fits(s.rec, file) {
+        let near = matches!((s.rec.duration, file.duration_secs), (Some(a), Some(b)) if (a - b).abs() <= DURATION_SLACK_SECS);
+        let artist = s.rec.artist()?;
+        if !same_song(tags, title) || !near || !same_artist(&tags.artist, &artist) {
             return None;
         }
-        if let Some(a) = s.rec.artist() {
-            if !tags.artist.trim().is_empty() && !same_artist(&tags.artist, &a) {
-                return None;
-            }
-        }
         let groups = &s.rec.releasegroups;
-        let live_only = !groups.is_empty()
-            && groups
+        let live = |g: &AcReleaseGroup| g.secondarytypes.iter().any(|t| t.eq_ignore_ascii_case("live"));
+        let live_only = !groups.is_empty() && groups.iter().all(live);
+        let live_ok = live_file
+            || groups
                 .iter()
-                .all(|g| g.secondarytypes.iter().any(|t| t.eq_ignore_ascii_case("live")));
+                .any(|g| live(g) && g.title.as_deref().is_some_and(|t| named_like_album(tags, t)));
         if live_only && !live_ok {
             continue;
         }
         pool.push(s);
     }
+    let any_named = pool.iter().any(|s| named(s));
+    // An album that says it is another version: only a recording on that very release
+    if album_says_version(tags) && !any_named {
+        return None;
+    }
+    // Several, none on the file's album: only when their titles say the same
+    if !any_named && pool.len() > 1 {
+        let title = |s: &Seen| s.rec.title.clone().unwrap_or_default().to_lowercase();
+        if pool.iter().any(|s| title(s) != title(pool[0])) {
+            return None;
+        }
+    }
     let key = |s: &Seen| {
         let fits = fitting_release(s.rec, file, folder_len, None).is_some();
-        let named = album.as_ref().is_some_and(|a| {
-            s.rec
-                .all_releases()
-                .any(|r| r.title.as_deref().map(crate::matching::plain_title).as_ref() == Some(a))
-                || s.rec
-                    .releasegroups
-                    .iter()
-                    .any(|g| g.title.as_deref().map(crate::matching::plain_title).as_ref() == Some(a))
-        });
         let plain = s
             .rec
             .releasegroups
@@ -617,7 +627,7 @@ fn same_audio<'a>(
             .unwrap_or(0);
         (
             std::cmp::Reverse(fits),
-            std::cmp::Reverse(named),
+            std::cmp::Reverse(named(s)),
             std::cmp::Reverse(plain),
             std::cmp::Reverse(s.rec.all_releases().count()),
         )
@@ -1225,6 +1235,95 @@ mod tests {
         ]);
         assert!(matches!(
             decide_with_tags(&live_only, &file, 12, &[], Some(&tags)),
+            Decision::Suggest(_)
+        ));
+    }
+
+    /// PR #250 review: one audio under several recordings is identified only on full evidence:
+    /// each recording's length (present, within 3 s) and artist (present, the file's), and no
+    /// qualifier the file doesn't have.
+    #[test]
+    fn same_audio_needs_length_artist_and_the_same_version() {
+        let tags = crate::same_song::FileTags {
+            title: "Over My Shoulder".into(),
+            artist: "Mike + The Mechanics".into(),
+            album: Some("Beggar on a Beach of Gold".into()),
+            duration_ms: Some(232_000),
+        };
+        let file = FileFacts {
+            track_no: Some(2),
+            disc_no: Some(1),
+            duration_secs: Some(232.0),
+        };
+        let answer = |recs: Vec<AcRecording>| {
+            vec![AcoustIdResult {
+                id: "a".into(),
+                score: 0.96,
+                recordings: recs,
+            }]
+        };
+        let base = || {
+            vec![
+                grouped(
+                    2,
+                    "Over My Shoulder",
+                    "Album",
+                    &[],
+                    "Beggar on a Beach of Gold",
+                    10,
+                    2,
+                ),
+                grouped(3, "Over My Shoulder", "Album", &["Compilation"], "Hits", 18, 3),
+            ]
+        };
+        assert!(matches!(
+            decide_with_tags(&answer(base()), &file, 12, &[], Some(&tags)),
+            Decision::Identified { .. }
+        ));
+        let mut no_len = base();
+        no_len[1].duration = None;
+        assert!(
+            matches!(
+                decide_with_tags(&answer(no_len), &file, 12, &[], Some(&tags)),
+                Decision::Suggest(_)
+            ),
+            "a length to compare"
+        );
+        let mut no_artist = base();
+        no_artist[1].artists.clear();
+        assert!(
+            matches!(
+                decide_with_tags(&answer(no_artist), &file, 12, &[], Some(&tags)),
+                Decision::Suggest(_)
+            ),
+            "an artist to compare"
+        );
+        let mut other = base();
+        other[1].title = Some("Over My Shoulder (Alternate Take)".into());
+        assert!(
+            matches!(
+                decide_with_tags(&answer(other), &file, 12, &[], Some(&tags)),
+                Decision::Suggest(_)
+            ),
+            "another take"
+        );
+        // "Live Forever" says nothing about a live recording
+        let mut t2 = tags.clone();
+        t2.album = Some("Live Forever".into());
+        let live = answer(vec![
+            grouped(
+                4,
+                "Over My Shoulder",
+                "Album",
+                &["Live"],
+                "Live at Wembley",
+                15,
+                7,
+            ),
+            grouped(5, "Over My Shoulder", "Album", &["Live"], "Live Too", 15, 7),
+        ]);
+        assert!(matches!(
+            decide_with_tags(&live, &file, 12, &[], Some(&t2)),
             Decision::Suggest(_)
         ));
     }

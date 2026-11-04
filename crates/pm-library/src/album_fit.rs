@@ -105,7 +105,10 @@ pub fn release_candidates_ranked(
         let Some(id) = r["id"].as_str().and_then(|s| Mbid::parse(s).ok()) else {
             continue;
         };
-        if plain_title(r["title"].as_str().unwrap_or_default()) != title {
+        // Named like the album, its qualifiers too ("1989 (Taylor's Version)" is not "1989")
+        if plain_title(r["title"].as_str().unwrap_or_default()) != title
+            || qualifiers(r["title"].as_str().unwrap_or_default()) != qualifiers(&a.title)
+        {
             continue;
         }
         let credit: String = r["artist-credit"]
@@ -188,7 +191,7 @@ pub fn compact_answer(v: &Value) -> Value {
                     .flatten()
                     .map(|t| {
                         let mut x = pick(t, &["position", "number", "title", "length"]);
-                        x["recording"] = pick(&t["recording"], &["id", "title", "length"]);
+                        x["recording"] = pick(&t["recording"], &["id", "title", "length", "disambiguation"]);
                         x
                     })
                     .collect();
@@ -231,6 +234,8 @@ struct ReleaseTrack {
     title: String,
     length_ms: Option<u64>,
     recording: Mbid,
+    /// MusicBrainz's disambiguation of the recording ("re-recording", "live, 1986…").
+    disambiguation: Option<String>,
 }
 
 fn release_tracks(release: &Value) -> Vec<ReleaseTrack> {
@@ -254,6 +259,10 @@ fn release_tracks(release: &Value) -> Vec<ReleaseTrack> {
                     .to_string(),
                 length_ms: t["length"].as_u64().or(t["recording"]["length"].as_u64()),
                 recording,
+                disambiguation: t["recording"]["disambiguation"]
+                    .as_str()
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string),
             });
         }
     }
@@ -495,69 +504,6 @@ fn decoration(title: &str) -> String {
     out
 }
 
-/// The bracketed or " - " parts of a title that name a version (with a [`version_marks`] word),
-/// each as its sorted words without filler ("at", "the", "version"…): "Song (Live at Wembley)
-/// [Remastered]" is `["live wembley"]`. Parts naming a featured artist or a remaster are left out.
-fn version_groups(title: &str) -> Vec<String> {
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth = 0u32;
-    let mut cur = String::new();
-    for c in title.chars() {
-        match c {
-            '(' | '[' => {
-                if depth == 0 {
-                    cur.clear();
-                }
-                depth += 1;
-            }
-            ')' | ']' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    parts.push(std::mem::take(&mut cur));
-                }
-            }
-            c if depth > 0 => cur.push(c),
-            _ => {}
-        }
-    }
-    if let Some((_, rest)) = title.split_once(" - ") {
-        // Without what is in brackets there (counted above)
-        let mut plain = String::new();
-        let mut d = 0u32;
-        for c in rest.chars() {
-            match c {
-                '(' | '[' => d += 1,
-                ')' | ']' => d = d.saturating_sub(1),
-                c if d == 0 => plain.push(c),
-                _ => {}
-            }
-        }
-        parts.push(plain);
-    }
-    const FILLER: &[&str] = &["at", "the", "a", "an", "in", "on", "of", "and", "version", "from"];
-    let mut out: Vec<String> = parts
-        .iter()
-        .filter(|p| !marks_in(p).is_empty())
-        .map(|p| {
-            let lower = p.to_lowercase();
-            let mut words: Vec<&str> = lower
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| !w.is_empty() && !FILLER.contains(w))
-                .collect();
-            words.sort_unstable();
-            words.dedup();
-            words.join(" ")
-        })
-        .filter(|g| {
-            let first = g.split(' ').next().unwrap_or_default();
-            !["feat", "ft", "featuring", "with"].contains(&first)
-        })
-        .collect();
-    out.sort();
-    out.dedup();
-    out
-}
-
 pub(crate) fn marks_in(text: &str) -> Vec<&'static str> {
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower
@@ -575,26 +521,214 @@ pub(crate) fn marks_in(text: &str) -> Vec<&'static str> {
     out
 }
 
-/// Whether a file and a track are the same version: each side's marks are on the other side, or
-/// said by its album as a whole (every song of "Live in Paris" is live).
+/// Whether a file and a track are the same version ([`same_version`], with the file's album as
+/// context). The release's own name says nothing: "Live Forever" is no live album.
+#[cfg(test)]
 pub(crate) fn versions_agree(
     file: &str,
     file_album: Option<&str>,
     track: &str,
-    release_title: Option<&str>,
+    _release_title: Option<&str>,
 ) -> bool {
-    // Both name their version: the words naming it must be the same (Alice's remix is not Bob's,
-    // a take at Wembley is not one at Knebworth), not only its kind
-    let (fg, tg) = (version_groups(file), version_groups(track));
-    if !fg.is_empty() && !tg.is_empty() && fg != tg {
-        return false;
+    same_version(file, file_album, track, None, &[])
+}
+
+/// Words a title's qualifier may hold and still name the same recording: a remaster, a year, an
+/// album, single or LP version, an original mix, an edition of the album, a bonus track (the
+/// qualifier also passes when it only names a featured artist). Anything else (live, remix, an
+/// edit, mono or stereo, explicit, a re-recording, "Taylor's Version", an alternate take, any word
+/// not listed) names another version, which must then be the same on both sides.
+const NEUTRAL_WORDS: &[&str] = &[
+    "remaster",
+    "remastered",
+    "remasters",
+    "remastering",
+    "mastered",
+    "digital",
+    "digitally",
+    "version",
+    "album",
+    "single",
+    "lp",
+    "original",
+    "mix",
+    "deluxe",
+    "edition",
+    "expanded",
+    "anniversary",
+    "bonus",
+    "track",
+    "the",
+    "a",
+];
+
+fn neutral(words: &[&str]) -> bool {
+    if words.is_empty() {
+        return true;
     }
-    let (fm, tm) = (version_marks(file), version_marks(track));
-    let (fa, ra) = (
-        marks_in(file_album.unwrap_or_default()),
-        marks_in(release_title.unwrap_or_default()),
-    );
-    tm.iter().all(|m| fm.contains(m) || fa.contains(m)) && fm.iter().all(|m| tm.contains(m) || ra.contains(m))
+    let year = |w: &str| {
+        w.len() == 4 && w.chars().all(|c| c.is_ascii_digit()) && (w.starts_with("19") || w.starts_with("20"))
+    };
+    let ordinal = |w: &str| {
+        let d: String = w.chars().take_while(|c| c.is_ascii_digit()).collect();
+        !d.is_empty() && ["st", "nd", "rd", "th"].contains(&&w[d.len()..])
+    };
+    let has = |x: &str| words.contains(&x);
+    words
+        .iter()
+        .all(|w| NEUTRAL_WORDS.contains(w) || year(w) || ordinal(w))
+        && (!has("mix") || has("original"))
+        && (!has("version")
+            || ["album", "single", "lp", "original", "remaster", "remastered"]
+                .iter()
+                .any(|x| has(x)))
+}
+
+/// Whether a qualifier only names a featured artist ("feat. Carol", "with Band").
+fn featuring(part: &str) -> bool {
+    let first = part
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .find(|w| !w.is_empty())
+        .map(str::to_string)
+        .unwrap_or_default();
+    ["feat", "ft", "featuring", "with"].contains(&first.as_str())
+}
+
+/// A qualifier as compared: its words, lower case, without filler ("at", "the"…), sorted.
+fn normal_words(part: &str) -> Vec<String> {
+    const FILLER: &[&str] = &["at", "the", "a", "an", "in", "on", "of", "and", "from"];
+    let lower = part.to_lowercase();
+    let mut words: Vec<String> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !FILLER.contains(w))
+        .map(str::to_string)
+        .collect();
+    words.sort();
+    words.dedup();
+    words
+}
+
+/// The bracketed and " - " parts of a title, as written.
+fn title_parts(title: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0u32;
+    let mut cur = String::new();
+    let (head, tail) = match title.split_once(" - ") {
+        Some((h, t)) => (h, Some(t)),
+        None => (title, None),
+    };
+    for c in head.chars() {
+        match c {
+            '(' | '[' => {
+                if depth == 0 {
+                    cur.clear();
+                }
+                depth += 1;
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c if depth > 0 => cur.push(c),
+            _ => {}
+        }
+    }
+    if let Some(t) = tail {
+        // The tail, and what is in brackets in it, each a part
+        let mut plain = String::new();
+        let mut d = 0u32;
+        let mut inner = String::new();
+        for c in t.chars() {
+            match c {
+                '(' | '[' => {
+                    d += 1;
+                    inner.clear();
+                }
+                ')' | ']' => {
+                    d = d.saturating_sub(1);
+                    if d == 0 {
+                        parts.push(std::mem::take(&mut inner));
+                    }
+                }
+                c if d > 0 => inner.push(c),
+                c => plain.push(c),
+            }
+        }
+        parts.push(plain);
+    }
+    parts
+}
+
+/// What a title says about its version beyond the song's name: its qualifiers that are not
+/// neutral (a remaster, a year, a featured artist, an album or single version…), each as its
+/// sorted words. `Song (Live at Wembley) [Remastered]` is `["live wembley"]`;
+/// `Song (2011 Remaster)` is `[]`.
+pub fn qualifiers(title: &str) -> Vec<String> {
+    let mut out: Vec<String> = title_parts(title)
+        .iter()
+        .filter(|p| !featuring(p))
+        .map(|p| normal_words(p))
+        .filter(|w| {
+            let words: Vec<&str> = w.iter().map(String::as_str).collect();
+            !neutral(&words)
+        })
+        .map(|w| w.join(" "))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A disambiguation as a qualifier: `None` when empty or neutral ("2011 remaster").
+pub fn disambiguation_qualifier(d: Option<&str>) -> Option<String> {
+    let w = normal_words(d.unwrap_or_default());
+    let words: Vec<&str> = w.iter().map(String::as_str).collect();
+    (!neutral(&words)).then(|| w.join(" "))
+}
+
+/// Whether a candidate is the file's version of the song (fail-closed, owner review of PR #250):
+/// every qualifier that isn't neutral, and the candidate's MusicBrainz disambiguation, must be on
+/// both sides. The file's album's own qualifiers ("Album (Taylor's Version)", "Hits (Live)") and
+/// `context` (what the release is, e.g. "live" for a release MusicBrainz types Live) may stand on
+/// either side alone.
+pub fn same_version(
+    file: &str,
+    file_album: Option<&str>,
+    cand: &str,
+    cand_disambiguation: Option<&str>,
+    context: &[&str],
+) -> bool {
+    let mut ctx: Vec<String> = qualifiers(file_album.unwrap_or_default());
+    ctx.extend(context.iter().map(|c| c.to_string()));
+    let mut f: Vec<String> = qualifiers(file)
+        .into_iter()
+        .filter(|q| !ctx.contains(q))
+        .collect();
+    let mut c: Vec<String> = qualifiers(cand)
+        .into_iter()
+        .filter(|q| !ctx.contains(q))
+        .collect();
+    if let Some(d) = disambiguation_qualifier(cand_disambiguation).filter(|d| !ctx.contains(d)) {
+        if !c.contains(&d) {
+            c.push(d);
+        }
+    }
+    f.sort();
+    f.dedup();
+    c.sort();
+    c.dedup();
+    f == c
+}
+
+/// Whether two release names are the same: equal once plain, and the same qualifiers that aren't
+/// neutral ("Greatest Hits" is not "Greatest Hits (Re-Recorded)"; "Album (2011 Remaster)" is
+/// "Album").
+pub fn same_name(a: &str, b: &str) -> bool {
+    let (pa, pb) = (plain_title(a), plain_title(b));
+    !pa.is_empty() && pa == pb && qualifiers(a) == qualifiers(b)
 }
 
 /// A fit below this leaves the whole folder to the fingerprint.
@@ -607,7 +741,12 @@ pub const MIN_FIT: f32 = 0.6;
 /// same track would match two files.
 pub fn fit_release(files: &[FolderFile], release: &Value) -> Option<AlbumFit> {
     let id = release["id"].as_str().and_then(|s| Mbid::parse(s).ok())?;
-    let release_title = release["title"].as_str();
+    // A release MusicBrainz types as Live: its tracks may say "(live)" where the files don't
+    let live = ReleaseType::of(release)
+        .secondary
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("live"));
+    let context: &[&str] = if live { &["live"] } else { &[] };
     let tracks = release_tracks(release);
     if tracks.is_empty() || files.is_empty() {
         return None;
@@ -631,7 +770,13 @@ pub fn fit_release(files: &[FolderFile], release: &Value) -> Option<AlbumFit> {
         let Some(t) = hit.filter(|t| {
             lengths_agree(f.duration_ms, t.length_ms)
                 && titles_agree(&f.title, &t.title)
-                && versions_agree(&f.title, f.album.as_deref(), &t.title, release_title)
+                && same_version(
+                    &f.title,
+                    f.album.as_deref(),
+                    &t.title,
+                    t.disambiguation.as_deref(),
+                    context,
+                )
         }) else {
             continue;
         };
@@ -943,6 +1088,7 @@ mod tests {
             .collect();
         let mut r = release(4);
         r["title"] = json!("Live in Paris");
+        r["release-group"] = json!({"primary-type": "Album", "secondary-types": ["Live"]});
         for i in 0..4 {
             r["media"][0]["tracks"][i]["title"] = json!(format!("Song {} (live)", i + 1));
         }
@@ -1020,5 +1166,71 @@ mod tests {
         let fit = fit_release(&files, &r).unwrap();
         let tracks: Vec<i64> = fit.matched.iter().map(|m| m.track).collect();
         assert_eq!(tracks, vec![1, 4, 5]);
+    }
+
+    /// PR #250 review: the album lane's version evidence. A live take fits a plain file only on a
+    /// release MusicBrainz types as Live (or a file/album that says live in brackets), not because
+    /// a word of the album's name is "live"; a recording MusicBrainz marks by its disambiguation
+    /// (a re-recording) fits no file that doesn't say so; and an album whose name says it is
+    /// another version ("(Taylor's Version)") only looks at releases named so.
+    #[test]
+    fn version_evidence_in_the_album_lane() {
+        let live_tracks = |r: &mut Value| {
+            for i in 0..4 {
+                r["media"][0]["tracks"][i]["title"] = json!(format!("Song {} (live)", i + 1));
+            }
+        };
+        let files = |album: &str| -> Vec<FolderFile> {
+            (1..=4)
+                .map(|i| FolderFile {
+                    album: Some(album.into()),
+                    ..file(i)
+                })
+                .collect()
+        };
+        // Named "Live Forever", typed as a plain album: no evidence
+        let mut r = release(4);
+        r["title"] = json!("Live Forever");
+        live_tracks(&mut r);
+        assert_eq!(fit_release(&files("Live Forever"), &r), None);
+        // Typed Live by MusicBrainz: it is the live album
+        r["release-group"] = json!({"primary-type": "Album", "secondary-types": ["Live"]});
+        assert_eq!(fit_release(&files("Live Forever"), &r).unwrap().matched.len(), 4);
+        // The album tag says live in brackets
+        let mut r = release(4);
+        live_tracks(&mut r);
+        assert_eq!(fit_release(&files("Album (Live)"), &r).unwrap().matched.len(), 4);
+        // A re-recording, marked only by its disambiguation
+        let mut r = release(10);
+        for i in 0..10 {
+            r["media"][0]["tracks"][i]["recording"]["disambiguation"] = json!("re-recording");
+        }
+        let plain: Vec<FolderFile> = (1..=10).map(file).collect();
+        assert_eq!(fit_release(&plain, &r), None);
+        // "(Taylor's Version)" folder: only releases so named are candidates
+        let a = FolderAlbum {
+            title: "1989 (Taylor's Version)".into(),
+            artist: "Band".into(),
+            release: None,
+        };
+        let answer = json!({"releases": [
+            {"id": REL, "score": 100, "title": "1989", "track-count": 12, "artist-credit": [{"name": "Band"}]},
+            {"id": REL2, "score": 90, "title": "1989 (Taylor's Version)", "track-count": 12, "artist-credit": [{"name": "Band"}]}
+        ]});
+        assert_eq!(
+            release_candidates(&a, 12, &answer, 3),
+            vec![Mbid::parse(REL2).unwrap()]
+        );
+        // Neutral words in the name change nothing: "Album (Remastered)" still finds "Album"
+        let b = FolderAlbum {
+            title: "Album (2011 Remaster)".into(),
+            artist: "Band".into(),
+            release: None,
+        };
+        let answer = json!({"releases": [{"id": REL, "score": 100, "title": "Album", "track-count": 12, "artist-credit": [{"name": "Band"}]}]});
+        assert_eq!(
+            release_candidates(&b, 12, &answer, 3),
+            vec![Mbid::parse(REL).unwrap()]
+        );
     }
 }

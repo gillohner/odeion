@@ -672,6 +672,8 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .idhold { margin: 4px 0 0; }
 .idintro { max-width: 72ch; }
 .idloading { margin: 8px 0 12px; }
+.idopt > label.grow { display: flex; flex-direction: column; gap: 2px; cursor: pointer; min-width: 0; }
+.idmb { white-space: nowrap; display: inline-flex; align-items: center; gap: 4px; }
 .idconfirm { margin: 8px 14px 4px; align-items: center; }
 .idstale { background: color-mix(in srgb, var(--warn) 12%, transparent); }
 @media (max-width: 720px) { .idopt { flex-wrap: wrap; } .idopt .grow { flex-basis: calc(100% - 40px); } .idpick .btn { margin-left: 28px; } }

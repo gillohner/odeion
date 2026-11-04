@@ -61,9 +61,12 @@ const server = http.createServer(async (req, res) => {
     if (p in lists) return send(200, lists[p]);
     return send(200, {});
   }
-  const file = { '/app.js': 'app.js', '/app.css': 'app.css', '/icon.svg': 'icon.svg', '/manifest.webmanifest': 'manifest.webmanifest' }[u.pathname] || 'index.html';
-  const type = file.endsWith('.js') ? 'text/javascript' : file.endsWith('.css') ? 'text/css' : file.endsWith('.svg') ? 'image/svg+xml' : file.endsWith('.webmanifest') ? 'application/manifest+json' : 'text/html';
-  res.writeHead(200, { 'content-type': `${type}; charset=utf-8`, 'cache-control': 'no-cache' });
+  // A file of the static folder by its name (app.js, pwa.js, icons…), else the page itself
+  const name = u.pathname.slice(1);
+  const file = /^[\w.-]+$/.test(name) && name !== 'index.html' && fs.existsSync(path.join(STATIC, name)) ? name : 'index.html';
+  const ext = path.extname(file);
+  const type = { '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json', '.html': 'text/html; charset=utf-8' }[ext] || 'application/octet-stream';
+  res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
   res.end(fs.readFileSync(path.join(STATIC, file)));
 });
 
@@ -74,7 +77,8 @@ const server = http.createServer(async (req, res) => {
   try {
     for (const [name, w, h] of [['phone', 390, 844], ['tablet', 834, 1194], ['desktop', 1440, 900]]) {
       const W = `${name}:`;
-      const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: 'reduce', hasTouch: name !== 'desktop' });
+      // No service worker: its cache would answer instead of this server
+      const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: 'reduce', hasTouch: name !== 'desktop', serviceWorkers: 'block' });
       await ctx.addInitScript(() => { localStorage.setItem('pm.token', 't'); localStorage.setItem('pm.zone', 'browser'); });
       const outside = [];
       await ctx.route((url) => url.origin !== BASE && !/^(data|blob):/.test(url.protocol), (r) => { outside.push(r.request().url()); return r.abort(); });
@@ -222,6 +226,63 @@ const server = http.createServer(async (req, res) => {
       } else {
         check(false, `${W} the tracks view shows a Match button for an unmatched song`);
       }
+
+      // 7. PR #250 review: paging by folder, not by position. The node's list of albums shrinks as
+      // songs are confirmed; "Show more" asks for the albums after the last one shown, so none is
+      // skipped, and an album shown already isn't shown twice.
+      const live = { albums: [albumA(), albumB(), albumC()] };
+      const keyOf = (a) => a.key;
+      const pageOf = (u) => {
+        const now = live.albums.filter((a) => a.songs.length).sort((x, y) => (keyOf(x) < keyOf(y) ? -1 : 1));
+        const after = u.searchParams.get('after'); const off = Number(u.searchParams.get('offset') || 0);
+        const from = after != null ? now.filter((a) => keyOf(a) > after) : now.slice(off);
+        const first = (after == null && off === 0) ? from.slice(0, 2) : from.slice(0, 2);
+        const more = from.length > first.length;
+        const songs = now.reduce((n, a) => n + a.songs.length, 0);
+        return { albums: first, songs, total_albums: now.length, offset: off, next: more ? off + first.length : null, next_after: more ? keyOf(first[first.length - 1]) : null };
+      };
+      fx = base({ routes: {
+        'GET /library/suggestions/albums': async (u) => [200, pageOf(u)],
+        'POST /library/suggestions/confirm': async (_, b) => { const done = new Set(b.choices.map((c) => c.track_id)); live.albums.forEach((a) => { a.songs = a.songs.filter((g) => !done.has(g.track.id)); }); return [200, { confirmed: [...done], count: done.size }]; },
+      } });
+      // Keys sort: /music/Band/Album < /music/Other/Single < /music/Third/Later
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      // The whole second album is confirmed before more albums load
+      await page.locator('section.idalbum').nth(1).locator('[data-confirm]').click();
+      await until(async () => asked('POST', '/library/suggestions/confirm').length === 1);
+      await until(async () => (await page.locator('section.idalbum').count()) === 1);
+      await page.locator('#idmore').click();
+      check(await until(async () => (await page.locator('section.idalbum').count()) === 2), `${W} after a whole album is confirmed, Show more still brings the next album`);
+      const moreQ = asked('GET', '/library/suggestions/albums').slice(-1)[0].query;
+      check(/after=%2Fmusic%2FOther%2FSingle/.test(moreQ), `${W} Show more asks for the albums after the last one shown (${moreQ})`);
+      check(await page.locator('section.idalbum h3', { hasText: 'Later' }).count() === 1, `${W} … the third album`);
+      // An album the next page repeats (a run added to it meanwhile) is shown once
+      fx.routes['GET /library/suggestions/albums'] = async (u) => (u.searchParams.get('after') ? [200, { albums: [albumA(), albumC()], songs: 6, total_albums: 3, offset: 2, next: null, next_after: null }] : [200, { albums: [albumA(), albumB()], songs: 6, total_albums: 3, offset: 0, next: 2, next_after: '/music/Other/Single' }]);
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      await page.locator('#idmore').click();
+      await until(async () => (await page.locator('section.idalbum h3', { hasText: 'Later' }).count()) === 1);
+      check(await page.locator('input[name="pick-11"]').count() === 2, `${W} a repeated album is shown once (one set of radios per song)`);
+      // Counts follow "Not this": song 3's conflict ends when one of its two options goes
+      fx = base();
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      const headA = page.locator('section.idalbum').first().locator('.section-head');
+      check(/1 needs your pick/.test(await headA.textContent()), `${W} the album says a song needs your pick`);
+      await page.locator('[data-reject="104"]').click();
+      await until(async () => asked('DELETE', '/library/suggestions/104').length === 1);
+      check(await until(async () => !/needs your pick/.test(await page.locator('section.idalbum').first().locator('.section-head').textContent())), `${W} … and stops saying so once its options agree`);
+      // The radios' names are the options, not the buttons and links next to them
+      check(await page.locator('.idopt label a, .idopt label button').count() === 0, `${W} no link or button inside an option's label`);
+      const named = await page.locator('input[name="pick-12"]').first().evaluate((el) => [...el.labels].map((l) => l.textContent).join(' ') || (el.getAttribute('aria-labelledby') || '').split(' ').map((id) => (document.getElementById(id) || {}).textContent || '').join(' '));
+      check(/Song 2/.test(named) && !/Not this|MusicBrainz/.test(named), `${W} an option's radio is named by the option only ("${named.trim().slice(0, 60)}")`);
+      // The last song confirmed: "Nothing to confirm"
+      fx = base({ routes: { 'GET /library/suggestions/albums': async () => [200, { albums: [albumB()], songs: 1, total_albums: 1, offset: 0, next: null, next_after: null }] } });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 1);
+      await page.locator('section.idalbum [data-confirm]').click();
+      check(await until(async () => /Nothing to confirm/.test(await page.locator('#main').textContent())), `${W} after the last song is confirmed the page says there is nothing to confirm`);
 
       check(!errors.length, `${W} no page errors ${errors.slice(0, 3).join(' | ')}`);
       check(!outside.length, `${W} nothing asked outside the loopback server ${outside.slice(0, 3).join(' ')}`);

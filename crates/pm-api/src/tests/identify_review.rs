@@ -2596,3 +2596,202 @@ async fn the_review_page_answers_quickly_with_a_big_backlog() {
     assert!(bytes.len() < 200_000, "{} bytes", bytes.len());
     assert!(took < std::time::Duration::from_millis(1000), "{took:?}");
 }
+
+// ---- PR #250 review, fix round 1 ----
+
+/// PR #250 review (Kimi, high): a rescan that replaces a song's file while the run works on it
+/// makes the run's answer stale: not stored, not counted, and the song is checked again by the
+/// next run (which then finds it).
+#[tokio::test]
+async fn an_answer_for_a_song_rescanned_during_the_run_is_not_stored() {
+    const RX: &str = "a9000000-0000-4000-8000-0000000000aa";
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let node: Arc<std::sync::OnceLock<(Arc<NodeState>, i64)>> = Default::default();
+    let rescan = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let rel = serde_json::json!({"id": RX, "title": "X", "media": [{"position": 1, "tracks": [
+        {"position": 1, "title": "Song 1", "length": 201_000, "recording": {"id": rec(1)}}]}]});
+    let mock = {
+        let (node, rescan) = (node.clone(), rescan.clone());
+        Router::new()
+            .route(
+                "/ws/2/release",
+                get(|| async { Json(serde_json::json!({"releases": [{"id": RX, "score": 100, "title": "X", "track-count": 1, "artist-credit": [{"name": "Band"}]}]})) }),
+            )
+            .route(
+                "/ws/2/release/{id}",
+                get(move || {
+                    // While the run looks the album up, the file is replaced and read again
+                    if rescan.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        let (s, id) = node.get().unwrap();
+                        let lib = s.library.lock().unwrap();
+                        let mut t = lib.get_track(pm_model::TrackId(*id)).unwrap().unwrap();
+                        t.file.size_bytes += 4096;
+                        t.file.mtime_unix += 30;
+                        lib.upsert_track(&t).unwrap();
+                    }
+                    let r = rel.clone();
+                    async move { Json(r) }
+                }),
+            )
+            .route("/ws/2/recording", get(|| async { Json(serde_json::json!({"recordings": []})) }))
+    };
+    tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    s.set_contact("tests@example.org").unwrap();
+    *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+    let x = album_folder(&s, dir.path(), "Band/X", 1)[0];
+    node.set((s.clone(), x)).ok().unwrap();
+    identify::run_with(&s, identify::RunOptions::quick(false))
+        .await
+        .unwrap();
+    let canonical = |id: i64| {
+        s.library
+            .lock()
+            .unwrap()
+            .get_track(pm_model::TrackId(id))
+            .unwrap()
+            .unwrap()
+            .canonical
+    };
+    assert!(
+        canonical(x).is_none(),
+        "the answer for the old file is not stored"
+    );
+    assert_eq!(s.identify.lock().unwrap().identified, 0);
+    // The next run checks it again (the same audio, nothing changed now) and identifies it
+    identify::run_with(&s, identify::RunOptions::quick(false))
+        .await
+        .unwrap();
+    assert_eq!(
+        canonical(x).unwrap().0.to_url(),
+        format!("https://musicbrainz.org/recording/{}", rec(1))
+    );
+}
+
+/// PR #250 review (low): a recording the owner rejected for a song is left out before the
+/// fingerprint decides: its same-audio sibling is identified instead of the song ending
+/// "unknown" with the sibling still open.
+#[tokio::test]
+async fn the_fingerprint_decides_without_rejected_recordings() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+        api_key: "test-key".into(),
+        base_url: "http://127.0.0.1:9".into(),
+        configured: String::new(),
+    };
+    let path = dir.path().join("music/Solo/01 song.flac");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "solo audio").unwrap();
+    let mut t = untagged_track(path.clone(), "Over My Shoulder", "Band");
+    t.track_no = Some(1);
+    t.duration_ms = Some(232_000);
+    t.file.duration_ms = Some(232_000);
+    let id = s.library.lock().unwrap().upsert_track(&t).unwrap().0;
+    let fp = |r: &str| {
+        serde_json::json!({"id": r, "title": "Over My Shoulder", "duration": 232.0, "artists": [{"name": "Band"}],
+        "releasegroups": [{"id": "g", "title": "Hits", "type": "Album", "releases": [{"id": REL, "title": "Hits", "track_count": 9, "mediums": [{"position": 1, "track_count": 9, "tracks": [{"position": 4}]}]}]}]})
+    };
+    {
+        let lib = s.library.lock().unwrap();
+        let key = Library::file_key(&path).unwrap();
+        lib.save_fingerprint(&key, 232, "AQfake").unwrap();
+        let answer = serde_json::json!({"status": "ok", "results": [{"id": "x", "score": 0.96, "recordings": [fp(&rec(1)), fp(&rec(2))]}]});
+        lib.save_lookup(&key, &answer.to_string()).unwrap();
+        // The owner said "Not this" to recording 1 (the one picked otherwise: the lowest id)
+        lib.add_suggestions(
+            id,
+            &[option(&rec(1), None, "Over My Shoulder", 0.9, "fingerprint")],
+        )
+        .unwrap();
+        let sid = lib.suggestions_for(id).unwrap()[0].id;
+        lib.reject_suggestion(sid).unwrap();
+    }
+    rusqlite::Connection::open(dir.path().join("lib.sqlite"))
+        .unwrap()
+        .execute("DELETE FROM identify_state WHERE track_id = ?1", [id])
+        .unwrap();
+    identify::run_with(&s, identify::RunOptions::quick(false))
+        .await
+        .unwrap();
+    let (uri, _) = s
+        .library
+        .lock()
+        .unwrap()
+        .get_track(pm_model::TrackId(id))
+        .unwrap()
+        .unwrap()
+        .canonical
+        .expect("its sibling");
+    assert_eq!(
+        uri.to_url(),
+        format!("https://musicbrainz.org/recording/{}", rec(2))
+    );
+}
+
+/// PR #250 review (medium): album review pages by folder: `after` the last folder shown, so
+/// albums confirmed meanwhile make it skip none; `next_after` says where the next page starts
+/// (`offset` still works).
+#[tokio::test]
+async fn album_review_pages_by_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let mut first_of = Vec::new();
+    for (k, folder) in ["A/One", "B/Two", "C/Three"].iter().enumerate() {
+        let id = song(&s, dir.path(), folder, 1, &format!("Song {k}"));
+        suggest(
+            &s,
+            id,
+            &[option(
+                &rec(k as u32 + 1),
+                None,
+                &format!("Song {k}"),
+                0.95,
+                "album",
+            )],
+        );
+        first_of.push(id);
+    }
+    let (_, p1) = call(&app, "GET", "/v1/library/suggestions/albums?limit=1", None).await;
+    assert_eq!(p1["albums"][0]["album"], "One");
+    let after = p1["next_after"].as_str().expect("a cursor").to_string();
+    assert!(after.ends_with("A/One"), "{after}");
+    // The first album is confirmed whole before the next page is asked for
+    let o = &p1["albums"][0]["songs"][0];
+    let (st, _) = call(&app, "POST", "/v1/library/suggestions/confirm", Some(serde_json::json!({"choices": [{"track_id": o["track"]["id"], "suggestion_id": o["options"][0]["id"], "recording_mbid": o["options"][0]["recording_mbid"]}]}))).await;
+    assert_eq!(st, StatusCode::OK);
+    let q = format!(
+        "/v1/library/suggestions/albums?limit=1&after={}",
+        urlencode(&after)
+    );
+    let (_, p2) = call(&app, "GET", &q, None).await;
+    assert_eq!(p2["albums"][0]["album"], "Two", "nothing skipped: {p2}");
+    let (_, p3) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/library/suggestions/albums?limit=1&after={}",
+            urlencode(p2["next_after"].as_str().unwrap())
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(p3["albums"][0]["album"], "Three");
+    assert!(p3["next_after"].is_null());
+    // By offset, as before
+    let (_, o1) = call(
+        &app,
+        "GET",
+        "/v1/library/suggestions/albums?limit=1&offset=1",
+        None,
+    )
+    .await;
+    assert_eq!(o1["albums"][0]["album"], "Three");
+}
+
+fn urlencode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
