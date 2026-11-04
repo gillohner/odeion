@@ -107,7 +107,22 @@ def main():
     release = adb("shell", "getprop", "ro.build.version.release").strip()
     log(f"Android {release} (API {api})")
     adb("reverse", f"tcp:{PORT}", f"tcp:{PORT}")
-    adb("install", "-r", apk, timeout=600)
+    # The API 37 image reports boot_completed before its package service takes an install
+    # ("device offline", "Failure calling service package: Broken pipe"): wait for it, try 3 times.
+    for attempt in range(3):
+        adb("wait-for-device", check=False, timeout=300)
+        for _ in range(60):
+            if "package:" in adb("shell", "pm", "path", "android", check=False, timeout=30):
+                break
+            time.sleep(5)
+        try:
+            adb("install", "-r", apk, timeout=600)
+            break
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            log(f"install attempt {attempt + 1} failed: {e}")
+            if attempt == 2:
+                raise
+            time.sleep(20)
     # The emulator's network comes up after boot: start the app only once a name resolves.
     for _ in range(90):
         if "1 received" in adb("shell", "ping", "-c", "1", "-W", "2", "pkarr.pubky.app", check=False):
