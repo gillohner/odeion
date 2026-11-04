@@ -1119,6 +1119,10 @@ impl Store {
                 .map_err(storage)?
         };
         let gone = gone as u64;
+        #[cfg(test)]
+        if FAIL_EVICT_COUNT.with(|f| f.get()) {
+            return Err(Refusal::Storage);
+        }
         if gone > 0 {
             self.conn
                 .execute(
@@ -1317,6 +1321,8 @@ thread_local! {
     static FAIL_VACUUM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Tests: how many VACUUMs were tried on this thread.
     static VACUUM_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// Tests: an eviction's count can't be saved.
+    static FAIL_EVICT_COUNT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A stored event: when (unix seconds, to the minute), alias, role, viewport, the event.
@@ -3682,6 +3688,140 @@ mod tests {
             !has(&std::fs::read(dir.path().join(FILE)).unwrap()),
             "gone from the file"
         );
+    }
+
+    /// Kimi review of 77c62a81, M1: nothing grows the file past the cap. People's choices make
+    /// room from the oldest events, and once none are left a Stop still holds (in memory); the
+    /// day's counts alone wait in memory rather than grow it.
+    #[test]
+    fn nothing_grows_the_file_past_the_cap_not_choices_nor_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap: u64 = 256 << 10;
+        let u = small(dir.path(), |l| {
+            l.max_store_bytes = cap;
+            l.per_alias_per_min = 1_000_000;
+            l.per_person_per_min = 1_000_000;
+            l.global_per_min = 1_000_000;
+            l.max_batch = 1_000;
+        });
+        let t0 = Instant::now();
+        on(&u, t0);
+        let pages = || -> u64 { std::fs::metadata(dir.path().join(FILE)).unwrap().len() };
+        let visit = Event::Visit {
+            view: View::Albums,
+            surface: Surface::Page,
+            ms: Ms::Lt1000,
+            exposed: vec![Control::RowPlay, Control::RowMore, Control::ItemPlay],
+            used: vec![Control::RowPlay],
+            unregistered: 0,
+        };
+        let a = open(&u, &l("a"), T1, t0);
+        for _ in 0..40 {
+            let p = l("a");
+            u.ingest(
+                u.epoch(&p),
+                &p,
+                &a,
+                T1,
+                &vec![visit.clone(); 200],
+                0,
+                t0,
+                1_000 * DAY,
+            )
+            .unwrap();
+            u.flush(1_000 * DAY).unwrap();
+        }
+        assert!(pages() <= cap, "{} bytes, cap {cap}", pages());
+        // New people's Stops, more than the file can hold
+        for i in 0..4_000 {
+            let p = l(&format!("p{i}"));
+            u.choose(u.epoch(&p), &p, false, None, t0).unwrap();
+            if i % 50 == 0 {
+                assert!(pages() <= cap, "{} bytes after {i} Stops, cap {cap}", pages());
+            }
+        }
+        assert!(pages() <= cap, "{} bytes, cap {cap}", pages());
+        for i in (0..4_000).step_by(397) {
+            let p = l(&format!("p{i}"));
+            assert!(!u.me(u.epoch(&p), &p, t0).unwrap().sharing, "p{i}'s Stop holds");
+        }
+        // Counts alone, on new days: never past the cap either
+        for d in 1..=30u64 {
+            let unix = (1_000 + d) * DAY;
+            let p = l(&format!("q{d}"));
+            let me = u.me(u.epoch(&p), &p, t0).unwrap();
+            let q = u
+                .open(
+                    u.epoch(&p),
+                    &p,
+                    T2,
+                    Viewport::Phone,
+                    me.generation,
+                    me.choice,
+                    t0,
+                    unix,
+                )
+                .unwrap();
+            u.ingest(u.epoch(&p), &p, &q, T2, &[visit.clone()], 3, t0, unix)
+                .unwrap();
+            let _ = u.flush(unix);
+            assert!(pages() <= cap, "{} bytes on day {d}, cap {cap}", pages());
+        }
+    }
+
+    /// Kimi review of 77c62a81, L2: an eviction and its count go together, or neither does.
+    #[test]
+    fn an_eviction_and_its_count_go_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let a = open(&u, &l("a"), T1, t0);
+        send(&u, &l("a"), T1, &a, 20, t0).unwrap();
+        u.flush(1_000 * DAY).unwrap();
+        let before = stored(&u);
+        FAIL_EVICT_COUNT.with(|f| f.set(true));
+        let r = u.with_store(true, |s| s.make_room(1_000 * DAY));
+        FAIL_EVICT_COUNT.with(|f| f.set(false));
+        assert!(r.is_err());
+        assert_eq!(
+            stored(&u),
+            before,
+            "the events stay when their eviction can't be counted"
+        );
+        let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY).unwrap();
+        assert_eq!(s["dropped"]["evicted"], 0, "{s}");
+    }
+
+    /// Kimi review of 77c62a81, L3: a flush the file can't take keeps its page loads and counts
+    /// for the next one (its events count as lost to a full queue).
+    #[test]
+    fn a_failed_flush_keeps_its_page_loads_and_counts_for_the_next() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let u = usage(dir.path());
+        let t0 = Instant::now();
+        on(&u, t0);
+        let p = l("a");
+        let a = open(&u, &p, T1, t0);
+        let nav = Event::Nav {
+            view: View::Home,
+            how: How::Push,
+        };
+        u.ingest(u.epoch(&p), &p, &a, T1, &[nav], 5, t0, 1_000 * DAY)
+            .unwrap();
+        u.fail_store.store(true, Ordering::SeqCst);
+        assert!(u.flush(1_000 * DAY).is_err());
+        u.fail_store.store(false, Ordering::SeqCst);
+        u.flush(1_000 * DAY).unwrap();
+        let s = u.summary(u.epoch(&Person::Owner), "t", t0, 1_000 * DAY).unwrap();
+        assert_eq!(s["dropped"]["by_browsers"], 5, "{s}");
+        assert_eq!(s["dropped"]["queue_full"], 1, "{s}");
+        let loads: u64 = s["daily_totals"]["alias"]
+            .as_object()
+            .map(|m| m.values().filter_map(|v| v.as_u64()).sum())
+            .unwrap_or(0);
+        assert_eq!(loads, 1, "the page load is counted: {s}");
     }
 
     /// Kimi K-L4: two removals of one person the file could not take are one cleanup (the owner's
