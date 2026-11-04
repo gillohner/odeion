@@ -11,8 +11,8 @@
 //      reports the tracks it could not resolve.
 //
 // Configuration (environment):
-//   PM_NODE   node origin, default http://127.0.0.1:7788
-//   PM_TOKEN  bearer token from the node's [api] token
+//   ODEION_NODE   node origin, default http://127.0.0.1:7788 (PM_NODE, the pre-Odeion name, still works)
+//   ODEION_TOKEN  bearer token from the node's [api] token (or PM_TOKEN)
 //
 // Roon must authorize the extension once under Settings → Extensions.
 // This sidecar has not run against a Roon Core yet; treat the Browse walk
@@ -32,9 +32,9 @@ const scrobbler = new Scrobbler(api);
 
 const roon = new RoonApi({
   extension_id: "org.pubky.music.bridge",
-  display_name: "Pubky Music Bridge",
+  display_name: "Odeion Bridge",
   display_version: "0.1.0",
-  publisher: "Pubky Music",
+  publisher: "Odeion",
   email: "bridge@pubky.music.invalid",
   website: "https://github.com/gillohner/pubky-music-node",
   core_paired(core) {

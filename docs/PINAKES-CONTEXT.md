@@ -1,4 +1,4 @@
-# Pinakes context for the Pubky Music Node (handoff §12)
+# Pinakes context for the Odeion node (handoff §12)
 
 Pinakes is the indexer for **external resources** people reference on Pubky. It follows Nexus's
 reference feed, reads each referenced link once (through official APIs where they exist) and

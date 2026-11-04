@@ -26,7 +26,7 @@ and a second notion of formats for little gain, and a fork would be ours to main
 ### 2026-10-28: the app's built-in player only, paired with its own node
 
 Without a pairing, anyone on the LAN could play to an endpoint or hold its sessions. `pm-endpoint`
-is now only the Pubky Music app's built-in player; speakers on a Pi or another computer with a DAC
+is now only the Odeion app's built-in player; speakers on a Pi or another computer with a DAC
 run squeezelite (the node's Slimproto server), and network speakers keep their own protocols.
 
 - **Key.** The app makes a random key (32 bytes from the OS CSPRNG, hex) each time it starts the

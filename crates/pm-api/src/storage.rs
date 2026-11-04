@@ -290,6 +290,26 @@ pub(crate) fn walk(dir: &std::path::Path) -> impl Iterator<Item = (PathBuf, u64)
     out.into_iter()
 }
 
+/// What the owner's quota on the bundled homeserver leaves, in bytes: `None` without a quota
+/// (unlimited, unknown, or another homeserver, which tells nobody). The quota is in MiB, as the
+/// homeserver's `user_storage_quota_mb`.
+pub(crate) async fn quota_left(s: &NodeState) -> Option<u64> {
+    if let Some(left) = *s.copy_jobs.quota_seam.lock().expect("quota seam") {
+        return Some(left);
+    }
+    s.bundled_homeserver()?;
+    let user = s.sync_handle()?.z32().trim_start_matches("pubky").to_string();
+    let q = crate::bundled::admin(s, reqwest::Method::GET, &format!("/users/{user}/quota"), None)
+        .await
+        .ok()?;
+    let mb = q["effective"]["storage_quota_mb"].as_u64()?;
+    let dir = s.homeserver_files_dir()?.join(&user);
+    let used = tokio::task::spawn_blocking(move || if dir.is_dir() { dir_size(&dir) } else { 0 })
+        .await
+        .ok()?;
+    Some((mb * 1024 * 1024).saturating_sub(used))
+}
+
 /// `GET /v1/storage`.
 pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<StorageStatus> {
     let sync = s.sync_handle();

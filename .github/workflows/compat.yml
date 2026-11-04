@@ -26,7 +26,7 @@ env:
   CARGO_INCREMENTAL: 0
 jobs:
   home-assistant:
-    # dlna_dmr finds the zone renderers and plays to them; the Pubky Music integration finds the
+    # dlna_dmr finds the zone renderers and plays to them; the Odeion integration finds the
     # node by zeroconf, browses the library, plays, groups (tools/ha-check.py).
     runs-on: ubuntu-24.04
     strategy:
@@ -45,7 +45,7 @@ jobs:
       - run: cargo build -p pm-node
       - name: dlna_dmr against the zone renderers
         run: python3 -I tools/ha-check.py dlna target/debug/pm-node /tmp/ha-dlna --docker ${{ matrix.image }}
-      - name: the Pubky Music integration
+      - name: the Odeion integration
         run: python3 -I tools/ha-check.py integration target/debug/pm-node /tmp/ha-int --docker ${{ matrix.image }}
       - if: failure()
         run: |

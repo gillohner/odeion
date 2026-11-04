@@ -1,4 +1,4 @@
-/* Pubky Music web UI. Talks to /v1 (bearer token), listens on /v1/events,
+/* Odeion web UI. Talks to /v1 (bearer token), listens on /v1/events,
    and plays either through a node zone or through this browser's <audio>. */
 (() => {
   'use strict';
@@ -197,7 +197,7 @@
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
     // The node refused this browser's token (its own answer, not a service refusing a sign-in typed here)
     if (r.status === 401 && json && json.error === NODE_REFUSED) { sessionEnded(sent); throw new Error('Log in to use the node.'); }
-    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; throw err; }
+    if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; err.body = json; throw err; }
     return json;
   };
 
@@ -578,18 +578,21 @@
     show();
   };
   // Importing a provider playlist asks once: keep that provider as each song's source, or Auto.
+  // Imports in flight, by service and playlist: a redrawn list keeps their buttons off (no second import)
+  const importing = new Set();
   const importPlaylist = async (b, service, id) => {
+    const key = `${service}:${id}`; if (importing.has(key)) return;
     const name = SERVICE_NAMES[service] || service;
     let order = 'your play order'; try { const o = await api('GET', '/play-order'); order = o.order.map(srcName).join(' › '); } catch { /* keep the words */ }
     const how = await choiceDialog({ title: 'Import this playlist', text: 'Where should its songs play from?', choices: [
       { label: `Keep ${name}`, note: `Each song is pinned to its ${name} track.`, value: 'keep', primary: true },
       { label: 'Auto', note: `Each song plays from the first source that has it (${order}).`, value: 'auto' },
     ] });
-    if (!how) return;
-    b.disabled = true;
+    if (!how || importing.has(key)) return;
+    b.disabled = true; importing.add(key);
     try { const r = await api('POST', `/sources/${service}/playlists/${encodeURIComponent(id)}/import${how === 'keep' ? '?keep_source=true' : ''}`); state.playlists = await api('GET', '/playlists'); toast(`Imported “${r.playlist.summary.name}”: ${countOf(r.imported, 'songs')}${r.kept ? `, ${countOf(r.kept, 'kept as links')}` : ''}${r.skipped ? `, ${r.skipped} skipped` : ''}${how === 'keep' ? `, pinned to ${name}` : ''}`); }
     catch (e) { toast(e.message, 'error'); }
-    b.disabled = false;
+    importing.delete(key); b.disabled = false;
   };
   // Theme: System (no attribute), or Light/Dark kept in this browser (index.html applies it early).
   const themePref = () => { try { return localStorage.getItem('pm.theme') || 'system'; } catch { return 'system'; } };
@@ -743,9 +746,10 @@
       else if ((e.key === ' ' || e.key === 'Enter') && !t.busy) { e.preventDefault(); tick(p); }
     };
     // ---- artists and albums: a search over the library's lists ----
-    const lists = { artists: null, albums: null };
+    // `lists` holds only whole lists; `partial` the one paging in now, drawn as it grows
+    const lists = { artists: null, albums: null }; const partial = { artists: null, albums: null };
     const pickList = (kind) => {
-      const all = lists[kind]; const box = $('#cplist', d); if (!box || !all) return;
+      const all = lists[kind] || partial[kind]; const box = $('#cplist', d); if (!box || !all) return;
       const q = ($('#cpq', d).value || '').trim().toLowerCase();
       const hit = (x) => !q || String(kind === 'artists' ? x.name : `${x.title} ${x.album_artist || x.artist || ''}`).toLowerCase().includes(q);
       const rows = []; for (const x of all) { if (hit(x)) rows.push(x); if (rows.length >= 30) break; }
@@ -758,24 +762,33 @@
       try {
         if (kind === 'artists') lists.artists = await api('GET', '/library/artists');
         else {
-          // The node gives at most 1 000 albums an answer: page on with `after`, the list growing
-          // A list left part way (another choice, or a failed page) is dropped, so the next look
-          // loads it whole
-          let after = null; lists.albums = [];
+          // The node gives at most 1 000 albums an answer: page on with `after`, the list growing.
+          // Only the newest load may draw, and only a whole list is kept: one left part way
+          // (another choice, a failed page) loads whole next time
+          let after = null; let got = []; partial.albums = null;
           for (;;) {
-            let page; try { page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`); } catch (e) { lists.albums = null; throw e; }
-            if (gen !== loadGen) { lists.albums = null; return; }
-            lists.albums = lists.albums.concat(page); pickList(kind);
+            const page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`);
+            if (gen !== loadGen) return;
+            got = got.concat(page); partial.albums = got; pickList(kind);
             if (page.length < 1000 || !page.length) break;
             after = page[page.length - 1].id;
           }
+          lists.albums = got; partial.albums = null;
         }
-      } catch (e) { if (gen === loadGen && box.isConnected) box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; const b = $('#cplretry', d); if (b) b.onclick = () => loadList(kind); return; }
+      } catch (e) {
+        // Only the newest load answers: the part it had goes (a search would draw it over the
+        // error), and its Try again is the one bound
+        if (gen !== loadGen) return;
+        partial[kind] = null;
+        if (box.isConnected) { box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; $('#cplretry', d).onclick = () => loadList(kind); }
+        return;
+      }
       if (gen === loadGen) pickList(kind);
     };
     let loadGen = 0;
     // ---- the panel for each choice ----
     const drawPanel = () => {
+      loadGen++; // a list still loading for the last choice draws nothing more
       // A node without the folder list: Folders goes, and the choice (and the focus) moves on
       const fell = pick.mode === 'folders' && t.missing;
       if (fell) pick.mode = preset ? 'preset' : 'all';
@@ -956,7 +969,7 @@
   // the space it keeps free running out, failures in a row), never shown as done
   const jobCancelled = (p) => !!(p.cancelled || p.state === 'cancelled');
   const jobStopped = (p) => jobDone(p) && (jobCancelled(p) || p.state === 'failed' || !!p.stopped_reason || !!p.full);
-  const jobStopWhy = (p) => p.stopped_reason || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
+  const jobStopWhy = (p) => p.stopped_reason || (p.state === 'failed' && p.error) || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
   const jobStopShort = (p) => (jobCancelled(p) && !p.stopped_reason ? 'Cancelled' : /space|full|reserve|room/i.test(jobStopWhy(p)) ? 'Stopped: full' : /in a row/i.test(jobStopWhy(p)) ? 'Stopped: failures' : 'Stopped');
   const jobTitle = (p) => (p.kind === 'import' ? (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
     ? (jobDone(p) ? (jobStopped(p) ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
@@ -1096,7 +1109,7 @@
       // Another tab may have logged in again meanwhile: its token stays
       if (localStorage.getItem('pm.token') !== mine) return;
       ACCOUNT_KEYS.forEach((k) => localStorage.removeItem(k));
-      Object.keys(localStorage).filter((k) => k.startsWith('pm.up.')).forEach((k) => localStorage.removeItem(k));
+      Object.keys(localStorage).filter((k) => k.startsWith('pm.up.') || k.startsWith('pm.srcmine.')).forEach((k) => localStorage.removeItem(k));
     } catch { /* no storage */ }
   };
   const ringFirst = () => matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -1418,6 +1431,9 @@
   // its own ways' areas (null = the shared import/paste area), `wire(pick, si, h, act)` for their
   // handlers, `extra(si, pick)` for rows under the status line, `after(si, h, el)` once rendered.
   const sgHelp = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+  // A long note's first sentence (or the clause before a colon), and the rest: settings show the
+  // rest only where it is needed (UX sweep A25)
+  const splitNote = (t) => { const x = String(t || ''); const m = /^(.{24,}?[.:])\s+(\S.{19,})$/s.exec(x); if (!m) return [x, '']; const colon = m[1].endsWith(':'); return [colon ? m[1].slice(0, -1) + '.' : m[1], colon ? m[2].charAt(0).toUpperCase() + m[2].slice(1) : m[2]]; };
   const sgRow = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${sgHelp(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
   const sgBlock = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${sgHelp(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
   const sgGroup = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
@@ -1464,7 +1480,7 @@
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
     if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
     if (choosing) {
-      const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
+      const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`).join('');
       rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
     }
     if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
@@ -1520,7 +1536,7 @@
     source: 'tidal', name: 'TIDAL', el,
     actions: (pick, si, h) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
-      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Pubky Music/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
+      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
         const client = u.client_from ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
         // No device client yet: the step card first (the node never ships another party's)
@@ -1944,7 +1960,6 @@
   };
   // Something to move: the zone's queue, or the browser's.
   const hasQueue = (z) => !!z && (z.id === BROWSER ? state.browserQueue.length > 0 : !!(z.queue && z.queue.length));
-  const otherZones = () => zoneList().filter((z) => z.id !== state.zone);
   // The browser takes over a queue at a song and a position; paused stays paused.
   const browserResumeAt = (index, posMs, paused) => {
     const it = state.browserQueue[index]; if (!it) { state.browserIndex = -1; renderBar(); return; }
@@ -2143,14 +2158,13 @@
         <span class="state">${z.transport === 'playing' ? `${icon('play')} playing` : ''}</span>
       </button>${movingTo === z.id ? '<span class="pop-act muted"><span class="spin"></span> Moving…</span>' : movable && z.id !== state.zone ? `<button class="pop-item pop-act" ${moving ? 'disabled' : ''} data-move="${esc(z.id)}" title="Move what plays, with the queue, to ${esc(z.name)}" aria-label="Move here: ${esc(z.name)}">Move here</button>` : ''}</div>`).join('')
       + (err ? `<div class="pop-err" role="alert">${esc(err.charAt(0).toUpperCase() + err.slice(1))}</div>` : '')
-      // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
+      // The sleep timer for the zone in use, here too (UX review: it was only in Now playing). Moving
+      // is each device's Move here above, one way only (UX sweep A14); the Queue page has Move to…
       + `<div class="pop-title">This zone</div>`
-      + (movable && otherZones().length ? `<button class="pop-item" id="zpmove">${icon('zone')}<span><span class="name">Move to…</span><span class="sub">the song where it is, the queue, repeat and radio</span></span></button>` : '')
       + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`
       + (isOffline() ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
     const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
     const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
-    const zm = $('#zpmove', zonePop); if (zm) zm.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Move to' }, ...otherZones().map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]); };
     $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
       state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone);
@@ -2353,8 +2367,8 @@
     const key = it ? `${z.id}|${it.uri}|${it.title}` : `${z ? z.id : ''}|none`;
     if (key !== state.dashKey) {
       state.dashKey = key;
-      box.innerHTML = it ? `${it.image || albumIdOf(it) ? `<div class="dash-bg" aria-hidden="true">${itemArt(it)}</div>` : ''}<div class="dash-inner">${itemArt(it, 'dash-art')}<div class="dash-text"><div class="eyebrow">Now playing on ${esc(z.name)}</div><h1>${esc(np.stream_title || it.title || '')}</h1><p class="dash-artist">${esc(it.artist || '')}</p>${it.album ? `<p class="muted">${esc(it.album)}</p>` : ''}<div class="dash-progress"><span id="dashbar"></span></div><div class="dash-times muted"><span id="dashpos"></span><span id="dashdur"></span></div></div></div><div class="dash-brand muted small">Pubky Music</div>`
-        : `<div class="dash-inner empty"><div class="dash-text"><div class="eyebrow">${esc(z ? z.name : '')}</div><h1>Nothing playing</h1><p class="muted">Start something on this zone and it shows here.</p></div></div><div class="dash-brand muted small">Pubky Music</div>`;
+      box.innerHTML = it ? `${it.image || albumIdOf(it) ? `<div class="dash-bg" aria-hidden="true">${itemArt(it)}</div>` : ''}<div class="dash-inner">${itemArt(it, 'dash-art')}<div class="dash-text"><div class="eyebrow">Now playing on ${esc(z.name)}</div><h1>${esc(np.stream_title || it.title || '')}</h1><p class="dash-artist">${esc(it.artist || '')}</p>${it.album ? `<p class="muted">${esc(it.album)}</p>` : ''}<div class="dash-progress"><span id="dashbar"></span></div><div class="dash-times muted"><span id="dashpos"></span><span id="dashdur"></span></div></div></div><div class="dash-brand muted small">Odeion</div>`
+        : `<div class="dash-inner empty"><div class="dash-text"><div class="eyebrow">${esc(z ? z.name : '')}</div><h1>Nothing playing</h1><p class="muted">Start something on this zone and it shows here.</p></div></div><div class="dash-brand muted small">Odeion</div>`;
     }
     if (it) {
       const pos = np.position_ms || 0; const dur = np.duration_ms || 0;
@@ -3370,7 +3384,8 @@
     const mins = (ms) => (ms ? fmt(ms) : '');
     const pick = await choiceDialog({ title: 'Which song is this?', text: `Playlists and favourites name each song by its entry in MusicBrainz (the open music encyclopedia). Pick the one that is ${about}${t.duration_ms ? ` (${mins(t.duration_ms)})` : ''}; it is remembered for this file.`, choices: c.suggestions.map((x, k) => ({ label: `${x.title || t.title}${x.artist ? ` · ${x.artist}` : ''}`, note: [x.release_title, `${Math.round(x.score * 100)}% match`].filter(Boolean).join(' · '), value: x.id, primary: k === 0 })) });
     if (pick == null) return null;
-    try { const done = await api('POST', `/library/suggestions/${pick}/accept`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
+    const picked = c.suggestions.find((x) => x.id === pick);
+    try { const done = await api('POST', `/library/suggestions/${pick}/accept?track_id=${encodeURIComponent(t.id)}${picked ? `&recording_mbid=${encodeURIComponent(picked.recording_mbid)}` : ''}`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
   };
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
@@ -4031,7 +4046,7 @@
     $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = all[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
-  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a), true)}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${a.year || ''}</div>${coverFrom(coverSvc(a))}</button>`).join('')}</div>`;
+  const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a), true)}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${esc(a.year || '')}</div>${coverFrom(coverSvc(a))}</button>`).join('')}</div>`;
   const bindItemTiles = (box, tiles, kind) => {
     $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; setView('item', { kind, id: tiles[Number(b.dataset.tile)].id }); });
     $$('[data-tileplay]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { const pg = await api('GET', `/item/${kind}/${tiles[Number(b.dataset.tileplay)].id}`); playSongs(pg.songs, 0, 'replace', pg.plays_from, b, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } });
@@ -4668,28 +4683,112 @@
           break;
         }
         case 'identify': {
-          const sug = await api('GET', '/library/suggestions');
-          if (state.view !== 'identify') return;
-          const byTrack = new Map(); for (const x of sug) { if (!byTrack.has(x.track_id)) byTrack.set(x.track_id, { track: x.track, options: [] }); byTrack.get(x.track_id).options.push(x); }
-          const byFolder = new Map(); for (const g of byTrack.values()) { const f = (g.track.file.path || '').replace(/[^/]*$/, ''); if (!byFolder.has(f)) byFolder.set(f, []); byFolder.get(f).push(g); }
-          // The release most suggestions in a folder point at (the folder as an album).
-          const releaseOf = (groups) => { const n = new Map(); groups.forEach((g) => g.options.forEach((o) => { if (o.release_mbid) n.set(o.release_mbid, (n.get(o.release_mbid) || 0) + 1); })); let best = null; n.forEach((c, r) => { if (!best || c > best[1]) best = [r, c]; }); return best && best[0]; };
-          main.innerHTML = pageHead('Confirm matches', byTrack.size) + (byTrack.size ? `<p class="muted small" style="margin-top:-6px">Each file, with what MusicBrainz knows about it. A confirmed match becomes the file's identity (stored in the node, your files stay as they are).</p>` + [...byFolder.entries()].map(([folder, groups]) => `<section class="section" data-folder="${esc(folder)}"><div class="section-head"><h3>${esc(folder.split('/').filter(Boolean).slice(-2).join(' / ') || 'Library')}</h3><span class="muted small">${groups.length} file${groups.length === 1 ? '' : 's'}</span>${releaseOf(groups) ? `<button class="btn sm" data-align="${esc(folder)}">Compare with the album</button>` : ''}</div><div class="alignbox" hidden></div><div class="list">${groups.map((g) => `<div class="idrow"><div class="idfile"><div class="name">${g.track.track_no ? `<span class="muted">${g.track.track_no}.</span> ` : ''}${esc(g.track.title)}</div><div class="sub">${esc([artists(g.track), fmt(g.track.duration_ms), (g.track.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div></div><div class="idopts">${g.options.map((o) => `<div class="idopt"><div class="grow"><div class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></div><div class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags'} · ${Math.round(o.score * 100)}% · <a href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener">MusicBrainz ${icon('external')}</a></div></div><button class="btn primary sm" data-accept="${o.id}">This one</button><button class="btn ghost sm" data-reject="${o.id}">Not this</button></div>`).join('')}</div></div>`).join('')}</div></section>`).join('') : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
-          // Side by side: the folder's files and the MusicBrainz release's tracklist, aligned by position.
-          $$('[data-align]', main).forEach((b) => b.onclick = async () => {
-            const sec = b.closest('[data-folder]'); const box = $('.alignbox', sec); const groups = byFolder.get(b.dataset.align) || [];
-            if (!box.hidden) { box.hidden = true; return; }
-            const rel = releaseOf(groups); box.hidden = false; box.innerHTML = '<p class="muted small">Loading the album from MusicBrainz…</p>';
-            let r; try { const res = await fetch(`/mb/ws/2/release/${encodeURIComponent(rel)}?inc=recordings+artist-credits&fmt=json`); if (!res.ok) throw new Error(`MusicBrainz answered ${res.status}`); r = await res.json(); } catch (e) { box.innerHTML = `<div class="notice">${esc(e.message)}</div>`; return; }
-            const tracks = (r.media || []).flatMap((m) => (m.tracks || []).map((t) => ({ disc: m.position || 1, pos: t.position, title: t.title, len: t.length, rec: t.recording && t.recording.id })));
-            const fileAt = (disc, pos) => groups.find((g) => (g.track.track_no === pos) && ((g.track.disc_no || 1) === disc));
-            const matches = [];
-            const rows = tracks.map((t) => { const g = fileAt(t.disc, t.pos); const o = g && g.options.find((x) => x.recording_mbid === t.rec); if (o) matches.push(o.id); const dur = g && g.track.duration_ms && t.len ? Math.abs(g.track.duration_ms - t.len) <= 3000 : null; return `<div class="alignrow ${o ? 'ok' : g ? 'diff' : 'none'}"><span class="muted small">${t.disc > 1 ? t.disc + '.' : ''}${t.pos}</span><div class="aside">${g ? `${esc(g.track.title)} <span class="muted small">${fmt(g.track.duration_ms)}</span>` : '<span class="muted small">no file at this position</span>'}</div><span class="amark">${o ? icon('check') : g ? '≠' : ''}</span><div class="aside">${esc(t.title)} <span class="muted small">${t.len ? fmt(t.len) : ''}${dur === false ? ' · length differs' : ''}</span></div></div>`; }).join('');
-            box.innerHTML = `<div class="alignhead"><span></span><b>Your folder</b><span></span><b>${esc(r.title)} <span class="muted small">${esc((r['artist-credit'] || []).map((a) => a.name).join(', '))} · ${esc(r.date || '')} · ${countOf(tracks.length, 'tracks')}</span></b></div>${rows}<div class="actions" style="margin-top:10px">${matches.length ? `<button class="btn primary sm" data-acceptall="${matches.join(',')}">Accept all ${matches.length} matching</button>` : ''}<a class="btn ghost sm" href="https://musicbrainz.org/release/${esc(rel)}" target="_blank" rel="noopener">On MusicBrainz ${icon('external')}</a></div>`;
-            const all = $('[data-acceptall]', box); if (all) all.onclick = async () => { all.disabled = true; let ok = 0; for (const id of all.dataset.acceptall.split(',')) { try { await api('POST', `/library/suggestions/${id}/accept`); ok++; } catch { /* next */ } } toast(`${ok} file${ok === 1 ? '' : 's'} identified`); render(); };
-          });
-          $$('[data-accept]', main).forEach((b) => b.onclick = async () => { try { await api('POST', `/library/suggestions/${b.dataset.accept}/accept`); toast('Identified'); render(); } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-reject]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/library/suggestions/${b.dataset.reject}`); render(); } catch (e) { toast(e.message, 'error'); } });
+          // Album review: each folder's songs together, every song with its own options and
+          // evidence. A song with one strong option is offered ticked; a song whose options
+          // disagree waits for the owner's pick. Confirm stores the album's choices in one go,
+          // or none when one went stale (409: reload).
+          // Every await checks this is still the view it drew (leaving, or leaving and coming
+          // back, starts a new one): an answer that comes late draws nothing
+          const gen = state.idGen = (state.idGen || 0) + 1;
+          const live = () => state.view === 'identify' && state.idGen === gen;
+          // Something at once while the first page comes (owner, 2026-11-04: no answer for long)
+          main.innerHTML = pageHead('Confirm matches', null) + '<p class="muted small idloading" role="status">Loading the matches to confirm…</p><div class="sk-grid">' + '<div class="skeleton"></div>'.repeat(4) + '</div>';
+          const [page, st] = await Promise.all([api('GET', '/library/suggestions/albums?limit=50'), api('GET', '/library/identify').catch(() => null)]);
+          if (!live()) return;
+          // Paged by folder: "Show more" asks for the albums after the last one shown, so albums
+          // confirmed meanwhile don't make it skip any (an older node pages by offset)
+          const cursor = (p) => (p.next_after != null ? `after=${encodeURIComponent(p.next_after)}` : p.next != null ? `offset=${p.next}` : null);
+          const albums = page.albums.slice(); let next = cursor(page);
+          // The owner's choice per song, kept while more albums load (a song not touched shows what is offered)
+          const choices = new Map();
+          const MAX_CONFIRM = 500;
+          const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags');
+          const holdWhy = { search: 'found by its title and artist only', weak: 'a weak match', other_release: 'on another release than the rest of the album' };
+          const isChecked = (g, value) => (choices.has(g.track.id) ? choices.get(g.track.id) === value : String(g.pick == null ? '' : g.pick) === value);
+          // What Confirm does to the files depends on "Write IDs into my files": said as it is set
+          const files = !st ? 'With "Write IDs into my files" on (Library › Identify), its MusicBrainz IDs are also written into the file.'
+            : st.write_ids ? '"Write IDs into my files" is on, so its MusicBrainz IDs are also written into the file (its tags are backed up first).'
+              : 'It is stored in the node; your files stay as they are ("Write IDs into my files" is off).';
+          const albumHtml = (a, ai) => {
+            const head = `${esc(a.album || a.key.split('/').filter(Boolean).slice(-1)[0] || 'Library')}${a.artist ? ` <span class="muted small">${esc(a.artist)}</span>` : ''}`;
+            const parts = [countOf(a.songs.length, 'songs'), a.ready ? `${a.ready} ready` : '', a.conflicts ? `${a.conflicts} need${a.conflicts === 1 ? 's' : ''} your pick` : ''].filter(Boolean).join(' · ');
+            const rel = a.release ? `<p class="muted small">${a.release.songs} of ${a.songs.length} have an option on <a href="https://musicbrainz.org/release/${esc(a.release.mbid)}" target="_blank" rel="noopener">${esc(a.release.title || 'one release')} ${icon('external')}</a>. Nothing is chosen for you by it.</p>` : '';
+            const songs = a.songs.map((g) => {
+              const t = g.track; const name = `pick-${t.id}`;
+              // The radio is named by its label, which holds the option alone; the link and
+              // "Not this" sit beside it, not inside it
+              const opts = g.options.map((o) => `<div class="idopt idpick"><input type="radio" id="idopt-${o.id}" name="${name}" value="${o.id}" data-rec="${esc(o.recording_mbid)}" ${isChecked(g, String(o.id)) ? 'checked' : ''}><label class="grow" for="idopt-${o.id}"><span class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></span><span class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round(o.score * 100)}%</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(o.recording_mbid)}" target="_blank" rel="noopener" aria-label="${esc(`${o.title || 'Recording'} on MusicBrainz`)}">MusicBrainz ${icon('external')}</a><button class="btn ghost sm" type="button" data-reject="${o.id}" data-track="${t.id}" data-rec="${esc(o.recording_mbid)}" aria-label="${esc(`Not ${o.title || 'this recording'}`)}">Not this</button></div>`).join('');
+              const note = g.status === 'conflict' ? '<p class="small warn-text idhold">These disagree: pick one, or leave it for later.</p>' : g.hold ? `<p class="small muted idhold">Not ticked: ${esc(holdWhy[g.hold] || g.hold)}.</p>` : '';
+              return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<div class="idopt idpick idlater"><input type="radio" id="idlater-${t.id}" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><label class="grow small muted" for="idlater-${t.id}">Leave for later</label></div></div></div>`;
+            }).join('');
+            if (!a.songs.length) return '';
+            return `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${head}</h3><span class="muted small">${parts}</span></div>${rel}<div class="list">${songs}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-confirm="${ai}"></button><span class="small muted" role="status" data-confirm-out="${ai}"></span></div></section>`;
+          };
+          const draw = () => {
+            main.innerHTML = pageHead('Confirm matches', page.songs) + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            $$('[data-album]', main).forEach(wire);
+            const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live()) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
+          };
+          // One album drawn again from what is known here, after a confirm or a "Not this" (the
+          // rest of the page, its choices and where it is scrolled stay; nothing is fetched)
+          const redraw = (ai) => {
+            const sec = $(`[data-album="${ai}"]`, main); if (!sec) return;
+            const html = albumHtml(albums[ai], ai);
+            if (!html) { sec.remove(); } else { sec.insertAdjacentHTML('afterend', html); sec.remove(); wire($(`[data-album="${ai}"]`, main)); }
+            const count = $('.page-head .count', main); if (count) count.textContent = String(page.songs);
+            if (!albums.some((a) => a.songs.length) && next == null) draw();
+            else if (!albums.some((a) => a.songs.length)) { const m = $('#idmore'); if (m) m.click(); }
+          };
+          const chosen = (sec) => $$('.idrow', sec).map((row) => { const r = $('input[type=radio]:checked', row); return r && r.value ? { track_id: Number(row.dataset.track), suggestion_id: Number(r.value), recording_mbid: r.dataset.rec } : null; }).filter(Boolean);
+          const wire = (sec) => {
+            const btn = $('[data-confirm]', sec); const out = $('[data-confirm-out]', sec);
+            // More than one batch takes: the first ones are confirmed (all of them or none), the rest stay
+            const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n; };
+            label(); $$('input[type=radio]', sec).forEach((r) => r.onchange = () => { choices.set(Number(r.name.slice(5)), r.value); label(); });
+            btn.onclick = async () => {
+              const batch = chosen(sec).slice(0, MAX_CONFIRM); if (!batch.length) return; btn.disabled = true; out.textContent = 'Confirming…';
+              try {
+                const r = await api('POST', '/library/suggestions/confirm', { choices: batch });
+                const skipped = (r.files && r.files.skipped) || [];
+                toast(`${countOf(r.count, 'songs')} identified${skipped.length ? `; IDs not written into ${countOf(skipped.length, 'files')} (${skipped[0].reason})` : ''}${r.files && r.files.error ? `; IDs not written: ${r.files.error}` : ''}`, skipped.length || (r.files && r.files.error) ? 'error' : '');
+                if (!live()) return;
+                // The confirmed songs leave this album; the page isn't loaded again
+                const done = new Set(r.confirmed || batch.map((c) => c.track_id));
+                const ai = Number(sec.dataset.album); const a = albums[ai];
+                a.songs = a.songs.filter((g) => !done.has(g.track.id)); done.forEach((id) => choices.delete(id));
+                a.ready = a.songs.filter((g) => g.pick != null).length; a.conflicts = a.songs.filter((g) => g.status === 'conflict').length;
+                page.songs = Math.max(0, page.songs - done.size);
+                redraw(ai);
+              } catch (e) {
+                if (!live()) return;
+                const stale = (e.body && e.body.stale) || [];
+                stale.forEach((x) => { const row = $(`.idrow[data-track="${x.track_id}"]`, sec); if (row) row.classList.add('idstale'); });
+                out.textContent = e.message; out.classList.add('warn-text'); btn.disabled = false;
+                if (stale.length) { btn.textContent = 'Reload this list'; btn.onclick = () => render(); }
+              }
+            };
+            // "Not this" names the song and recording the page shows: one changed meanwhile is refused
+            $$('[data-reject]', sec).forEach((b) => b.onclick = async (ev) => {
+              ev.preventDefault();
+              try {
+                await api('DELETE', `/library/suggestions/${b.dataset.reject}?track_id=${encodeURIComponent(b.dataset.track)}&recording_mbid=${encodeURIComponent(b.dataset.rec)}`);
+                if (!live()) return;
+                // That option leaves its song; a song with none left leaves the album
+                const ai = Number(sec.dataset.album); const a = albums[ai]; const tid = Number(b.dataset.track); const sid = Number(b.dataset.reject);
+                const g = a.songs.find((x) => x.track.id === tid);
+                if (g) {
+                  g.options = g.options.filter((o) => o.id !== sid);
+                  if (choices.get(tid) === String(sid)) choices.delete(tid);
+                  if (g.pick === sid) g.pick = null;
+                  if (g.options.length === 1 && g.status === 'conflict') g.status = 'single';
+                  if (!g.options.length) { a.songs = a.songs.filter((x) => x !== g); page.songs = Math.max(0, page.songs - 1); }
+                  a.ready = a.songs.filter((x) => x.pick != null).length; a.conflicts = a.songs.filter((x) => x.status === 'conflict').length;
+                }
+                redraw(ai);
+              } catch (e) { toast(e.message, 'error'); }
+            });
+          };
+          draw();
           break;
         }
         case 'genres': {
@@ -4785,7 +4884,7 @@
           const zid = state.viewArg;
           if (zid && (zid === BROWSER || state.zones[zid])) state.zone = zid;
           // A way back for whoever opened it from a link (a TV in kiosk use simply doesn't tap it)
-          main.innerHTML = '<a class="dash-home" href="/" id="dashhome">‹ Pubky Music</a><div class="dash" id="dash" aria-live="polite"></div>';
+          main.innerHTML = '<a class="dash-home" href="/" id="dashhome">‹ Odeion</a><div class="dash" id="dash" aria-live="polite"></div>';
           $('#dashhome').onclick = (e) => { e.preventDefault(); setView('home'); };
           state.dashKey = null; drawDashboard();
           break;
@@ -4978,7 +5077,7 @@
           // Only what can play here: services not connected aren't part of the answer (second review #16)
           const orderText = pf ? pf.order.order.filter((k) => { const sv = (pf.order.services || []).find((x) => x.id === k); return !sv || sv.connected; }).map(srcName).join(' › ') || 'Your library' : '';
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button>${shellMode() === 'desktop' ? `<button class="btn danger" id="pldel">${icon('trash')} Delete</button>` : ''}</div></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + (pf ? `<section class="section" id="plorder"><div class="section-head"><h3>Play from</h3><span class="muted small">${ownOrder ? 'this playlist’s own order' : 'your node’s order (Settings)'}</span></div><p class="muted small">Each song plays from the first source here that has it. A pinned song keeps its own source.</p>${orderList(pf.order)}<label class="check small" style="margin-top:10px"><input type="checkbox" id="plownorder" ${ownOrder ? '' : 'checked'}> Use my node’s order</label></section>` : '')
@@ -5011,8 +5110,9 @@
             try { await api('PUT', `/playlists/${d.summary.id}`, { [key]: r.text }); state.playlists = await api('GET', '/playlists'); toast(key === 'name' ? `Renamed to “${r.text}”` : 'Description saved'); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
-          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) }] });
-          $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
+          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) },
+            ...($('#pldel') ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+          if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); state.plPf = null; render(); } catch (er) { toast(er.message, 'error'); } });
           const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-pup]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); pmove(Number(b.dataset.pup), Number(b.dataset.pup) - 1); });
@@ -5078,7 +5178,7 @@
           const subAccount = active !== 'subsonic' ? '' : sub && sub.connected
             ? `<div class="toolbar"><span class="pill ok account">Connected · ${esc(sub.name || 'your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.user || '')}@${esc(sub.url || '')}</span><button class="btn ghost" id="subforget">Forget this server</button></div>`
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
-            : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Pubky Music node. The password stays on this node; requests are signed with a fresh token each time.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
+            : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Odeion node. The password stays on this node; requests are signed with a fresh token each time.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
           let jf = null; let jfPls = []; if (active === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
           const jfAccount = active !== 'jellyfin' ? '' : jf && jf.connected
             ? `<div class="toolbar"><span class="pill ok account">Signed in · ${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · ${esc(jf.user || '')}</span><button class="btn ghost" id="jfout">Sign out</button></div>`
@@ -5324,19 +5424,60 @@
           }
           if (tidal && tidal.signed_in && cur.enabled) {
             // Your collection and playlists, with imports into the node's favourites and Pubky playlists.
-            const box = document.createElement('div'); box.id = 'tidalmine'; stillLoading(box, 'Still loading from TIDAL… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your TIDAL collection…</p>'; ($('#srcmine') || main).appendChild(box);
-            (async () => {
-              try {
-                const [col, pls] = await Promise.all([api('GET', '/sources/tidal/collection'), api('GET', '/sources/tidal/playlists')]);
-                if (state.view !== 'sources' || state.sourceId !== 'tidal' || !box.isConnected) return;
-                const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind)}</span></div>`;
-                box.innerHTML = `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.tracks.length, 'tracks')} · ${countOf(col.albums.length, 'albums')}</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.slice(0, 20).map(hit).join('')}${col.tracks.slice(0, 50).map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>
-                  <section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`;
-                $$('[data-sitem]', box).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
-                $('#tidalfav').onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
-                $$('[data-tpl]', box).forEach((b) => b.onclick = () => importPlaylist(b, 'tidal', b.dataset.tpl));
-              } catch (e) { box.innerHTML = `<p class="muted small">TIDAL collection: ${esc(e.message)}</p>`; }
-            })();
+            // A cold node can take 20 s and more: the last good copy shows at once (this browser keeps
+            // it), each part draws as it comes, and the top of the page says it is loading (UX A7)
+            const box = document.createElement('div'); box.id = 'tidalmine'; box.innerHTML = '<div id="tidalcol"></div><div id="tidalpls"></div>'; ($('#srcmine') || main).appendChild(box);
+            const memo = `pm.srcmine.tidal.${(state.me && state.me.key) || 'owner'}`;
+            let kept = null; try { kept = JSON.parse(localStorage.getItem(memo) || 'null'); } catch { kept = null; }
+            const hit = (h) => `<div class="list-row clickable" data-sitem="${esc(h.id)}">${h.image ? `<img class="thumb" src="${esc(h.image)}" alt="" loading="lazy">` : '<div class="thumb"></div>'}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([h.creator, h.year].filter(Boolean).join(' · '))}</div></div><span class="muted small">${esc(h.kind)}</span></div>`;
+            const failed = (what, err) => `<section class="section"><div class="section-head"><h3>${what}</h3></div><p class="muted small">Couldn’t load it: ${esc(err)} <button class="btn sm" type="button" data-tretry>Try again</button></p></section>`;
+            const colHtml = (col) => view.colErr && !col ? failed('Your collection', view.colErr) : col ? `<section class="section"><div class="section-head"><h3>Your collection</h3><span class="muted small">${countOf(col.nTracks, 'tracks')} · ${countOf(col.nAlbums, 'albums')}</span><button class="btn sm" id="tidalfav" title="Favourite them here too: by ISRC where TIDAL has one, else by the TIDAL link">${icon('heart')} Import as favourites</button></div>${col.albums.length || col.tracks.length ? `<div class="list">${col.albums.map(hit).join('')}${col.tracks.map(hit).join('')}</div>` : '<p class="muted">Nothing in your TIDAL collection yet.</p>'}</section>`
+              : '<section class="section"><div class="section-head"><h3>Your collection</h3></div><p class="muted small" data-loading>Loading your TIDAL collection…</p></section>';
+            const plsHtml = (pls) => view.plsErr && !pls ? failed('Your playlists', view.plsErr) : pls ? `<section class="section"><div class="section-head"><h3>Your playlists</h3><span class="muted small">import one as a private Pubky playlist</span></div>${pls.length ? `<div class="list">${pls.map((p) => `<div class="list-row"><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items, 'tracks')}${p.description ? ' · ' + esc(p.description) : ''}</div></div><button class="btn sm" data-tpl="${esc(p.id)}" ${importing.has(`tidal:${p.id}`) ? 'disabled' : ''}>${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted">No playlists of your own on TIDAL.</p>'}</section>`
+              : '<section class="section"><div class="section-head"><h3>Your playlists</h3></div><p class="muted small" data-loading>Loading your TIDAL playlists…</p></section>';
+            const view = { col: kept && kept.col, pls: kept && kept.pls, fresh: { col: false, pls: false }, colErr: null, plsErr: null, slow: false, topKey: null };
+            const here = () => state.view === 'sources' && state.sourceId === 'tidal' && box.isConnected;
+            // Under the page's title, where the eye is: loading, updating a kept copy, or the error
+            const top = document.createElement('p'); top.className = 'muted small srcmine-status'; top.setAttribute('role', 'status');
+            const desc = $('#src-tidal .src-desc') || $('#src-tidal .set-title'); if (desc) desc.after(top);
+            // Rewritten only when what it says changes (a screen reader hears it once); an error stays,
+            // with Try again, also over a kept copy
+            const drawTop = () => {
+              if (!top.isConnected) return;
+              const done = view.fresh.col && view.fresh.pls; const err = view.colErr || view.plsErr;
+              const k = done ? (err ? `e:${err}` : 'done') : `l:${view.slow}`; if (k === view.topKey) return; view.topKey = k;
+              if (done && !err) { top.hidden = true; top.innerHTML = ''; return; }
+              top.hidden = false;
+              top.innerHTML = done
+                ? `<span class="warn-text">Couldn’t ${kept ? 'update' : 'load'} your TIDAL collection: ${esc(err)}</span>${kept ? ' Showing the last copy.' : ''} <button class="btn sm" type="button" data-tretry>Try again</button>`
+                : `<span class="spin" aria-hidden="true"></span> ${kept ? 'Updating your TIDAL collection' : 'Loading your TIDAL collection'}${view.slow ? '… the first time after a restart can take a while' : '…'} <a href="#tidalmine" data-jump>${kept ? 'Show the last copy' : 'Show'}</a>`;
+              const j = $('[data-jump]', top); if (j) j.onclick = (e) => { e.preventDefault(); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+              const t = $('[data-tretry]', top); if (t) t.onclick = () => render();
+            };
+            // Each part redraws on its own, so focus in the other one stays
+            const drawCol = () => {
+              const el = $('#tidalcol', box); if (!el || !here()) return;
+              el.innerHTML = colHtml(view.col);
+              $$('[data-sitem]', el).forEach((b) => b.onclick = () => setView('source-item', { source: 'tidal', id: b.dataset.sitem }));
+              const fav = $('#tidalfav', el); if (fav) fav.onclick = async () => { try { const r = await api('POST', '/sources/tidal/collection/import'); toast(`${r.imported} favourites imported${r.skipped ? `, ${r.skipped} skipped` : ''}`); loadFavourites().catch(() => {}); } catch (e) { toast(e.message, 'error'); } };
+              $$('[data-tretry]', el).forEach((b) => b.onclick = () => render());
+            };
+            const drawPls = () => {
+              const el = $('#tidalpls', box); if (!el || !here()) return;
+              el.innerHTML = plsHtml(view.pls);
+              $$('[data-tpl]', el).forEach((b) => b.onclick = async () => { await importPlaylist(b, 'tidal', b.dataset.tpl); drawPls(); });
+              $$('[data-tretry]', el).forEach((b) => b.onclick = () => render());
+            };
+            const settled = () => {
+              drawTop();
+              if (view.fresh.col && view.fresh.pls && !view.colErr && !view.plsErr) { try { localStorage.setItem(memo, JSON.stringify({ at: Date.now(), col: view.col, pls: view.pls })); } catch { /* a full or blocked store: shown fresh next time */ } }
+            };
+            drawCol(); drawPls(); drawTop();
+            setTimeout(() => { if (!(view.fresh.col && view.fresh.pls)) { view.slow = true; drawTop(); } }, 2000);
+            api('GET', '/sources/tidal/collection').then((col) => { view.col = { albums: col.albums.slice(0, 20), tracks: col.tracks.slice(0, 50), nAlbums: col.albums.length, nTracks: col.tracks.length }; view.fresh.col = true; drawCol(); settled(); })
+              .catch((e) => { view.colErr = e.message; view.fresh.col = true; drawCol(); settled(); });
+            api('GET', '/sources/tidal/playlists').then((pls) => { view.pls = pls; view.fresh.pls = true; drawPls(); settled(); })
+              .catch((e) => { view.plsErr = e.message; view.fresh.pls = true; drawPls(); settled(); });
           }
           const ssa = $('#ssearchall'); if (ssa) ssa.onclick = () => { state.searchScope = cur.id; search.placeholder = `Search ${cur.name}…`; search.focus(); search.select(); if (search.value.trim()) runSearch(); else { const box = search.closest('.search') || search; box.classList.remove('nudge'); void box.offsetWidth; box.classList.add('nudge'); } };
           break;
@@ -5483,17 +5624,19 @@
           // sits under the header; without one it stays at the end of the page. A function: when open
           // sources answer later (about_pending) it is redrawn in place.
           const aboutTop = !!(pg.about_text && pg.about_text.text); // artist, album and song (F5: the same About everywhere)
+          // A file is its name; where it is on the node's disk is a tooltip, not page text (UX sweep A21)
+          const fileFact = (f) => { if (f.label !== 'File' || !/[\\/]/.test(String(f.value || ''))) return esc(f.value); const v = String(f.value); const name = v.split(/[\\/]/).pop(); return `<span class="filefact" title="${esc(v)}">${esc(name)}</span>`; };
           const aboutHtml = (p) => {
             const at = p.about_text;
             const clamp = !!(at && at.text);
             const blurbText = (at && at.text) || p.blurb;
-            return `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${clamp ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${clamp ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
+            return `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${blurbText ? `<p class="blurb${clamp ? ' clamp' : ''}" id="iblurb"${at && at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(blurbText)}</p>${clamp ? '<button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>' : ''}` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : fileFact(f)}</dd>`).join('')}</dl>` : blurbText ? '' : empty('Nothing more is known yet.')}</section>`;
           };
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
             + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn" id="izone">${icon('zone')} Play on…</button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
             + (aboutTop ? aboutHtml(pg) : '')
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
@@ -5518,7 +5661,9 @@
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
             const same = bk && $$('[data-crumb-id]', main).find((c) => bk.textContent.trim().endsWith(c.textContent.trim()));
-            if (same) { bk.classList.add('dupback'); same.dataset.asBack = '1'; } }
+            if (same) { bk.classList.add('dupback'); same.dataset.asBack = '1'; }
+            // Back to a page with this page's name (a song from its album of the same name) says Back
+            if (bk && bk.textContent.trim() === String(pg.title || '').trim()) bk.lastChild.textContent = ' Back'; }
           const ig = $('#iglobal'); if (ig) ig.onclick = () => setView('item', { kind, id: idOf(pg.song_uri) });
           if ($('#isongs')) { bindSongRows($('#isongs'), songs, { plays_from: pf, fallback }); enableSelect($('#isongs'), songs, { plays_from: pf, fallback }); }
           if (pg.albums.length) bindItemTiles($('#ialbums'), pg.albums, 'album');
@@ -5747,7 +5892,7 @@
           const head = pageHead('Your library', null, owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '') + tabsHtml;
           if (tab === 'mine') {
             if (!owner) {
-              main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Pubky Music app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>');
+              main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Odeion app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>');
               break;
             }
             const [st, pk, ns] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/pubky').catch(() => null), api('GET', '/node/settings').catch(() => ({}))]);
@@ -5848,7 +5993,7 @@
         }
         case 'downloads': {
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
-          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Pubky Music app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
+          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
           let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'downloads') return;
           const byId = new Map(d.tracks.map((t) => [t.id, t]));
@@ -5942,7 +6087,7 @@
           const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.output || ''), `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
           const playback = group('Play from', block('Where songs play from', 'The first source here that has a song plays it. A playlist can have its own order; a pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>')
             + row('Prefer full tracks', 'On a service\u2019s song page, Play plays that service, even a 30 s preview. With this on, a preview gives way to the full track from your Play from order.', `<label><input type="checkbox" id="preferfull" ${ns.prefer_full ? 'checked' : ''}> On</label>`))
-            + group('Speakers and outputs', block('', 'What this node can play to, found on your network. A Raspberry Pi or computer next to a DAC: run squeezelite on it with this node as its server (squeezelite -s and this node\u2019s address). Network speakers (UPnP, Sonos, HEOS, Chromecast, AirPlay, BluOS) are found by themselves; MPD and Snapcast are set in the node\u2019s config. The computer or phone the Pubky Music app runs on: the app adds its own player, which plays only for this node.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
+            + group('Speakers and outputs', block('', 'What this node can play to, found on your network. A Raspberry Pi or computer next to a DAC: run squeezelite on it with this node as its server (squeezelite -s and this node\u2019s address). Network speakers (UPnP, Sonos, HEOS, Chromecast, AirPlay, BluOS) are found by themselves; MPD and Snapcast are set in the node\u2019s config. The computer or phone the Odeion app runs on: the app adds its own player, which plays only for this node.', `${outList}<div class="toolbar" style="margin-top:10px"><button class="btn" id="rescan" title="Look again for speakers, streamers and devices on your network">Look for speakers again</button><button class="btn ghost" id="netscan" title="Ask every UPnP and Cast device on the network and explain what answers">${icon('search')} Explain what is on the network</button></div><div id="netscanout"></div>`)
               + block('Add a renderer by address', 'For a UPnP speaker or streamer the network scan doesn’t find: its IP address or its description URL. For a Linn: its IP address, MAC address and serial number, with spaces between.', `<div class="toolbar"><input class="input" id="rendaddr" placeholder="192.168.1.20" aria-label="Renderer address"><button class="btn" id="rendadd">${icon('plus')} Add renderer</button></div><div id="rendsaved" class="muted small"></div>`))
             + group('Zones', zoneRows + '<div id="dspbox"></div>'
               + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other, and so do the app\u2019s players on a DAC.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
@@ -5997,7 +6142,7 @@
           const appAdvanced = (a) => !a.set ? '' : `<details class="small app-adv"><summary>Advanced: use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
           // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
           const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
-          const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? help(esc(a.limits)) : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
+          const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? (() => { const [x, y] = splitNote(a.limits); return help(esc(x)) + (y ? `<details class="small morenote"><summary>More</summary><p class="set-help">${esc(y)}</p></details>` : ''); })() : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
           const appsTab = group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
@@ -6431,16 +6576,30 @@
   // ---- identify library (Settings card and the review view) ----
   let idTimer = null;
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
-  const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
+  const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint'], [n('tag_match'), 'by title, artist and length']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
   const renderIdentify = async () => {
     const box = $('#idbox'); if (!box) return;
     let st; try { st = await api('GET', '/library/identify'); } catch (e) { box.textContent = e.message; return; }
     const c = st.counts; const p = st.progress;
     const pct = c.total ? Math.round((c.identified / c.total) * 100) : 0;
-    box.innerHTML = `<div class="idbar"><span style="width:${pct}%"></span></div>
+    // One line says where identification stands (st.phase), before the numbers
+    const n = (x) => Number(x || 0).toLocaleString(); const matches = (x) => `${n(x)} ${x === 1 ? 'match' : 'matches'}`;
+    const ph = st.phase || (p.running ? 'running' : c.suggested ? 'needs_review' : c.unchecked ? 'new' : 'ready');
+    const head = {
+      running: `Working: ${n(p.done)} of ${n(p.total)}…`,
+      needs_review: `Finished — ${matches(c.suggested)} need${c.suggested === 1 ? 's' : ''} your review`,
+      ready: c.unknown ? `Finished — nothing to review (${n(c.unknown)} not found)` : 'Finished — nothing to review',
+      new: `${n(c.unchecked)} ${c.unchecked === 1 ? 'song' : 'songs'} not checked yet`,
+      interrupted: `The last run was cut off when the node stopped${p.total ? ` (after ${n(p.done)} of ${n(p.total)})` : ''}. Identify carries on from there.`,
+      failed: `It stopped after ${n(p.done)} of ${n(p.total)}: ${esc(p.stopped || 'an error')}. Identify carries on from there.`,
+      empty: 'No songs yet: add music first.',
+    }[ph] || '';
+    const reviewFirst = ph === 'needs_review';
+    box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>
+      <div class="idbar"><span style="width:${pct}%"></span></div>
       <p class="small">${c.identified} of ${c.total} identified${c.suggested ? ` · <a data-view="identify">${c.suggested} to confirm</a>` : ''}${c.unknown ? ` · ${c.unknown} not found` : ''}${c.unchecked ? ` · ${c.unchecked} not checked yet` : ''}</p>
-      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
-      ${p.running ? `<p class="small">Working: ${p.done} of ${p.total}…</p>` : (p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>${p.stopped ? `<p class="small warn-text" role="status">It stopped after ${p.done} of ${p.total}: ${esc(p.stopped)}. Identify carries on from there.</p>` : ''}` : '')}
+      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
+      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : ''}
       ${(() => {
         // The AcoustID key lives here, with its state and a Check (owner, 2026-10-31): Settings
         // keeps no copy. Matching by how songs sound needs it; without it, title and artist only
@@ -6452,7 +6611,7 @@
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
-      <div class="actions"><button class="btn primary" id="idrun" ${p.running ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
+      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };

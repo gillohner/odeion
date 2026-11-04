@@ -1,0 +1,47 @@
+# The Odeion node next to its own homeserver, on bare metal (docs/deploy.md).
+#
+# The same node as pubky-music-node.service, the unit from before Odeion: the same user, config
+# file and data folder (compat: pre-Odeion paths, kept so a node updates without moving its data).
+# Run one of the two, never both: each Conflicts= the other, and this one starts After= the old one,
+# so starting either while the other runs stops the other first (one ordering edge, no cycle). Moving an install from the old unit
+# (docs/branding-compatibility.md, "Moving to odeiond.service"):
+#   systemctl cat pubky-music-node     # the old unit as it runs: its file, then its drop-ins
+#   sudo install -m 755 odeiond /usr/local/bin/ && sudo ln -sf odeiond /usr/local/bin/pm-node
+#   sudo install -m 644 odeiond.service /etc/systemd/system/
+#   # Drop-ins move with it; lines you edited in the old unit's own file (another folder in
+#   # ReadWritePaths= for backups, Environment= lines) go into a drop-in of the new one:
+#   sudo mkdir -p /etc/systemd/system/odeiond.service.d
+#   [ ! -d /etc/systemd/system/pubky-music-node.service.d ] ||
+#     sudo cp -a /etc/systemd/system/pubky-music-node.service.d/. /etc/systemd/system/odeiond.service.d/
+#   sudo systemctl edit odeiond         # e.g. ReadWritePaths=/mnt/backup  (added to the unit's own)
+#   sudo systemctl daemon-reload
+#   systemctl cat odeiond               # the same ReadWritePaths= and Environment= as before
+#   sudo systemctl disable --now pubky-music-node && sudo systemctl enable --now odeiond
+# No alias for the old unit name: an alias cannot be enabled while the old unit file is installed.
+[Unit]
+Description=Odeion node
+Wants=network-online.target pubky-homeserver.service
+After=network-online.target pubky-homeserver.service sound.target pubky-music-node.service
+Conflicts=pubky-music-node.service
+
+[Service]
+User=pubky-music
+Group=pubky-music
+# audio: the DAC; pubky-files: read the homeserver's stored files (its music is a library folder),
+# nothing else of the homeserver's
+SupplementaryGroups=audio pubky-files
+ExecStart=/usr/local/bin/odeiond -c /etc/pubky-music/node.toml serve
+# info: the start-up notes (old setting names, by name only) show in the journal
+Environment=RUST_LOG=info
+# How Settings › Remote access tells you to restart the homeserver after a tunnel change
+Environment=ODEION_TUNNEL_RESTART_HINT="On the machine: sudo systemctl restart pubky-homeserver cloudflared-pubky"
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/pubky-music
+
+[Install]
+WantedBy=multi-user.target

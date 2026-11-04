@@ -27,6 +27,7 @@ pub mod matching;
 pub mod musicbrainz;
 pub mod posts;
 pub mod roon;
+pub mod same_song;
 pub mod scan;
 pub mod tags;
 pub mod tagwrite;
@@ -36,7 +37,7 @@ pub use db::{
     AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentifiedBy,
     IdentityCounts, PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
 };
-pub use db::{AlbumEdit, Library, LibraryStats, TrackOverride};
+pub use db::{AlbumEdit, ConfirmChoice, ConfirmReport, Library, LibraryStats, StaleChoice, TrackOverride};
 pub use error::{LibraryError, Result};
 pub use import::{ImportFormat, ImportedList, ImportedTrack};
 pub use lyrics::LyricLine;

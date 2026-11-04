@@ -1,6 +1,6 @@
 [package]
 name = "pm-model"
-description = "Shared types for the Pubky Music Node: audio formats, capabilities, signal path, canonical music identity, library entities"
+description = "Shared types for the Odeion node: audio formats, capabilities, signal path, canonical music identity, library entities"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

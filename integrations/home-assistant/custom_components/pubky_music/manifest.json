@@ -1,6 +1,6 @@
 {
   "domain": "pubky_music",
-  "name": "Pubky Music",
+  "name": "Odeion",
   "codeowners": ["@gillohner"],
   "config_flow": true,
   "dependencies": ["media_source"],

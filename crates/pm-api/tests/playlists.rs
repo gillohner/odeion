@@ -1452,7 +1452,7 @@ async fn another_subsonic_server_is_a_source() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["name"], "Pubky Music node");
+    assert_eq!(v["name"], "Odeion node");
     assert!(!v.to_string().contains("sesame"));
     let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
     assert!(sources

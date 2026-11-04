@@ -1,7 +1,7 @@
 # Cloudflare Tunnel for the node and its homeserver, on bare metal (docs/deploy.md). The token is
 # the one Settings › Remote access saves; until there is one this unit fails and retries.
 [Unit]
-Description=Cloudflare Tunnel for Pubky Music Node
+Description=Cloudflare Tunnel for the Odeion node
 Wants=network-online.target
 After=network-online.target
 

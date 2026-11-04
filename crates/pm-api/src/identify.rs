@@ -14,10 +14,12 @@ use axum::http::StatusCode;
 use axum::Json;
 use futures_util::StreamExt;
 use pm_library::album_fit::{
-    fit_release, folder_album, release_candidates, release_query, titles_agree, AlbumFit, FolderAlbum,
-    FolderFile, Matched,
+    fit_release, folder_album, release_candidates_ranked, release_query, settle_editions, AlbumFit,
+    FolderAlbum, FolderFile, Matched,
 };
-use pm_library::identify::{best_folder_release, decide, AcoustIdResult, Candidate, Decision, FileFacts};
+use pm_library::identify::{
+    best_folder_releases, decide_with_tags, AcoustIdResult, Candidate, Decision, FileFacts,
+};
 use pm_library::{IdentityCounts, Library, SuggestionRow};
 use pm_model::{Confidence, Mbid, MusicUri, Track};
 use serde::{Deserialize, Serialize};
@@ -64,6 +66,151 @@ pub struct IdentifyProgress {
     pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<i64>,
+    /// The node stopped while this run went on (it never finished): the next run carries on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
+    /// What the run had to do, and what it took from earlier runs instead.
+    #[serde(default, skip_serializing_if = "RunWork::is_empty")]
+    pub work: RunWork,
+}
+
+/// A run's work: what it read, decoded and asked, and what it reused from earlier runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RunWork {
+    /// Files read for their content key (2 MiB each).
+    pub file_reads: usize,
+    /// Content keys taken from the library (the file's size and time unchanged).
+    pub file_keys_reused: usize,
+    /// Files decoded for a fingerprint.
+    pub decoded: usize,
+    /// AcoustID lookups sent.
+    pub acoustid_asked: usize,
+    /// AcoustID answers taken from the library.
+    pub lookups_reused: usize,
+    /// MusicBrainz requests sent.
+    pub mb_asked: usize,
+    /// MusicBrainz answers taken from the library.
+    pub mb_reused: usize,
+    /// Files known not to fingerprint (their audio, unchanged), not decoded again.
+    #[serde(default)]
+    pub failures_reused: usize,
+}
+
+impl RunWork {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn work(s: &NodeState, f: impl FnOnce(&mut RunWork)) {
+    f(&mut s.identify.lock().expect("identify lock").work);
+}
+
+/// How a run goes: `retry` looks again at "not found" songs; the pacing is MusicBrainz's and
+/// AcoustID's (tests and the replay benchmark pace nothing, see [`RunOptions::quick`]).
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub retry: bool,
+    pub mb_interval: std::time::Duration,
+    pub acoustid_interval: std::time::Duration,
+    /// The most MusicBrainz answers kept (default [`Library::IDENTIFY_MB_MAX`]); held when
+    /// the run ends, not only when the next one starts.
+    pub mb_cache_max: Option<i64>,
+}
+
+impl RunOptions {
+    pub fn new(retry: bool) -> Self {
+        Self {
+            retry,
+            mb_interval: std::time::Duration::from_millis(1000),
+            acoustid_interval: std::time::Duration::from_millis(340),
+            mb_cache_max: None,
+        }
+    }
+
+    /// Unpaced, against mock services only (tests, the replay benchmark).
+    pub fn quick(retry: bool) -> Self {
+        Self {
+            retry,
+            mb_interval: std::time::Duration::ZERO,
+            acoustid_interval: std::time::Duration::ZERO,
+            mb_cache_max: None,
+        }
+    }
+}
+
+/// Where identification stands, in one word for the Identify card (`IdentifyStatus::phase`):
+/// - `empty`: the library has no songs;
+/// - `new`: songs nobody has checked yet (never run, or songs added since);
+/// - `running`;
+/// - `interrupted`: the node stopped during the last run;
+/// - `failed`: the last run stopped early on an error (`progress.stopped` says why);
+/// - `needs_review`: finished, and matches wait for the owner (`counts.suggested`);
+/// - `ready`: finished, nothing to review.
+pub fn phase(p: &IdentifyProgress, c: &IdentityCounts) -> &'static str {
+    if p.running {
+        "running"
+    } else if c.total == 0 {
+        "empty"
+    } else if p.interrupted {
+        "interrupted"
+    } else if p.stopped.is_some() {
+        "failed"
+    } else if c.suggested > 0 {
+        "needs_review"
+    } else if c.unchecked > 0 {
+        "new"
+    } else {
+        "ready"
+    }
+}
+
+/// The last run's progress, kept in the library's settings: after a restart the card still knows
+/// how it ended, or that it never did.
+const LAST_RUN_KEY: &str = "identify.last_run";
+
+fn remember_run(s: &NodeState, p: &IdentifyProgress) {
+    let Ok(json) = serde_json::to_string(p) else {
+        return;
+    };
+    if let Err(e) = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .set_setting(LAST_RUN_KEY, &json)
+    {
+        tracing::debug!("identify: the run's progress not kept: {e}");
+    }
+}
+
+/// The run this process knows, else the last one the library remembers (a run it remembers as
+/// going on was cut off by a restart).
+fn progress_now(s: &NodeState) -> IdentifyProgress {
+    let p = s.identify.lock().expect("identify lock").clone();
+    if p.running || p.started_at.is_some() {
+        return p;
+    }
+    let kept = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(LAST_RUN_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<IdentifyProgress>(&j).ok());
+    let Some(mut kept) = kept else { return p };
+    if kept.running {
+        kept.running = false;
+        kept.interrupted = true;
+    }
+    // Kept for this process: a key refusal or a run started meanwhile replace it as before
+    let mut now = s.identify.lock().expect("identify lock");
+    if now.running || now.started_at.is_some() {
+        return now.clone();
+    }
+    kept.acoustid_refused = now.acoustid_refused.take().or(kept.acoustid_refused);
+    *now = kept.clone();
+    kept
 }
 
 /// `GET /v1/library/identify`.
@@ -71,6 +218,9 @@ pub struct IdentifyProgress {
 pub struct IdentifyStatus {
     pub progress: IdentifyProgress,
     pub counts: IdentityCounts,
+    /// Where identification stands, see [`phase`].
+    #[serde(default)]
+    pub phase: String,
     /// Whether an AcoustID key is configured (fingerprint lookups).
     pub acoustid: bool,
     /// Whether that key was entered on the page (it can be changed or removed there).
@@ -318,7 +468,7 @@ fn status(s: &NodeState) -> Result<IdentifyStatus, ApiError> {
         (lib.identity_counts()?, own)
     };
     // Its own statement: the run counts while it holds the library, so never hold both
-    let progress = s.identify.lock().expect("identify lock").clone();
+    let progress = progress_now(s);
     let acoustid = !s.acoustid.read().expect("acoustid lock").api_key.is_empty();
     let (acoustid_state, acoustid_detail) = if !acoustid {
         ("missing", None)
@@ -328,6 +478,7 @@ fn status(s: &NodeState) -> Result<IdentifyStatus, ApiError> {
         ("ok", None)
     };
     Ok(IdentifyStatus {
+        phase: phase(&progress, &counts).into(),
         progress,
         counts,
         acoustid,
@@ -360,15 +511,21 @@ pub(crate) async fn start(
             ..Default::default()
         };
     }
+    let started = s.identify.lock().expect("identify lock").clone();
+    remember_run(&s, &started);
     let st = s.clone();
     tokio::spawn(async move {
         if let Err(e) = run(&st, retry).await {
             tracing::warn!("identify: {}", e.message);
             st.identify.lock().expect("identify lock").stopped = Some(e.message);
         }
-        let mut p = st.identify.lock().expect("identify lock");
-        p.running = false;
-        p.finished_at = Some(pm_library::db::now_unix());
+        let ended = {
+            let mut p = st.identify.lock().expect("identify lock");
+            p.running = false;
+            p.finished_at = Some(pm_library::db::now_unix());
+            p.clone()
+        };
+        remember_run(&st, &ended);
         let _ = st.events.send(crate::types::ApiEvent::LibraryChanged);
     });
     Ok(Json(status(&s)?))
@@ -385,6 +542,32 @@ fn fingerprint_workers() -> usize {
 
 /// Releases a folder's search may look up before the folder goes to the fingerprint.
 const RELEASES_PER_FOLDER: usize = 2;
+
+/// Tests: something to do right after a run has read the library (a rescan landing there), for
+/// the node it is registered for.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static AFTER_SNAPSHOT: std::sync::Mutex<Vec<(usize, Box<dyn Fn() + Send>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn after_snapshot(s: &Arc<NodeState>) {
+    let key = Arc::as_ptr(s) as usize;
+    for (k, f) in AFTER_SNAPSHOT.lock().expect("hooks").iter() {
+        if *k == key {
+            f();
+        }
+    }
+}
+
+/// What the lanes share: the songs this run identified, and what each song looks like now.
+struct RunCtx {
+    found: Mutex<Vec<i64>>,
+    inputs: HashMap<i64, String>,
+    /// What each song was when the run read it ([`Library::input_generations`]): an answer for a
+    /// song that changed since is not stored.
+    read: HashMap<i64, String>,
+}
 
 /// A folder that says it is an album, for the album lane.
 struct AlbumWork {
@@ -421,10 +604,67 @@ struct Miss {
 /// lane leaves; the search waits for the album lane, which shares MusicBrainz's one request a
 /// second and settles a dozen songs a request.
 pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
-    let (todo, all) = {
+    run_with(s, RunOptions::new(retry)).await
+}
+
+/// [`run`] with its options (tests and the replay benchmark pace nothing).
+pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiError> {
+    let retry = opts.retry;
+    {
+        // Counted afresh (a run started from the page was reset already, and is marked running)
+        let mut p = s.identify.lock().expect("identify lock");
+        *p = IdentifyProgress {
+            running: p.running,
+            started_at: p.started_at.or(Some(pm_library::db::now_unix())),
+            ..Default::default()
+        };
+    }
+    let settings = s.acoustid.read().expect("acoustid lock").clone();
+    let mb = mb_client(s, opts.mb_interval);
+    let cache_max = opts.mb_cache_max.unwrap_or(Library::IDENTIFY_MB_MAX);
+    let (mut todo, all, kept, read) = {
         let lib = s.library.lock().expect("library poisoned");
-        (lib.tracks_to_identify(retry)?, lib.all_tracks()?)
+        // The caches stay bounded (a cleanup failing only keeps more); not while a scan writes:
+        // the run's first write then is a song's, which waits for the scan
+        if !s.is_scanning() {
+            if let Err(e) = lib.prune_identify_cache(pm_library::db::now_unix(), cache_max) {
+                tracing::debug!("identify: caches not pruned: {e}");
+            }
+        }
+        (
+            lib.tracks_to_identify(retry)?,
+            lib.all_tracks()?,
+            lib.identify_inputs()?,
+            // What each song is (file and tags), in the same read as the songs themselves: a
+            // rescan after it makes the run's answer stale, and settling sees that
+            lib.input_generations()?,
+        )
     };
+    #[cfg(test)]
+    after_snapshot(s);
+    // What each song looks like now; a "not found" song that changed since it was checked (its
+    // tags, its file, an AcoustID key or a MusicBrainz contact added) is checked again
+    let services = services_key(s, &settings, mb.is_some());
+    let inputs: HashMap<i64, String> = all
+        .iter()
+        .filter_map(|t| {
+            let id = t.id?.0;
+            Some((id, pm_library::identify::input_key(t, &services)))
+        })
+        .collect();
+    if !retry {
+        let changed: Vec<Track> = all
+            .iter()
+            .filter(|t| {
+                t.id.is_some_and(|id| {
+                    kept.get(&id.0)
+                        .is_some_and(|k| k.as_deref() != inputs.get(&id.0).map(String::as_str))
+                })
+            })
+            .cloned()
+            .collect();
+        todo.extend(changed);
+    }
     s.identify.lock().expect("identify lock").total = todo.len();
     let folder_of = |t: &Track| t.file.path.parent().map(PathBuf::from).unwrap_or_default();
     let mut by_folder: BTreeMap<PathBuf, Vec<Track>> = BTreeMap::new();
@@ -439,14 +679,19 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
         }
     }
     drop(all);
-    let settings = s.acoustid.read().expect("acoustid lock").clone();
     let client = if settings.api_key.is_empty() {
         None
     } else {
-        Some(acoustid_client(s, &settings.api_key, &settings.base_url)?)
+        let mut c = pm_library::identify::AcoustIdConfig::new(&settings.api_key, s.user_agent());
+        c.base_url = settings.base_url.clone();
+        c.min_interval = opts.acoustid_interval;
+        Some(pm_library::identify::AcoustIdClient::new(c).map_err(ApiError::from)?)
     };
-    let mb = mb_client(s);
-    let found: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+    let found = RunCtx {
+        found: Mutex::new(Vec::new()),
+        inputs,
+        read,
+    };
     // Folders that are no album go to the fingerprint at once; albums to the album lane
     let (to_fp, from_albums) = mpsc::unbounded_channel::<Folder>();
     let mut albums = Vec::new();
@@ -476,9 +721,9 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
     let lanes = tokio::try_join!(
         album_lane,
         fingerprint_lane(s, client.as_ref(), from_albums, to_search, &found),
-        search_lane(s, misses, after_albums, &found),
+        search_lane(s, mb.as_ref(), misses, after_albums, &found),
     );
-    let identified_now = found.into_inner().expect("found lock");
+    let identified_now = found.found.into_inner().expect("found lock");
     // "Write IDs into my files", when the owner turned it on: also for the songs a run that
     // stopped early identified before it stopped
     if !identified_now.is_empty() && write_ids_on(s) {
@@ -499,8 +744,34 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
             Err(e) => return Err(e),
         }
     }
+    // The caches stay within their bounds when the run ends too (waiting through a scan)
+    if let Err(e) = write_waiting(s, |lib| {
+        lib.prune_identify_cache(pm_library::db::now_unix(), cache_max)
+    })
+    .await
+    {
+        tracing::debug!("identify: caches not pruned: {}", e.message);
+    }
     lanes?;
     Ok(())
+}
+
+/// What a song's check depended on in the node's services: AcoustID's address and key, and
+/// MusicBrainz's address and whether a contact lets it be asked. The key goes in only hashed,
+/// and only into [`pm_library::identify::input_key`]'s own hash: nothing of it is stored.
+fn services_key(s: &NodeState, acoustid: &AcoustIdSettings, mb_on: bool) -> String {
+    let key = if acoustid.api_key.is_empty() {
+        String::new()
+    } else {
+        blake3::hash(format!("pm-identify-acoustid-key\u{1f}{}", acoustid.api_key).as_bytes()).to_hex()[..16]
+            .to_string()
+    };
+    let mb_base = s.mb_base.read().expect("mb lock").clone();
+    format!(
+        "acoustid={}|{key}|musicbrainz={mb_on}|{}",
+        acoustid.base_url.trim_end_matches('/'),
+        mb_base.trim_end_matches('/')
+    )
 }
 
 fn folder_file(t: &Track) -> FolderFile {
@@ -517,14 +788,19 @@ fn folder_file(t: &Track) -> FolderFile {
     }
 }
 
-/// MusicBrainz, when the owner gave a contact (it requires one).
-fn mb_client(s: &NodeState) -> Option<pm_library::musicbrainz::MusicBrainzClient> {
+/// MusicBrainz, when the owner gave a contact (it requires one). Every client shares the
+/// process's one gate per host ([`pm_library::musicbrainz::take_turn`]).
+fn mb_client(
+    s: &NodeState,
+    interval: std::time::Duration,
+) -> Option<pm_library::musicbrainz::MusicBrainzClient> {
     let contact = s.contact();
     if contact.trim().is_empty() {
         return None;
     }
     let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
     cfg.base_url = s.mb_base.read().expect("mb lock").clone();
+    cfg.min_interval = interval;
     pm_library::musicbrainz::MusicBrainzClient::new(cfg).ok()
 }
 
@@ -535,7 +811,7 @@ async fn album_lane(
     mb: Option<&pm_library::musicbrainz::MusicBrainzClient>,
     albums: Vec<AlbumWork>,
     next: &mpsc::UnboundedSender<Folder>,
-    found: &Mutex<Vec<i64>>,
+    found: &RunCtx,
 ) -> Result<(), ApiError> {
     let Some(mb) = mb else {
         return Ok(());
@@ -553,7 +829,7 @@ async fn album_lane(
         .unwrap_or(true);
     let workers = fingerprint_workers();
     for w in albums {
-        let fit = match fit_folder(mb, &w, &mut searches, &mut releases).await {
+        let fit = match fit_folder(s, mb, &w, &mut searches, &mut releases).await {
             Ok(f) => f,
             Err(e) => {
                 tracing::debug!(album = %w.album.title, "identify: the album lookup failed ({e}); the fingerprint decides");
@@ -565,6 +841,24 @@ async fn album_lane(
             let mut matched = Vec::new();
             for t in w.tracks {
                 let id = t.id.map(|i| i.0).unwrap_or_default();
+                if let Some(c) = f.conflicts.iter().find(|c| c.track == id) {
+                    // Editions that fit as well name different recordings: the owner chooses
+                    let options = c
+                        .options
+                        .iter()
+                        .map(|o| Candidate {
+                            recording: o.recording,
+                            release: Some(o.release),
+                            title: Some(o.title.clone()),
+                            artist: Some(w.album.artist.clone()),
+                            release_title: o.release_title.clone(),
+                            score: f.score(),
+                            source: "album".into(),
+                        })
+                        .collect();
+                    settle(s, &t, Outcome::Suggest(options), found).await?;
+                    continue;
+                }
                 match f.matched.iter().find(|m| m.track == id) {
                     Some(m) => matched.push((t, m.clone())),
                     None => left.push(t),
@@ -587,7 +881,8 @@ async fn album_lane(
             let _ = next.send(Folder {
                 tracks: left,
                 len: w.files.len(),
-                release: fit.map(|f| f.release.to_string()),
+                // Tied editions: the fingerprint finds out which (if any) on its own
+                release: fit.filter(|f| f.editions == 1).map(|f| f.release.to_string()),
             });
         }
     }
@@ -596,60 +891,59 @@ async fn album_lane(
 
 /// The release a folder fits best: the one its tags name, else the search's nearest few.
 async fn fit_folder(
+    s: &NodeState,
     mb: &pm_library::musicbrainz::MusicBrainzClient,
     w: &AlbumWork,
     searches: &mut HashMap<String, Option<serde_json::Value>>,
     releases: &mut HashMap<Mbid, Option<serde_json::Value>>,
 ) -> Result<Option<AlbumFit>, String> {
-    let ids = match w.album.release {
-        Some(r) => vec![r],
+    let ids: Vec<(Mbid, u64)> = match w.album.release {
+        Some(r) => vec![(r, 0)],
         None => {
             let q = release_query(&w.album);
             let answer = match searches.get(&q) {
                 Some(a) => a.clone(),
                 None => {
-                    let a = mb
-                        .get_json("release", &[("query", q.as_str()), ("limit", "10")])
-                        .await
-                        .map_err(|e| e.to_string())?;
+                    let a = mb_get(s, mb, "release", &[("query", q.as_str()), ("limit", "10")]).await?;
                     searches.insert(q, a.clone());
                     a
                 }
             };
             answer
-                .map(|a| release_candidates(&w.album, w.files.len(), &a, RELEASES_PER_FOLDER))
+                .map(|a| release_candidates_ranked(&w.album, w.files.len(), &a, RELEASES_PER_FOLDER))
                 .unwrap_or_default()
         }
     };
-    let mut best: Option<AlbumFit> = None;
-    for id in ids {
+    // Every candidate (at most RELEASES_PER_FOLDER) is looked at: an edition further in size
+    // may fit as well (a multi-disc edition fits by the discs the folder holds), with other
+    // recordings
+    let mut fits: Vec<AlbumFit> = Vec::new();
+    for (id, _) in ids {
         let rel = match releases.get(&id) {
             Some(r) => r.clone(),
             None => {
-                let r = mb
-                    .get_json(&format!("release/{id}"), &[("inc", "recordings+artist-credits")])
-                    .await
-                    .map_err(|e| e.to_string())?;
+                // With its release group: the release's kind (album, single, compilation…)
+                let r = mb_get(
+                    s,
+                    mb,
+                    &format!("release/{id}"),
+                    &[("inc", "recordings+artist-credits+release-groups")],
+                )
+                .await?;
                 releases.insert(id, r.clone());
                 r
             }
         };
         if let Some(f) = rel.as_ref().and_then(|r| fit_release(&w.files, r)) {
-            if best.as_ref().is_none_or(|b| f.fit > b.fit) {
-                let whole = f.fit >= 1.0;
-                best = Some(f);
-                if whole {
-                    break;
-                }
-            }
+            fits.push(f);
         }
     }
-    Ok(best)
+    Ok(settle_editions(fits, &w.album))
 }
 
 /// A song its folder's release names. A fingerprint looked up before (by an earlier run) is a
-/// second opinion: agreeing raises the confidence; naming another song (not another recording
-/// of this one) leaves both for the owner to confirm.
+/// second opinion: agreeing raises the confidence; naming other recordings only (another song,
+/// or another recording of this one) leaves both for the owner to confirm.
 async fn album_outcome(
     s: &NodeState,
     t: &Track,
@@ -671,17 +965,18 @@ async fn album_outcome(
     let agrees = strong
         .iter()
         .find(|(_, _, rec)| rec.id == m.recording.to_string());
-    let other_song = !strong.is_empty()
-        && agrees.is_none()
-        && !strong
-            .iter()
-            .any(|(_, _, rec)| rec.title.as_deref().is_some_and(|x| titles_agree(x, &m.title)));
+    // A sure fingerprint that names none of the folder's recording is another recording: maybe of
+    // this song (a live take, another master), never settled by the title
+    let other_song = !strong.is_empty() && agrees.is_none();
+    // Tied editions agreeing on the recording: which edition stays open
+    let release = (fit.editions == 1).then_some(fit.release);
     let mine = Candidate {
         recording: m.recording,
-        release: Some(fit.release),
+        release,
         title: Some(m.title.clone()),
         artist: Some(album.artist.clone()),
-        release_title: fit.release_title.clone(),
+        // Tied editions: none of their titles stands for the release
+        release_title: release.and(fit.release_title.clone()),
         score: fit.score(),
         source: "album".into(),
     };
@@ -709,11 +1004,12 @@ async fn album_outcome(
             Some(acoustid.to_string()),
             "album_fit, the fingerprint agrees",
         ),
+        None if fit.editions > 1 => (fit.score(), None, "album_fit, editions agree"),
         None => (fit.score(), None, "album_fit"),
     };
     Outcome::Identified {
         recording: m.recording,
-        release: Some(fit.release),
+        release,
         confidence: Confidence::AlbumFit { score },
         acoustid,
         detail: detail.into(),
@@ -722,11 +1018,7 @@ async fn album_outcome(
 
 /// What an earlier run's AcoustID lookup said about the file, without decoding it.
 async fn cached_results(s: &NodeState, t: &Track) -> Option<Vec<AcoustIdResult>> {
-    let path = t.file.path.clone();
-    let key = tokio::task::spawn_blocking(move || Library::file_key(&path))
-        .await
-        .ok()?
-        .ok()?;
+    let key = content_key(s, t).await.ok()?;
     let (_, _, json) = s
         .library
         .lock()
@@ -744,7 +1036,7 @@ async fn fingerprint_lane(
     client: Option<&pm_library::identify::AcoustIdClient>,
     folders: mpsc::UnboundedReceiver<Folder>,
     misses: mpsc::UnboundedSender<Miss>,
-    found: &Mutex<Vec<i64>>,
+    found: &RunCtx,
 ) -> Result<(), ApiError> {
     struct Meta {
         len: usize,
@@ -787,34 +1079,51 @@ async fn fingerprint_lane(
         if folder.len() < meta.songs {
             continue;
         }
-        let looked_up = std::mem::take(&mut folder);
+        let mut looked_up = std::mem::take(&mut folder);
+        // What the owner rejected for a song is no recording to decide on (its same-audio
+        // sibling may still be)
+        {
+            let lib = s.library.lock().expect("library poisoned");
+            for (t, _, r) in looked_up.iter_mut() {
+                let id = t.id.map(|i| i.0).unwrap_or_default();
+                if let Ok(results) = r {
+                    for res in results.iter_mut() {
+                        res.recordings
+                            .retain(|rec| !lib.is_rejected(id, &rec.id).unwrap_or(false));
+                    }
+                    results.retain(|res| !res.recordings.is_empty());
+                }
+            }
+        }
         let pairs: Vec<(FileFacts, &[AcoustIdResult])> = looked_up
             .iter()
             .filter_map(|(_, f, r)| r.as_ref().ok().map(|r| (*f, r.as_slice())))
             .collect();
-        let preferred = meta
-            .release
-            .clone()
-            .or_else(|| best_folder_release(&pairs, meta.len));
+        let preferred: Vec<String> = match meta.release.clone() {
+            Some(r) => vec![r],
+            None => best_folder_releases(&pairs, meta.len),
+        };
         for (t, facts, r) in looked_up {
             let outcome = match r {
                 Err(e) => Outcome::Error(e),
-                Ok(results) => match decide(&results, &facts, meta.len, preferred.as_deref()) {
-                    Decision::Identified {
-                        recording,
-                        release,
-                        confidence,
-                        acoustid,
-                    } => Outcome::Identified {
-                        recording,
-                        release,
-                        confidence,
-                        acoustid: Some(acoustid),
-                        detail: confidence.label().into(),
-                    },
-                    Decision::Suggest(c) => Outcome::Suggest(c),
-                    Decision::Unknown => Outcome::Unknown,
-                },
+                Ok(results) => {
+                    match decide_with_tags(&results, &facts, meta.len, &preferred, Some(&file_tags(&t))) {
+                        Decision::Identified {
+                            recording,
+                            release,
+                            confidence,
+                            acoustid,
+                        } => Outcome::Identified {
+                            recording,
+                            release,
+                            confidence,
+                            acoustid: Some(acoustid),
+                            detail: confidence.label().into(),
+                        },
+                        Decision::Suggest(c) => Outcome::Suggest(c),
+                        Decision::Unknown => Outcome::Unknown,
+                    }
+                }
             };
             match outcome {
                 // Nothing from the fingerprint: the search by tags has a go
@@ -828,18 +1137,62 @@ async fn fingerprint_lane(
     Ok(())
 }
 
+/// What a file says about itself, for choosing among recordings of its song.
+fn file_tags(t: &Track) -> pm_library::same_song::FileTags {
+    pm_library::same_song::FileTags {
+        title: t.title.clone(),
+        artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+        album: t.album.as_ref().map(|a| a.title.clone()),
+        duration_ms: t.duration_ms.or(t.file.duration_ms),
+    }
+}
+
 /// The last step, once the album lane is done with MusicBrainz: a search by the tags.
 async fn search_lane(
     s: &NodeState,
+    mb: Option<&pm_library::musicbrainz::MusicBrainzClient>,
     mut misses: mpsc::UnboundedReceiver<Miss>,
     after_albums: tokio::sync::oneshot::Receiver<()>,
-    found: &Mutex<Vec<i64>>,
+    found: &RunCtx,
 ) -> Result<(), ApiError> {
     let _ = after_albums.await;
     while let Some(m) = misses.recv().await {
-        let outcome = match search_suggestions(s, &m.track).await {
-            Ok(c) if !c.is_empty() => Outcome::Suggest(c),
-            _ => m.outcome,
+        let found_now = match mb {
+            Some(mb) => search_hits(s, mb, &m.track, true).await,
+            None => Ok(Vec::new()),
+        };
+        let outcome = match found_now {
+            Ok(hits) => {
+                // What the owner rejected for this song is never picked
+                let id = m.track.id.map(|i| i.0).unwrap_or_default();
+                let hits: Vec<pm_library::musicbrainz::RecordingHit> = {
+                    let lib = s.library.lock().expect("library poisoned");
+                    hits.into_iter()
+                        .filter(|h| !lib.is_rejected(id, &h.mbid.to_string()).unwrap_or(false))
+                        .collect()
+                };
+                match pm_library::same_song::pick_exact_hit(&file_tags(&m.track), &hits) {
+                    // Exactly the file's song (on one or several recordings): identified
+                    Some(p) => Outcome::Identified {
+                        recording: p.recording,
+                        release: p.release,
+                        confidence: Confidence::TagMatch {
+                            score: TAG_MATCH_SCORE,
+                        },
+                        acoustid: None,
+                        detail: "tag_match".into(),
+                    },
+                    None => {
+                        let c = rank_track_hits(&m.track, hits);
+                        if c.is_empty() {
+                            m.outcome
+                        } else {
+                            Outcome::Suggest(c)
+                        }
+                    }
+                }
+            }
+            Err(_) => m.outcome,
         };
         settle(s, &m.track, outcome, found).await?;
     }
@@ -847,51 +1200,72 @@ async fn search_lane(
 }
 
 /// Store what a song's ladder found and count it.
-async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &Mutex<Vec<i64>>) -> Result<(), ApiError> {
+async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> Result<(), ApiError> {
+    use pm_library::db::{SettleAnswer, Settled};
     let id = t.id.map(|i| i.0).unwrap_or_default();
-    // The library first (waiting through a busy database), then the count, never both at once:
-    // `status` holds the progress while it reads the library
-    match &outcome {
+    let input_key = found.inputs.get(&id).cloned();
+    let answer = match &outcome {
         Outcome::Identified {
             recording,
             release,
             confidence,
             acoustid,
             detail,
-        } => {
-            let uri = MusicUri::Recording { mbid: *recording };
-            write_waiting(s, |lib| {
-                lib.set_identity(id, &uri, *confidence, acoustid.as_deref())
-            })
-            .await?;
-            // Found once its identity is stored: later runs skip it, so a write after this that
-            // fails still leaves its IDs to be written into the file
-            found.lock().expect("found lock").push(id);
-            write_waiting(s, |lib| lib.set_identify_state(id, "identified", Some(detail))).await?;
-            if let Some(r) = release {
-                write_waiting(s, |lib| lib.set_identify_release(id, r)).await?;
-            }
-        }
-        Outcome::Suggest(c) => {
-            write_waiting(s, |lib| lib.add_suggestions(id, c)).await?;
-            write_waiting(s, |lib| lib.set_identify_state(id, "suggested", None)).await?;
-        }
-        Outcome::Unknown => write_waiting(s, |lib| lib.set_identify_state(id, "unknown", None)).await?,
-        Outcome::Error(e) => write_waiting(s, |lib| lib.set_identify_state(id, "error", Some(e))).await?,
+        } => SettleAnswer::Identified {
+            recording: MusicUri::Recording { mbid: *recording },
+            confidence: *confidence,
+            acoustid: acoustid.clone(),
+            detail: detail.clone(),
+            release: *release,
+            input_key,
+        },
+        Outcome::Suggest(c) => SettleAnswer::Suggest {
+            candidates: c.clone(),
+            input_key,
+        },
+        Outcome::Unknown => SettleAnswer::State {
+            state: "unknown".into(),
+            detail: None,
+            input_key,
+        },
+        Outcome::Error(e) => SettleAnswer::State {
+            state: "error".into(),
+            detail: Some(e.clone()),
+            input_key,
+        },
+    };
+    // One step, against what holds when it is written (the owner may confirm or reject while a
+    // busy library makes the run wait): the owner's word stands, and only what was stored counts
+    let read = found.read.get(&id).map(String::as_str);
+    let settled = write_waiting(s, |lib| lib.settle_checked(id, &answer, read)).await?;
+    if settled == Settled::Stored && matches!(outcome, Outcome::Identified { .. }) {
+        // Found once its identity is stored: its IDs may be written into the file
+        found.found.lock().expect("found lock").push(id);
     }
+    // The library first, then the count, never both at once: `status` holds the progress while
+    // it reads the library
     let mut p = s.identify.lock().expect("identify lock");
     p.done += 1;
-    match outcome {
-        Outcome::Identified { confidence, .. } => {
+    match (settled, outcome) {
+        // Kept: the owner's or another identity; Changed: checked again by the next run
+        (Settled::Kept | Settled::Changed, _) => {}
+        (Settled::Rejected | Settled::Empty, _) => p.unknown += 1,
+        (Settled::Stored, Outcome::Identified { confidence, .. }) => {
             p.identified += 1;
             *p.identified_by.entry(confidence.label().to_string()).or_default() += 1;
         }
-        Outcome::Suggest(_) => p.suggested += 1,
-        Outcome::Unknown => p.unknown += 1,
-        Outcome::Error(e) => {
+        (Settled::Stored, Outcome::Suggest(_)) => p.suggested += 1,
+        (Settled::Stored, Outcome::Unknown) => p.unknown += 1,
+        (Settled::Stored, Outcome::Error(e)) => {
             p.errors += 1;
             p.last_error = Some(e);
         }
+    }
+    // Now and then the run's progress is kept, so a restart knows how far it got
+    let kept = p.done.is_multiple_of(250).then(|| p.clone());
+    drop(p);
+    if let Some(k) = kept {
+        remember_run(s, &k);
     }
     Ok(())
 }
@@ -931,13 +1305,7 @@ async fn lookup(
     gate: &KeyGate,
 ) -> Result<Vec<AcoustIdResult>, String> {
     let path = t.file.path.clone();
-    let key = tokio::task::spawn_blocking({
-        let p = path.clone();
-        move || Library::file_key(&p)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let key = content_key(s, t).await?;
     let cached = s
         .library
         .lock()
@@ -946,6 +1314,7 @@ async fn lookup(
         .map_err(|e| e.to_string())?;
     if let Some((_, _, Some(j))) = &cached {
         let r: pm_library::identify::LookupResponse = serde_json::from_str(j).map_err(|e| e.to_string())?;
+        work(s, |w| w.lookups_reused += 1);
         return Ok(r.results);
     }
     // Without a key, or once AcoustID refused it (this run), a fingerprint answers nothing
@@ -964,6 +1333,11 @@ async fn lookup(
         return Ok(Vec::new());
     }
     let (duration, fp) = match cached {
+        // This audio didn't fingerprint before (too short, not decodable): the same answer
+        Some((_, fp, _)) if fp.starts_with(UNFINGERPRINTABLE) => {
+            work(s, |w| w.failures_reused += 1);
+            return Err(fp[UNFINGERPRINTABLE.len()..].to_string());
+        }
         Some((d, fp, _)) => (d, fp),
         None => {
             if t.file.format.kind == pm_model::SampleKind::Dsd {
@@ -975,10 +1349,30 @@ async fn lookup(
                 return Ok(Vec::new());
             }
             let p = path.clone();
-            let f = tokio::task::spawn_blocking(move || pm_audio::fingerprint::fingerprint_file(&p))
+            work(s, |w| w.decoded += 1);
+            let f = match tokio::task::spawn_blocking(move || pm_audio::fingerprint::fingerprint_file(&p))
                 .await
                 .map_err(|e| e.to_string())?
-                .map_err(|e| format!("fingerprint: {e}"))?;
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    let why = format!("fingerprint: {e}");
+                    // What the audio itself makes impossible is kept by its content (a changed
+                    // file has another key); a file that couldn't be read is tried again
+                    let lasting =
+                        !matches!(e, pm_audio::AudioError::Open { .. } | pm_audio::AudioError::Io(_));
+                    if lasting {
+                        if let Err(e) = s.library.lock().expect("library poisoned").save_fingerprint(
+                            &key,
+                            0,
+                            &format!("{UNFINGERPRINTABLE}{why}"),
+                        ) {
+                            tracing::debug!("identify: fingerprint failure not kept: {e}");
+                        }
+                    }
+                    return Err(why);
+                }
+            };
             // The cache saves work, nothing more: a busy library doesn't fail the song
             if let Err(e) = s.library.lock().expect("library poisoned").save_fingerprint(
                 &key,
@@ -994,6 +1388,7 @@ async fn lookup(
     if refused() {
         return Ok(Vec::new());
     }
+    work(s, |w| w.acoustid_asked += 1);
     let looked = client.lookup(&fp, duration).await;
     if let Some(a) = probe.as_mut() {
         **a = !matches!(looked, Err(pm_library::LibraryError::AcoustIdKey(_)));
@@ -1022,6 +1417,121 @@ async fn lookup(
         tracing::debug!("identify: AcoustID answer not cached: {e}");
     }
     Ok(results)
+}
+
+/// The fingerprint kept for audio that can't be fingerprinted, before the reason (a real
+/// fingerprint is URL-safe base64, never this).
+const UNFINGERPRINTABLE: &str = "!";
+
+/// A file's content key ([`Library::file_key`]): kept while the file's size and modification
+/// time stay the same (one look at its metadata, nothing read), else read and kept.
+async fn content_key(s: &NodeState, t: &Track) -> Result<String, String> {
+    let path = t.file.path.clone();
+    let stat = tokio::task::spawn_blocking({
+        let p = path.clone();
+        move || std::fs::metadata(&p)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    let size = stat.len();
+    let mtime = stat
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or_default();
+    let kept = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .cached_file_key(&path, size, mtime)
+        .ok()
+        .flatten();
+    if let Some(k) = kept {
+        work(s, |w| w.file_keys_reused += 1);
+        return Ok(k);
+    }
+    work(s, |w| w.file_reads += 1);
+    let key = tokio::task::spawn_blocking({
+        let p = path.clone();
+        move || Library::file_key(&p)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    // The cache saves work, nothing more: not kept while a scan writes (no wait for it)
+    if !s.is_scanning() {
+        if let Err(e) = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .save_file_key(&path, size, mtime, &key)
+        {
+            tracing::debug!("identify: content key not kept: {e}");
+        }
+    }
+    Ok(key)
+}
+
+/// The key a MusicBrainz answer is kept under: the service's address, the path and the query
+/// (no credentials: MusicBrainz takes none).
+fn mb_key(s: &NodeState, path: &str, query: &[(&str, &str)]) -> String {
+    let base = s.mb_base.read().expect("mb lock").clone();
+    let q: Vec<String> = query.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{}/{path}?{}", base.trim_end_matches('/'), q.join("&"))
+}
+
+/// A MusicBrainz answer: the one an earlier run kept (within [`Library::IDENTIFY_MB_TTL_SECS`]),
+/// else asked now (paced through the process's one gate) and kept. A failed request is not kept,
+/// so the next run asks again.
+async fn mb_get(
+    s: &NodeState,
+    mb: &pm_library::musicbrainz::MusicBrainzClient,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<Option<serde_json::Value>, String> {
+    let key = mb_key(s, path, query);
+    let since = pm_library::db::now_unix() - Library::IDENTIFY_MB_TTL_SECS;
+    let kept = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .identify_mb_cached(&key, since)
+        .ok()
+        .flatten();
+    if let Some(body) = kept {
+        // A kept answer that no longer parses is asked again
+        let parsed = match body {
+            None => Some(None),
+            Some(b) => serde_json::from_str::<serde_json::Value>(&b).ok().map(Some),
+        };
+        if let Some(v) = parsed {
+            work(s, |w| w.mb_reused += 1);
+            return Ok(v);
+        }
+    }
+    work(s, |w| w.mb_asked += 1);
+    let v = mb.get_json(path, query).await.map_err(|e| e.to_string())?;
+    keep_mb(s, &key, v.as_ref());
+    Ok(v)
+}
+
+/// Keep a MusicBrainz answer for later runs (only what identification reads of a release).
+fn keep_mb(s: &NodeState, key: &str, v: Option<&serde_json::Value>) {
+    // Not while a scan writes: an answer kept saves a request, never worth waiting for the scan
+    if s.is_scanning() {
+        return;
+    }
+    let body = v.map(|v| pm_library::album_fit::compact_answer(v).to_string());
+    if let Err(e) = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .save_identify_mb(key, body.as_deref())
+    {
+        tracing::debug!("identify: MusicBrainz answer not kept: {e}");
+    }
 }
 
 fn acoustid_client(
@@ -1077,24 +1587,76 @@ async fn write_waiting<T>(
 /// MusicBrainz recordings matching the tags' artist and title (± 2 s): suggestions only, ranked
 /// by [`rank_hits`]. A file with no artist gets none: a title alone matches strangers' songs.
 async fn search_suggestions(s: &NodeState, t: &Track) -> Result<Vec<Candidate>, String> {
-    let contact = s.contact();
-    let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
-    if contact.is_empty() || t.title.trim().is_empty() || artist.trim().is_empty() {
+    let Some(mb) = mb_client(s, std::time::Duration::from_millis(1000)) else {
         return Ok(Vec::new());
-    }
-    let mut cfg = pm_library::musicbrainz::MusicBrainzConfig::new(contact);
-    cfg.base_url = s.mb_base.read().expect("mb lock").clone();
-    let mb = pm_library::musicbrainz::MusicBrainzClient::new(cfg).map_err(|e| e.to_string())?;
-    let found = mb
-        .search_recording_hits(&artist, &t.title, t.duration_ms)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(rank_hits(
+    };
+    // Asked now (the owner's "Which song is this?"): not from the library's kept answers
+    search_suggestions_with(s, &mb, t, false).await
+}
+
+/// The score a tag match is stored with: an exact title, artist and length on MusicBrainz's
+/// strongest hits names the song (and may be published), below a fingerprint's sure answer.
+pub const TAG_MATCH_SCORE: f32 = 0.9;
+
+/// [`search_suggestions`] with a client; `reuse` takes MusicBrainz's answers kept by earlier runs.
+async fn search_suggestions_with(
+    s: &NodeState,
+    mb: &pm_library::musicbrainz::MusicBrainzClient,
+    t: &Track,
+    reuse: bool,
+) -> Result<Vec<Candidate>, String> {
+    Ok(rank_track_hits(t, search_hits(s, mb, t, reuse).await?))
+}
+
+/// The suggestions for a track from search hits ([`rank_hits`]).
+fn rank_track_hits(t: &Track, hits: Vec<pm_library::musicbrainz::RecordingHit>) -> Vec<Candidate> {
+    rank_hits(
         &t.title,
         t.album.as_ref().map(|a| a.title.as_str()),
         t.duration_ms,
-        found,
-    ))
+        hits,
+    )
+}
+
+/// MusicBrainz's recordings for a track's artist and title (± 2 s, then without the length);
+/// `reuse` takes the answers kept by earlier runs.
+async fn search_hits(
+    s: &NodeState,
+    mb: &pm_library::musicbrainz::MusicBrainzClient,
+    t: &Track,
+    reuse: bool,
+) -> Result<Vec<pm_library::musicbrainz::RecordingHit>, String> {
+    let artist = t.artists.first().map(|a| a.name.clone()).unwrap_or_default();
+    if t.title.trim().is_empty() || artist.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let (narrow, wide) = pm_library::musicbrainz::recording_hit_queries(&artist, &t.title, t.duration_ms);
+    let get = |q: String| async move {
+        let query = [("query", q.as_str()), ("limit", "10")];
+        let v = if reuse {
+            mb_get(s, mb, "recording", &query).await?
+        } else {
+            work(s, |w| w.mb_asked += 1);
+            let v = mb
+                .get_json("recording", &query)
+                .await
+                .map_err(|e| e.to_string())?;
+            keep_mb(s, &mb_key(s, "recording", &query), v.as_ref());
+            v
+        };
+        Ok::<_, String>(
+            v.map(|v| pm_library::musicbrainz::parse_search_hits(&v))
+                .unwrap_or_default(),
+        )
+    };
+    let mut found = match narrow {
+        Some(q) => get(q).await?,
+        None => Vec::new(),
+    };
+    if found.is_empty() {
+        found = get(wide).await?;
+    }
+    Ok(found)
 }
 
 /// A title as people compare them: lower case, without "(Live)", "[Remastered]" or
@@ -1242,10 +1804,23 @@ pub(crate) async fn track_candidates(
         let found = search_suggestions(&s, &track)
             .await
             .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, format!("MusicBrainz: {e}")))?;
-        let lib = s.library.lock().expect("library poisoned");
-        lib.add_suggestions(id, &found)?;
-        if !found.is_empty() {
-            lib.set_identify_state(id, "suggested", None)?;
+        // Stored like a run's answer: what the owner rejected stays out, and the song waits for
+        // review only with something open (none: "unknown", so a retry looks at it again; a
+        // song with an identity is left as it is)
+        if !found.is_empty()
+            || s.library
+                .lock()
+                .expect("library poisoned")
+                .suggestions_for(id)?
+                .is_empty()
+        {
+            s.library.lock().expect("library poisoned").settle(
+                id,
+                &pm_library::db::SettleAnswer::Suggest {
+                    candidates: found,
+                    input_key: None,
+                },
+            )?;
         }
     }
     let suggestions = s.library.lock().expect("library poisoned").suggestions_for(id)?;
@@ -1257,11 +1832,30 @@ pub(crate) async fn track_candidates(
 }
 
 /// `POST /v1/library/suggestions/{id}/accept`: the owner confirms; the
-/// track's identity becomes that recording (`confirmed_by_user`).
-pub(crate) async fn accept(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Track> {
+/// track's identity becomes that recording (`confirmed_by_user`). A song that got an identity
+/// meanwhile keeps it (409).
+pub(crate) async fn accept(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    axum::extract::Query(want): axum::extract::Query<Expect>,
+) -> ApiResult<Track> {
     let (track, t) = {
         let lib = s.library.lock().expect("library poisoned");
+        if lib.check_suggestion(id, want.track_id, want.recording_mbid.as_deref())?
+            == pm_library::db::SuggestionCheck::Changed
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "That suggestion changed since the page was loaded; nothing was confirmed. Reload to see it.",
+            ));
+        }
         let Some((track, _)) = lib.accept_suggestion(id)? else {
+            if lib.suggestion_by_id(id)?.is_some() {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "This song got an identity meanwhile; it was kept. Reload to see it.",
+                ));
+            }
             return Err(ApiError::not_found(format!("no suggestion {id}")));
         };
         let t = lib
@@ -1277,20 +1871,382 @@ pub(crate) async fn accept(State(s): State<Arc<NodeState>>, Path(id): Path<i64>)
     Ok(Json(t))
 }
 
+/// Songs one batch confirmation takes at most (an album box set is a few hundred).
+pub const MAX_CONFIRM: usize = 500;
+/// Albums one page of album review lists at most.
+pub const MAX_REVIEW_ALBUMS: usize = 200;
+/// Songs one page of album review stops at (whole albums: a page has at least one, and an album
+/// is never split, so a page may run over by the last album's songs).
+pub const MAX_REVIEW_SONGS: usize = 200;
+/// A song's only option is offered ticked from this score up (when it comes from the folder or the
+/// fingerprint, never a search by tags alone).
+pub const PRESELECT: f32 = 0.85;
+
+/// One song in album review: its own options (best first, each with its evidence: source, score,
+/// release), `single` (one option) or `conflict` (several recordings), and `pick`, the option
+/// offered ticked (the owner still confirms it); a conflict is never picked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewSong {
+    pub track: ReviewTrack,
+    pub options: Vec<SuggestionRow>,
+    pub status: String,
+    #[serde(default)]
+    pub pick: Option<i64>,
+    /// Why a single option is not ticked: `weak`, `search` or `other_release`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold: Option<String>,
+}
+
+/// A song as album review shows it: what the page needs of the track, not the whole record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewTrack {
+    pub id: i64,
+    pub title: String,
+    pub artists: Vec<ReviewName>,
+    #[serde(default)]
+    pub track_no: Option<u32>,
+    #[serde(default)]
+    pub disc_no: Option<u32>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    pub file: ReviewFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewName {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFile {
+    pub path: String,
+}
+
+impl From<&Track> for ReviewTrack {
+    fn from(t: &Track) -> Self {
+        Self {
+            id: t.id.map(|i| i.0).unwrap_or_default(),
+            title: t.title.clone(),
+            artists: t
+                .artists
+                .iter()
+                .map(|a| ReviewName { name: a.name.clone() })
+                .collect(),
+            track_no: t.track_no,
+            disc_no: t.disc_no,
+            duration_ms: t.duration_ms.or(t.file.duration_ms),
+            file: ReviewFile {
+                path: t.file.path.display().to_string(),
+            },
+        }
+    }
+}
+
+/// The release at least half of an album's songs have an option on (shown, never chosen by).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewRelease {
+    pub mbid: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub songs: usize,
+}
+
+/// One folder of songs waiting for review, as an album.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewAlbum {
+    /// The folder (the album's key in the page).
+    pub key: String,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub release: Option<ReviewRelease>,
+    pub songs: Vec<ReviewSong>,
+    /// Songs offered ticked.
+    pub ready: usize,
+    /// Songs whose options disagree.
+    pub conflicts: usize,
+}
+
+/// `GET /v1/library/suggestions/albums`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewPage {
+    pub albums: Vec<ReviewAlbum>,
+    /// Where the next page starts: ask for `after=` this folder (`None`: no more).
+    #[serde(default)]
+    pub next_after: Option<String>,
+    /// Songs waiting, in every album.
+    pub songs: usize,
+    pub total_albums: usize,
+    pub offset: usize,
+    #[serde(default)]
+    pub next: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReviewQuery {
+    /// The albums after this folder (the last one shown): albums confirmed meanwhile make no
+    /// page skip one. Takes the place of `offset`.
+    #[serde(default)]
+    pub after: Option<String>,
+    #[serde(default)]
+    pub offset: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+fn review_song(track: &Track, options: Vec<SuggestionRow>, release: Option<&str>) -> ReviewSong {
+    let single = options.len() == 1;
+    let (pick, hold) = match options.first().filter(|_| single) {
+        None => (None, None),
+        Some(o) if o.source == "search" => (None, Some("search")),
+        Some(o) if o.score < PRESELECT => (None, Some("weak")),
+        Some(o) if release.is_some() && o.release_mbid.as_deref().is_some_and(|r| Some(r) != release) => {
+            (None, Some("other_release"))
+        }
+        Some(o) => (Some(o.id), None),
+    };
+    ReviewSong {
+        track: ReviewTrack::from(track),
+        options,
+        status: if single { "single" } else { "conflict" }.into(),
+        pick,
+        hold: hold.map(str::to_string),
+    }
+}
+
+/// The release at least half of the songs have an option on, when one stands out.
+fn album_release(songs: &[(Track, Vec<SuggestionRow>)]) -> Option<ReviewRelease> {
+    let mut on: BTreeMap<&str, (usize, Option<&str>)> = BTreeMap::new();
+    for (_, options) in songs {
+        let mut seen = std::collections::HashSet::new();
+        for o in options {
+            if let Some(r) = o.release_mbid.as_deref().filter(|r| seen.insert(*r)) {
+                let e = on.entry(r).or_default();
+                e.0 += 1;
+                e.1 = e.1.or(o.release_title.as_deref());
+            }
+        }
+    }
+    let mut ranked: Vec<(&str, (usize, Option<&str>))> = on.into_iter().collect();
+    ranked.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+    let (mbid, (n, title)) = *ranked.first()?;
+    if ranked.get(1).is_some_and(|x| x.1 .0 == n) || n * 2 < songs.len() {
+        return None;
+    }
+    Some(ReviewRelease {
+        mbid: mbid.to_string(),
+        title: title.map(str::to_string),
+        songs: n,
+    })
+}
+
+/// `GET /v1/library/suggestions/albums?offset&limit`: open suggestions as albums (a folder each),
+/// a page of at most [`MAX_REVIEW_ALBUMS`] albums (50 by default).
+pub(crate) async fn review_albums(
+    State(s): State<Arc<NodeState>>,
+    axum::extract::Query(q): axum::extract::Query<ReviewQuery>,
+) -> ApiResult<ReviewPage> {
+    // Grouped from ids and paths alone; only the page's songs are read whole (a backlog of
+    // thousands answers as quickly as a few)
+    let paths = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .suggested_track_paths()?;
+    let songs = paths.len();
+    let mut by_folder: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    for (id, path) in paths {
+        let folder = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        by_folder.entry(folder).or_default().push(id);
+    }
+    let total_albums = by_folder.len();
+    let offset = match &q.after {
+        Some(after) => by_folder
+            .range::<String, _>((
+                std::ops::Bound::Excluded(after.clone()),
+                std::ops::Bound::Unbounded,
+            ))
+            .count(),
+        None => 0,
+    };
+    let offset = match &q.after {
+        Some(_) => total_albums - offset,
+        None => q.offset.unwrap_or(0).min(total_albums),
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, MAX_REVIEW_ALBUMS);
+    let mut page: Vec<(String, Vec<i64>)> = Vec::new();
+    let mut on_page = 0;
+    for (folder, ids) in by_folder.into_iter().skip(offset) {
+        if page.len() >= limit || (!page.is_empty() && on_page >= MAX_REVIEW_SONGS) {
+            break;
+        }
+        on_page += ids.len();
+        page.push((folder, ids));
+    }
+    let page_len = page.len();
+    let last_key = page.last().map(|(k, _)| k.clone());
+    let (tracks, rows) = {
+        let lib = s.library.lock().expect("library poisoned");
+        let ids: Vec<i64> = page.iter().flat_map(|(_, ids)| ids.iter().copied()).collect();
+        let mut tracks: HashMap<i64, Track> = HashMap::new();
+        for id in &ids {
+            if let Some(t) = lib.get_track(pm_model::TrackId(*id))? {
+                tracks.insert(*id, t);
+            }
+        }
+        (tracks, lib.suggestions_for_tracks(&ids)?)
+    };
+    let mut options: HashMap<i64, Vec<SuggestionRow>> = HashMap::new();
+    for r in rows {
+        options.entry(r.track_id).or_default().push(r);
+    }
+    let albums: Vec<ReviewAlbum> = page
+        .into_iter()
+        .filter_map(|(key, ids)| {
+            let mut list: Vec<(Track, Vec<SuggestionRow>)> = ids
+                .iter()
+                .filter_map(|id| Some((tracks.get(id)?.clone(), options.remove(id)?)))
+                .collect();
+            if list.is_empty() {
+                return None;
+            }
+            list.sort_by(|(a, _), (b, _)| {
+                (a.disc_no.unwrap_or(1), a.track_no.unwrap_or(u32::MAX), &a.title).cmp(&(
+                    b.disc_no.unwrap_or(1),
+                    b.track_no.unwrap_or(u32::MAX),
+                    &b.title,
+                ))
+            });
+            let release = album_release(&list);
+            let first = &list[0].0;
+            let album = first.album.as_ref().map(|a| a.title.clone());
+            let artist = first
+                .album
+                .as_ref()
+                .and_then(|a| a.album_artist.clone())
+                .or_else(|| first.artists.first().map(|a| a.name.clone()));
+            let songs: Vec<ReviewSong> = list
+                .into_iter()
+                .map(|(t, o)| review_song(&t, o, release.as_ref().map(|r| r.mbid.as_str())))
+                .collect();
+            Some(ReviewAlbum {
+                key,
+                album,
+                artist,
+                ready: songs.iter().filter(|x| x.pick.is_some()).count(),
+                conflicts: songs.iter().filter(|x| x.status == "conflict").count(),
+                release,
+                songs,
+            })
+        })
+        .collect();
+    let shown = offset + page_len;
+    let next = (shown < total_albums).then_some(shown);
+    let next_after = next.and(last_key);
+    Ok(Json(ReviewPage {
+        albums,
+        next_after,
+        songs,
+        total_albums,
+        offset,
+        next,
+    }))
+}
+
+/// `POST /v1/library/suggestions/confirm {choices: [{track_id, suggestion_id, recording_mbid}]}`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfirmBody {
+    pub choices: Vec<pm_library::ConfirmChoice>,
+}
+
+/// `POST /v1/library/suggestions/confirm`: the owner confirms the songs they chose, at most
+/// [`MAX_CONFIRM`]. All are stored in one transaction, or none: a choice that went stale (the
+/// suggestion gone or changed, the song identified meanwhile, a song twice) is a 409 listing them.
+pub(crate) async fn confirm(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<ConfirmBody>,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    if body.choices.is_empty() {
+        return Err(ApiError::bad_request("Choose at least one song to confirm"));
+    }
+    if body.choices.len() > MAX_CONFIRM {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_CONFIRM} songs at once"
+        )));
+    }
+    let report = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .confirm_suggestions(&body.choices)?;
+    match report {
+        pm_library::ConfirmReport::Stale(stale) => Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "Some songs changed since the page was loaded, so nothing was confirmed. Reload and check them again.",
+                "stale": stale,
+            })),
+        )
+            .into_response()),
+        pm_library::ConfirmReport::Confirmed(tracks) => {
+            // The identities are stored; writing the IDs into the files ("Write IDs" on) comes
+            // after, and what it couldn't do is said, not hidden (it undoes nothing)
+            let files = if write_ids_on(&s) {
+                let st = s.clone();
+                let only = tracks.clone();
+                match tokio::task::spawn_blocking(move || write_found_ids(&st, Some(&only))).await {
+                    Ok(Ok(r)) => Some(serde_json::json!({"written": r.written, "skipped": r.skipped})),
+                    Ok(Err(e)) => Some(serde_json::json!({"written": 0, "skipped": [], "error": e.message})),
+                    Err(e) => Some(serde_json::json!({"written": 0, "skipped": [], "error": e.to_string()})),
+                }
+            } else {
+                None
+            };
+            let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+            let mut out = serde_json::json!({"confirmed": tracks, "count": tracks.len()});
+            if let Some(f) = files {
+                out["files"] = f;
+            }
+            Ok(Json(out).into_response())
+        }
+    }
+}
+
 /// `DELETE /v1/library/suggestions/{id}`: not this one.
 pub(crate) async fn reject(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<i64>,
+    axum::extract::Query(want): axum::extract::Query<Expect>,
 ) -> Result<StatusCode, ApiError> {
-    if s.library
+    let check = s
+        .library
         .lock()
         .expect("library poisoned")
-        .reject_suggestion(id)?
-    {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found(format!("no suggestion {id}")))
+        .reject_suggestion_checked(id, want.track_id, want.recording_mbid.as_deref())?;
+    match check {
+        pm_library::db::SuggestionCheck::Holds => Ok(StatusCode::NO_CONTENT),
+        pm_library::db::SuggestionCheck::Changed => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "That suggestion changed since the page was loaded; nothing was rejected. Reload to see it.",
+        )),
+        pm_library::db::SuggestionCheck::Gone => Err(ApiError::not_found(format!("no suggestion {id}"))),
     }
+}
+
+/// What the caller saw of a suggestion (`?track_id&recording_mbid`, both optional): a single
+/// accept or "Not this" whose suggestion is now for another song or recording is refused (409).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Expect {
+    #[serde(default)]
+    pub track_id: Option<i64>,
+    #[serde(default)]
+    pub recording_mbid: Option<String>,
 }
 
 #[cfg(test)]
@@ -1321,6 +2277,7 @@ mod tests {
             release: releases.first().map(|r| r.title.clone()),
             release_mbid: releases.first().and_then(|r| r.mbid),
             length_ms: Some(length_ms),
+            disambiguation: None,
             releases,
         }
     }

@@ -23,8 +23,8 @@
 //     redraws only About when it arrives in the background;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
-//   * Play to: while something plays or is queued, every other device gets Move here (This zone
-//     gets Move to…): the song at its position, the queue and repeat move, paused stays paused,
+//   * Play to: while something plays or is queued, every other device gets Move here (the one way
+//     to move there; the Queue page has Move to…): the song at its position, the queue and repeat move, paused stays paused,
 //     out of and into This browser too, and the menu follows; the node's errors show in the menu;
 //     the device line says the protocol and model in words, with the id as a tooltip;
 //   * the sound pill in the player bar says where it plays from (the provider's mark), the path in
@@ -244,7 +244,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const IMG = BASE + '/icon.svg';
     const pageJson = (kind, id, extra) => ({ kind, id, uri: null, target: {}, title: 'Mock ' + kind, artist: kind === 'artist' ? null : { id: 'tidal-77', name: 'Mock Artist' }, album: null, year: 2020, image: kind === 'artist' ? null : IMG, source: 'TIDAL', source_id: 'tidal', section: 'home', plays_from: null, connect: [], reading: false, pending: false, songs: [], total_ms: 0, albums: [], versions: [], also_on: [], opened_as: null, plays_note: null, song_uri: null, link: null, on_pubky: null, ...extra });
     const SONGS = [{ no: 1, title: 'Streamed song', artist: 'Mock Artist', duration_ms: 1000, uri: 'tidal:1', track_id: null, page: null, image: IMG, id: 'tidal-1', artist_id: 'tidal-77', album: 'Mock album', album_id: 'tidal-5' }, { no: 2, title: 'Local song', artist: 'Mock Artist', duration_ms: 1000, uri: 'track:5', track_id: 5, page: null, image: IMG, id: 'lib-5', artist_id: null, album: 'Local album', album_id: 'lib-1' }];
-    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }];
+    // The third tile's "year" is a remote subtitle with markup in it: it must show as text
+    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }, { id: 'tidal-6', title: 'Odd album', image: IMG, year: '<img id="yearinj" src="x"><b>Someone</b>' }];
     await p.route(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/, (r) => {
       const u = new URL(r.request().url()); if (u.pathname.endsWith('/extras')) return r.fulfill({ json: {} });
       const [, , kind, id] = u.pathname.replace('/v1/', '/').split('/');
@@ -256,6 +257,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/artist/tidal-77');
     await p.waitForSelector('#ialbums [data-tile="1"]');
     const t0 = await badge('#ialbums [data-tile="0"]'); const t1 = await badge('#ialbums [data-tile="1"]');
+    check(!(await p.$('#ialbums #yearinj, #ialbums [data-tile="2"] b')) && /<img id="yearinj"/.test(await p.textContent('#ialbums [data-tile="2"] .a')), 'a tile\'s year from a service is text, never markup');
     check(t0 && t0.label === 'From TIDAL' && t0.hidden && !t0.role, `a TIDAL album tile says where it is from, at the end of its name, the badge itself decoration (${t0 && t0.label})`);
     check(t1 && t1.label === 'From your library', `a library album tile too (${t1 && t1.label})`);
     check(t0 && t0.absolute && t0.inside && t0.square, 'in the cover’s bottom corner, over it (the cover stays square)');
@@ -331,7 +333,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const sub = row(nz.id).locator('.sub').first();
       const subText = await sub.evaluate((e) => { const c = e.cloneNode(true); c.querySelectorAll('.sr-only').forEach((x) => x.remove()); return c.textContent; }); // the id is there too, for screen readers only
       check(subText === 'Null output, for developers · HomePod mini' && (await sub.getAttribute('title')) === nz.output, `the device line is in words, the id a tooltip (${subText})`);
-      check(await p.locator('#zpmove').count() === 1, 'and This zone has Move to…');
+      check(await p.locator('#zpmove').count() === 0 && !/Move to…/.test(await p.textContent('#zonepop')), 'one way to move: no Move to… under This zone (UX sweep A14)');
       await row(nz.id).locator('[data-move]').click();
       check(await waitText(p, '#zonename', nz.name), 'Move here: the zone in use is the new one');
       const zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`);
@@ -651,7 +653,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           const vis = !!crumb && getComputedStyle(crumb.closest('.crumbs')).display !== 'none';
           return { trail: vis, diff: vis ? Math.round(Math.abs(mid(back) - mid(crumb)) * 10) / 10 : 0, backFont: getComputedStyle(back).fontSize, crumbFont: vis ? getComputedStyle(crumb).fontSize : null, backMb: getComputedStyle(back).marginBottom, barMb: getComputedStyle(bar).marginBottom };
         });
-        check(m.trail === (w > 720) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
+        check(m.trail === (w > 1024) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
         // An artist page has no trail: the bar keeps the same gap below
         await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
         const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
@@ -905,8 +907,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(/^pubkyauth:/.test(await p.getAttribute('#loginring', 'href')), 'the link opens Pubky Ring');
       check((await p.textContent('#loginh')).trim() === 'Log in to CI node', 'the screen names the node');
       const hint = await p.textContent('#logintoken');
-      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1, 'the API token stays as the alternative, saying where it is');
-      await p.click('#logintoken summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
+      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1 && !(await p.$eval('#logintoken .tokwhere', (d) => d.open)) && (await p.$eval('#tokhint', (e) => e.textContent.length)) < 90, 'the API token stays as the alternative (one short line, where to find it folded: UX sweep A20), saying where it is');
+      await p.click('#logintoken > summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
       check(await waitText(p, '#tokerr', 'The node doesn\u2019t take that token.') && await p.isVisible('#loginpage'), 'a wrong token is said on the screen');
       await p.fill('#tok', TOKEN); await p.click('#tokform button[type=submit]');
       check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false) && await visible(p, '#me'), 'the right token logs in');

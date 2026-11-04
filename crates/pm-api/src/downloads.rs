@@ -49,10 +49,14 @@ pub struct DownloadQuery {
     /// `aac`, `mp3` or `opus`; absent or `original`: the file as it is.
     #[serde(default)]
     pub format: Option<String>,
-    /// kbit/s, 64–320 (default 256; Opus 160).
+    /// kbit/s, one of [`BITRATES`] (default 256; Opus 160).
     #[serde(default)]
     pub bitrate: Option<u32>,
 }
+
+/// The bitrates a transcode may ask for. Each one is its own cached file and ffmpeg run, so any
+/// number from 64 to 320 let one caller fill the cache with near-copies of the same track.
+pub const BITRATES: [u32; 7] = [64, 96, 128, 160, 192, 256, 320];
 
 /// A transcode target: ffmpeg's codec and muxer, the file's extension and MIME type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,8 +84,10 @@ pub fn target(q: &DownloadQuery) -> Result<Option<Target>, ApiError> {
         }
     };
     let kbps = q.bitrate.unwrap_or(default);
-    if !(64..=320).contains(&kbps) {
-        return Err(ApiError::bad_request("bitrate is 64 to 320 kbit/s"));
+    if !BITRATES.contains(&kbps) {
+        return Err(ApiError::bad_request(
+            "bitrate is 64, 96, 128, 160, 192, 256 or 320 kbit/s",
+        ));
     }
     Ok(Some(Target {
         format,
@@ -659,5 +665,30 @@ mod tests {
         assert_eq!(parse_range("bytes=5-1", 1000), None);
         assert_eq!(parse_range("bytes=0-1,5-6", 1000), None);
         assert_eq!(parse_range("items=0-1", 1000), None);
+    }
+
+    /// Only the fixed bitrates make a transcode: any other number would be one more cached copy
+    /// and ffmpeg run of the same track (security review 2026-11-02, low).
+    #[test]
+    fn only_the_fixed_bitrates_make_a_transcode() {
+        let q = |b: u32| DownloadQuery {
+            format: Some("aac".into()),
+            bitrate: Some(b),
+        };
+        for b in BITRATES {
+            assert_eq!(target(&q(b)).unwrap().unwrap().kbps, b);
+        }
+        for b in [65, 100, 127, 129, 200, 255, 319] {
+            let e = target(&q(b)).unwrap_err();
+            assert_eq!(e.status, StatusCode::BAD_REQUEST, "{b}");
+        }
+        // Each format's default is one of them
+        for f in ["aac", "mp3", "opus"] {
+            let d = DownloadQuery {
+                format: Some(f.into()),
+                bitrate: None,
+            };
+            assert!(BITRATES.contains(&target(&d).unwrap().unwrap().kbps), "{f}");
+        }
     }
 }

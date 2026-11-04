@@ -1,5 +1,5 @@
 //! Decoding, DSD, the DSP pipeline skeleton and playback helpers for the
-//! Pubky Music Node (handoff §6).
+//! Odeion node (handoff §6).
 //!
 //! * [`decode`]: symphonia-based decoding of FLAC, ALAC, WAV and AIFF into
 //!   [`pm_model::AudioBlock`]s in the crate-wide integer layout.

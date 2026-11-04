@@ -135,7 +135,7 @@ wrapped to.
   client with a device-client sign-in), uses the tokens until `expires_at` and leaves the refresh to another
   client.
 - `revision` goes up by one at every write.
-- `node` is what a Pubky Music node keeps for itself: its own settings for the sign-in, an id that a
+- `node` is what an Odeion node keeps for itself: its own settings for the sign-in, an id that a
   refresh keeps and a new sign-in changes, and `std`, a hash of the standard members as the node wrote them.
   Clients keep it like any unknown member; when they write their own tokens, `std` no longer matches, and
   nodes then treat the copy as another client's.

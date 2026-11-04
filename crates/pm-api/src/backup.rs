@@ -71,11 +71,17 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 /// Settings that belong to this node and are never carried over (its stream key, its id, the
 /// backup schedule with its passphrase, and the hash of its API token the owner's browser
 /// sessions were made under: a short token set in the config could be guessed from it offline).
+/// Also the files jobs this node is running or keeps for its next start (copies to the
+/// homeserver, bringing files here, uploads it left half written): a restored backup never starts
+/// one nobody asked for, and the node's own carry on (#237 review, M2).
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
     SCHEDULE_KEY,
     crate::accounts::OWNER_SESSIONS_TOKEN,
+    crate::copy_jobs::JOBS_KEY,
+    crate::files::BRING_RESUME_KEY,
+    crate::copy_guard::IN_FLIGHT_KEY,
 ];
 const SCHEDULE_KEY: &str = "backup.schedule";
 /// The passphrase arrives in this header, never in a URL (URLs end up in logs).
@@ -122,9 +128,9 @@ pub struct Secrets {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
-    #[error("This is not a Pubky Music backup ({0})")]
+    #[error("This is not an Odeion backup ({0})")]
     NotABackup(String),
-    #[error("This backup was made by a newer version of Pubky Music (format {0}); update this node first")]
+    #[error("This backup was made by a newer version of Odeion (format {0}); update this node first")]
     TooNew(u32),
     #[error("That passphrase does not open this backup")]
     WrongPassphrase,
@@ -306,7 +312,7 @@ pub fn is_person_signin(key: &str) -> bool {
 }
 
 /// Deletes every sign-in from a plain database copy: the owner's ([`SECRET_SETTINGS`]) and each
-/// listener's own (`pm-node backup`, and the web backup's snapshot).
+/// listener's own (`odeiond backup`, and the web backup's snapshot).
 pub fn strip_signins(copy: &Library) -> Result<(), pm_library::LibraryError> {
     for (key, _) in SECRET_SETTINGS {
         copy.delete_setting(key)?;

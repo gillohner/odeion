@@ -21,7 +21,7 @@ services:
     # Needed to find speakers on your network and for them to reach the node.
     network_mode: host
     environment:
-      PM_NAME: "Pubky Music"
+      PM_NAME: "Odeion"
     volumes:
       # Your music folder on this machine, on the left. Read-only: the node never changes it.
       - /srv/music:/music:ro

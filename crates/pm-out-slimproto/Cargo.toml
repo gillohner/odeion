@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-slimproto"
-description = "Slimproto server: Squeezebox-family players and squeezelite as outputs of the Pubky Music Node"
+description = "Slimproto server: Squeezebox-family players and squeezelite as outputs of the Odeion node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

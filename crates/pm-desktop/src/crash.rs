@@ -41,7 +41,7 @@ pub fn install_hook() {
         let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
         let bt = std::backtrace::Backtrace::force_capture();
         let text = format!(
-            "== Rust panic on thread \"{thread}\": {info}\nPubky Music {} ({} {})\n{bt}\n\n",
+            "== Rust panic on thread \"{thread}\": {info}\nOdeion {} ({} {})\n{bt}\n\n",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH

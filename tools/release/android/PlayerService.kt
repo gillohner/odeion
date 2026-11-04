@@ -43,7 +43,7 @@ class PlayerService : Service() {
             // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
             // phones refuse as a small icon ("Bad notification for startForeground", a crash).
             .setSmallIcon(R.drawable.ic_stat_pubky_music)
-            .setContentTitle("Pubky Music")
+            .setContentTitle("Odeion")
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)
