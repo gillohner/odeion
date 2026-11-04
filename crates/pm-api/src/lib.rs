@@ -15746,6 +15746,88 @@ exec sleep 300
         assert_eq!(*seen.lock().unwrap(), ["Bearer owner-token", "Bearer anna-token"]);
     }
 
+    #[tokio::test]
+    async fn personal_play_order_http_writes_never_change_another_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let a = accounts::mint(&s, anna).unwrap();
+        let b = accounts::mint(&s, ben).unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("play.provider_order", r#"["spotify"]"#)
+            .unwrap();
+        let send = |method: &str, uri: &str, token: &str, body: serde_json::Value| {
+            let app = app.clone();
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let st = r.status();
+                let bytes = r.into_body().collect().await.unwrap().to_bytes();
+                (st, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            }
+        };
+        let (st, v) = send(
+            "PUT",
+            "/v1/play-order",
+            &a,
+            serde_json::json!({"order":["tidal"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["order"][0], "tidal");
+        let (st, v) = send(
+            "PUT",
+            "/v1/play-order",
+            &b,
+            serde_json::json!({"order":["jamendo"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["order"][0], "jamendo");
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "tidal");
+        let (_, v) = send("GET", "/v1/play-order", "s3cret", serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "spotify", "only owner retains legacy default");
+        let (_, v) = send("GET", "/v1/me/prefs", &a, serde_json::json!(null)).await;
+        assert_eq!(v["play_order"]["value"][0], "tidal");
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/prefs",
+            &a,
+            serde_json::json!({"play_order":["unknown"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "tidal", "invalid update is non-destructive");
+        let (st, _) = send("PUT", "/v1/me/prefs", &a, serde_json::json!({"play_order":null})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(
+            v["order"][0], "library",
+            "listener reset never borrows legacy owner order"
+        );
+        let (_, v) = send("GET", "/v1/play-order", &b, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "jamendo");
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("play.provider_order")
+                .unwrap()
+                .unwrap(),
+            r#"["spotify"]"#
+        );
+    }
+
     /// Settings › You › Services: each person sees their own sign-ins.
     #[tokio::test]
     async fn me_services_are_the_callers_own() {

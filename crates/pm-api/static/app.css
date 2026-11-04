@@ -1431,7 +1431,7 @@ body.offline .nav-item.nav-offline, html[data-shell="tablet"] body.offline .bnav
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,
-body.offline .track .lnk[data-act="song"], body.offline .track .lnk[data-act="tartist"] { pointer-events: none; }
+body.offline .track .lnk[data-act="song"], body.offline .track [data-artist-credit] { pointer-events: none; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #volbtn,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark { display: none; }
