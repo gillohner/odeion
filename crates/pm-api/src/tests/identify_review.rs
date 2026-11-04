@@ -2795,3 +2795,65 @@ async fn album_review_pages_by_folder() {
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
+
+/// PR #250 delta review (high): the run reads the songs and what each was (its file and tags) as
+/// one snapshot. A rescan replacing a file right after the run read the library is caught: the
+/// answer for the old file is not stored; the next run finds the song.
+#[tokio::test]
+async fn a_rescan_right_after_the_run_reads_the_library_is_caught() {
+    const RX: &str = "ab000000-0000-4000-8000-0000000000ab";
+    let asked = Arc::new(Asked::default());
+    let port = mock_mb(
+        vec![("Snap".into(), vec![edition(RX, "Snap", 1, &[], &[])])],
+        asked,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    s.set_contact("tests@example.org").unwrap();
+    *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+    let x = album_folder(&s, dir.path(), "Band/Snap", 1)[0];
+    let key = Arc::as_ptr(&s) as usize;
+    {
+        let st = s.clone();
+        let once = std::sync::atomic::AtomicBool::new(true);
+        identify::AFTER_SNAPSHOT.lock().unwrap().push((
+            key,
+            Box::new(move || {
+                if once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    let lib = st.library.lock().unwrap();
+                    let mut t = lib.get_track(pm_model::TrackId(x)).unwrap().unwrap();
+                    t.file.size_bytes += 4096;
+                    t.file.mtime_unix += 30;
+                    lib.upsert_track(&t).unwrap();
+                }
+            }),
+        ));
+    }
+    identify::run_with(&s, identify::RunOptions::quick(false))
+        .await
+        .unwrap();
+    let canonical = |id: i64| {
+        s.library
+            .lock()
+            .unwrap()
+            .get_track(pm_model::TrackId(id))
+            .unwrap()
+            .unwrap()
+            .canonical
+    };
+    let stale = canonical(x);
+    identify::AFTER_SNAPSHOT
+        .lock()
+        .unwrap()
+        .retain(|(k, _)| *k != key);
+    assert!(stale.is_none(), "the answer for the file as it was is not stored");
+    assert_eq!(s.identify.lock().unwrap().identified, 0);
+    identify::run_with(&s, identify::RunOptions::quick(false))
+        .await
+        .unwrap();
+    assert_eq!(
+        canonical(x).unwrap().0.to_url(),
+        format!("https://musicbrainz.org/recording/{}", rec(1))
+    );
+}

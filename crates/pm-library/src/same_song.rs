@@ -29,16 +29,28 @@ pub struct SongPick {
 /// Whether `title` is the file's song in the file's version: the same title once plain, and no
 /// version words (live, remix, edit…) on one side the other doesn't have ([`crate::album_fit`]).
 pub fn same_song(file: &FileTags, title: &str) -> bool {
-    same_song_as(file, title, None)
+    same_song_as(file, title, None, None)
 }
 
 /// [`same_song`] with what MusicBrainz says tells the candidate apart (its disambiguation):
 /// the same title once plain, and the same version ([`crate::album_fit::same_version`]:
 /// qualifiers and disambiguation that aren't neutral must be on both sides).
-pub fn same_song_as(file: &FileTags, title: &str, disambiguation: Option<&str>) -> bool {
+pub fn same_song_as(
+    file: &FileTags,
+    title: &str,
+    disambiguation: Option<&str>,
+    credit: Option<&str>,
+) -> bool {
     !file.title.trim().is_empty()
         && plain_title(&file.title) == plain_title(title)
-        && crate::album_fit::same_version(&file.title, file.album.as_deref(), title, disambiguation, &[])
+        && crate::album_fit::same_version(
+            &file.title,
+            file.album.as_deref(),
+            title,
+            disambiguation,
+            &[],
+            &[file.artist.as_str(), credit.unwrap_or_default()],
+        )
 }
 
 /// Whether a release is named like the file's album (qualifiers included).
@@ -51,7 +63,10 @@ pub fn named_like_album(file: &FileTags, release_title: &str) -> bool {
 /// Whether the file's album says it is another version than the plain one ("(Re-Recorded)",
 /// "(Taylor's Version)", "(Live)"): then only a release named so is evidence.
 pub fn album_says_version(file: &FileTags) -> bool {
-    !crate::album_fit::qualifiers(file.album.as_deref().unwrap_or_default()).is_empty()
+    let album = file.album.as_deref().unwrap_or_default();
+    // In a qualifier, or a version word anywhere in the name ("Live at Roskilde 1995"): such a
+    // name only stops a pick (a release named so is still taken), it never allows one
+    !crate::album_fit::qualifiers(album).is_empty() || !crate::album_fit::marks_in(album).is_empty()
 }
 
 /// Whether a credit is the file's artist: the same name once plain, or that name featuring
@@ -62,7 +77,7 @@ pub fn same_artist(file: &str, credit: &str) -> bool {
         return false;
     }
     f == c
-        || ["feat", "ft", "featuring"]
+        || ["feat", "ft", "featuring", "with"]
             .iter()
             .any(|j| c.starts_with(&format!("{f} {j} ")))
 }
@@ -112,7 +127,10 @@ pub fn pick_exact_hit(file: &FileTags, hits: &[crate::musicbrainz::RecordingHit]
     let exact: Vec<&RecordingHit> = hits
         .iter()
         .filter(|h| h.score >= 90)
-        .filter(|h| same_song_as(file, &h.title, h.disambiguation.as_deref()) && same_artist(&file.artist, &h.artist))
+        .filter(|h| {
+            same_song_as(file, &h.title, h.disambiguation.as_deref(), Some(&h.artist))
+                && same_artist(&file.artist, &h.artist)
+        })
         .filter(|h| matches!((h.length_ms, file.duration_ms), (Some(a), Some(b)) if a.abs_diff(b) <= LENGTH_SLACK_MS))
         .filter(|h| live_ok(h))
         .collect();
@@ -543,5 +561,79 @@ mod tests {
             "title": "Song", "disambiguation": "re-recording", "length": 200000, "artist-credit": [{"name": "Band"}]}]});
         let hits = crate::musicbrainz::parse_search_hits(&v);
         assert_eq!(hits[0].disambiguation.as_deref(), Some("re-recording"));
+    }
+
+    /// PR #250 delta review (Kimi, high): "with …" names a featured artist only when that artist
+    /// is credited on the file or the hit; "(With Strings)", "(with Orchestra)" are versions.
+    #[test]
+    fn with_names_a_featured_artist_only_when_credited() {
+        let f = FileTags {
+            title: "Song".into(),
+            artist: "Band".into(),
+            album: Some("Album".into()),
+            duration_ms: Some(232_000),
+        };
+        let h = |title: &str, artist: &str| hit(1, title, artist, Some(232_000), vec![]);
+        assert!(pick_exact_hit(&f, &[h("Song (With Strings)", "Band")]).is_none());
+        assert!(pick_exact_hit(&f, &[h("Song (with Orchestra)", "Band")]).is_none());
+        assert!(
+            pick_exact_hit(&f, &[h("Song (with Carol)", "Band")]).is_none(),
+            "Carol is credited nowhere"
+        );
+        assert!(
+            pick_exact_hit(&f, &[h("Song (with Carol)", "Band with Carol")]).is_some(),
+            "Carol is credited on the hit"
+        );
+        let mut g = f.clone();
+        g.title = "Song (with Carol)".into();
+        g.artist = "Band with Carol".into();
+        assert!(
+            pick_exact_hit(&g, &[h("Song", "Band with Carol")]).is_some(),
+            "credited on the file"
+        );
+        assert!(
+            pick_exact_hit(&f, &[h("Song (feat. Carol)", "Band")]).is_some(),
+            "feat. is always a featured artist"
+        );
+    }
+
+    /// PR #250 delta review (medium): version words anywhere in the album's name ("Live at
+    /// Roskilde 1995", "Unplugged in New York") stop an automatic pick unless a hit is on a release
+    /// named like that album; they never allow one ("Live Forever" allows no live-only take).
+    #[test]
+    fn version_words_in_the_album_name_only_block() {
+        let studio = hit_d(1, "Song", "", vec![rel(1, "Hits", &["Album"])]);
+        assert!(pick_exact_hit(
+            &tags("Song", "Live at Roskilde 1995"),
+            std::slice::from_ref(&studio)
+        )
+        .is_none());
+        assert!(pick_exact_hit(
+            &tags("Song", "Unplugged in New York"),
+            std::slice::from_ref(&studio)
+        )
+        .is_none());
+        let there = hit_d(
+            2,
+            "Song",
+            "",
+            vec![rel(2, "Live at Roskilde 1995", &["Album", "Live"])],
+        );
+        assert_eq!(
+            pick_exact_hit(&tags("Song", "Live at Roskilde 1995"), &[studio.clone(), there])
+                .unwrap()
+                .recording,
+            id(2)
+        );
+        let elsewhere = hit_d(3, "Song", "", vec![rel(3, "Live at Wembley", &["Album", "Live"])]);
+        assert!(pick_exact_hit(&tags("Song", "Live Forever"), &[elsewhere]).is_none());
+        assert!(
+            pick_exact_hit(&tags("Song", "Live Forever"), std::slice::from_ref(&studio)).is_none(),
+            "the name blocks"
+        );
+        assert!(
+            pick_exact_hit(&tags("Song", "Album"), &[studio]).is_some(),
+            "a plain name blocks nothing"
+        );
     }
 }

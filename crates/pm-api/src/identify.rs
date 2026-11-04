@@ -543,6 +543,23 @@ fn fingerprint_workers() -> usize {
 /// Releases a folder's search may look up before the folder goes to the fingerprint.
 const RELEASES_PER_FOLDER: usize = 2;
 
+/// Tests: something to do right after a run has read the library (a rescan landing there), for
+/// the node it is registered for.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+pub(crate) static AFTER_SNAPSHOT: std::sync::Mutex<Vec<(usize, Box<dyn Fn() + Send>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn after_snapshot(s: &Arc<NodeState>) {
+    let key = Arc::as_ptr(s) as usize;
+    for (k, f) in AFTER_SNAPSHOT.lock().expect("hooks").iter() {
+        if *k == key {
+            f();
+        }
+    }
+}
+
 /// What the lanes share: the songs this run identified, and what each song looks like now.
 struct RunCtx {
     found: Mutex<Vec<i64>>,
@@ -605,7 +622,7 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
     let settings = s.acoustid.read().expect("acoustid lock").clone();
     let mb = mb_client(s, opts.mb_interval);
     let cache_max = opts.mb_cache_max.unwrap_or(Library::IDENTIFY_MB_MAX);
-    let (mut todo, all, kept) = {
+    let (mut todo, all, kept, read) = {
         let lib = s.library.lock().expect("library poisoned");
         // The caches stay bounded (a cleanup failing only keeps more); not while a scan writes:
         // the run's first write then is a song's, which waits for the scan
@@ -618,9 +635,13 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             lib.tracks_to_identify(retry)?,
             lib.all_tracks()?,
             lib.identify_inputs()?,
+            // What each song is (file and tags), in the same read as the songs themselves: a
+            // rescan after it makes the run's answer stale, and settling sees that
+            lib.input_generations()?,
         )
     };
-    let read = s.library.lock().expect("library poisoned").input_generations()?;
+    #[cfg(test)]
+    after_snapshot(s);
     // What each song looks like now; a "not found" song that changed since it was checked (its
     // tags, its file, an AcoustID key or a MusicBrainz contact added) is checked again
     let services = services_key(s, &settings, mb.is_some());

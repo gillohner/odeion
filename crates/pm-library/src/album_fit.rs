@@ -530,7 +530,7 @@ pub(crate) fn versions_agree(
     track: &str,
     _release_title: Option<&str>,
 ) -> bool {
-    same_version(file, file_album, track, None, &[])
+    same_version(file, file_album, track, None, &[], &[])
 }
 
 /// Words a title's qualifier may hold and still name the same recording: a remaster, a year, an
@@ -584,15 +584,26 @@ fn neutral(words: &[&str]) -> bool {
                 .any(|x| has(x)))
 }
 
-/// Whether a qualifier only names a featured artist ("feat. Carol", "with Band").
-fn featuring(part: &str) -> bool {
-    let first = part
-        .to_lowercase()
+/// Whether a qualifier only names a featured artist: "feat. Carol" always; "with Carol" only
+/// when Carol is credited (`credits`: the file's artists, the candidate's credit), since
+/// "(With Strings)" or "(with Orchestra)" name a version.
+fn featuring(part: &str, credits: &[&str]) -> bool {
+    let lower = part.to_lowercase();
+    let mut words = lower
         .split(|c: char| !c.is_alphanumeric())
-        .find(|w| !w.is_empty())
-        .map(str::to_string)
-        .unwrap_or_default();
-    ["feat", "ft", "featuring", "with"].contains(&first.as_str())
+        .filter(|w| !w.is_empty());
+    match words.next() {
+        Some("feat" | "ft" | "featuring") => true,
+        Some("with") => {
+            let rest = plain_name(&words.collect::<Vec<_>>().join(" "));
+            !rest.is_empty()
+                && credits.iter().any(|c| {
+                    let c = plain_name(c);
+                    c == rest || format!(" {c} ").contains(&format!(" {rest} "))
+                })
+        }
+        _ => false,
+    }
 }
 
 /// A qualifier as compared: its words, lower case, without filler ("at", "the"…), sorted.
@@ -667,9 +678,15 @@ fn title_parts(title: &str) -> Vec<String> {
 /// sorted words. `Song (Live at Wembley) [Remastered]` is `["live wembley"]`;
 /// `Song (2011 Remaster)` is `[]`.
 pub fn qualifiers(title: &str) -> Vec<String> {
+    qualifiers_credited(title, &[])
+}
+
+/// [`qualifiers`], with the artists credited on either side: "with" one of them names a featured
+/// artist, not a version.
+pub fn qualifiers_credited(title: &str, credits: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = title_parts(title)
         .iter()
-        .filter(|p| !featuring(p))
+        .filter(|p| !featuring(p, credits))
         .map(|p| normal_words(p))
         .filter(|w| {
             let words: Vec<&str> = w.iter().map(String::as_str).collect();
@@ -700,14 +717,15 @@ pub fn same_version(
     cand: &str,
     cand_disambiguation: Option<&str>,
     context: &[&str],
+    credits: &[&str],
 ) -> bool {
     let mut ctx: Vec<String> = qualifiers(file_album.unwrap_or_default());
     ctx.extend(context.iter().map(|c| c.to_string()));
-    let mut f: Vec<String> = qualifiers(file)
+    let mut f: Vec<String> = qualifiers_credited(file, credits)
         .into_iter()
         .filter(|q| !ctx.contains(q))
         .collect();
-    let mut c: Vec<String> = qualifiers(cand)
+    let mut c: Vec<String> = qualifiers_credited(cand, credits)
         .into_iter()
         .filter(|q| !ctx.contains(q))
         .collect();
@@ -776,6 +794,7 @@ pub fn fit_release(files: &[FolderFile], release: &Value) -> Option<AlbumFit> {
                     &t.title,
                     t.disambiguation.as_deref(),
                     context,
+                    &[f.artist.as_str(), f.album_artist.as_deref().unwrap_or_default()],
                 )
         }) else {
             continue;

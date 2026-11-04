@@ -570,7 +570,7 @@ fn same_audio<'a>(
     tags: &crate::same_song::FileTags,
 ) -> Option<&'a Seen<'a>> {
     use crate::same_song::{
-        album_says_version, file_is_live, named_like_album, plain_kind, same_artist, same_song,
+        album_says_version, file_is_live, named_like_album, plain_kind, same_artist, same_song_as,
     };
     let live_file = file_is_live(tags);
     let named = |s: &Seen| {
@@ -589,7 +589,7 @@ fn same_audio<'a>(
         let title = s.rec.title.as_deref()?;
         let near = matches!((s.rec.duration, file.duration_secs), (Some(a), Some(b)) if (a - b).abs() <= DURATION_SLACK_SECS);
         let artist = s.rec.artist()?;
-        if !same_song(tags, title) || !near || !same_artist(&tags.artist, &artist) {
+        if !same_song_as(tags, title, None, Some(&artist)) || !near || !same_artist(&tags.artist, &artist) {
             return None;
         }
         let groups = &s.rec.releasegroups;
@@ -1324,6 +1324,44 @@ mod tests {
         ]);
         assert!(matches!(
             decide_with_tags(&live, &file, 12, &[], Some(&t2)),
+            Decision::Suggest(_)
+        ));
+    }
+
+    /// PR #250 delta review (medium): one audio under several recordings, for a file whose album's
+    /// name says it is live ("Live at Roskilde 1995") and no recording on that release: for the
+    /// owner, not the studio recording.
+    #[test]
+    fn same_audio_is_blocked_by_version_words_in_the_album_name() {
+        let tags = crate::same_song::FileTags {
+            title: "Over My Shoulder".into(),
+            artist: "Mike + The Mechanics".into(),
+            album: Some("Live at Roskilde 1995".into()),
+            duration_ms: Some(232_000),
+        };
+        let file = FileFacts {
+            track_no: Some(2),
+            disc_no: Some(1),
+            duration_secs: Some(232.0),
+        };
+        let answer = vec![AcoustIdResult {
+            id: "a".into(),
+            score: 0.96,
+            recordings: vec![
+                grouped(
+                    2,
+                    "Over My Shoulder",
+                    "Album",
+                    &[],
+                    "Beggar on a Beach of Gold",
+                    10,
+                    2,
+                ),
+                grouped(3, "Over My Shoulder", "Album", &["Compilation"], "Hits", 18, 3),
+            ],
+        }];
+        assert!(matches!(
+            decide_with_tags(&answer, &file, 12, &[], Some(&tags)),
             Decision::Suggest(_)
         ));
     }
