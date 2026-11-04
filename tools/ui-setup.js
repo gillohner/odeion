@@ -480,7 +480,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
           await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
-          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#itags', { timeout: 15000 }).catch(() => {}); await p.waitForTimeout(800);
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#main .hero', { timeout: 15000 }).catch(() => {}); await p.waitForTimeout(800);
           check(!(await p.$('#icollections')) && !(await p.$('#icollections-slot')), 'no In collections row while Pinakes doesn’t list them');
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
         } else check(false, `Play from here needs a playing library song and another one (${curUri})`);

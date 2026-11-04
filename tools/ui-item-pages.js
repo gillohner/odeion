@@ -40,9 +40,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (songId) { await p.click('#isongs [data-ssong]'); await waitPage(); pages.push(['library song', new URL(p.url()).pathname]); }
   for (const [name, path] of pages) {
     await p.goto(BASE + path); await waitPage();
-    // Song pages have no one-song list; every page has Tags and About
+    // Song pages have no one-song list; every page has Tags (in the top card) and About
     const isSong = path.startsWith('/song/');
-    const sections = await p.$$eval('#isongs, #itags, #iabout', (els) => els.map((e) => e.id));
+    const sections = await p.$$eval('#isongs, #htags, #iabout', (els) => els.map((e) => e.id));
     const want = isSong ? 2 : 3;
     const hero = await p.$$eval('#iplay, #izone, #ifav, #imore', (els) => els.map((e) => e.id));
     let menu = [];

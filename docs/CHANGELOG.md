@@ -6,6 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **Tags are in the top card, drawn as pubky.app draws them** (owner's ask).
+  - Album, song and artist pages show their tags under the title, above Play. The Tags section at the bottom is gone; My rating stays where it was.
+  - The item's tags and the source link's stay two groups, both always visible, each with its own "+" to add one. Each group reads, adds, removes and counts on its own link only, and so do the people beside each tag: the same tag in both groups keeps its own people.
+  - Each tag has pubky.app's colour for its label (the same function, ported), without the "#", with how many people used it. Your own tag has a border, and only your own has × to remove it. Beside a tag are up to four of the people who used it, then "+N"; a click lists them, and each opens their page.
+  - Others' tags come first, most used first. About two rows show, and "+N more" shows the rest in place. While Pubky answers the item's own tags are already there; when it doesn't answer the page says so, and your tags still work.
+  - An album or artist with no MusicBrainz match says so in the top card, with **Match this album to tag it** (the matches to confirm). A link not matched yet takes tags on the link only. No tag ever goes to a guessed identity.
+  - Home's tags, a tag's page, search's Tags, Genres' "Your Pubky tags" and the now-playing tags use the same chip and colours.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".
