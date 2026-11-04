@@ -1292,7 +1292,7 @@ impl Library {
              FROM albums al
              JOIN tracks t ON t.album_id = al.id
              JOIN track_artists ta ON ta.track_id = t.id
-             WHERE ta.artist_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path))
+             WHERE ta.artist_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND +f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path))
              ORDER BY al.year, al.title COLLATE NOCASE",
         )?;
         let v = stmt
@@ -1916,7 +1916,7 @@ impl Library {
         let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
              FROM albums al JOIN tracks t ON t.album_id = al.id JOIN track_genres tg ON tg.track_id = t.id
-             WHERE tg.genre_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path)) ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
+             WHERE tg.genre_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND +f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path)) ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
         )?;
         let v = stmt
             .query_map(params![genre_id], row_to_album)?
@@ -3817,13 +3817,13 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.album_id, t.track_no, t.disc
     LEFT JOIN albums al ON al.id = t.album_id";
 
 /// A track (aliased `t`) has a present file.
-const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path))";
+const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path))";
 
 /// An album (the `albums` table unaliased) has a song with a present file.
-const ALBUM_PRESENT: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = albums.id)";
+const ALBUM_PRESENT: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = albums.id)";
 
 /// [`ALBUM_PRESENT`] for an album aliased `al`.
-const ALBUM_PRESENT_AL: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = al.id)";
+const ALBUM_PRESENT_AL: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = al.id)";
 
 /// A song row: the copy played by default and, when there are several, every copy.
 #[derive(Debug, Clone, PartialEq)]
@@ -3928,7 +3928,7 @@ fn song_rows<P: rusqlite::Params>(conn: &Connection, tail: &str, p: P) -> Result
         "SELECT t.id, t.album_id, t.disc_no, t.track_no, t.title,
             (SELECT h.blake3 FROM files hf JOIN file_hashes h ON h.path = hf.path
                  AND h.size_bytes = hf.size_bytes AND h.mtime_unix = hf.mtime_unix
-             WHERE hf.track_id = t.id AND hf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = hf.path) LIMIT 1),
+             WHERE hf.track_id = t.id AND +hf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = hf.path) LIMIT 1),
             t.duration_ms
          FROM tracks t WHERE {TRACK_PRESENT} {tail}"
     ))?;
@@ -4120,7 +4120,7 @@ fn songs_in_order(
 fn present_select() -> String {
     TRACK_SELECT.replacen(
         "JOIN files fi ON fi.track_id = t.id AND",
-        "JOIN files fi ON fi.track_id = t.id AND fi.missing = 0 AND",
+        "JOIN files fi ON fi.track_id = t.id AND +fi.missing = 0 AND",
         1,
     )
 }
@@ -6323,5 +6323,33 @@ mod identify_tests {
             .count();
         // a fair draw gives about 200; drawing copies would give about 40
         assert!((120..=280).contains(&hits), "{hits}");
+    }
+
+    /// PR #268 CI (speed): the presence checks ran through the index on `files.missing`, one
+    /// scan of every present file per track (11 s for 5,000 tracks). They must use `files_track`.
+    #[test]
+    fn whole_library_counts_stay_fast() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.begin_batch().unwrap();
+        for n in 0..3000u32 {
+            let mut t = sample_track(&format!("/m/A{}/{n}.flac", n / 10), &format!("S{n}"));
+            t.album.as_mut().unwrap().title = format!("Album {}", n / 10);
+            t.track_no = Some(n % 10 + 1);
+            t.recording_mbid = None;
+            t.isrc = None;
+            t.canonical = None;
+            lib.upsert_track(&t).unwrap();
+        }
+        lib.commit_batch().unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(lib.stats().unwrap().tracks, 3000);
+        lib.list_artists().unwrap();
+        lib.list_genres().unwrap();
+        lib.random_tracks(50).unwrap();
+        assert_eq!(lib.list_albums(None, 1000).unwrap().len(), 300);
+        assert_eq!(lib.recent_albums(0, 1000).unwrap().len(), 300);
+        let took = t0.elapsed();
+        // a few tens of ms here; the quadratic plan took seconds
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 }
