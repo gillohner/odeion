@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **Internet Archive and Audius items found by search play again** (owner's report: "almost all I find don't play"). A search hit opens the item page, which asked only TIDAL, Deezer and Spotify for what an item holds: an archive item showed "No connected service lists songs for this yet" and an Audius song had a row with nothing to play. The page now asks the Internet Archive for an item's recordings and Audius for a song's stream (Jamendo albums too), with "Plays from" set, so Play, Shuffle, the rows and This browser all work. Items the archive restricts (its files answer 401: mostly podcast and SoundCloud mirrors, 13 of the first 50 hits for "test") no longer appear in search, a private file is never offered, and one opened by its link says "Restricted on the Internet Archive: its recordings can't be streamed" with Play off instead of an empty list.
 - **Security fixes from the review of 2026-11-02.**
   - A listener's or a party's plays never go to the owner's Last.fm or ListenBrainz, not even as "playing now". A song the owner started whose zone goes to a listener or a party before its listen is due is dropped, and doesn't count when the zone comes back.
   - An M3U or PLS radio playlist is read to 64 KiB at most. One that says it is bigger is refused unread, so a queued link can't make the node read a huge or endless "playlist".

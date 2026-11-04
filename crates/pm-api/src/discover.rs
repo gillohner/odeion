@@ -149,6 +149,50 @@ pub(crate) fn service_link(url: &str, tagged: bool) -> Option<ServiceLink> {
         .trim_start_matches("listen.")
         .trim_start_matches("open.");
     let segs: Vec<&str> = u.path_segments()?.filter(|s| !s.is_empty()).collect();
+    if host == "archive.org" {
+        // An Internet Archive item, `archive.org/details/<identifier>`: a set of recordings, so
+        // an album here; identifiers carry `-`, `_` and `.`
+        let i = segs.iter().position(|s| *s == "details")?;
+        let id = segs.get(i + 1)?.to_string();
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
+            return None;
+        }
+        return Some(ServiceLink {
+            service: "archive",
+            kind: "album",
+            id,
+            url: url.to_string(),
+            tagged,
+            own: false,
+        });
+    }
+    if host == "audius.co" {
+        // An Audius song, `audius.co/<handle>/<slug>` (a user's page has one segment, a playlist
+        // or album three): the node resolves the link to the track
+        let ok = |x: &str| {
+            !x.is_empty()
+                && x.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        };
+        let &[handle, slug] = segs.as_slice() else {
+            return None;
+        };
+        if !ok(handle) || !ok(slug) {
+            return None;
+        }
+        return Some(ServiceLink {
+            service: "audius",
+            kind: "track",
+            id: format!("{handle}/{slug}"),
+            url: url.to_string(),
+            tagged,
+            own: false,
+        });
+    }
     let service = match host {
         "tidal.com" => "tidal",
         "deezer.com" => "deezer",
@@ -196,6 +240,9 @@ pub(crate) enum Access {
 /// any library lock: the session loaders take that lock themselves.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ServiceAccess {
+    /// No account: the archive's open items and Audius's songs stream for everyone
+    archive: Access,
+    audius: Access,
     jamendo: Access,
     tidal: Access,
     spotify: Access,
@@ -204,7 +251,7 @@ pub(crate) struct ServiceAccess {
     off: u8,
 }
 
-const OFF_IDS: [&str; 4] = ["tidal", "spotify", "jamendo", "deezer"];
+const OFF_IDS: [&str; 6] = ["tidal", "spotify", "jamendo", "deezer", "archive", "audius"];
 
 /// Whether `service` is switched off on Sources.
 pub(crate) fn turned_off(acc: &ServiceAccess, service: &str) -> bool {
@@ -223,6 +270,8 @@ pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
             .filter(|(_, id)| !s.source_enabled(id))
             .fold(0, |m, (i, _)| m | (1 << i)),
         deezer: on("deezer", Access::Preview),
+        archive: on("archive", Access::Full),
+        audius: on("audius", Access::Full),
         // No account: the node's developer app is enough
         jamendo: on(
             "jamendo",
@@ -258,6 +307,8 @@ pub(crate) fn access(acc: &ServiceAccess, service: &str) -> Access {
         "jamendo" => acc.jamendo,
         "deezer" => acc.deezer,
         "spotify" => acc.spotify,
+        "archive" => acc.archive,
+        "audius" => acc.audius,
         _ => Access::No,
     }
 }
@@ -282,7 +333,19 @@ pub(crate) fn service_name(id: &str) -> &'static str {
         "deezer" => "Deezer",
         "spotify" => "Spotify",
         "jamendo" => "Jamendo",
+        "archive" => "Internet Archive",
+        "audius" => "Audius",
         _ => "service",
+    }
+}
+
+/// The id a service's `item()` takes for a link: the archive's bare identifier, an Audius
+/// permalink (resolved by Audius), else `kind:id`.
+fn svc_item_id(l: &ServiceLink) -> String {
+    match l.service {
+        "archive" => l.id.clone(),
+        "audius" => format!("{}{}", crate::audius::PERMALINK, l.id),
+        _ => format!("{}:{}", l.kind, l.id),
     }
 }
 
@@ -690,11 +753,13 @@ pub(crate) async fn describe_from_provider(s: &NodeState, u: &str) -> Option<Dis
     let svc: Box<dyn StreamingService> = match (l.service, access(&acc, l.service)) {
         ("tidal", Access::Full) => Box::new(crate::tidal::Tidal),
         ("jamendo", Access::Full) => Box::new(crate::jamendo::Jamendo),
+        ("archive", Access::Full) => Box::new(crate::archive::InternetArchive),
+        ("audius", Access::Full) => Box::new(crate::audius::Audius),
         ("deezer", _) => Box::new(crate::deezer::Deezer),
         ("spotify", Access::External) => Box::new(crate::spotify::Spotify),
         _ => return None,
     };
-    let src = svc.item(s, &format!("{}:{}", l.kind, l.id)).await.ok()?;
+    let src = svc.item(s, &svc_item_id(&l)).await.ok()?;
     // A track link's item is its album; the song is its one track
     let song = (l.kind == "track" && src.tracks.len() == 1).then(|| &src.tracks[0]);
     let mut it = DiscoverItem {
@@ -1332,12 +1397,45 @@ async fn fetch_contents(
                 "tidal" => Some(Box::new(crate::tidal::Tidal)),
                 "deezer" => Some(Box::new(crate::deezer::Deezer)),
                 "spotify" => Some(Box::new(crate::spotify::Spotify)),
+                // No account needed: the archive's items and Jamendo's albums list their files,
+                // an Audius song is its stream
+                "archive" => Some(Box::new(crate::archive::InternetArchive)),
+                "jamendo" => Some(Box::new(crate::jamendo::Jamendo)),
+                "audius" => Some(Box::new(crate::audius::Audius)),
                 _ => None,
             };
             if let Some(svc) = svc {
                 match l.kind {
-                    "album" => {
-                        if let Ok(item) = svc.item(s, &format!("album:{}", l.id)).await {
+                    // A song page from a service that streams by link: its one row carries the
+                    // stream, so Play, the row and the browser all have something to play
+                    "track" if l.service == "audius" => {
+                        if let Ok(item) = svc.item(s, &svc_item_id(l)).await {
+                            out.tracks = item
+                                .tracks
+                                .iter()
+                                .map(|t| ItemTrack {
+                                    no: None,
+                                    title: t.title.clone(),
+                                    artist: t.artist.clone().or_else(|| item.creator.clone()),
+                                    duration_ms: t.duration_ms,
+                                    uri: Some(t.url.clone()),
+                                    track_id: None,
+                                    page: Some(l.url.clone()),
+                                    image: item.image.clone(),
+                                    id: Some(page_id(&l.url)),
+                                    ..Default::default()
+                                })
+                                .collect();
+                        }
+                    }
+                    "album" => match svc.item(s, &svc_item_id(l)).await {
+                        // The archive says an item is restricted: the page says so, and stops looking
+                        Err(e) if l.service == "archive" && e.status == axum::http::StatusCode::FORBIDDEN => {
+                            out.unavailable = Some(e.message);
+                            break;
+                        }
+                        Err(_) => {}
+                        Ok(item) => {
                             out.tracks = item
                                 .tracks
                                 .iter()
@@ -1356,7 +1454,7 @@ async fn fetch_contents(
                                 })
                                 .collect();
                         }
-                    }
+                    },
                     "artist" => {
                         // The artist's albums and top tracks at once
                         let top_f = async {
@@ -1446,8 +1544,15 @@ async fn expand_link(
         "tidal" => Box::new(crate::tidal::Tidal),
         "deezer" => Box::new(crate::deezer::Deezer),
         "jamendo" => Box::new(crate::jamendo::Jamendo),
+        "archive" => Box::new(crate::archive::InternetArchive),
+        "audius" => Box::new(crate::audius::Audius),
         _ => return Ok(Vec::new()),
     };
+    // An Audius song streams by its resolved track: the item says the stream
+    if l.kind == "track" && l.service == "audius" {
+        let item = svc.item(s, &svc_item_id(l)).await?;
+        return Ok(item.tracks.iter().map(|t| t.queue_item(&item)).collect());
+    }
     if l.kind == "track" {
         let uri = match l.service {
             "tidal" => crate::tidal::track_uri(&l.id),
@@ -1489,7 +1594,7 @@ async fn expand_link(
             })
             .collect());
     }
-    let album = svc.item(s, &format!("album:{}", l.id)).await?;
+    let album = svc.item(s, &svc_item_id(l)).await?;
     Ok(album
         .tracks
         .iter()
@@ -1993,5 +2098,58 @@ mod page_id_tests {
         // Anything else keeps the base64 id
         assert!(page_id("https://tidal.com/track/1?x=1").starts_with("u-"));
         assert!(page_id("https://example.org/track/1").starts_with("u-"));
+    }
+}
+
+#[cfg(test)]
+mod archive_links {
+    use super::*;
+
+    #[test]
+    fn an_archive_item_is_a_service_link_the_node_can_stream() {
+        let l = service_link(
+            "https://archive.org/details/gd1977-05-08.sbd.hicks.4982.sbeok.shnf",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (l.service, l.kind, l.id.as_str()),
+            ("archive", "album", "gd1977-05-08.sbd.hicks.4982.sbeok.shnf")
+        );
+        assert_eq!(
+            svc_item_id(&l),
+            "gd1977-05-08.sbd.hicks.4982.sbeok.shnf",
+            "the archive's item takes the bare identifier"
+        );
+        assert!(service_link("https://archive.org/details/", false).is_none());
+        assert!(service_link("https://archive.org/search?query=x", false).is_none());
+        assert!(
+            service_link("https://archive.org/details/a%20b", false).is_none(),
+            "an escaped identifier is not one"
+        );
+        let tidal = service_link("https://tidal.com/album/1", false).unwrap();
+        assert_eq!(svc_item_id(&tidal), "album:1");
+    }
+
+    #[test]
+    fn an_audius_song_link_resolves_through_its_permalink() {
+        let l = service_link("https://audius.co/techwipe/ambient-piano-interlude-353852", false).unwrap();
+        assert_eq!(
+            (l.service, l.kind, l.id.as_str()),
+            ("audius", "track", "techwipe/ambient-piano-interlude-353852")
+        );
+        assert_eq!(
+            svc_item_id(&l),
+            "permalink:techwipe/ambient-piano-interlude-353852"
+        );
+        assert!(
+            service_link("https://audius.co/techwipe", false).is_none(),
+            "a user's page"
+        );
+        assert!(
+            service_link("https://audius.co/techwipe/album/chill", false).is_none(),
+            "an album, not a song"
+        );
+        assert!(service_link("https://audius.co/a%20b/c", false).is_none());
     }
 }

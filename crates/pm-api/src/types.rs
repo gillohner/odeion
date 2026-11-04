@@ -1490,6 +1490,10 @@ pub struct ItemPage {
     /// country"); none when it plays the page's own source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plays_note: Option<String>,
+    /// Why nothing on this page can play (the Internet Archive restricts the item): shown where
+    /// the songs would be, with Play and Shuffle off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
     /// The song (album, artist) itself, on every source: its MusicBrainz or ISRC link. Tags
     /// "on the song" attach here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1595,6 +1599,10 @@ pub struct ItemContents {
     pub total_ms: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub albums: Vec<ItemAlbum>,
+    /// Why nothing here can play, when the source says so (an item the Internet Archive
+    /// restricts): the page shows it instead of an empty list, with Play off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 /// Where an item plays from (the "Plays from" chip).

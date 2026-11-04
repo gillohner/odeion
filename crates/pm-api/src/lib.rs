@@ -5105,6 +5105,191 @@ mod tests {
             .is_none());
     }
 
+    /// Search hits open the unified item page: an Internet Archive item lists its recordings
+    /// (public files only) and plays them, an Audius song's row carries its stream, and an item
+    /// the archive restricts says so (TASK-archive-restricted, revisions 1 and 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archive_and_audius_pages_from_search_play_and_a_restricted_item_says_so() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (flac_a, flac_b) = (flac.clone(), flac);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen_q = Arc::new(std::sync::Mutex::new(String::new()));
+        let sq = seen_q.clone();
+        let track = serde_json::json!({"id": "W0NJ0", "title": "Ambient Piano Interlude", "user": {"name": "Techwipe"}, "duration": 5,
+            "permalink": "/techwipe/ambient-piano-interlude-353852", "artwork": {"480x480": "https://img/480"}, "play_count": 3});
+        let (t1, t2) = (track.clone(), track);
+        let mock = Router::new()
+            .route(
+                "/advancedsearch.php",
+                get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let sq = sq.clone();
+                    async move {
+                        *sq.lock().unwrap() = q.get("q").cloned().unwrap_or_default();
+                        Json(serde_json::json!({"response": {"docs": [
+                            {"identifier": "fixture-set", "title": "Fixture Set", "creator": "Tester", "year": "2020", "downloads": 7}
+                        ]}}))
+                    }
+                }),
+            )
+            .route(
+                "/metadata/{id}",
+                get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    Json(if id == "locked-set" {
+                        // A restricted item: the flag, and every audio file private
+                        serde_json::json!({
+                            "metadata": {"title": "Locked Set", "access-restricted-item": "true"},
+                            "files": [{"name": "x.mp3", "format": "VBR MP3", "source": "original", "private": "true"}]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "metadata": {"title": "Fixture Set", "creator": "Tester", "year": "2020"},
+                            "files": [
+                                {"name": "one.flac", "format": "Flac", "source": "original", "title": "One", "track": "1", "length": "5.15"},
+                                {"name": "two.flac", "format": "Flac", "source": "original", "title": "Two", "track": "2", "private": "true"}
+                            ]
+                        })
+                    })
+                }),
+            )
+            .route(
+                "/download/{id}/{file}",
+                get(move || {
+                    let flac = flac_a.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            )
+            .route(
+                "/v1/resolve",
+                get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let t = t1.clone();
+                    async move {
+                        assert_eq!(q.get("url").map(String::as_str), Some("https://audius.co/techwipe/ambient-piano-interlude-353852"));
+                        Json(serde_json::json!({"data": t}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/tracks/{id}",
+                get(move || {
+                    let t = t2.clone();
+                    async move { Json(serde_json::json!({"data": t})) }
+                }),
+            )
+            .route(
+                "/v1/tracks/{id}/stream",
+                get(move || {
+                    let flac = flac_b.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let base = format!("http://127.0.0.1:{port}");
+        *s.archive_base.write().unwrap() = base.clone();
+        *s.audius_base.write().unwrap() = base.clone();
+        let app = router(s.clone());
+        // The search never asks for restricted items
+        let (st, r) = call(&app, "GET", "/v1/sources/archive/search?q=fixture", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(
+            seen_q
+                .lock()
+                .unwrap()
+                .ends_with("AND mediatype:(audio) AND NOT access-restricted-item:(true)"),
+            "{}",
+            seen_q.lock().unwrap()
+        );
+        // An archive item from a search hit: the page lists its public recordings and plays them
+        let id = crate::discover::page_id("https://archive.org/details/fixture-set");
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert_eq!(pg["title"], "Fixture Set", "{pg}");
+        let songs = pg["songs"].as_array().unwrap();
+        assert_eq!(songs.len(), 1, "the private file is left out: {pg}");
+        let uri = songs[0]["uri"].as_str().unwrap().to_string();
+        assert_eq!(uri, format!("{base}/download/fixture-set/one.flac"));
+        assert_eq!(songs[0]["title"], "One");
+        assert_eq!(
+            (
+                pg["plays_from"]["service"].as_str(),
+                pg["plays_from"]["mode"].as_str()
+            ),
+            (Some("archive"), Some("full")),
+            "{pg}"
+        );
+        assert!(pg["unavailable"].is_null());
+        let (st, plan) = call(
+            &app,
+            "GET",
+            "/v1/discover/play?uri=https%3A%2F%2Farchive.org%2Fdetails%2Ffixture-set",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(plan["items"][0]["uri"], uri, "{plan}");
+        assert_eq!(plan["plays_from"]["service"], "archive");
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, q) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": uri, "title": "One", "album": "Fixture Set"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        // A restricted item: the page says so, with nothing to play and no "plays from"
+        let id = crate::discover::page_id("https://archive.org/details/locked-set");
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert!(
+            pg["unavailable"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("Restricted on the Internet Archive"),
+            "{pg}"
+        );
+        assert!(
+            pg["songs"].as_array().unwrap().is_empty() && pg["plays_from"].is_null(),
+            "{pg}"
+        );
+        let (st, e) = call(&app, "GET", "/v1/sources/archive/items/locked-set", None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+        assert!(
+            e["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Restricted on the Internet Archive"),
+            "{e}"
+        );
+        // An Audius song from a search hit: its row carries the stream, and Play queues it
+        let id = crate::discover::page_id("https://audius.co/techwipe/ambient-piano-interlude-353852");
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/song/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert_eq!(pg["title"], "Ambient Piano Interlude", "{pg}");
+        let stream = format!("{base}/v1/tracks/W0NJ0/stream?app_name=pubky-music-node");
+        assert_eq!(pg["songs"][0]["uri"], stream, "{pg}");
+        assert_eq!(pg["plays_from"]["service"], "audius", "{pg}");
+        let (st, plan) = call(
+            &app,
+            "GET",
+            "/v1/discover/play?uri=https%3A%2F%2Faudius.co%2Ftechwipe%2Fambient-piano-interlude-353852",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(plan["items"][0]["uri"], stream, "{plan}");
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audiobookshelf_asks_non_admins_for_a_key_and_ends_the_session() {
         let logouts = Arc::new(std::sync::atomic::AtomicU32::new(0));

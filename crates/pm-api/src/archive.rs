@@ -83,7 +83,14 @@ impl StreamingService for InternetArchive {
             return Err(upstream(format!("metadata answered {}", resp.status())));
         }
         let v: serde_json::Value = resp.json().await.map_err(upstream)?;
-        parse_item(id, &v, &base(s)).ok_or_else(|| ApiError::not_found(format!("no audio in item {id}")))
+        match parse_item(id, &v, &base(s)) {
+            Some(it) => Ok(it),
+            // A restricted item is a plain answer, not "no audio": the pages say why it can't play
+            None => Err(match restricted_reason(&v) {
+                Some(why) => ApiError::new(StatusCode::FORBIDDEN, why),
+                None => ApiError::not_found(format!("no audio in item {id}")),
+            }),
+        }
     }
 }
 
@@ -95,7 +102,8 @@ fn upstream(e: impl std::fmt::Display) -> ApiError {
 /// The search query for `term`: every word in the item's title or artist (never only in its
 /// description or subjects: "pink floyd" found radio shows and unrelated bands that way), ranked
 /// by how well the title, then the artist, matches rather than by downloads ("grateful dead" found
-/// a popular radio series first). Audio items only.
+/// a popular radio series first). Audio items only, and never one the archive restricts (its
+/// files answer 401: podcast and SoundCloud mirrors, mostly; 13 of the first 50 hits for "test").
 fn search_query(term: &str) -> String {
     let t = lucene(term);
     let rank = format!("(title:({t})^4 OR creator:({t})^3)");
@@ -105,9 +113,29 @@ fn search_query(term: &str) -> String {
         .map(|w| format!("(title:({w}) OR creator:({w}))"))
         .collect();
     if each.is_empty() {
-        return format!("{rank} AND mediatype:(audio)");
+        return format!("{rank} AND {OPEN_ITEMS}");
     }
-    format!("({}) AND {rank} AND mediatype:(audio)", each.join(" AND "))
+    format!("({}) AND {rank} AND {OPEN_ITEMS}", each.join(" AND "))
+}
+
+/// The part of every search query that keeps to audio items anyone may play.
+const OPEN_ITEMS: &str = "mediatype:(audio) AND NOT access-restricted-item:(true)";
+
+/// Why an item can't be played, when the archive restricts it: the item says so, or every audio
+/// file is private (its download answers 401). None for an open item.
+pub(crate) fn restricted_reason(v: &serde_json::Value) -> Option<String> {
+    let flag = |x: &serde_json::Value| x.as_bool() == Some(true) || x.as_str() == Some("true");
+    let audio: Vec<&serde_json::Value> = v["files"]
+        .as_array()
+        .map(|fs| {
+            fs.iter()
+                .filter(|f| f["format"].as_str().and_then(format_rank).is_some())
+                .collect()
+        })
+        .unwrap_or_default();
+    let all_private = !audio.is_empty() && audio.iter().all(|f| flag(&f["private"]));
+    (flag(&v["metadata"]["access-restricted-item"]) || all_private)
+        .then(|| "Restricted on the Internet Archive: its recordings can't be streamed.".to_string())
 }
 
 fn lucene(term: &str) -> String {
@@ -196,6 +224,10 @@ pub(crate) fn parse_item(id: &str, v: &serde_json::Value, base: &str) -> Option<
         let Some(rank) = f["format"].as_str().and_then(format_rank) else {
             continue;
         };
+        // A private file (a restricted item's) answers 401: never offered
+        if f["private"].as_bool() == Some(true) || f["private"].as_str() == Some("true") {
+            continue;
+        }
         let key = match f["original"].as_str() {
             Some(o) if f["source"].as_str() == Some("derivative") => o.to_string(),
             _ => name.to_string(),
@@ -317,7 +349,7 @@ mod tests {
         let q = search_query("pink floyd");
         assert_eq!(
             q,
-            "((title:(pink) OR creator:(pink)) AND (title:(floyd) OR creator:(floyd))) AND (title:(pink floyd)^4 OR creator:(pink floyd)^3) AND mediatype:(audio)"
+            "((title:(pink) OR creator:(pink)) AND (title:(floyd) OR creator:(floyd))) AND (title:(pink floyd)^4 OR creator:(pink floyd)^3) AND mediatype:(audio) AND NOT access-restricted-item:(true)"
         );
         assert!(!q.contains(" OR (pink"), "no match on the description alone");
         assert!(
@@ -327,8 +359,53 @@ mod tests {
         );
         assert_eq!(
             search_query(""),
-            "(title:()^4 OR creator:()^3) AND mediatype:(audio)"
+            "(title:()^4 OR creator:()^3) AND mediatype:(audio) AND NOT access-restricted-item:(true)"
         );
+        assert!(
+            q.ends_with(" AND mediatype:(audio) AND NOT access-restricted-item:(true)"),
+            "restricted items never reach the results: {q}"
+        );
+    }
+
+    #[test]
+    fn private_files_are_never_offered_and_a_restricted_item_says_why() {
+        // Every audio file private, as a restricted podcast mirror answers (the thumbnail and the
+        // metadata files have no `private`)
+        let locked = serde_json::json!({
+            "metadata": {"title": "Locked", "access-restricted-item": "true"},
+            "files": [
+                {"name": "x.mp3", "format": "VBR MP3", "source": "original", "private": "true"},
+                {"name": "x.png", "format": "PNG", "source": "derivative", "private": "true"},
+                {"name": "__ia_thumb.jpg", "format": "Item Tile", "source": "original"}
+            ]
+        });
+        assert!(parse_item("locked", &locked, "b").is_none(), "no playable file");
+        assert!(restricted_reason(&locked)
+            .unwrap()
+            .starts_with("Restricted on the Internet Archive"));
+        // The flag alone (`true` as a bool too), and private files alone, each say it
+        let flagged = serde_json::json!({"metadata": {"access-restricted-item": true}, "files": [{"name": "a.mp3", "format": "VBR MP3"}]});
+        assert!(restricted_reason(&flagged).is_some());
+        let private_only = serde_json::json!({"metadata": {}, "files": [{"name": "a.mp3", "format": "VBR MP3", "private": true}]});
+        assert!(restricted_reason(&private_only).is_some());
+        // A mixed item keeps its public files only, and is not restricted
+        let mixed = serde_json::json!({
+            "metadata": {"title": "Mixed"},
+            "files": [
+                {"name": "open.flac", "format": "Flac", "source": "original", "title": "Open", "track": "1"},
+                {"name": "kept.flac", "format": "Flac", "source": "original", "title": "Kept back", "track": "2", "private": "true"},
+                {"name": "kept.mp3", "format": "VBR MP3", "source": "derivative", "original": "kept.flac", "title": "Kept back", "track": "2", "private": "true"}
+            ]
+        });
+        let it = parse_item("mixed", &mixed, "b").unwrap();
+        assert_eq!(
+            it.tracks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            ["Open"]
+        );
+        assert!(restricted_reason(&mixed).is_none());
+        // An open item with no audio at all is "no audio", not restricted
+        let text = serde_json::json!({"metadata": {}, "files": [{"name": "a.txt", "format": "Text"}]});
+        assert!(parse_item("t", &text, "b").is_none() && restricted_reason(&text).is_none());
     }
 
     #[test]

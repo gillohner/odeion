@@ -125,6 +125,10 @@ pub(crate) fn item(host: &str, t: &serde_json::Value) -> Option<SourceItem> {
     })
 }
 
+/// An item id that is a song's page path (`permalink:<handle>/<slug>`), the way search hits and
+/// the pages name a song; Audius resolves it to the track.
+pub(crate) const PERMALINK: &str = "permalink:";
+
 pub struct Audius;
 
 #[async_trait::async_trait]
@@ -175,17 +179,33 @@ impl StreamingService for Audius {
     }
 
     async fn item(&self, s: &NodeState, id: &str) -> Result<SourceItem, ApiError> {
-        if id.trim().is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
-            return Err(ApiError::bad_request("bad track id"));
-        }
         let host = host(s).await?;
-        let resp = s
-            .http_client()
-            .get(format!("{host}/v1/tracks/{id}"))
-            .query(&[("app_name", APP_NAME)])
-            .send()
-            .await
-            .map_err(upstream)?;
+        let ok = |x: &str| {
+            !x.is_empty()
+                && x.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        };
+        let req = match id.strip_prefix(PERMALINK) {
+            // `GET /v1/resolve?url=` answers with the track the page is (through a redirect)
+            Some(path) => match path.split_once('/') {
+                Some((handle, slug)) if ok(handle) && ok(slug) && !slug.contains('/') => {
+                    s.http_client().get(format!("{host}/v1/resolve")).query(&[
+                        ("url", format!("https://audius.co/{handle}/{slug}").as_str()),
+                        ("app_name", APP_NAME),
+                    ])
+                }
+                _ => return Err(ApiError::bad_request("bad track link")),
+            },
+            None => {
+                if id.trim().is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                    return Err(ApiError::bad_request("bad track id"));
+                }
+                s.http_client()
+                    .get(format!("{host}/v1/tracks/{id}"))
+                    .query(&[("app_name", APP_NAME)])
+            }
+        };
+        let resp = req.send().await.map_err(upstream)?;
         if resp.status() == StatusCode::NOT_FOUND {
             return Err(ApiError::not_found(format!("no Audius track {id}")));
         }
