@@ -1,0 +1,25 @@
+#!/bin/sh
+# First boot (odeion-firstboot.service): writes /opt/odeion/.env, pulls the images and starts
+# Odeion. It fails, and systemd tries again, until the network is there and everything is up.
+set -eu
+cd /opt/odeion
+mode=$(cat /etc/odeion/mode)
+tag=$(cat /etc/odeion/image-tag)
+if [ ! -s .env ]; then
+  umask 077
+  printf 'PM_TAG=%s\nMUSIC_DIR=/srv/music\n' "$tag" > .env
+fi
+secret() { openssl rand -hex 24; }
+lan_ip() { ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1; }
+if [ "$mode" = bundle ]; then
+  # Passwords, the node's token and this machine's LAN address (kept when already there)
+  ./setup.sh
+else
+  grep -q '^PM_TOKEN=.' .env || printf 'PM_TOKEN=%s\n' "$(secret)" >> .env
+  ip=$(lan_ip || true)
+  grep -q '^PM_PUBLIC_URL=' .env || printf 'PM_PUBLIC_URL=%s\n' "${ip:+http://$ip:7788}" >> .env
+fi
+odeion-compose pull
+odeion-compose up -d
+touch /var/lib/odeion/firstboot-done
+echo "Odeion is up: open http://$(hostname).local:7788"

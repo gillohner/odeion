@@ -1,0 +1,143 @@
+name: iso
+# The Odeion installer ISO (deploy/iso, docs/guides/install-iso.md).
+# - Pull requests that change the installer or the bundle, and by hand: build it with test answers
+#   and install it in QEMU/KVM twice, "Odeion with its own homeserver" and "Odeion only".
+# - After the release workflow succeeds (main → edge, v* tags): build odeion-<channel>-amd64.iso and
+#   attach it with its .sha256 to that release. A version is tested in QEMU first.
+on:
+  pull_request:
+    paths: ["deploy/iso/**", "deploy/bundle/**", ".github/workflows/iso.yml"]
+  workflow_dispatch:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+concurrency:
+  group: iso-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.m.outputs.channel }}
+      tag: ${{ steps.m.outputs.tag }}
+      sha: ${{ steps.m.outputs.sha }}
+      test: ${{ steps.m.outputs.test }}
+    steps:
+      - id: m
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$EVENT" = workflow_run ]; then
+            sha=$RUN_SHA
+            case $RUN_BRANCH in
+              v[0-9]*) channel=$RUN_BRANCH; tag=${RUN_BRANCH#v}; test=true ;;
+              main) channel=edge; tag=edge; test=false ;;
+              *) echo "::error::release ran for $RUN_BRANCH"; exit 1 ;;
+            esac
+          else
+            sha=$GITHUB_SHA; channel=test; tag=edge; test=true
+          fi
+          echo "channel=$channel tag=$tag sha=$sha test=$test"
+          { echo "channel=$channel"; echo "tag=$tag"; echo "sha=$sha"; echo "test=$test"; } >> "$GITHUB_OUTPUT"
+
+  # Quick checks before the long installs: the scripts, and the firewall rules as nftables reads them
+  lint:
+    needs: meta
+    if: needs.meta.outputs.test == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck nftables
+      - name: shellcheck
+        run: |
+          shellcheck deploy/iso/build-iso.sh deploy/iso/test-qemu.sh
+          shellcheck -s sh deploy/iso/odeion/*.sh deploy/iso/odeion/system/odeion-compose \
+            deploy/iso/odeion/system/odeion-firstboot deploy/iso/odeion/system/odeion-local-redirect
+      - name: firewall rules (both choices) and the local redirect
+        run: |
+          sed 's/@HOMESERVER_PORT@/tcp dport 6287 accept/' deploy/iso/odeion/system/odeion.nft > /tmp/bundle.nft
+          sed '/@HOMESERVER_PORT@/d' deploy/iso/odeion/system/odeion.nft > /tmp/node.nft
+          sudo nft -c -f /tmp/bundle.nft
+          sudo nft -c -f /tmp/node.nft
+          printf '[pkdns]\npublic_ip = "203.0.113.7"\npublic_pubky_tls_port = 443\n' > /tmp/hs.toml
+          mkdir -p /tmp/fake && printf '#!/bin/sh\ncat > /tmp/redirect.nft\n' > /tmp/fake/nft && chmod +x /tmp/fake/nft
+          PATH=/tmp/fake:$PATH ODEION_HOMESERVER_CONFIG=/tmp/hs.toml sh deploy/iso/odeion/system/odeion-local-redirect
+          grep -q 'ip daddr 203.0.113.7 tcp dport 443 dnat to 127.0.0.1:6287' /tmp/redirect.nft
+          sudo nft -c -f /tmp/redirect.nft
+
+  qemu:
+    needs: [meta, lint]
+    if: needs.meta.outputs.test == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [bundle, node]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+      - name: tools and KVM
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xorriso debian-keyring gpgv qemu-system-x86 qemu-utils openssl
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+      - name: build the test ISO
+        run: |
+          deploy/iso/build-iso.sh --out "odeion-test-${{ matrix.mode }}.iso" --tag "${{ needs.meta.outputs.tag }}" \
+            --answers "mode=${{ matrix.mode }},disk=/dev/vda,hostname=odeion,password=odeion-ci,console=ttyS0"
+      - name: install and boot in QEMU
+        env:
+          LOGS: iso-logs
+        run: deploy/iso/test-qemu.sh "odeion-test-${{ matrix.mode }}.iso" "${{ matrix.mode }}"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-logs-${{ matrix.mode }}
+          path: iso-logs
+          if-no-files-found: ignore
+
+  attach:
+    needs: [meta, lint, qemu]
+    if: >-
+      always() && github.event_name == 'workflow_run' && needs.meta.result == 'success'
+      && (needs.qemu.result == 'success' || needs.qemu.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.meta.outputs.sha }}
+      - name: tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xorriso debian-keyring gpgv
+      - name: build
+        run: deploy/iso/build-iso.sh --out "odeion-${{ needs.meta.outputs.channel }}-amd64.iso" --tag "${{ needs.meta.outputs.tag }}"
+      - name: attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ needs.meta.outputs.channel }}
+        run: |
+          iso="odeion-$CHANNEL-amd64.iso"
+          for i in 1 2 3 4 5; do
+            gh release upload "$CHANNEL" "$iso" "$iso.sha256" --clobber -R "$GITHUB_REPOSITORY" && exit 0
+            echo "::warning::upload failed (attempt $i); trying again"; sleep $((i * 15))
+          done
+          exit 1
