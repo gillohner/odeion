@@ -1225,4 +1225,110 @@ mod tests {
         ));
         assert!(inbox.add("p", &new("new"), 2000, &|| true).unwrap().1);
     }
+
+    /// A resend after the window is turned away (signed in: 409; signed out): what it answers, and
+    /// how many digests the inbox still holds afterwards.
+    fn a_late_resend(signed_in: bool) -> (Result<(String, bool), InboxError>, i64) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        let t = 2_000_000_000;
+        let first = new("first");
+        inbox.add("p", &first, t, &|| true).unwrap();
+        let answer = inbox.add("p", &first, t + RESEND + 1, &|| signed_in);
+        let kept = inbox
+            .conn
+            .query_row("SELECT COUNT(*) FROM report WHERE digest IS NOT NULL", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        (answer, kept)
+    }
+
+    #[test]
+    fn a_resend_turned_away_as_changed_still_forgets_old_digests() {
+        // The expiry stays even when the report itself is turned away: it is not undone with the
+        // report's own write
+        let (answer, kept) = a_late_resend(true);
+        assert!(matches!(answer, Err(InboxError::Changed)));
+        assert_eq!(kept, 0);
+    }
+
+    #[test]
+    fn a_signed_out_resend_still_forgets_old_digests() {
+        let (answer, kept) = a_late_resend(false);
+        assert!(matches!(answer, Err(InboxError::SignedOut)));
+        assert_eq!(kept, 0);
+    }
+
+    #[test]
+    fn what_the_inbox_lets_go_is_overwritten_in_its_file() {
+        // A cleared digest or a purged report must not stay readable in the file's free space:
+        // whoever copies the file has the inbox's key too. Short reports sit inside a page; the
+        // longest spills onto overflow pages, which are freed another way
+        let dir = tempfile::tempdir().unwrap();
+        let mut inbox = Inbox::open(dir.path()).unwrap();
+        let t = 2_000_000_000;
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let segment = |n: usize| format!("報告の長い断片{tag}{n:04}。");
+        let mut long = String::new();
+        let mut n = 0;
+        while long.chars().count() < MAX_TEXT {
+            long.push_str(&segment(n));
+            n += 1;
+        }
+        let long: String = long.chars().take(MAX_TEXT).collect();
+        assert!(long.len() > 4096, "longer than a page: {}", long.len());
+        // Found by its pieces: an overflowing text isn't in one run of bytes
+        let segments: Vec<String> = (0..n)
+            .map(segment)
+            .filter(|s| long.contains(s.as_str()))
+            .collect();
+        let mut gone = Vec::new();
+        for i in 0..13 {
+            let text = if i == 12 {
+                long.clone()
+            } else {
+                format!("purged-report-{i:02}-{}", uuid::Uuid::new_v4().simple())
+            };
+            let (id, _) = inbox.add(&format!("p{i}"), &new(&text), t, &|| true).unwrap();
+            let digest: String = inbox
+                .conn
+                .query_row("SELECT digest FROM report WHERE id = ?1", params![id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let pieces = if i == 12 { segments.clone() } else { vec![text] };
+            gone.push((id, pieces, digest));
+        }
+        let file = dir.path().join(FILE);
+        let found = |pieces: &[String]| {
+            let raw = std::fs::read(&file).unwrap();
+            pieces
+                .iter()
+                .filter(|p| raw.windows(p.len()).any(|w| w == p.as_bytes()))
+                .count()
+        };
+        // Control: the file holds what is kept (most of the long one: a piece can straddle pages)
+        for (_, pieces, digest) in &gone {
+            assert_eq!(found(std::slice::from_ref(digest)), 1);
+            assert!(
+                found(pieces) * 10 >= pieces.len() * 9,
+                "control: the file holds the text"
+            );
+        }
+        for (id, _, _) in &gone {
+            assert!(inbox.receipt(id, State::Reviewed, "r1", t + 1).unwrap());
+        }
+        for (_, _, digest) in &gone {
+            assert_eq!(
+                found(std::slice::from_ref(digest)),
+                0,
+                "a cleared digest stays in the file"
+            );
+        }
+        assert_eq!(inbox.purge(t + 2 + KEEP_REVIEWED).unwrap(), 13);
+        for (_, pieces, _) in &gone {
+            assert_eq!(found(pieces), 0, "a purged report stays in the file");
+        }
+    }
 }
