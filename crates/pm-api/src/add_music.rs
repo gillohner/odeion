@@ -610,6 +610,26 @@ pub struct NewImport {
 }
 
 fn claim(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
+    let _admitted = crate::copy_jobs::admit(s);
+    // The start settles what a stopped node left first
+    if crate::copy_jobs::held(s) {
+        return Err(crate::copy_jobs::settling());
+    }
+    if let Some(copy) = crate::copy_jobs::busy(s) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "another copy is {} ({} of {} files); wait for it or cancel it",
+                if copy.state == "paused" {
+                    "paused"
+                } else {
+                    "running"
+                },
+                copy.done + copy.skipped,
+                copy.total
+            ),
+        ));
+    }
     let mut jobs = s.upload_jobs.lock().expect("upload jobs");
     jobs.retain(|_, j| !j.finished);
     if let Some(running) = jobs.values().next() {
@@ -732,7 +752,7 @@ pub(crate) async fn import(
             Err(e) => {
                 set(&|j| {
                     j.errors
-                        .push(format!("the homeserver did not list its files: {e}"));
+                        .push(format!("the homeserver did not list its files: {e}").into());
                     j.finished = true;
                 });
                 return;
@@ -740,7 +760,7 @@ pub(crate) async fn import(
         };
         let stop = |why: String| {
             set(&|j| {
-                j.errors.push(why.clone());
+                j.errors.push(why.clone().into());
                 j.stopped_reason = Some(why.clone());
             })
         };
@@ -758,26 +778,33 @@ pub(crate) async fn import(
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned());
             set(&|j| j.current = Some(name.clone()));
-            if !crate::copy_guard::is_audio(&path).await {
-                set(&|j| j.not_audio += 1);
-                continue;
-            }
             // Never into the disk's reserve: checked right before each real upload (store)
-            let res = match tokio::fs::read(&path).await {
-                Ok(bytes) => {
-                    store(
-                        &s2,
-                        target.as_ref(),
-                        room.as_ref(),
-                        &mut have,
-                        &name,
-                        rel.as_deref(),
-                        bytes,
-                        Some(&path),
-                    )
-                    .await
+            let res = match crate::copy_guard::is_audio(&path).await {
+                // Left out, counted as gone through: the bar reaches the end
+                Ok(false) => {
+                    set(&|j| {
+                        j.not_audio += 1;
+                        j.bytes_done += size;
+                    });
+                    continue;
                 }
-                Err(e) => Err(format!("{name}: {e}")),
+                Err(e) => Err(e),
+                Ok(true) => match tokio::fs::read(&path).await {
+                    Ok(bytes) => {
+                        store(
+                            &s2,
+                            target.as_ref(),
+                            room.as_ref(),
+                            &mut have,
+                            &name,
+                            rel.as_deref(),
+                            bytes,
+                            Some(&path),
+                        )
+                        .await
+                    }
+                    Err(e) => Err(format!("{name}: {e}")),
+                },
             };
             match res {
                 Ok(Stored::Sent(_)) => {
@@ -808,7 +835,7 @@ pub(crate) async fn import(
                 Err(e) => {
                     set(&|j| {
                         j.failed += 1;
-                        j.errors.push(e.clone());
+                        j.errors.push(e.clone().into());
                     });
                     if let Some(why) = streak.failed(&e) {
                         stop(why);

@@ -106,7 +106,7 @@ impl Space {
     }
 }
 
-fn gb(b: u64) -> String {
+pub fn gb(b: u64) -> String {
     format!("{:.1} GB", b as f64 / 1e9)
 }
 
@@ -227,14 +227,23 @@ pub fn is_apple_double(path: &Path) -> bool {
 
 /// Whether a file is audio the library plays: macOS's `._*` AppleDouble files are not, and the
 /// format is probed, not taken from the extension (a truncated or mislabelled file fails it).
-pub async fn is_audio(path: &Path) -> bool {
+/// A file that can't be opened is an error (a share gone, a permission), not "not audio": the
+/// copy counts it as failed, and failures in a row stop it.
+pub async fn is_audio(path: &Path) -> Result<bool, String> {
     if is_apple_double(path) {
-        return false;
+        return Ok(false);
     }
     let p = path.to_path_buf();
-    tokio::task::spawn_blocking(move || pm_library::probe_and_read(&p).is_ok())
-        .await
-        .unwrap_or(false)
+    tokio::task::spawn_blocking(move || {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        std::fs::File::open(&p).map_err(|e| format!("{name}: can't be read: {e}"))?;
+        Ok(pm_library::probe_and_read(&p).is_ok())
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()))
 }
 
 /// After a failed or short upload: deletes what it left at `remote` when its size isn't what was

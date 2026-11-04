@@ -17,6 +17,7 @@ pub mod art;
 pub mod artist_info;
 pub mod audius;
 pub mod copy_guard;
+pub mod copy_jobs;
 pub mod renderer;
 
 /// "1 album", "2 albums".
@@ -282,6 +283,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/backup/schedule/run", post(backup::run_schedule))
         .route("/library/folders/move", post(move_folder))
+        .route("/library/tree", get(copy_jobs::tree))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/tracks/{id}/download", get(downloads::download))
         .route("/library/search", get(search))
@@ -757,9 +759,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(files::list).post(files::upload).delete(files::remove),
         )
         .route("/pubky/files/mirror", post(files::mirror))
-        .route("/pubky/files/upload", post(files::upload_many))
+        .route("/pubky/files/upload", post(copy_jobs::start))
         .route("/pubky/files/upload/{id}", get(files::upload_progress))
-        .route("/pubky/files/jobs", get(files::current_job))
+        .route("/pubky/files/upload/{id}/pause", post(copy_jobs::pause))
+        .route("/pubky/files/upload/{id}/resume", post(copy_jobs::resume))
+        .route("/pubky/files/upload/{id}/cancel", post(copy_jobs::cancel_route))
+        .route("/pubky/files/upload/{id}/retry", post(copy_jobs::retry))
+        .route("/pubky/files/jobs", get(copy_jobs::jobs))
+        .route("/pubky/files/jobs/last", delete(copy_jobs::dismiss_last))
         .route("/pubky/files/jobs/{id}", get(files::upload_progress))
         .route("/pubky/files/jobs/{id}/cancel", post(files::cancel_job))
         .route("/events", get(events::events_ws))
@@ -16174,6 +16181,14 @@ exec sleep 300
         stat_fails: std::sync::atomic::AtomicBool,
         /// Files whose size the homeserver doesn't say (no Content-Length).
         no_size: std::sync::Mutex<std::collections::HashSet<String>>,
+        /// How long each upload takes.
+        delay: Option<std::time::Duration>,
+        /// How long a size check takes.
+        stat_delay: Option<std::time::Duration>,
+        /// Uploads (`up:`) and deletes (`del:`) in the order they happened.
+        ops: std::sync::Mutex<Vec<String>>,
+        /// Whose homeserver it is when set (else `fake-account`): a sign-in as someone else.
+        who: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -16187,6 +16202,10 @@ exec sleep 300
             bytes: Vec<u8>,
             _rate: Option<u64>,
         ) -> Result<(), copy_guard::UploadError> {
+            if let Some(d) = self.delay {
+                tokio::time::sleep(d).await;
+            }
+            self.ops.lock().unwrap().push(format!("up:{remote}"));
             let n = {
                 let mut u = self.uploads.lock().unwrap();
                 u.push(remote.to_string());
@@ -16211,6 +16230,9 @@ exec sleep 300
             Ok(())
         }
         async fn stat(&self, remote: &str) -> Result<Option<Option<u64>>, String> {
+            if let Some(d) = self.stat_delay {
+                tokio::time::sleep(d).await;
+            }
             if self.stat_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("connection reset".into());
             }
@@ -16223,11 +16245,16 @@ exec sleep 300
                 .map(|n| (!no_size).then_some(*n)))
         }
         async fn delete(&self, remote: &str) -> Result<(), String> {
+            self.ops.lock().unwrap().push(format!("del:{remote}"));
             self.deletes.lock().unwrap().push(remote.to_string());
             Ok(())
         }
         fn account(&self) -> String {
-            "fake-account".into()
+            self.who
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "fake-account".into())
         }
     }
 
@@ -16458,7 +16485,7 @@ exec sleep 300
             Some(serde_json::json!({"all": true})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{job}");
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
         let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
         assert_eq!(done["failed"], 3, "{done}");
         assert!(
@@ -16638,7 +16665,7 @@ exec sleep 300
             Some(serde_json::json!({"all": true})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{job}");
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
         assert_eq!(job["needed_bytes"], 0, "{job}");
         let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
         assert_eq!(done["skipped"], 2, "{done}");
@@ -17791,5 +17818,980 @@ exec sleep 300
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let sent = got.lock().unwrap().clone();
         assert_eq!(listens(&sent), 0, "{sent:?}");
+    }
+
+    /// Library songs at these paths (made as short tones), their sizes as on disk: what the
+    /// copy-library tests pick from.
+    fn songs_at(s: &NodeState, paths: &[std::path::PathBuf]) {
+        for (i, p) in paths.iter().enumerate() {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            tone_wav(p, 1 + i as u32 % 3);
+            let mut t = untagged_track(p.clone(), &format!("Song {i}"), "Band");
+            t.file.size_bytes = std::fs::metadata(p).unwrap().len();
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
+    }
+
+    async fn copy_ended(app: &Router, id: &str) -> serde_json::Value {
+        for _ in 0..400 {
+            let (_, v) = call(app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+            if v["finished"] == true {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the copy never ended");
+    }
+
+    fn roomy() -> Arc<FakeDisk> {
+        Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })))
+    }
+
+    /// The folder tree, one level at a time from the library: the music folders at the top, the
+    /// folders in one with their files and bytes, `leaf` without folders inside, paging, and what
+    /// the homeserver has once its list is known (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn the_folder_tree_counts_each_level_from_the_library() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs = [
+            src.join("A/01 one.wav"),
+            src.join("A/Disc 2/02 two.wav"),
+            src.join("B/03 three.wav"),
+            src.join("loose.wav"),
+        ];
+        songs_at(&s, &songs);
+        let (there, _) = copied_name(&s, &songs[0]);
+        hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+            path: there,
+            size: None,
+        });
+        let (st, top) = call(&app, "GET", "/v1/library/tree", None).await;
+        assert_eq!(st, StatusCode::OK, "{top}");
+        let root = top["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"] == src.to_string_lossy().as_ref())
+            .cloned()
+            .unwrap_or_else(|| panic!("{top}"));
+        assert_eq!(
+            (root["files"].as_u64(), root["leaf"].as_bool()),
+            (Some(4), Some(false))
+        );
+        assert_eq!(
+            root["present_pending"], true,
+            "the homeserver's list isn't known yet: {root}"
+        );
+        assert!(root.get("present").is_none());
+
+        // Once known (asked in the background): what is already there
+        let mut level = serde_json::Value::Null;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            level = call(
+                &app,
+                "GET",
+                &format!("/v1/library/tree?path={}", src.display()),
+                None,
+            )
+            .await
+            .1;
+            if level["present_pending"] != true {
+                break;
+            }
+        }
+        let kids = level["children"].as_array().unwrap();
+        let names: Vec<&str> = kids.iter().map(|k| k["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["A", "B"], "{level}");
+        assert_eq!(
+            (level["files"].as_u64(), kids[0]["files"].as_u64()),
+            (Some(4), Some(2))
+        );
+        assert_eq!(
+            (kids[0]["present"].as_u64(), kids[1]["present"].as_u64()),
+            (Some(1), Some(0))
+        );
+        assert_eq!(
+            (kids[0]["leaf"].as_bool(), kids[1]["leaf"].as_bool()),
+            (Some(false), Some(true))
+        );
+        let bytes_a: u64 = songs[..2]
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .sum();
+        assert_eq!(kids[0]["bytes"].as_u64(), Some(bytes_a));
+
+        let page = |after: Option<&str>| {
+            let app = app.clone();
+            let mut uri = format!("/v1/library/tree?path={}&limit=1", src.display());
+            if let Some(a) = after {
+                uri.push_str(&format!("&after={a}"));
+            }
+            async move { call(&app, "GET", &uri, None).await.1 }
+        };
+        let one = page(None).await;
+        assert_eq!(
+            (one["children"][0]["name"].as_str(), one["next"].as_str()),
+            (Some("A"), Some("A"))
+        );
+        let two = page(Some("A")).await;
+        assert_eq!(two["children"][0]["name"], "B");
+        assert!(two.get("next").is_none(), "{two}");
+    }
+
+    /// Picking two folders copies their songs and nothing else; the dry run first says what it
+    /// would be, without what is already there (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn a_copy_of_two_folders_sends_only_their_songs() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs = [
+            src.join("A/01 one.wav"),
+            src.join("B/02 two.wav"),
+            src.join("B/sub/03 three.wav"),
+            src.join("C/04 four.wav"),
+        ];
+        songs_at(&s, &songs);
+        // In the library, but no audio any more: left out, its bytes still counted as gone through
+        std::fs::write(src.join("A/05 notes.flac"), b"not audio at all").unwrap();
+        let mut notes = untagged_track(src.join("A/05 notes.flac"), "Notes", "Band");
+        notes.file.size_bytes = 16;
+        s.library.lock().unwrap().upsert_track(&notes).unwrap();
+        let (there, len) = copied_name(&s, &songs[0]);
+        hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+            path: there,
+            size: Some(len),
+        });
+        let pick = |dry: bool| {
+            Some(serde_json::json!({
+                "paths": [src.join("A"), src.join("B")],
+                "dry_run": dry,
+            }))
+        };
+        let (st, plan) = call(&app, "POST", "/v1/pubky/files/upload", pick(true)).await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(
+            (plan["total"].as_u64(), plan["skipped"].as_u64()),
+            (Some(4), Some(1)),
+            "{plan}"
+        );
+        assert_eq!(plan["bytes_skipped"].as_u64(), Some(len));
+        assert!(hs.uploads.lock().unwrap().is_empty(), "a dry run sends nothing");
+
+        let (st, job) = call(&app, "POST", "/v1/pubky/files/upload", pick(false)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        assert_eq!(
+            (job["state"].as_str(), job["label"].as_str()),
+            (Some("running"), Some("2 folders"))
+        );
+        let done = copy_ended(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (
+                done["state"].as_str(),
+                done["done"].as_u64(),
+                done["skipped"].as_u64()
+            ),
+            (Some("finished"), Some(2), Some(1)),
+            "{done}"
+        );
+        assert_eq!(done["not_audio"], 1, "{done}");
+        assert_eq!(
+            done["bytes_done"], done["bytes_total"],
+            "the bar reaches the end: {done}"
+        );
+        let sent = hs.uploads.lock().unwrap().clone();
+        let mut names: Vec<&str> = sent.iter().map(|u| u.split_once('-').unwrap().1).collect();
+        names.sort();
+        assert_eq!(names, ["02_two.wav", "03_three.wav"]);
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["current"].is_null(), "{jobs}");
+        assert_eq!(jobs["last"]["id"], job["id"]);
+        let (st, _) = call(&app, "DELETE", "/v1/pubky/files/jobs/last", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["last"].is_null(), "{jobs}");
+    }
+
+    /// One copy at a time: a second waits in the queue and starts when the first is done. A
+    /// running copy pauses after the file in hand and carries on with Resume; Cancel stops it
+    /// within seconds, and a queued one leaves the queue (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn copies_wait_their_turn_and_can_be_paused_and_cancelled() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(150)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=8).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        songs_at(&s, &[src.join("B/01 other.wav")]);
+        let mut events = s.events.subscribe();
+        let start = |folder: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"paths": [src.join(folder)]});
+            async move { call(&app, "POST", "/v1/pubky/files/upload", Some(body)).await.1 }
+        };
+        let first = start("A").await;
+        let second = start("B").await;
+        assert_eq!(
+            (first["state"].as_str(), second["state"].as_str()),
+            (Some("running"), Some("queued"))
+        );
+        let (one, two) = (first["id"].as_str().unwrap(), second["id"].as_str().unwrap());
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(
+            (jobs["current"]["id"].as_str(), jobs["queued"][0]["id"].as_str()),
+            (Some(one), Some(two))
+        );
+        // An import waits for the copies
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src.join("B")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        let act = |id: &str, what: &str| {
+            let app = app.clone();
+            let uri = format!("/v1/pubky/files/upload/{id}/{what}");
+            async move { call(&app, "POST", &uri, None).await }
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (st, p) = act(one, "pause").await;
+        assert_eq!((st, p["state"].as_str()), (StatusCode::OK, Some("paused")), "{p}");
+        // The file in hand finishes first
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let held = hs.uploads.lock().unwrap().len();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            hs.uploads.lock().unwrap().len(),
+            held,
+            "nothing is sent while paused"
+        );
+        assert!(held < 8);
+        let (st, p) = act(one, "resume").await;
+        assert_eq!((st, p["state"].as_str()), (StatusCode::OK, Some("running")));
+
+        // The queued one is cancelled: it leaves the queue
+        let (st, p) = act(two, "cancel").await;
+        assert_eq!((st, p["state"].as_str()), (StatusCode::OK, Some("cancelled")));
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(jobs["queued"].as_array().map(Vec::len), Some(0), "{jobs}");
+
+        // The running one stops within seconds (the old route still cancels)
+        let asked = std::time::Instant::now();
+        let (st, _) = call(&app, "POST", &format!("/v1/pubky/files/jobs/{one}/cancel"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let done = copy_ended(&app, one).await;
+        assert!(asked.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(done["state"], "cancelled", "{done}");
+        assert!(done["done"].as_u64().unwrap() < 8, "{done}");
+        assert!(!hs
+            .uploads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u.ends_with("other.wav")));
+
+        // Each change went out to the owner's pages, and only theirs
+        let mut seen = 0;
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev.event, ApiEvent::Jobs { .. }) {
+                seen += 1;
+                let listener = accounts::Caller {
+                    role: accounts::Role::Listener,
+                    key: Some("o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy".into()),
+                };
+                let owner = accounts::Caller {
+                    role: accounts::Role::Owner,
+                    key: None,
+                };
+                assert!(events::for_caller(&s, &listener, &ev.event).is_none());
+                assert!(events::for_caller(&s, &owner, &ev.event).is_some());
+            }
+        }
+        assert!(seen >= 4, "{seen} jobs events");
+    }
+
+    /// A copy the node was running when it stopped carries on after the restart from where it
+    /// got, also when the library's list changed meanwhile (a song of it gone: the next one isn't
+    /// skipped, #237 review); a paused one stays paused until Resume (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn a_copy_carries_on_after_a_restart() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (0..=3).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        // 00 was sent before; 01 too, and then left the library (a rescan found it missing)
+        {
+            let lib = s.library.lock().unwrap();
+            let gone = lib
+                .list_tracks(None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.file.path == songs[1]);
+            lib.hide_track(gone.unwrap().id.unwrap()).unwrap();
+        }
+        let after = songs[1].to_string_lossy().into_owned();
+        let kept = |state: &str| {
+            let progress = types::UploadProgress {
+                id: format!("kept-{state}"),
+                kind: "copy".into(),
+                state: state.into(),
+                total: 4,
+                done: 2,
+                started_at: Some(1),
+                ..Default::default()
+            };
+            serde_json::json!({
+                "current": {"progress": progress, "selection": {"paths": [src.join("A")]}, "after": after, "account": "fake-account"},
+                "queued": [],
+                "last": null,
+            })
+            .to_string()
+        };
+        // Stopped while running: the first song was sent before
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept("running"))
+            .unwrap();
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept-running").await;
+        assert_eq!(
+            (done["state"].as_str(), done["done"].as_u64()),
+            (Some("finished"), Some(4)),
+            "{done}"
+        );
+        let sent = hs.uploads.lock().unwrap().clone();
+        let mut names: Vec<&str> = sent.iter().map(|u| u.split_once('-').unwrap().1).collect();
+        names.sort();
+        assert_eq!(names, ["02_song.wav", "03_song.wav"], "only what was left");
+
+        // Paused before the restart: still paused, nothing sent, until Resume
+        hs.uploads.lock().unwrap().clear();
+        *s.copy_jobs.queue.lock().unwrap() = Default::default();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept("paused"))
+            .unwrap();
+        files::resume_jobs(&s);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(hs.uploads.lock().unwrap().is_empty());
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(jobs["current"]["state"], "paused", "{jobs}");
+        let (st, _) = call(&app, "POST", "/v1/pubky/files/upload/kept-paused/resume", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let done = copy_ended(&app, "kept-paused").await;
+        assert_eq!(done["done"].as_u64(), Some(4), "{done}");
+
+        // Cancelled just before the stop: it ends at the start, and the copy queued after it runs
+        hs.uploads.lock().unwrap().clear();
+        *s.copy_jobs.queue.lock().unwrap() = Default::default();
+        let mut kept_cancelled: serde_json::Value = serde_json::from_str(&kept("cancelled")).unwrap();
+        let mut next = kept_cancelled["current"].clone();
+        next["progress"]["id"] = "kept-next".into();
+        next["progress"]["state"] = "queued".into();
+        next["after"] = serde_json::Value::Null;
+        kept_cancelled["queued"] = serde_json::json!([next]);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept_cancelled.to_string())
+            .unwrap();
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept-next").await;
+        assert_eq!(done["state"], "finished", "{done}");
+        let (_, gone) = call(&app, "GET", "/v1/pubky/files/upload/kept-cancelled", None).await;
+        assert_eq!(gone["state"], "cancelled", "{gone}");
+    }
+
+    /// Retry after a copy stopped early (failures in a row) sends the failed files and every one
+    /// it never got to, once; the speed limit for copies stays 2.5 MB/s by default (#237 review).
+    #[tokio::test]
+    async fn retry_after_a_stop_sends_what_was_never_tried() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=6).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"paths": [src.join("A")]})),
+        )
+        .await;
+        let id = job["id"].as_str().unwrap().to_string();
+        let done = copy_ended(&app, &id).await;
+        assert_eq!(
+            (
+                done["state"].as_str(),
+                done["failed"].as_u64(),
+                done["failed_retryable"].as_u64()
+            ),
+            (Some("failed"), Some(3), Some(6)),
+            "{done}"
+        );
+        hs.fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        hs.uploads.lock().unwrap().clear();
+        let retry = format!("/v1/pubky/files/upload/{id}/retry");
+        let (st, again) = call(&app, "POST", &retry, None).await;
+        assert_eq!(
+            (st, again["total"].as_u64()),
+            (StatusCode::ACCEPTED, Some(6)),
+            "{again}"
+        );
+        let (st, _) = call(&app, "POST", &retry, None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "once");
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(done["done"].as_u64(), Some(6), "{done}");
+
+        let (_, settings) = call(&app, "GET", "/v1/node/settings", None).await;
+        assert_eq!(settings["copy_rate"], 2_500_000, "{settings}");
+    }
+
+    /// Retry failed copies again only the files that failed, as a new job (TASK-copy-library-
+    /// folders); a song whose file can't be read is a failure with its reason, not "not audio"
+    /// (FOLLOWUP-copy-guard-224, item 2).
+    #[tokio::test]
+    async fn retry_sends_the_failed_files_and_unreadable_ones_are_failures() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
+        // In the library, but gone from the disk (a share that went away)
+        let mut gone = untagged_track(src.join("A/03 gone.wav"), "Gone", "Band");
+        gone.file.size_bytes = 1000;
+        s.library.lock().unwrap().upsert_track(&gone).unwrap();
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"paths": [src.join("A")]})),
+        )
+        .await;
+        let id = job["id"].as_str().unwrap().to_string();
+        let done = copy_ended(&app, &id).await;
+        assert_eq!(
+            (
+                done["failed"].as_u64(),
+                done["not_audio"].as_u64(),
+                done["failed_retryable"].as_u64()
+            ),
+            (Some(3), Some(0), Some(3)),
+            "{done}"
+        );
+        assert_eq!(done["bytes_done"], done["bytes_total"], "the bar reaches the end");
+        let reasons: Vec<&serde_json::Value> = done["errors"].as_array().unwrap().iter().collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|e| e["path"].as_str().unwrap().ends_with("03 gone.wav")
+                    && e["reason"].as_str().unwrap().contains("can't be read")),
+            "{done}"
+        );
+        assert_eq!(done["errors_count"], 4, "three files and the stop: {done}");
+
+        hs.fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        hs.uploads.lock().unwrap().clear();
+        let (st, again) = call(&app, "POST", &format!("/v1/pubky/files/upload/{id}/retry"), None).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{again}");
+        assert_eq!(again["label"], "Retry: 3 files");
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].as_u64(), done["failed"].as_u64()),
+            (Some(2), Some(1)),
+            "{done}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 2);
+    }
+
+    /// A copy bigger than what the owner's homeserver quota leaves is refused before it starts,
+    /// with what it needs and what is free (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn a_copy_past_the_homeserver_quota_is_refused() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav")]);
+        *s.copy_jobs.quota_seam.lock().unwrap() = Some(1000);
+        for dry in [true, false] {
+            let (st, v) = call(
+                &app,
+                "POST",
+                "/v1/pubky/files/upload",
+                Some(serde_json::json!({"paths": [src.join("A")], "dry_run": dry})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{v}");
+            assert_eq!(v["free_bytes"], 1000, "{v}");
+            assert!(v["needed_bytes"].as_u64().unwrap() > 1000);
+            assert!(v["error"].as_str().unwrap().contains("quota"), "{v}");
+        }
+        assert!(hs.uploads.lock().unwrap().is_empty());
+    }
+
+    /// The homeserver's file list comes a page at a time, and searched (TASK-copy-library-
+    /// folders: lists of 10k files).
+    #[tokio::test]
+    async fn my_music_on_the_homeserver_comes_in_pages() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, _s, app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        for i in 0..5 {
+            hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+                path: format!("/priv/pubky.music/files/{i:016x}-song_{i}.flac"),
+                size: Some(10),
+            });
+        }
+        let get = |q: &str| {
+            let app = app.clone();
+            let uri = format!("/v1/me/music?{q}");
+            async move { call(&app, "GET", &uri, None).await }
+        };
+        let (st, v) = get("limit=2").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            (
+                v["files"].as_array().unwrap().len(),
+                v["count"].as_u64(),
+                v["bytes"].as_u64()
+            ),
+            (2, Some(5), Some(50))
+        );
+        let (_, v) = get("offset=4&limit=2").await;
+        assert_eq!(v["files"].as_array().unwrap().len(), 1);
+        let (_, v) = get("q=SONG_3").await;
+        assert_eq!(
+            (v["count"].as_u64(), v["files"][0]["name"].as_str()),
+            (Some(1), Some("song_3.flac")),
+            "{v}"
+        );
+    }
+
+    /// The folder tree stays quick on a big library: a level of 20 000 songs.
+    #[tokio::test]
+    async fn the_folder_tree_answers_quickly_for_twenty_thousand_songs() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs, roomy(), 0).await;
+        {
+            let lib = s.library.lock().unwrap();
+            lib.begin_batch().unwrap();
+            for i in 0..20_000 {
+                let p = src.join(format!("Artist {}/Album {}/{i:05}.flac", i / 200, i / 20));
+                let mut t = untagged_track(p, &format!("Song {i}"), "Band");
+                t.file.size_bytes = 30_000_000;
+                lib.upsert_track(&t).unwrap();
+            }
+            lib.commit_batch().unwrap();
+        }
+        for uri in [
+            "/v1/library/tree".to_string(),
+            format!("/v1/library/tree?path={}", src.display()),
+        ] {
+            let t = std::time::Instant::now();
+            let (st, v) = call(&app, "GET", &uri, None).await;
+            assert_eq!(st, StatusCode::OK);
+            let ms = t.elapsed().as_millis();
+            assert!(ms < 1500, "{uri}: {ms} ms");
+            eprintln!(
+                "{uri}: {ms} ms, {} children",
+                v["children"].as_array().unwrap().len()
+            );
+        }
+    }
+
+    /// At start, what a stopped node half wrote on the homeserver is settled before a kept copy
+    /// carries on: the settling never deletes what the copy has just sent again (#237 review, K3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_start_settles_half_written_uploads_before_a_copy_carries_on() {
+        let hs = Arc::new(FakeHomeserver {
+            stat_delay: Some(std::time::Duration::from_millis(300)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let song = src.join("A/01 song.wav");
+        songs_at(&s, std::slice::from_ref(&song));
+        let (remote, _) = copied_name(&s, &song);
+        // The stopped node was sending it, and the homeserver kept part
+        hs.sizes.lock().unwrap().insert(remote.clone(), 3);
+        let progress = types::UploadProgress {
+            id: "kept".into(),
+            kind: "copy".into(),
+            state: "running".into(),
+            total: 1,
+            ..Default::default()
+        };
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting(
+                copy_guard::IN_FLIGHT_KEY,
+                &serde_json::json!({&remote: {"size": 7, "existed": false}}).to_string(),
+            )
+            .unwrap();
+            lib.set_setting(
+                copy_jobs::JOBS_KEY,
+                &serde_json::json!({"current": {"progress": progress, "selection": {"paths": [src.join("A")]}, "account": "fake-account"}, "queued": []})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept").await;
+        assert_eq!(done["done"], 1, "{done}");
+        let ops = hs.ops.lock().unwrap().clone();
+        assert_eq!(
+            ops,
+            [format!("del:{remote}"), format!("up:{remote}")],
+            "settled first"
+        );
+    }
+
+    /// A copy and an import (or bringing files here) are let in under one lock: the check that
+    /// nothing else runs and the start happen together (#237 review, K2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // The test holds the door on purpose while the copy's request waits on another worker
+    #[allow(clippy::await_holding_lock)]
+    async fn files_jobs_are_let_in_one_at_a_time() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
+        tone_wav(&src.join("B.wav"), 1);
+        std::fs::create_dir_all(src.join("B")).unwrap();
+        tone_wav(&src.join("B/01 b.wav"), 1);
+        // While another start holds the door, a copy waits instead of checking and starting
+        let held = copy_jobs::admit(&s);
+        let copy = {
+            let app = app.clone();
+            let body = serde_json::json!({"paths": [src.join("A")]});
+            tokio::spawn(async move { call(&app, "POST", "/v1/pubky/files/upload", Some(body)).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(copy_jobs::busy(&s).is_none(), "the copy went in past the lock");
+        drop(held);
+        let (st, job) = copy.await.unwrap();
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        copy_ended(&app, job["id"].as_str().unwrap()).await;
+
+        // Started side by side, many times: never both running
+        for _ in 0..10 {
+            let (c, i) = tokio::join!(
+                call(
+                    &app,
+                    "POST",
+                    "/v1/pubky/files/upload",
+                    Some(serde_json::json!({"paths": [src.join("A")]}))
+                ),
+                call(
+                    &app,
+                    "POST",
+                    "/v1/library/imports",
+                    Some(serde_json::json!({"path": src.join("B")}))
+                ),
+            );
+            let import_in = i.0 == StatusCode::OK;
+            assert!(
+                !(import_in && c.1["state"] == "running"),
+                "both started: {c:?} {i:?}"
+            );
+            if import_in {
+                call(
+                    &app,
+                    "POST",
+                    &format!("/v1/pubky/files/jobs/{}/cancel", i.1["id"].as_str().unwrap()),
+                    None,
+                )
+                .await;
+                copy_finished(&app, i.1["id"].as_str().unwrap()).await;
+            }
+            call(
+                &app,
+                "POST",
+                &format!("/v1/pubky/files/upload/{}/cancel", c.1["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+            copy_ended(&app, c.1["id"].as_str().unwrap()).await;
+        }
+    }
+
+    /// A copy job kept for the next start: `id`, running, of the folder `A` under `src`, for
+    /// `account` (none: kept by a node that didn't note it).
+    fn kept_copy(id: &str, src: &std::path::Path, account: Option<&str>) -> String {
+        let progress = types::UploadProgress {
+            id: id.into(),
+            kind: "copy".into(),
+            state: "running".into(),
+            total: 3,
+            started_at: Some(1),
+            ..Default::default()
+        };
+        let mut current = serde_json::json!({"progress": progress, "selection": {"paths": [src.join("A")]}});
+        if let Some(a) = account {
+            current["account"] = a.into();
+        }
+        serde_json::json!({"current": current, "queued": [], "last": null}).to_string()
+    }
+
+    /// A backup taken while a copy ran, restored later on an idle node, never starts that copy
+    /// again at the next start: the files jobs a node keeps (copies, bringing files here, uploads
+    /// it left half written) are its own, as its stream key is; the node's own stay (#237 review,
+    /// M2).
+    #[tokio::test]
+    async fn a_restored_backup_never_starts_an_old_copy() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
+        let keys = [
+            copy_jobs::JOBS_KEY,
+            files::BRING_RESUME_KEY,
+            copy_guard::IN_FLIGHT_KEY,
+        ];
+        let set = |k: &str, v: String| s.library.lock().unwrap().set_setting(k, &v).unwrap();
+        set(copy_jobs::JOBS_KEY, kept_copy("old", &src, Some("fake-account")));
+        set(
+            files::BRING_RESUME_KEY,
+            serde_json::json!({"dest": src.join("brought")}).to_string(),
+        );
+        set(
+            copy_guard::IN_FLIGHT_KEY,
+            serde_json::json!({"/pub/old.wav": {"size": 7, "existed": false}}).to_string(),
+        );
+        let (taken, _) = backup::make(&s, None).unwrap();
+        let open = backup::parse(&taken).unwrap();
+        let has = |hay: &[u8], needle: &str| hay.windows(needle.len()).any(|w| w == needle.as_bytes());
+        for k in keys {
+            assert!(!has(&open.database, k), "{k} in the backup");
+        }
+        // Since then that copy ended and the node is idle
+        for k in keys {
+            s.library.lock().unwrap().delete_setting(k).unwrap();
+        }
+        backup::restore(&s, taken.clone(), None, false).await.unwrap();
+        for k in keys {
+            assert_eq!(
+                s.library.lock().unwrap().get_setting(k).unwrap(),
+                None,
+                "{k} came back"
+            );
+        }
+        files::resume_jobs(&s);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(hs.uploads.lock().unwrap().is_empty(), "the old copy ran");
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["current"].is_null(), "{jobs}");
+
+        // A copy this node keeps itself stays through a restore
+        let own = kept_copy("own", &src, Some("fake-account"));
+        set(copy_jobs::JOBS_KEY, own.clone());
+        backup::restore(&s, taken, None, false).await.unwrap();
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(copy_jobs::JOBS_KEY)
+                .unwrap(),
+            Some(own)
+        );
+    }
+
+    /// A copy sends only into the Pubky account it was started for: kept over a restart or
+    /// paused while someone else signed in, it stops before sending anything, also when the
+    /// sign-in changes while it runs, and Retry waits for that account; a copy kept by a node
+    /// that didn't note its account doesn't run (#237 review, L6).
+    #[tokio::test]
+    async fn a_copy_never_sends_into_another_account() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(150)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=3).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        let sign_in_as = |who: Option<&str>| *hs.who.lock().unwrap() = who.map(str::to_string);
+        let sent = || hs.uploads.lock().unwrap().len();
+        let refused = |done: &serde_json::Value| {
+            done["state"] == "failed"
+                && done["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("another Pubky account"))
+        };
+
+        // Kept over a restart; the node came back signed in as someone else
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                copy_jobs::JOBS_KEY,
+                &kept_copy("kept", &src, Some("fake-account")),
+            )
+            .unwrap();
+        sign_in_as(Some("someone-else"));
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept").await;
+        assert!(refused(&done), "{done}");
+        assert_eq!(sent(), 0);
+        let retry = "/v1/pubky/files/upload/kept/retry";
+        let (st, e) = call(&app, "POST", retry, None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{e}");
+        assert_eq!(sent(), 0);
+        // Back as the owner: Retry sends it
+        sign_in_as(None);
+        let (st, again) = call(&app, "POST", retry, None).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{again}");
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(done["done"], 3, "{done}");
+
+        // Paused, then someone else signs in and it is resumed
+        hs.uploads.lock().unwrap().clear();
+        let start = || {
+            call(
+                &app,
+                "POST",
+                "/v1/pubky/files/upload",
+                Some(serde_json::json!({"paths": [src.join("A")]})),
+            )
+        };
+        let (st, job) = start().await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        let id = job["id"].as_str().unwrap().to_string();
+        let (st, _) = call(&app, "POST", &format!("/v1/pubky/files/upload/{id}/pause"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let before = sent();
+        assert!(before < 3, "it paused");
+        sign_in_as(Some("someone-else"));
+        let (st, _) = call(&app, "POST", &format!("/v1/pubky/files/upload/{id}/resume"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let done = copy_ended(&app, &id).await;
+        assert!(refused(&done), "{done}");
+        assert_eq!(sent(), before, "nothing went to someone else");
+
+        // Someone else signs in while it runs: it stops before the next file
+        sign_in_as(None);
+        hs.uploads.lock().unwrap().clear();
+        let (_, job) = start().await;
+        let id = job["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        sign_in_as(Some("someone-else"));
+        let done = copy_ended(&app, &id).await;
+        assert!(refused(&done), "{done}");
+        assert!(sent() < 3, "{done}");
+
+        // Kept by a node that didn't note the account: it doesn't run
+        sign_in_as(None);
+        hs.uploads.lock().unwrap().clear();
+        *s.copy_jobs.queue.lock().unwrap() = Default::default();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept_copy("unnoted", &src, None))
+            .unwrap();
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "unnoted").await;
+        assert_eq!(done["state"], "failed", "{done}");
+        assert_eq!(sent(), 0);
+    }
+
+    /// While the start settles what a stopped node left, no import or bring job is let in (it
+    /// would race the settling, and keep a bring the node had from resuming); only the bring job
+    /// the node resumes itself goes in. Once settled, imports come in again (#237 review, Kimi M2).
+    #[tokio::test]
+    async fn imports_wait_while_the_start_settles() {
+        let hs = Arc::new(FakeHomeserver {
+            stat_delay: Some(std::time::Duration::from_millis(1500)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        std::fs::create_dir_all(src.join("B")).unwrap();
+        tone_wav(&src.join("B/01 b.wav"), 1);
+        // A stopped node left an upload to settle; checking it takes a while
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                copy_guard::IN_FLIGHT_KEY,
+                &serde_json::json!({"/pub/left.wav": {"size": 7, "existed": false}}).to_string(),
+            )
+            .unwrap();
+        files::resume_jobs(&s);
+        let body = Some(serde_json::json!({"path": src.join("B")}));
+        let (st, e) = call(&app, "POST", "/v1/library/imports", body.clone()).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("settling"), "{e}");
+        let job = types::UploadProgress {
+            id: "resumed".into(),
+            kind: "bring".into(),
+            total: 1,
+            ..Default::default()
+        };
+        assert!(files::claim_job(&s, &job).is_err(), "a bring job asked for");
+        files::claim_job_as(&s, &job, true).expect("the bring job the node resumes");
+        s.upload_jobs.lock().unwrap().remove("resumed");
+        for _ in 0..100 {
+            if !copy_jobs::held(&s) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!copy_jobs::held(&s), "settled");
+        let (st, e) = call(&app, "POST", "/v1/library/imports", body).await;
+        assert_eq!(st, StatusCode::OK, "{e}");
+    }
+
+    /// Retry asked twice at once makes one job; a copy's summary always says how many files a
+    /// retry would send, `0` too (left out, the page fell back to `failed` and kept offering
+    /// Retry failed) (#237 review).
+    #[tokio::test]
+    async fn retry_asked_twice_at_once_makes_one_job() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=4).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"paths": [src.join("A")]})),
+        )
+        .await;
+        let id = job["id"].as_str().unwrap().to_string();
+        let done = copy_ended(&app, &id).await;
+        assert_eq!(done["state"], "failed", "{done}");
+        hs.fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        let retry = format!("/v1/pubky/files/upload/{id}/retry");
+        let (a, b) = tokio::join!(call(&app, "POST", &retry, None), call(&app, "POST", &retry, None));
+        let mut st = [a.0, b.0];
+        st.sort();
+        assert_eq!(st, [StatusCode::ACCEPTED, StatusCode::CONFLICT], "{a:?} {b:?}");
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(jobs["last"]["id"], id.as_str(), "{jobs}");
+        assert_eq!(jobs["last"]["failed_retryable"], 0, "{jobs}");
+        assert!(jobs["queued"].as_array().unwrap().is_empty(), "{jobs}");
+        let again = if a.0 == StatusCode::ACCEPTED { a.1 } else { b.1 };
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].as_u64(), done["failed_retryable"].as_u64()),
+            (Some(4), Some(0)),
+            "{done}"
+        );
+        assert_eq!(
+            hs.uploads.lock().unwrap().len(),
+            3 + 4,
+            "three failed, then four sent"
+        );
     }
 }

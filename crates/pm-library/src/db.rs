@@ -1579,6 +1579,33 @@ impl Library {
         Ok(v)
     }
 
+    /// Every present library file whose path starts with `prefix` (a folder ending in its separator,
+    /// a share's or a drive's key ending in `/`), by path: its size and the first 16 hex digits of
+    /// its content hash when one is kept for that size. The range on the path uses its index.
+    pub fn files_under(&self, prefix: &str) -> Result<Vec<(String, u64, Option<String>)>> {
+        let Some(last) = prefix.chars().last() else {
+            return Ok(Vec::new());
+        };
+        // Every path with this prefix sorts before the prefix with its last character raised by one
+        let upper = format!(
+            "{}{}",
+            &prefix[..prefix.len() - last.len_utf8()],
+            char::from_u32(last as u32 + 1).unwrap_or(char::MAX)
+        );
+        let conn = self.lock();
+        let v = conn
+            .prepare(
+                "SELECT f.path, f.size_bytes, substr(h.blake3, 1, 16) FROM files f
+                 LEFT JOIN file_hashes h ON h.path = f.path AND h.size_bytes = f.size_bytes
+                 WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2 ORDER BY f.path",
+            )?
+            .query_map(params![prefix, upper], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(v)
+    }
+
     /// Every present file under `root` with its album's id and title. The scanner uses it to
     /// find albums that one folder's files were split into.
     pub fn album_files_under(&self, root: &Path) -> Result<Vec<(PathBuf, i64, String)>> {
