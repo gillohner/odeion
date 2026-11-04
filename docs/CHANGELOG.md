@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **An item page tells switching from leaving** (owner's report: "multiple open in links. separate between switching and external apps"). The hero's icon row is two labelled groups: **Also on**, the services Odeion plays from (an icon switches to that service's page here, "Switch to TIDAL"), and **Open in ↗**, the services that only have a site (a new tab, "Open in Spotify (new tab)"). The ⋯ menu has one **Open in…** row whose second menu lists every site (one site is a direct row), and **Also on…** the same way; four "Open on X" rows are gone. Every link that leaves Odeion says "Open in".
 - **Tags are in the top card, drawn as pubky.app draws them** (owner's ask).
   - Album, song and artist pages show their tags under the title, above Play. The Tags section at the bottom is gone; My rating stays where it was.
   - The item's tags and the source link's stay two groups, both always visible, each with its own "+" to add one. Each group reads, adds, removes and counts on its own link only, and so do the people beside each tag: the same tag in both groups keeps its own people.

@@ -292,7 +292,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
     await p.click('#iblurbmore');
     check(await p.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true'), 'More shows the whole text');
-    check([...ab.icons].sort().join('|') === 'Open on Spotify (opens a new tab)|Open on TIDAL' && !/also/.test(ab.line), `Also on: one icon per service next to Play, not in the source line (${ab.icons.join(', ')})`);
+    check([...ab.icons].sort().join('|') === 'Open in Spotify (new tab)|Switch to TIDAL' && !/also/.test(ab.line), `Also on switches to TIDAL here, Open in leaves for Spotify's site; neither in the source line (${ab.icons.join(', ')})`);
     await p.click('.also-icons [data-also]'); await p.waitForTimeout(300);
     check(/\/artist\/tidal-77$/.test(await p.evaluate(() => location.pathname)), 'a service the node plays from opens its page here');
     await p.unroute(/\/v1\/item\/artist\/lib-900$/);

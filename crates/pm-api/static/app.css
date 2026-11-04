@@ -789,6 +789,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 /* The icons say what they are (UX sweep 11-01, A11) */
 .also-icons .also-label { margin-right: 2px; }
 .also-icons .src-badge.ico { width: 24px; height: 24px; margin: 0; box-shadow: none; }
+/* "Open in": the group that leaves Odeion, marked by the arrow after its label */
+.also-icons.open-in { margin-left: 10px; }
+.also-icons.open-in .also-label .ic { width: 12px; height: 12px; vertical-align: -1px; margin-left: 2px; }
 .btn.icon-only { padding-left: 10px; padding-right: 10px; }
 .idfile { min-width: 0; }
 .eq-row .eq-kind { text-transform: capitalize; }
