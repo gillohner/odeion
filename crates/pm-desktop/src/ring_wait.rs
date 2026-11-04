@@ -7,13 +7,15 @@
 //! host") and keeps that choice for 60 s. The relay poll that waits for the approval gives up the
 //! same way (three failed polls).
 //!
-//! So [`approval`] consumes Ring's approval, and with it exchanges the grant, only while the app is
-//! on screen and the network answers; until then the page says to come back. A relay poll that
+//! So [`approval`] exchanges the grant only while the app is on screen and the network answers;
+//! until then the page says to come back. (The SDK's background listener may still take Ring's
+//! approval from the relay while the app is away; only the exchange waits.) A relay poll that
 //! died while the app was away listens again on the same relay inbox, where the approval waits
-//! (no grant has been sent then). Nothing is retried after a grant was sent.
+//! until it is read (no grant has been sent then). Nothing is retried after a grant was sent.
+//! Only Android reports leaving the screen; on desktop the wait is skipped.
 
-// Only Android and iOS report leaving the screen; on desktop the app is always "on screen".
-#![cfg_attr(not(mobile), allow(dead_code))]
+// Only Android reports leaving the screen; elsewhere the app is always "on screen".
+#![cfg_attr(not(target_os = "android"), allow(dead_code))]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -45,6 +47,12 @@ pub fn trips() -> u64 {
 pub const COME_BACK: &str = "Come back to Odeion to finish signing in";
 /// … and while it waits for the network after that.
 pub const NO_NETWORK: &str = "Finishing sign-in: waiting for the network…";
+/// … and once the app is back and online, as before the wait.
+pub const WAITING: &str = "Waiting for Pubky Ring…";
+
+/// Whether the wait applies: on Android (and in this module's tests), not on desktop, where a
+/// direct TCP check could fail behind a proxy-only network.
+const GATED: bool = cfg!(any(target_os = "android", test));
 
 /// Whether `host:port` takes a TCP connection within 3 s (a backgrounded app on Android 15+ cannot
 /// even resolve the name).
@@ -69,6 +77,9 @@ pub async fn until_ready(host: &str, port: u16, mut state: impl FnMut(&'static s
         } else if !online(host, port).await {
             Some(NO_NETWORK)
         } else {
+            if shown.is_some() {
+                state(WAITING);
+            }
             return;
         };
         if reason != shown {
@@ -132,21 +143,24 @@ pub trait Pending: Sized {
 }
 
 /// Waits for Ring's approval and exchanges the grant only while the app is on screen and online.
-/// `relay` is the relay host (the network check connects to it on `port`, 443 in the app);
-/// `state` updates the page.
+/// `since_trip` is [`trips`] when `flow`'s relay listener started; `relay` is the relay host (the
+/// network check connects to it on `port`, 443 in the app); `state` updates the page.
 pub async fn approval<F: Pending>(
     mut flow: F,
+    since_trip: u64,
     relay: &str,
     port: u16,
     mut state: impl FnMut(&'static str),
 ) -> Result<F::Done, String> {
     // Trips away already covered by the current relay listener.
-    let mut listening_since = trips();
+    let mut listening_since = since_trip;
     // The trip after which the network was last seen answering: checked once per return, not
     // before every poll.
     let mut ready_after: Option<u64> = None;
     loop {
-        if !on_screen() || ready_after != Some(trips()) {
+        // The app can leave between this check and the poll: an exchange then starts within the few
+        // seconds Android still leaves it the network.
+        if GATED && (!on_screen() || ready_after != Some(trips())) {
             until_ready(relay, port, &mut state).await;
             ready_after = Some(trips());
         }
@@ -210,14 +224,12 @@ mod tests {
 
     impl Pending for Fake {
         type Done = u32;
-        fn poll(&self) -> impl std::future::Future<Output = Result<Option<u32>, String>> + Send + '_ {
-            async move {
-                self.polls.lock().unwrap().push(on_screen());
-                if self.generation == 0 || self.dies {
-                    Err("error sending request for url (https://127.0.0.1/inbox/x) <- dns error".into())
-                } else {
-                    Ok(Some(7))
-                }
+        async fn poll(&self) -> Result<Option<u32>, String> {
+            self.polls.lock().unwrap().push(on_screen());
+            if self.generation == 0 || self.dies {
+                Err("error sending request for url (https://127.0.0.1/inbox/x) <- dns error".into())
+            } else {
+                Ok(Some(7))
             }
         }
         fn resume(&self) -> Result<Self, String> {
@@ -237,7 +249,9 @@ mod tests {
         let port = relay.local_addr().unwrap().port();
         tokio::spawn(async move { while relay.accept().await.is_ok() {} });
         let polls = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
-        // Away: nothing may be polled until the app is back.
+        // The listener starts on screen, then the user leaves for Ring: nothing may be polled
+        // until the app is back.
+        let since = trips();
         left();
         let flow = Fake {
             generation: 0,
@@ -247,7 +261,10 @@ mod tests {
         let task = tokio::spawn(async move {
             let states = std::sync::Arc::new(Mutex::new(Vec::new()));
             let st = states.clone();
-            let r = approval(flow, "127.0.0.1", port, move |s| st.lock().unwrap().push(s)).await;
+            let r = approval(flow, since, "127.0.0.1", port, move |s| {
+                st.lock().unwrap().push(s)
+            })
+            .await;
             let states = states.lock().unwrap().clone();
             (r, states)
         });
@@ -261,6 +278,7 @@ mod tests {
         assert_eq!(r, Ok(7), "listens again after the relay poll died while away");
         assert_eq!(polls.lock().unwrap().as_slice(), &[true, true]);
         assert_eq!(states.first(), Some(&COME_BACK));
+        assert_eq!(states.last(), Some(&WAITING), "the page text is reset once back");
 
         // On screen and no trip away since: a relay error is final (no second listen).
         let flow = Fake {
@@ -268,9 +286,12 @@ mod tests {
             polls,
             dies: true,
         };
-        let r = tokio::time::timeout(Duration::from_secs(10), approval(flow, "127.0.0.1", port, |_| {}))
-            .await
-            .unwrap();
+        let r = tokio::time::timeout(
+            Duration::from_secs(10),
+            approval(flow, trips(), "127.0.0.1", port, |_| {}),
+        )
+        .await
+        .unwrap();
         assert!(r.is_err());
     }
 }

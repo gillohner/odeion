@@ -457,6 +457,8 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     let flow = hs
         .start_login_with("pubky-music-desktop", RING_CAPS)
         .map_err(|e| e.to_string())?;
+    // The relay listener runs from here: trips away from now on can stop it.
+    let since_trip = ring_wait::trips();
     let url = flow.url().to_string();
     let relay = ring_wait::relay_host(&url);
     let _ = app.emit(
@@ -468,7 +470,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     );
     // Only on screen and online: Android 15+ cuts a backgrounded app's network (see ring_wait).
     let page = app.clone();
-    let session = ring_wait::approval(RingFlow(flow), &relay, 443, move |s| {
+    let session = ring_wait::approval(RingFlow(flow), since_trip, &relay, 443, move |s| {
         let _ = page.emit("ring-state", s);
     })
     .await?;
@@ -489,8 +491,8 @@ struct RingFlow(pm_pubky::homeserver::LoginFlow);
 
 impl ring_wait::Pending for RingFlow {
     type Done = pm_pubky::homeserver::PubkySession;
-    fn poll(&self) -> impl std::future::Future<Output = Result<Option<Self::Done>, String>> + Send + '_ {
-        async move { self.0.poll().await.map_err(|e| ring_wait::chain(&e)) }
+    async fn poll(&self) -> Result<Option<Self::Done>, String> {
+        self.0.poll().await.map_err(|e| ring_wait::chain(&e))
     }
     /// A fresh client: nothing it holds comes from the time in the background.
     fn resume(&self) -> Result<Self, String> {
@@ -649,8 +651,9 @@ pub fn run() {
         .build(tauri::generate_context!());
     match app {
         Ok(app) => app.run(|_, event| {
-            // The Ring sign-in waits for the screen (ring_wait): Android onPause / onResume.
-            #[cfg(mobile)]
+            // The Ring sign-in waits for the screen (ring_wait): Android onPause / onResume. Not on
+            // iOS, whose Suspended (willResignActive) and Resumed (willEnterForeground) do not pair.
+            #[cfg(target_os = "android")]
             if let tauri::RunEvent::WindowEvent { event, .. } = &event {
                 match event {
                     tauri::WindowEvent::Suspended => ring_wait::left(),
@@ -658,7 +661,7 @@ pub fn run() {
                     _ => {}
                 }
             }
-            #[cfg(not(mobile))]
+            #[cfg(not(target_os = "android"))]
             let _ = event;
         }),
         Err(e) => {
