@@ -127,7 +127,7 @@ impl std::io::Read for DashReader {
                 .get(&url)
                 .send()
                 .and_then(|r| r.error_for_status())
-                .map_err(|e| std::io::Error::other(format!("segment: {e}")))?;
+                .map_err(|e| std::io::Error::other(format!("segment: {}", e.without_url())))?;
             self.current = Some(resp);
         }
     }
