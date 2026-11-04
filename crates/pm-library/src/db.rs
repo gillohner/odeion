@@ -1174,6 +1174,16 @@ impl Library {
         Ok(songs_only(self.album_songs(album_id)?))
     }
 
+    /// Every track of an album, files gone or not (what an offline device keeps for it).
+    pub fn album_track_ids(&self, album_id: i64) -> Result<Vec<i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached("SELECT id FROM tracks WHERE album_id = ?1 ORDER BY id")?;
+        let v = stmt
+            .query_map(params![album_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        Ok(v)
+    }
+
     /// [`Library::album_tracks`] with each song's other copies.
     pub fn album_songs(&self, album_id: i64) -> Result<Vec<Song>> {
         let conn = self.lock();
@@ -1282,7 +1292,7 @@ impl Library {
              FROM albums al
              JOIN tracks t ON t.album_id = al.id
              JOIN track_artists ta ON ta.track_id = t.id
-             WHERE ta.artist_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing = 0)
+             WHERE ta.artist_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path))
              ORDER BY al.year, al.title COLLATE NOCASE",
         )?;
         let v = stmt
@@ -1325,12 +1335,19 @@ impl Library {
 
     pub fn random_tracks(&self, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
+        // Songs drawn, not files: a song kept in two copies is no likelier than one kept once
+        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let songs: std::collections::BTreeSet<i64> = reps.values().copied().collect();
+        let list = format!(
+            "[{}]",
+            songs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        );
         let ids = candidates(
             &conn,
-            &format!("SELECT t.id, t.album_id FROM tracks t WHERE {TRACK_PRESENT} ORDER BY RANDOM()"),
-            [],
+            "SELECT t.id, t.album_id FROM json_each(?1) j JOIN tracks t ON t.id = j.value ORDER BY RANDOM() LIMIT ?2",
+            params![list, limit as i64],
         )?;
-        Ok(songs_only(songs_in_order(&conn, ids, Some(limit as usize))?))
+        Ok(songs_only(songs_in_order(&conn, ids, None)?))
     }
 
     /// Albums newest-first by id (a proxy for "recently added").
@@ -1899,7 +1916,7 @@ impl Library {
         let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
              FROM albums al JOIN tracks t ON t.album_id = al.id JOIN track_genres tg ON tg.track_id = t.id
-             WHERE tg.genre_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing = 0) ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
+             WHERE tg.genre_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path)) ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
         )?;
         let v = stmt
             .query_map(params![genre_id], row_to_album)?
@@ -3800,13 +3817,13 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.album_id, t.track_no, t.disc
     LEFT JOIN albums al ON al.id = t.album_id";
 
 /// A track (aliased `t`) has a present file.
-const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND pf.missing = 0)";
+const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path))";
 
 /// An album (the `albums` table unaliased) has a song with a present file.
-const ALBUM_PRESENT: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND pf.missing = 0 WHERE pt.album_id = albums.id)";
+const ALBUM_PRESENT: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = albums.id)";
 
 /// [`ALBUM_PRESENT`] for an album aliased `al`.
-const ALBUM_PRESENT_AL: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND pf.missing = 0 WHERE pt.album_id = al.id)";
+const ALBUM_PRESENT_AL: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = al.id)";
 
 /// A song row: the copy played by default and, when there are several, every copy.
 #[derive(Debug, Clone, PartialEq)]
@@ -3911,7 +3928,7 @@ fn song_rows<P: rusqlite::Params>(conn: &Connection, tail: &str, p: P) -> Result
         "SELECT t.id, t.album_id, t.disc_no, t.track_no, t.title,
             (SELECT h.blake3 FROM files hf JOIN file_hashes h ON h.path = hf.path
                  AND h.size_bytes = hf.size_bytes AND h.mtime_unix = hf.mtime_unix
-             WHERE hf.track_id = t.id AND hf.missing = 0 LIMIT 1),
+             WHERE hf.track_id = t.id AND hf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = hf.path) LIMIT 1),
             t.duration_ms
          FROM tracks t WHERE {TRACK_PRESENT} {tail}"
     ))?;
@@ -6264,5 +6281,47 @@ mod identify_tests {
             .id
             .unwrap();
         assert_eq!(lib.album_songs(album).unwrap().len(), 2);
+    }
+
+    /// PR #268 delta review (Codex M2): a hidden file is no present song: it takes no place in a
+    /// limited list and no count.
+    #[test]
+    fn a_hidden_file_takes_no_place_in_a_list() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/A/01.flac", "One");
+        a.track_no = Some(1);
+        let hidden = lib.upsert_track(&a).unwrap();
+        let mut b = sample_track("/m/A/02.flac", "Two");
+        b.track_no = Some(2);
+        let shown = lib.upsert_track(&b).unwrap();
+        lib.hide_track(hidden).unwrap();
+        // as if a scan had seen the file again without asking whether it is hidden
+        lib.lock().execute("UPDATE files SET missing = 0", []).unwrap();
+        let genre = lib.list_genres().unwrap()[0].clone();
+        assert_eq!(genre.tracks, 1);
+        let got = lib.genre_tracks(genre.id, 1).unwrap();
+        assert_eq!(got.iter().map(|t| t.id).collect::<Vec<_>>(), vec![Some(shown)]);
+        assert_eq!(lib.random_tracks(5).unwrap().len(), 1);
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+    }
+
+    /// PR #268 delta review (Codex M1): Shuffle draws songs, so a song with copies is not likelier.
+    #[test]
+    fn shuffle_draws_songs_not_copies() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/A/01.flac", "Many");
+        a.track_no = Some(1);
+        for n in 0..9 {
+            a.file.path = PathBuf::from(format!("/m/A/01-{n}.flac"));
+            lib.upsert_track(&a).unwrap();
+        }
+        let mut b = sample_track("/m/A/02.flac", "Once");
+        b.track_no = Some(2);
+        let once = lib.upsert_track(&b).unwrap();
+        let hits = (0..400)
+            .filter(|_| lib.random_tracks(1).unwrap()[0].id == Some(once))
+            .count();
+        // a fair draw gives about 200; drawing copies would give about 40
+        assert!((120..=280).contains(&hits), "{hits}");
     }
 }
