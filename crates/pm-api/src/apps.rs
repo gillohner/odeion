@@ -319,8 +319,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
     };
     let return_page = s.return_page();
     let spotify = crate::spotify::app_origin(s);
-    let mut out =
-        vec![
+    let mut out = vec![
         NodeApp {
             // node.toml wins over Settings: the route refuses then
             set: (spotify != Some("config")).then_some("PUT /v1/sources/spotify/app"),
@@ -334,7 +333,12 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
                  people need Spotify's approval, which it gives only to large organisations. Playing \
                  through Spotify Connect (librespot) needs no app.",
             ),
-            ..app("spotify", "Spotify", spotify.is_some(), spotify.map(str::to_string))
+            ..app(
+                "spotify",
+                "Spotify",
+                spotify.is_some(),
+                spotify.map(str::to_string),
+            )
         },
         NodeApp {
             limits: Some(
@@ -360,10 +364,12 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             ],
             status: Some("GET /v1/sources/tidal/unofficial"),
             limits: Some(
-                "Whole songs need a device client, the kind TIDAL's own apps use. TIDAL gives those only \
-                 to its partners and can stop accepting one at any time; an app from TIDAL's developer \
-                 site doesn't work here.",
+                "For the code sign-in to full tracks: a device client, the kind TIDAL's own apps use. A \
+                 release build carries one; yours replaces it. Sign in with TIDAL (lossless and hi-res) \
+                 needs nothing here. TIDAL can stop accepting a client at any time; an app from TIDAL's \
+                 developer site doesn't work here.",
             ),
+            builtin: crate::project_apps::tidal_device_client().is_some(),
             ..app(
                 "tidal-full",
                 "TIDAL full tracks",
@@ -373,7 +379,10 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
         },
         NodeApp {
             set: Some("PUT /v1/sources/qobuz/unofficial"),
-            fields: vec![field("app_id", "App ID"), secret("app_secret", "App secret", false)],
+            fields: vec![
+                field("app_id", "App ID"),
+                secret("app_secret", "App secret", false),
+            ],
             status: Some("GET /v1/sources/qobuz/unofficial"),
             limits: Some(
                 "Qobuz gives app IDs only to its partners, not to other players, so Odeion has none \
@@ -439,12 +448,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             builtin: crate::project_apps::acoustid_key().is_some(),
             note: Some("Entered on Your library › Node library › Identify, with its state and a Check."),
             page: Some("library:node"),
-            ..app(
-                "acoustid",
-                "AcoustID",
-                acoustid_from.is_some(),
-                acoustid_from,
-            )
+            ..app("acoustid", "AcoustID", acoustid_from.is_some(), acoustid_from)
         },
         NodeApp {
             status: Some("GET /v1/library/drives"),

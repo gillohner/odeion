@@ -67,6 +67,10 @@ tracing = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+# Hermetic authenticated homeserver health tests over local HTTPS.
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true }
 # The spec's v0-to-v1 transforms (what pubky-social-migrator runs), for the testnet check that it
 # and the node's own move converge. Tests only.

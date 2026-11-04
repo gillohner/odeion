@@ -555,6 +555,7 @@ const LISTENER_READS: &[&str] = &[
 const LISTENER_OWN: &[&str] = &[
     // Usage insights: their own choice, aliases and events (usage.rs checks the person itself)
     "/usage",
+    "/play-order",
     "/sources/tidal/signin",
     "/sources/qobuz/signin",
     "/sources/spotify/signin",

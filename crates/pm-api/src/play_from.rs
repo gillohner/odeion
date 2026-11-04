@@ -2,7 +2,7 @@
 //!
 //! The order of resolution, shown as the item's chip so nothing surprises the user:
 //! 1. the item's pin, when that source is usable on this node;
-//! 2. the playlist's own order (else the node's global order), over every source the item has
+//! 2. the asking person's Settings order, over every source the item has
 //!    here: a library file, each connected service's exact link (the item's own page, then
 //!    Pinakes `also_on`);
 //! 3. any other usable source (a directly streamable file link);
@@ -45,13 +45,31 @@ pub fn normalize(order: &[String]) -> Vec<String> {
     out
 }
 
-/// The node's global order (Settings).
+/// The asking person's order. Legacy node order is an owner-only fallback; it is
+/// never inherited by listeners or unauthenticated/background work. Reads migrate nothing.
 pub fn global_order(lib: &Library) -> Vec<String> {
-    let saved: Vec<String> = lib
-        .get_setting(ORDER_KEY)
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
+    use crate::accounts::{asking, Who};
+    let who = asking();
+    let key = match &who {
+        Who::Owner => Some("me.prefs".to_string()),
+        Who::Listener(k) => Some(crate::prefs::storage_key_of(k)),
+        Who::Nobody => None,
+    };
+    let personal = key
+        .and_then(|k| lib.get_setting(&k).ok().flatten())
+        .and_then(|j| serde_json::from_str::<crate::prefs::Prefs>(&j).ok())
+        .and_then(|p| p.play_order);
+    let saved = personal
+        .or_else(|| {
+            matches!(who, Who::Owner)
+                .then(|| {
+                    lib.get_setting(ORDER_KEY)
+                        .ok()
+                        .flatten()
+                        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+                })
+                .flatten()
+        })
         .unwrap_or_default();
     normalize(&saved)
 }
@@ -326,11 +344,9 @@ pub(crate) async fn resolve_playlist(s: &Arc<NodeState>, p: &Playlist) -> (Vec<S
     let acc = discover::service_access(s);
     let (order, own, tracks) = {
         let lib = s.library.lock().expect("library poisoned");
-        let own = p.source_order.as_ref().is_some_and(|o| !o.is_empty());
-        let order = match &p.source_order {
-            Some(o) if !o.is_empty() => normalize(o),
-            _ => global_order(&lib),
-        };
+        // Collection orders remain serialized for compatibility, but never override a person.
+        let own = false;
+        let order = global_order(&lib);
         let tracks: Vec<Option<Track>> = p
             .items
             .iter()
@@ -495,7 +511,7 @@ fn isrc_of(uri: &str, track: Option<&Track>) -> Option<String> {
 
 // ---- handlers ----
 
-/// `GET /v1/play-order`: the node's global order and what each service can do here.
+/// `GET /v1/play-order`: the caller's personal order and usable services.
 pub(crate) async fn get_order(State(s): State<Arc<NodeState>>) -> ApiResult<PlayOrder> {
     let acc = discover::service_access(&s);
     let order = global_order(&s.library.lock().expect("library poisoned"));
@@ -537,13 +553,16 @@ fn play_order(order: Vec<String>, acc: &ServiceAccess) -> PlayOrder {
 /// `PUT /v1/play-order {order}`.
 pub(crate) async fn set_order(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<crate::accounts::Caller>,
     Json(body): Json<SetPlayOrder>,
 ) -> ApiResult<PlayOrder> {
-    let order = normalize(&body.order);
-    s.library.lock().expect("library poisoned").set_setting(
-        ORDER_KEY,
-        &serde_json::to_string(&order).expect("strings serialize"),
-    )?;
+    let order = checked_order(&body.order)?;
+    let _ = crate::prefs::put(
+        State(s.clone()),
+        axum::Extension(c),
+        Json(serde_json::json!({"play_order": order})),
+    )
+    .await?;
     let acc = discover::service_access(&s);
     s.notify_library();
     Ok(Json(play_order(order, &acc)))
@@ -596,6 +615,51 @@ mod tests {
 
     fn order(o: &[&str]) -> Vec<String> {
         normalize(&o.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[tokio::test]
+    async fn personal_orders_are_isolated_and_legacy_order_belongs_only_to_owner() {
+        use crate::accounts::{Who, ASKING};
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("prefs.sqlite")).unwrap();
+        lib.set_setting(ORDER_KEY, r#"["spotify"]"#).unwrap();
+        assert_eq!(
+            ASKING.scope(Who::Owner, async { global_order(&lib) }).await[0],
+            "spotify"
+        );
+        assert_eq!(
+            ASKING
+                .scope(Who::Listener("alice".into()), async { global_order(&lib) })
+                .await[0],
+            "library"
+        );
+        lib.set_setting("me.prefs.alice", r#"{"play_order":["tidal"]}"#)
+            .unwrap();
+        lib.set_setting("me.prefs.bob", r#"{"play_order":["jamendo"]}"#)
+            .unwrap();
+        lib.set_setting("me.prefs", r#"{"play_order":["library"]}"#)
+            .unwrap();
+        assert_eq!(
+            ASKING
+                .scope(Who::Listener("alice".into()), async { global_order(&lib) })
+                .await[0],
+            "tidal"
+        );
+        assert_eq!(
+            ASKING
+                .scope(Who::Listener("bob".into()), async { global_order(&lib) })
+                .await[0],
+            "jamendo"
+        );
+        assert_eq!(
+            ASKING.scope(Who::Owner, async { global_order(&lib) }).await[0],
+            "library"
+        );
+        assert_eq!(
+            ASKING.scope(Who::Nobody, async { global_order(&lib) }).await[0],
+            "library"
+        );
+        assert_eq!(lib.get_setting(ORDER_KEY).unwrap().unwrap(), r#"["spotify"]"#);
     }
 
     #[test]

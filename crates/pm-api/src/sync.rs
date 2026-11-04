@@ -231,6 +231,11 @@ impl PubkySync {
             .await?)
     }
 
+    /// One authenticated, bounded storage read for health checks (no inventory or stats).
+    pub async fn probe_private_storage(&self) -> Result<(), SyncError> {
+        Ok(self.homeserver.probe_private_storage(&self.session).await?)
+    }
+
     pub async fn list_private_files(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>, SyncError> {
         Ok(self.homeserver.list_private_files(&self.session).await?)
     }
