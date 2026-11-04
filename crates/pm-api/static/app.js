@@ -1547,7 +1547,9 @@
       h.m.browserUrl = r.url; h.m.way = 'browser';
       if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
     } catch (e) { if (tab) tab.close(); toast(e.message, 'error'); }
-    h.refill();
+    // The chooser is drawn again: whoever comes back from TIDAL's tab lands on the address field
+    await h.refill();
+    const field = $('#tbfinish input[name=text]'); if (field) field.focus();
   };
   const tidalPkceSteps = (u, h) => {
     const waiting = !!u.browser_pending;
@@ -1604,7 +1606,9 @@
       const st = u.signed_in
         ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
           : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the way it came from below to use it).' }
-          : lossy ? { cls: 'warn', label: 'AAC only', text: 'Full tracks, but TIDAL sends them as AAC (lossy).' }
+          // AAC only is a code sign-in's (TIDAL sends its device client AAC); a browser
+          // session's AAC track is that track (the Health row below says so)
+          : lossy && u.session_client !== 'pkce' ? { cls: 'warn', label: 'AAC only', text: 'Full tracks, but TIDAL sends them as AAC (lossy).' }
           : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
         : u.browser_pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the address of the TIDAL page you landed on (step 2 below).' }

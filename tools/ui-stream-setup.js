@@ -209,6 +209,7 @@ const tidalMocks = async (p, log, si0) => {
         check(await until(async () => /^https:\/\/login\.tidal\.com\/authorize\?/.test(tab.url()), 5000), `${w} TIDAL: TIDAL's sign-in opens in a new tab (${tab.url()})`);
         await tab.close();
         check(await until(async () => await p.isVisible('#tbfinish')), `${w} TIDAL: then a field for the address`);
+        check(await until(async () => p.evaluate(() => document.activeElement && document.activeElement.matches('#tbfinish input[name=text]'))), `${w} TIDAL: and the address field has the focus`);
         check(log.some((l) => l[0] === 'WAY' && l[1] === 'browser') && log.some((l) => l[0] === 'BROWSER'), `${w} TIDAL: the way was picked and the sign-in started`);
         check(await pillOf(p, root) === 'Waiting' && await p.locator(`${root} .setup-step[data-step="1"].done`).count() === 1, `${w} TIDAL: waiting for the address, step 1 done`);
         await shot('tidal-browser-paste');
@@ -228,6 +229,12 @@ const tidalMocks = async (p, log, si0) => {
         await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
         check(await pillOf(p, root) === 'AAC only' && !/full tracks are playing/.test(await p.textContent(root)) && await againLines() === 1 && await p.isVisible('#tbagain'), `${w} TIDAL: AAC only is said on the health line, with the button, once`);
         await shot('tidal-aac');
+        // A browser session's AAC track is that track: Working, the Health line says why
+        T.U.session_client = 'pkce'; T.si.in_use = { way: 'browser', label: 'Sign in with TIDAL', user: '77', gives: 'full tracks, lossless' }; T.U.health = { ok: true, lossy: true, detail: 'TIDAL sent the last track as AAC (lossy): it may have no lossless version', at: 1 };
+        await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Working' && /may have no lossless version/.test(await p.textContent(root)), `${w} TIDAL: a browser session's AAC track is not "AAC only"`);
+        T.U.session_client = 'device'; T.si.in_use = { way: 'device', label: 'Sign in with a code', user: '42', gives: 'full tracks' }; T.U.health = { ok: true, lossy: true, detail: 'TIDAL sends this sign-in AAC only (lossy). Sign in with TIDAL again for lossless', at: 1 };
+        await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
         // The button: the chooser opens on Sign in with TIDAL and TIDAL's tab opens
         const [tab2] = await Promise.all([ctx.waitForEvent('page'), p.click('#tbagain')]);
         await tab2.close();
