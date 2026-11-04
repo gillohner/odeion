@@ -78,6 +78,7 @@ const cases={
    assert.doesNotMatch(src,/musicbrainz|^https?:\/\/(?!odeion-fixture\.test)/,`${width} ${how}: audio element never loads a canonical page`);
    assert.deepEqual(run.external,[],`${width} ${how}: no third-party request`);
    if(how==='list')assert.match(await page.locator('#toast').innerText(),/1 song plays only through Spotify Connect/,'list Play says what it left out');
+   if(how==='list')assert.match(await page.locator('#toast').innerText(),/1 song plays nowhere you are connected/,'list Play also counts songs with no source');
    else assert.match(await page.locator('#toast').innerText(),/left out of this browser's queue/,'detail Play says what it left out');
    assert.deepEqual(state.errors,[]);console.log(`PASS ${width} ${how} Play: Connect row omitted, streams/duplicates/order kept, no canonical audio`);
    await run.context.close();

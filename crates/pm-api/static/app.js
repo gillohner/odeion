@@ -5207,9 +5207,9 @@
           const playable = (list) => list.filter((t) => !t.unavailable && !t.card);
           // In this browser only a library song or a stream plays: a row with neither (a Spotify
           // Connect pick, a song still being found) is left out and said, as the list's Play does,
-          // never played alone in place of the rest (review of #258)
+          // never played alone in place of the rest (review of #258); a zone (Shuffle on a speaker) keeps them, as before
           const playAll = (shuffle, anchorEl) => {
-            const all = [...playable(songs), ...localSongs]; const list = all.filter((t) => t.track_id != null || t.uri); const out = all.length - list.length;
+            const all = [...playable(songs), ...localSongs]; const list = isBrowser() ? all.filter((t) => t.track_id != null || t.uri) : all; const out = all.length - list.length;
             if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
             if (out) toast(`${countOf(out, 'songs')} left out of this browser's queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
             return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
