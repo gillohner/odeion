@@ -1,7 +1,7 @@
-//! `pm-node`: the Pubky Music Node binary.
-//!
-//! For now a CLI over the core services; the long-running daemon (API,
-//! zones, homeserver embedding) arrives with M3.
+// `odeiond`: the Odeion node. The daemon (`serve`) and a CLI over the core services.
+//
+// compat: pre-Odeion name: src/bin/pm-node.rs builds this same file as `pm-node`, so these are
+// plain comments, not `//!` (an included file cannot carry inner attributes).
 
 mod api_token;
 mod config;
@@ -15,7 +15,7 @@ use config::NodeConfig;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "pm-node", version = node_version(), about = "Pubky Music Node")]
+#[command(name = "odeiond", version = node_version(), about = "Odeion node")]
 struct Cli {
     /// Path to the node's config.toml.
     #[arg(short, long, global = true)]
@@ -289,7 +289,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         let port = cfg.outputs.slimproto_port;
         if e.kind() == std::io::ErrorKind::AddrInUse {
             tracing::warn!(
-                "Squeezebox players are off: port {port} is in use, most likely by another Pubky Music Node or \
+                "Squeezebox players are off: port {port} is in use, most likely by another Odeion node or \
                  a Lyrion Music Server on this machine. Stop it and restart, or set [outputs] slimproto_port"
             );
         } else {
@@ -607,8 +607,16 @@ async fn upload(cfg: &NodeConfig, files: &[PathBuf]) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads
+    let env_compat = pm_model::brand::apply_env_compat();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(env_compat))
+}
+
+async fn run(env_compat: pm_model::brand::EnvPlan) -> anyhow::Result<()> {
     pm_out_local::quiet_alsa_lib();
     let mut filter = tracing_subscriber::EnvFilter::from_default_env();
     // Symphonia warns about harmless things in many files (junk bytes before a frame, ID3
@@ -623,6 +631,12 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+    for line in env_compat.log_lines() {
+        tracing::info!("{line}");
+    }
+    if env!("CARGO_BIN_NAME") == pm_model::brand::LEGACY_DAEMON {
+        tracing::info!("pm-node is the pre-Odeion name of odeiond; both keep working");
+    }
     let cli = Cli::parse();
     let mut cfg = NodeConfig::load_or_default(cli.config.as_deref())?;
     let took = cfg.fill_from_restored();
@@ -696,10 +710,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The version this build reports: `PM_NODE_VERSION` at build time (release.yml sets the release's
-/// version, or `<version>-edge+<sha>` for a build of main), else Cargo.toml's.
+/// The version this build reports: `ODEION_NODE_VERSION` (or its pre-Odeion name `PM_NODE_VERSION`)
+/// at build time (release.yml sets the release's version, or `<version>-edge+<sha>` for a build of
+/// main), else Cargo.toml's.
 fn node_version() -> &'static str {
-    match option_env!("PM_NODE_VERSION") {
+    match pm_model::brand::build_env(option_env!("ODEION_NODE_VERSION"), option_env!("PM_NODE_VERSION")) {
         Some(v) if !v.trim().is_empty() => v,
         _ => env!("CARGO_PKG_VERSION"),
     }

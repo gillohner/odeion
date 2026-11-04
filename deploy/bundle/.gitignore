@@ -1,5 +1,6 @@
 .env
 music/
 ci/pm-node
+ci/odeiond
 ci/entrypoint.sh
 hsdata/

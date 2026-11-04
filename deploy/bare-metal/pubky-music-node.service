@@ -1,8 +1,11 @@
-# Pubky Music Node next to its own homeserver, on bare metal (docs/deploy.md).
+# compat: pre-Odeion unit, kept for installs that use it and for the published install commands.
+# New installs use odeiond.service (the same node, user, config and data); moving: see that file.
+# Never run both: each Conflicts= the other.
 [Unit]
-Description=Pubky Music Node
+Description=Odeion node (pre-Odeion unit name)
 Wants=network-online.target pubky-homeserver.service
 After=network-online.target pubky-homeserver.service sound.target
+Conflicts=odeiond.service
 
 [Service]
 User=pubky-music
@@ -10,7 +13,10 @@ Group=pubky-music
 # audio: the DAC; pubky-files: read the homeserver's stored files (its music is a library folder),
 # nothing else of the homeserver's
 SupplementaryGroups=audio pubky-files
+# pm-node: the pre-Odeion name of odeiond, still installed next to it
 ExecStart=/usr/local/bin/pm-node -c /etc/pubky-music/node.toml serve
+# info: the start-up notes (old setting names, by name only) show in the journal
+Environment=RUST_LOG=info
 # How Settings › Remote access tells you to restart the homeserver after a tunnel change
 Environment=PM_TUNNEL_RESTART_HINT="On the machine: sudo systemctl restart pubky-homeserver cloudflared-pubky"
 Restart=on-failure

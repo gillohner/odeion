@@ -1,4 +1,4 @@
-//! Find Pubky Music nodes on the LAN, and let a node be found (docs/CONNECTION.md).
+//! Find Odeion nodes on the LAN, and let a node be found (docs/CONNECTION.md).
 //!
 //! A node announces itself two ways, because networks differ in what they let through:
 //! - **mDNS / DNS-SD** `_pubky-music._tcp` with TXT `role=node`, `id`, `name`, `version`, `api=v1`,
@@ -551,9 +551,9 @@ pub fn description_xml(ad: &NodeAd) -> String {
   <device>
     <deviceType>{SSDP_ST}</deviceType>
     <friendlyName>{}</friendlyName>
-    <manufacturer>Pubky Music</manufacturer>
+    <manufacturer>Odeion</manufacturer>
     <manufacturerURL>https://github.com/gillohner/pubky-music-node</manufacturerURL>
-    <modelName>Pubky Music Node</modelName>
+    <modelName>Odeion node</modelName>
     <modelNumber>{}</modelNumber>
     <UDN>uuid:{}</UDN>
     <presentationURL>/</presentationURL>

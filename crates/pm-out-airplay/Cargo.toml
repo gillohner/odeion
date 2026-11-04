@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-airplay"
-description = "AirPlay 1 (RAOP) receivers as outputs of the Pubky Music Node"
+description = "AirPlay 1 (RAOP) receivers as outputs of the Odeion node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -232,7 +232,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
                     "contentId": url,
                     "contentType": content_type,
                     "streamType": "LIVE",
-                    "metadata": crate::meta_json(meta, "Pubky Music")
+                    "metadata": crate::meta_json(meta, "Odeion")
                 }
             }),
         )

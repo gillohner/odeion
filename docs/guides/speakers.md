@@ -24,7 +24,7 @@ several networks.
 | Snapcast | Pis or old phones running `snapclient`, kept in tight sync | add your snapserver to the config (below) |
 | MPD | a Music Player Daemon you already run | add it to the config (below) |
 | A DAC on the node's machine | USB DAC, HDMI, the sound card | found by itself; in Docker, pass `/dev/snd` (see the compose file) |
-| The Pubky Music app | your computer or Android phone | the app adds the device while it is connected at home, for its own node only ([guide](desktop-app.md)) |
+| The Odeion app | your computer or Android phone | the app adds the device while it is connected at home, for its own node only ([guide](desktop-app.md)) |
 | A browser | the web page itself | **This browser**, always there |
 
 To play the same music in several rooms in sync, pick speakers of one kind in **Settings › Zones
@@ -79,7 +79,7 @@ mpd = ["192.168.1.40", "password@study.local:6600"]
 ```
 
 - **Linux without Docker:** add the lines to `/etc/pubky-music/node.toml`, then
-  `sudo systemctl restart pubky-music-node`.
+  `sudo systemctl restart odeiond` (or `pubky-music-node` on an install from before Odeion).
 - **Docker:** add them to `/data/node.toml` in the container, then restart it:
 
   ```sh

@@ -1,11 +1,11 @@
-# Pubky Music's own data on a homeserver
+# Odeion's own data on a homeserver
 
 Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 
 - **The music spec** (`crates/pubky-music-specs`, later its own repository): objects any app can read and
   write, under `/pub/music/v1/` and `/priv/music/v1/`, plus the shared social objects (`/pub|priv/social/v1/`).
   It knows nothing about this app.
-- **Pubky Music's app data** (`crates/pm-appdata`, this page): what only this app and its node use, under
+- **Odeion's app data** (`crates/pm-appdata`, this page): what only this app and its node use, under
   `/priv/pubky.music/`. Every path is a constant in `pm_appdata::paths`. A test fails if one is missing
   here. (`/pub/pubky.music/tags/` is the one public path, from before tags moved to social v1; the
   node only reads and empties it.)
@@ -14,13 +14,13 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 
 | Path | Who writes it | Format | Version |
 | :-- | :-- | :-- | :-- |
-| `/priv/pubky.music/` | the person's Pubky Music clients | the app's private folder | — |
+| `/priv/pubky.music/` | the person's Odeion clients | the app's private folder | — |
 | `/priv/pubky.music/node.json` | the node | the node record (ADR 0008): `{name, api_url, token, version, updated_at, iroh?}`, so the person's own devices find their node | unversioned; readers ignore unknown members |
 | `/priv/pubky.music/settings.json` | the node, after every sync and change | the settings backup: `{version, saved_at, node, contact, folders, settings: {key: value}}`, restored after one Ring sign-in on a new or reinstalled node. Never a sign-in or a token: it is plain JSON, and sign-ins travel in the vault or the encrypted backup file | `version: 1` |
 | `/priv/pubky.music/prefs.json` | every node the person uses (`PUT /v1/me/prefs`) | "You" in Settings: `{version, updated_at, home_layout?, quality?, appearance?}`; the newer copy (`updated_at`) wins between nodes | `version: 1` |
 | `/priv/pubky.music/files/` | the node (uploads, copies, imports) and the person | the person's own music files, any audio format; the node names them `<16 hex digits of the BLAKE3 hash>-<name>` | — |
 | `/priv/pubky.music/files/.pubky-music-layout-check` | the node, once | an empty probe that shows how the homeserver lays out its files | — |
-| `/priv/pubky.music/vault/` | every Pubky Music client the person authorised | the sources vault: streaming sign-ins encrypted to each device (`crates/pm-appdata/VAULT.md`) | the index and the sign-ins carry `version: 1` |
+| `/priv/pubky.music/vault/` | every Odeion client the person authorised | the sources vault: streaming sign-ins encrypted to each device (`crates/pm-appdata/VAULT.md`) | the index and the sign-ins carry `version: 1` |
 | `/priv/pubky.music/vault/index.json` | the same clients | the vault's device list, every entry with a grant proof (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.json` | the same clients | one sign-in's envelope (VAULT.md) | `version: 1` |
 | `/priv/pubky.music/vault/<service>.lease.json` | the same clients | a refresh lease, only on homeservers without locks (VAULT.md) | — |

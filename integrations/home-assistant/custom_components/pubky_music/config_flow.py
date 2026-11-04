@@ -17,7 +17,7 @@ from .const import DEFAULT_PORT, DOMAIN
 
 
 class PubkyMusicConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Add a Pubky Music node."""
+    """Add an Odeion node."""
 
     VERSION = 1
 
@@ -52,7 +52,7 @@ class PubkyMusicConfigFlow(ConfigFlow, domain=DOMAIN):
                 await self.async_set_unique_id(info["id"])
                 self._abort_if_unique_id_configured(updates={CONF_HOST: host, CONF_PORT: port, CONF_TOKEN: token})
                 return self.async_create_entry(
-                    title=info.get("name") or "Pubky Music",
+                    title=info.get("name") or "Odeion",
                     data={CONF_HOST: host, CONF_PORT: port, CONF_TOKEN: token},
                 )
         return self.async_show_form(
@@ -89,7 +89,7 @@ class PubkyMusicConfigFlow(ConfigFlow, domain=DOMAIN):
             self.context["title_placeholders"] = {"name": self._name}
             return await self.async_step_zeroconf_moved()
         self._host, self._port = host, port
-        self._name = props.get("name") or "Pubky Music"
+        self._name = props.get("name") or "Odeion"
         self._token_required = props.get("auth", "token") != "none"
         self.context["title_placeholders"] = {"name": self._name}
         return await self.async_step_zeroconf_confirm()

@@ -122,9 +122,9 @@ pub struct Secrets {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
-    #[error("This is not a Pubky Music backup ({0})")]
+    #[error("This is not an Odeion backup ({0})")]
     NotABackup(String),
-    #[error("This backup was made by a newer version of Pubky Music (format {0}); update this node first")]
+    #[error("This backup was made by a newer version of Odeion (format {0}); update this node first")]
     TooNew(u32),
     #[error("That passphrase does not open this backup")]
     WrongPassphrase,
@@ -306,7 +306,7 @@ pub fn is_person_signin(key: &str) -> bool {
 }
 
 /// Deletes every sign-in from a plain database copy: the owner's ([`SECRET_SETTINGS`]) and each
-/// listener's own (`pm-node backup`, and the web backup's snapshot).
+/// listener's own (`odeiond backup`, and the web backup's snapshot).
 pub fn strip_signins(copy: &Library) -> Result<(), pm_library::LibraryError> {
     for (key, _) in SECRET_SETTINGS {
         copy.delete_setting(key)?;

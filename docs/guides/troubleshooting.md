@@ -5,7 +5,7 @@ First look at the node's log; most problems are named there.
 | Install | Log |
 | :-- | :-- |
 | Docker | `docker logs --tail 200 pubky-music` |
-| Linux without Docker | `journalctl -u pubky-music-node -n 200` |
+| Linux without Docker | `journalctl -u odeiond -n 200` (`-u pubky-music-node` on an install from before Odeion) |
 
 ## The web page doesn't open
 

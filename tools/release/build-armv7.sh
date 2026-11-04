@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Builds pm-node for 32-bit Raspberry Pi OS (armv7, hard float)
+# Builds odeiond (and pm-node, its pre-Odeion name) for 32-bit Raspberry Pi OS (armv7, hard float)
 # in a Debian bookworm container with the GNU cross toolchain and armhf ALSA
 # headers, the same way the Dockerfile cross-builds arm64. Needs Docker.
-# Output: target/armv7-unknown-linux-gnueabihf/release/pm-node
+# Output: target/armv7-unknown-linux-gnueabihf/release/odeiond and pm-node
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 mkdir -p "${CARGO_HOME_CACHE:-$PWD/.cargo-armv7}"
@@ -11,7 +11,7 @@ docker run --rm \
   -v "${CARGO_HOME_CACHE:-$PWD/.cargo-armv7}":/usr/local/cargo/registry \
   -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR=always \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
-  -e PM_NODE_VERSION="${PM_NODE_VERSION:-}" \
+  -e PM_NODE_VERSION="${PM_NODE_VERSION:-}" -e ODEION_NODE_VERSION \
   rust:1-bookworm bash -euo pipefail -c '
     dpkg --add-architecture armhf
     apt-get update -qq

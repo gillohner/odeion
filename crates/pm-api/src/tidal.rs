@@ -1354,7 +1354,7 @@ pub(crate) const WAY_PASTE: &str = "paste";
 fn app_label(c: &TidalCredentials) -> &'static str {
     let project = crate::project_apps::tidal_client_id().is_some_and(|id| id == c.client_id);
     if project {
-        "Pubky Music's app"
+        "Odeion's app"
     } else {
         "Your own TIDAL app"
     }

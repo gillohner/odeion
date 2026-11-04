@@ -4,7 +4,7 @@ STEWARD-COMPAT-HA-MA.md §2 asks what a useful subset of the Logitech/Lyrion Mus
 so that Home Assistant's `squeezebox` integration and LMS apps can control the node. This is an estimate only;
 nothing is built.
 
-**Recommendation: no, not now.** Home Assistant already has two better paths: the Pubky Music integration and
+**Recommendation: no, not now.** Home Assistant already has two better paths: the Odeion integration and
 DLNA. A partial LMS emulation would mostly serve third-party LMS apps, and each of those leans on a different
 corner of LMS. Revisit only if the owner wants a specific app, such as iPeng, Squeezer or Material.
 
@@ -19,7 +19,7 @@ its UDP 3483 discovery responder answers their broadcasts with these TLVs:
 
 It leaves out `JSON`, which tells controllers where LMS JSON-RPC lives, because the node serves no
 `/jsonrpc.js`. Until 2026-10-24 (PR #85) it did answer `JSON`, and Home Assistant's *Squeezebox (Lyrion Music
-Server)* flow listed "Pubky Music Node" and then failed with "cannot connect" (checked with Home Assistant
+Server)* flow listed the node (under its SSDP model name) and then failed with "cannot connect" (checked with Home Assistant
 2026.10.2). Now pysqueezebox, which that flow uses, drops the reply as not having enough information to connect,
 so the node isn't offered. LMS controllers that discover servers behave the same way. Squeezelite only needs the
 reply's source address, so it finds the node as before. (pysqueezebox also skips a server whose `UUID` is exactly
@@ -53,7 +53,7 @@ It uses `pysqueezebox` over HTTP JSON-RPC: `POST /jsonrpc.js` with `{"method": "
 
 ## Value
 
-- **Home Assistant:** little. The Pubky Music integration already does more than `squeezebox` would get: the
+- **Home Assistant:** little. The Odeion integration already does more than `squeezebox` would get: the
   library and search in the media browser, play-from, push updates, and no polling. DLNA covers people who don't
   install anything.
 - **LMS apps:** real for people who live in them, but only with the large second piece. A half-working LMS facade

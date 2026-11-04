@@ -439,7 +439,7 @@ impl Default for ApiConfig {
         Self {
             listen: "127.0.0.1:7788".into(),
             token: String::new(),
-            name: "Pubky Music Node".into(),
+            name: "Odeion node".into(),
             subsonic_user: "pubky".into(),
             public_url: String::new(),
             announce: true,

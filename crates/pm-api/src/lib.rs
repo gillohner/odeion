@@ -923,7 +923,7 @@ pub async fn bind(listen: &str) -> anyhow::Result<tokio::net::TcpListener> {
 pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::AddrInUse => format!(
-            "cannot listen on {listen}: the port is already in use, most likely by another Pubky Music Node \
+            "cannot listen on {listen}: the port is already in use, most likely by another Odeion node \
              on this machine (an older install, or a second container on the host network). Stop it, or set \
              [api] listen (PM_LISTEN) to a free port"
         ),
@@ -1635,7 +1635,7 @@ async fn add_endpoint(
 ) -> ApiResult<Vec<OutputInfo>> {
     let key = pm_stream::Key::parse(body.key.expose()).map_err(|_| {
         ApiError::bad_request(if body.key.is_empty() {
-            "the player's key is missing: update the Pubky Music app".to_string()
+            "the player's key is missing: update the Odeion app".to_string()
         } else {
             "the player's key is not 32 to 256 visible ASCII characters".to_string()
         })
@@ -3263,7 +3263,7 @@ async fn controller_login_start(
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `pm-node login`), or restart it once its homeserver answers",
+            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `odeiond login`), or restart it once its homeserver answers",
         ));
     };
     let hs = s
@@ -4583,7 +4583,7 @@ mod tests {
                 ),
                 (Some("Song"), Some("Band"), Some("Record"))
             );
-            assert_eq!(m["additional_info"]["media_player"], "Pubky Music");
+            assert_eq!(m["additional_info"]["media_player"], "Odeion");
             assert!(got[0]["listened_at"].as_i64().unwrap() > 1_700_000_000);
         }
 
@@ -4644,7 +4644,7 @@ mod tests {
         fn authed(h: &axum::http::HeaderMap, q: &std::collections::HashMap<String, String>) -> bool {
             h.get("authorization")
                 .and_then(|v| v.to_str().ok())
-                .is_some_and(|a| a.contains("Token=\"T1\"") && a.contains("Client=\"Pubky Music\""))
+                .is_some_and(|a| a.contains("Token=\"T1\"") && a.contains("Client=\"Odeion\""))
                 || q.get("api_key").map(String::as_str) == Some("T1")
         }
         type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
@@ -6635,7 +6635,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(e.to_string().contains("update the Pubky Music app"), "{e}");
+        assert!(e.to_string().contains("update the Odeion app"), "{e}");
         let (st, e) = register(serde_json::json!(pm_stream::Key::random().expose())).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert!(e.to_string().contains("wrong key"), "{e}");
@@ -12025,9 +12025,9 @@ exec sleep 300
         let s = state(dir.path(), Some("s3cret")).await;
         let app = router(s);
         for (path, needle) in [
-            ("/", "<title>Pubky Music</title>"),
-            ("/app", "<title>Pubky Music</title>"),
-            ("/app/", "<title>Pubky Music</title>"),
+            ("/", "<title>Odeion</title>"),
+            ("/app", "<title>Odeion</title>"),
+            ("/app/", "<title>Odeion</title>"),
             ("/app.css", ".player"),
             ("/app.js", "/v1/events"),
             ("/manifest.webmanifest", "\"display\": \"standalone\""),
@@ -17426,4 +17426,41 @@ exec sleep 300
 
     // Identification review, completion and reuse (their own file: fewer shared lines here)
     mod identify_review;
+
+    /// The installed web app (PWA) and the page say Odeion; the stored token keeps its key, so a
+    /// browser that was signed in stays signed in (docs/branding-compatibility.md).
+    #[tokio::test]
+    async fn the_web_app_is_called_odeion() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), Some("s3cret")).await);
+        let get = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                let r = app
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), StatusCode::OK, "{path}");
+                String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+            }
+        };
+        let m: serde_json::Value = serde_json::from_str(&get("/manifest.webmanifest").await).unwrap();
+        assert_eq!(m["name"], "Odeion");
+        assert_eq!(m["short_name"], "Odeion");
+        assert_eq!(
+            m["start_url"], "/",
+            "an installed web app keeps opening the same page"
+        );
+        let page = get("/").await;
+        assert!(page.contains("<title>Odeion</title>"), "{page}");
+        assert!(page.contains(r#"<meta name="apple-mobile-web-app-title" content="Odeion">"#));
+        assert!(page.contains(r#"<span class="brand-name">Odeion</span>"#));
+        assert!(!page.contains("Pubky Music")); // compat: pre-Odeion name must be gone
+        let js = get("/app.js").await;
+        assert!(
+            js.contains("localStorage.getItem('pm.token')"),
+            "the stored token's key is unchanged"
+        );
+        assert!(js.contains("‹ Odeion</a>"));
+    }
 }

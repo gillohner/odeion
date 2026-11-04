@@ -27,7 +27,7 @@ use std::time::Duration;
 pub const SOURCE_ID: &str = "audiobookshelf";
 pub const TRACK_URI_PREFIX: &str = "audiobookshelf:file:";
 const SETTING: &str = "audiobookshelf.server";
-const KEY_NAME: &str = "Pubky Music node";
+const KEY_NAME: &str = "Odeion node";
 const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 
 /// The connected server. `Debug` never shows the key.
