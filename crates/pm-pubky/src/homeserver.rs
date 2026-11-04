@@ -702,6 +702,23 @@ impl NodeHomeserver {
         Ok(())
     }
 
+    /// Check authenticated private storage with one bounded listing, not a file inventory.
+    /// A new account's missing directory is healthy; access and transport errors propagate.
+    pub async fn probe_private_storage(&self, session: &PubkySession) -> Result<(), HomeserverError> {
+        let storage = session.storage();
+        match storage
+            .list(PRIVATE_FILES_DIR)?
+            .limit(1)
+            .shallow(true)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Every file under the private files folder, with size when the
     /// homeserver reports it.
     pub async fn list_private_files(
