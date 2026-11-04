@@ -154,7 +154,8 @@
   });
 
   // While the sign-in waits for the app to be on screen and online (ring_wait.rs).
-  listen('ring-state', (ev) => { $('ring').textContent = String(ev.payload); });
+  // Only while a sign-in runs (the button is disabled then): a late event must not relabel it.
+  listen('ring-state', (ev) => { if ($('ring').disabled) $('ring').textContent = String(ev.payload); });
 
   $('ring').onclick = async () => {
     clearErr();
