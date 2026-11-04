@@ -1150,8 +1150,11 @@ impl Store {
     /// Gives free pages back (it needs room for a copy of the file).
     fn vacuum(&self) -> Result<(), Refusal> {
         #[cfg(test)]
-        if FAIL_VACUUM.with(|f| f.get()) {
-            return Err(Refusal::Storage);
+        {
+            VACUUM_TRIES.with(|n| n.set(n.get() + 1));
+            if FAIL_VACUUM.with(|f| f.get()) {
+                return Err(Refusal::Storage);
+            }
         }
         self.conn.execute_batch("VACUUM").map_err(storage)
     }
@@ -1263,6 +1266,8 @@ impl Store {
 thread_local! {
     /// Tests: VACUUM fails on this thread (as it does when the disk has no room for its copy).
     static FAIL_VACUUM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Tests: how many VACUUMs were tried on this thread.
+    static VACUUM_TRIES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// A stored event: when (unix seconds, to the minute), alias, role, viewport, the event.
@@ -3485,9 +3490,81 @@ mod tests {
         assert_eq!(s["dropped"]["queue_full"], 0, "{}", s["dropped"]);
         FAIL_VACUUM.with(|f| f.set(false));
         batch(&u);
-        u.flush(1_000 * DAY).unwrap();
+        u.flush(1_000 * DAY + 3_600).unwrap();
         assert!(on_disk() <= cap, "{} bytes on disk, cap {cap}", on_disk());
         assert!(stored(&u) > 0);
+    }
+
+    /// Claude review of da196e59, M2 and L3: while the file cannot be compacted, events that fit
+    /// in its free pages are still kept, the file never grows past the cap (not even by one
+    /// batch), and a failed VACUUM is not tried again on every write.
+    #[test]
+    fn a_file_that_cannot_be_compacted_still_takes_what_fits_and_never_grows_past_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let cap: u64 = 256 << 10;
+        let u = small(dir.path(), |l| {
+            l.max_store_bytes = cap;
+            l.per_alias_per_min = 1_000_000;
+            l.per_person_per_min = 1_000_000;
+            l.global_per_min = 1_000_000;
+            l.max_batch = 1_000;
+        });
+        let t0 = Instant::now();
+        on(&u, t0);
+        let pages = || -> u64 {
+            // The file itself, between writes (no journal is left between them)
+            std::fs::metadata(dir.path().join(FILE)).unwrap().len()
+        };
+        let visit = Event::Visit {
+            view: View::Albums,
+            surface: Surface::Page,
+            ms: Ms::Lt1000,
+            exposed: vec![
+                Control::RowPlay,
+                Control::RowMore,
+                Control::ItemPlay,
+                Control::ItemShuffle,
+                Control::PlayerToggle,
+            ],
+            used: vec![Control::RowPlay],
+            unregistered: 0,
+        };
+        let batch = |u: &Usage, who: &str, a: &str, token: &str| {
+            let p = l(who);
+            let ev = vec![visit.clone(); 200];
+            u.ingest(u.epoch(&p), &p, a, token, &ev, 0, t0, 1_000 * DAY)
+                .unwrap();
+        };
+        let a = open(&u, &l("a"), T1, t0);
+        FAIL_VACUUM.with(|f| f.set(true));
+        VACUUM_TRIES.with(|n| n.set(0));
+        for _ in 0..40 {
+            batch(&u, "a", &a, T1);
+            u.flush(1_000 * DAY).unwrap();
+            assert!(pages() <= cap, "{} bytes, cap {cap}", pages());
+        }
+        let tries = VACUUM_TRIES.with(|n| n.get());
+        assert!(
+            tries <= 1,
+            "a failed VACUUM was tried {tries} times within the hour"
+        );
+        // Everything cleared: the file keeps its size, all free pages, and takes events again
+        u.clear_all(u.epoch(&Person::Owner), t0).unwrap();
+        // Mostly free now: housekeeping compacts, and after a failure only an hour later
+        VACUUM_TRIES.with(|n| n.set(0));
+        for _ in 0..3 {
+            let _ = u.housekeep_store(1_000 * DAY);
+        }
+        assert_eq!(VACUUM_TRIES.with(|n| n.get()), 1, "one try within the hour");
+        let _ = u.housekeep_store(1_000 * DAY + 3_600);
+        assert_eq!(VACUUM_TRIES.with(|n| n.get()), 2, "tried again an hour later");
+        let before = pages();
+        let b = open(&u, &l("b"), T2, t0);
+        batch(&u, "b", &b, T2);
+        u.flush(1_000 * DAY).unwrap();
+        assert!(stored(&u) > 0, "events that fit in free pages are kept");
+        assert!(pages() <= before.max(cap), "{} bytes, was {before}", pages());
+        FAIL_VACUUM.with(|f| f.set(false));
     }
 
     /// Kimi K-L4: two removals of one person the file could not take are one cleanup (the owner's

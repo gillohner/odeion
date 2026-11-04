@@ -690,6 +690,37 @@ async fn ending_the_owners_sessions_ends_the_owners_aliases_only() {
     );
 }
 
+/// Claude review of da196e59, L2: People › Remove takes the person's linked events even when the
+/// node cannot write its token list (the removal fails and is not retried: the person is already
+/// gone from the roster).
+#[tokio::test]
+async fn a_removal_whose_token_write_fails_still_takes_the_usage_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let (l1, l2) = listeners(&s);
+    let app = router(s.clone());
+    switch(&app, true).await;
+    let a1 = open(&app, &l1).await;
+    let a2 = open(&app, &l2).await;
+    for (who, a) in [(&l1, &a1), (&l2, &a2)] {
+        assert_eq!(
+            send(&app, who, a, json!([nav("albums")])).await.0,
+            StatusCode::NO_CONTENT
+        );
+    }
+    // The library refuses the token list from here on
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_tokens_u BEFORE UPDATE ON settings WHEN NEW.key = 'accounts.tokens'
+           BEGIN SELECT RAISE(ABORT, 'test: no token writes'); END;
+         CREATE TRIGGER no_tokens_i BEFORE INSERT ON settings WHEN NEW.key = 'accounts.tokens'
+           BEGIN SELECT RAISE(ABORT, 'test: no token writes'); END;",
+    )
+    .unwrap();
+    assert!(pm_api::accounts::forget_person(&s, KEY).is_err());
+    assert_eq!(by_role(&export(&app).await), (0, 1), "their linked events went");
+}
+
 /// T6: a listener removed (People › Remove) or with music access taken away loses their aliases;
 /// removal also takes their stored choice and the events still linked to them.
 #[tokio::test]
