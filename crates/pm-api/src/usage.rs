@@ -912,6 +912,8 @@ impl Store {
         }
         let conn = rusqlite::Connection::open(path).map_err(storage)?;
         conn.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
+        // What a Clear or a removal takes is overwritten, not left readable in free pages
+        conn.execute_batch("PRAGMA secure_delete = ON").map_err(storage)?;
         conn.execute_batch(SCHEMA_SQL).map_err(storage)?;
         let salt = match get_meta(&conn, "salt")? {
             Some(hex) => decode32(&hex).ok_or(Refusal::Storage)?,
@@ -1184,9 +1186,10 @@ impl Store {
     }
 
     /// Gives free pages back (it needs room for a copy of the file). After it fails, it is not
-    /// tried again for [`VACUUM_BACKOFF`]: each try can fill the disk until it fails.
+    /// tried again for [`VACUUM_BACKOFF`]: each try can fill the disk until it fails. A clock
+    /// stepped back never makes the wait longer.
     fn vacuum(&mut self, unix: u64) -> Result<(), Refusal> {
-        if unix < self.vacuum_after {
+        if unix < self.vacuum_after && self.vacuum_after - unix <= VACUUM_BACKOFF {
             return Err(Refusal::Storage);
         }
         let done = self.try_vacuum();

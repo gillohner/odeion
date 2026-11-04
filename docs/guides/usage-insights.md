@@ -86,7 +86,8 @@ Stop or the default.
 
 In `usage.sqlite` in the node's data folder, readable only by the node's user (0600). The file is made when the owner first turns usage insights on, or when someone first records a choice (Stop, or that they read the notice); until the switch is on it holds only those choices. It is never in
 a backup or a restore (Settings › Backup, and the bundle's `backup.sh` and `restore.sh`, which also
-leaves out a copy in a backup made before), and never copied to a homeserver.
+leaves out a copy in a backup made before), and never copied to a homeserver. Copying the whole data
+folder by hand copies it too: leave `usage.sqlite` out ([backup guide](backup-and-update.md)).
 
 - Raw events: 14 days.
 - Daily counts: 90 days.
