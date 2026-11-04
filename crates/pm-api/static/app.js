@@ -611,7 +611,7 @@
   };
   // A touch screen (a tablet in the desktop layout too): the player bar is one target that opens
   // Now playing, as on a phone; with a mouse its title and artist are links of their own
-  const barPlain = () => shellMode() !== 'desktop' || matchMedia('(pointer: coarse)').matches;
+  const barPlain = () => shellMode() !== 'desktop' || !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   const shellFor = (w, pref) => (pref === 'phone' || w < (pref === 'desktop' ? 480 : 600) ? 'phone' : 'desktop');
   const shellMode = () => document.documentElement.dataset.shell || 'desktop';
   const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
