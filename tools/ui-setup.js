@@ -244,7 +244,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const IMG = BASE + '/icon.svg';
     const pageJson = (kind, id, extra) => ({ kind, id, uri: null, target: {}, title: 'Mock ' + kind, artist: kind === 'artist' ? null : { id: 'tidal-77', name: 'Mock Artist' }, album: null, year: 2020, image: kind === 'artist' ? null : IMG, source: 'TIDAL', source_id: 'tidal', section: 'home', plays_from: null, connect: [], reading: false, pending: false, songs: [], total_ms: 0, albums: [], versions: [], also_on: [], opened_as: null, plays_note: null, song_uri: null, link: null, on_pubky: null, ...extra });
     const SONGS = [{ no: 1, title: 'Streamed song', artist: 'Mock Artist', duration_ms: 1000, uri: 'tidal:1', track_id: null, page: null, image: IMG, id: 'tidal-1', artist_id: 'tidal-77', album: 'Mock album', album_id: 'tidal-5' }, { no: 2, title: 'Local song', artist: 'Mock Artist', duration_ms: 1000, uri: 'track:5', track_id: 5, page: null, image: IMG, id: 'lib-5', artist_id: null, album: 'Local album', album_id: 'lib-1' }];
-    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }];
+    // The third tile's "year" is a remote subtitle with markup in it: it must show as text
+    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }, { id: 'tidal-6', title: 'Odd album', image: IMG, year: '<img id="yearinj" src="x"><b>Someone</b>' }];
     await p.route(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/, (r) => {
       const u = new URL(r.request().url()); if (u.pathname.endsWith('/extras')) return r.fulfill({ json: {} });
       const [, , kind, id] = u.pathname.replace('/v1/', '/').split('/');
@@ -256,6 +257,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/artist/tidal-77');
     await p.waitForSelector('#ialbums [data-tile="1"]');
     const t0 = await badge('#ialbums [data-tile="0"]'); const t1 = await badge('#ialbums [data-tile="1"]');
+    check(!(await p.$('#ialbums #yearinj, #ialbums [data-tile="2"] b')) && /<img id="yearinj"/.test(await p.textContent('#ialbums [data-tile="2"] .a')), 'a tile\'s year from a service is text, never markup');
     check(t0 && t0.label === 'From TIDAL' && t0.hidden && !t0.role, `a TIDAL album tile says where it is from, at the end of its name, the badge itself decoration (${t0 && t0.label})`);
     check(t1 && t1.label === 'From your library', `a library album tile too (${t1 && t1.label})`);
     check(t0 && t0.absolute && t0.inside && t0.square, 'in the cover’s bottom corner, over it (the cover stays square)');
