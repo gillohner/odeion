@@ -3,7 +3,7 @@
 STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn.** The same note as a page, with the wireframes scaled side by side: `responsive/note.html` (published for the owner; link in ~/QUESTIONS.md). The study behind it: `mobile-study.md`.
 
 ## Rules
-- **Screens don't scroll; lists do.** Now playing, the quality sheet and the zone picker fit the screen. Library, album, artist, playlist and search scroll; their headers fold into a compact bar.
+- **Screens don't scroll; lists do.** Now playing and the zone picker fit the screen. Library, album, artist, playlist and search scroll; their headers fold into a compact bar.
 - **Secondary things are sheets.** Queue, Lyrics, Details (signal path, file, credits), Sources (also on) and Tags open over Now playing: a bottom sheet on a phone, a side panel on a tablet, a docked panel on a desktop.
 - **Thumbs first.** 44 px targets; transport and the secondary row in the bottom half; swipe a row for Play next, long-press for its menu.
 - **Same parts at every width;** only the arrangement and density change. Safe areas, both themes, reduced motion, font scale 1.3.
@@ -15,7 +15,7 @@ STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn
 
 - **Tabs:** Home, Search, Library, Zones. The mini player above them carries the quality and the zone.
 - **Library:** my library first; shared libraries and Downloads as their own sections.
-- **Now playing:** art; title with the heart; the quality label (opens the quality sheet); scrubber; transport. One row opens the five sheets; swipe down collapses it.
+- **Now playing:** art; title with the heart; the quality label (opens Details, the signal path); scrubber; transport. One row opens the five sheets; swipe down collapses it.
 - **Settings:** four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md). Each group header says where in one line:
   - **You:** saved on your homeserver, so it follows you to every node and device. My accounts, My library and sharing, Home, layout and appearance, playback quality.
   - **This phone:** only on this device. The USB DAC and bit-perfect, Downloads and cache.

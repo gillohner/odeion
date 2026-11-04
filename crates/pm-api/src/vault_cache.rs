@@ -67,12 +67,20 @@ pub struct Carry {
     pub part: Part,
 }
 
+/// The node's app for one session of a service's ([`Bridge::app_of_session`]).
+pub type SessionApp = fn(&NodeState, &Map<String, Value>) -> Option<String>;
+
 /// One sign-in the vault carries: its id there, the settings it lives in (the first is the
 /// sign-in itself: no sign-in without it), and the app its tokens belong to.
 pub struct Bridge {
     pub service: &'static str,
     pub carry: &'static [Carry],
     pub app: Option<fn(&NodeState) -> Option<String>>,
+    /// Where a service's sessions come in kinds made with different apps (TIDAL full tracks: the
+    /// code sign-in's device client, Sign in with TIDAL's browser client): the node's app for a
+    /// session like this one, none when the node has no app that renews it. `app` is then the
+    /// usual kind's.
+    pub app_of_session: Option<SessionApp>,
     /// Members of the node's state about the sign-in it had (`setting`, `member`), dropped when
     /// it takes another one from the vault: Last.fm's "this key was refused".
     pub reset: &'static [(&'static str, &'static str)],
@@ -100,24 +108,28 @@ pub const BRIDGES: &[Bridge] = &[
         service: "tidal",
         carry: &[whole("tidal.user")],
         app: Some(crate::tidal::app_id),
+        app_of_session: None,
         reset: &[],
     },
     Bridge {
         service: "tidal-full",
         carry: &[members("tidal.unofficial", &["session"])],
         app: Some(crate::tidal_unofficial::app_id),
+        app_of_session: Some(crate::tidal_unofficial::app_of_session),
         reset: &[],
     },
     Bridge {
         service: "spotify",
         carry: &[whole("spotify.user")],
         app: Some(crate::spotify::app_id),
+        app_of_session: None,
         reset: &[],
     },
     Bridge {
         service: "qobuz",
         carry: &[members("qobuz.unofficial", &["session"])],
         app: Some(crate::qobuz::app_id),
+        app_of_session: None,
         reset: &[],
     },
     Bridge {
@@ -127,6 +139,7 @@ pub const BRIDGES: &[Bridge] = &[
             members("bandcamp.unofficial", &["fan"]),
         ],
         app: None,
+        app_of_session: None,
         reset: &[],
     },
     Bridge {
@@ -134,18 +147,21 @@ pub const BRIDGES: &[Bridge] = &[
         // The key and who it is; whether to send what plays (`submit`) stays per node
         carry: &[members("lastfm.session", &["key", "user"])],
         app: Some(crate::lastfm::app_id),
+        app_of_session: None,
         reset: &[("lastfm.session", "problem")],
     },
     Bridge {
         service: "listenbrainz",
         carry: &[members("listenbrainz.account", &["token", "user"])],
         app: None,
+        app_of_session: None,
         reset: &[],
     },
     Bridge {
         service: "jamendo",
         carry: &[whole("jamendo.user")],
         app: Some(crate::jamendo::app_id),
+        app_of_session: None,
         reset: &[],
     },
 ];
@@ -855,6 +871,27 @@ fn side_of(b: &Bridge, travels: &Map<String, Value>, lineage: Option<String>) ->
     }
 }
 
+/// The node's app for a copy like `travels` (for the usual kind when there is none): a session
+/// made with another kind of client belongs to another app ([`Bridge::app_of_session`]).
+pub(crate) fn node_app_for(
+    s: &NodeState,
+    b: &Bridge,
+    travels: Option<&Map<String, Value>>,
+) -> Option<String> {
+    if let (Some(f), Some(sess)) = (b.app_of_session, travels.and_then(|t| session_of(b, t))) {
+        return f(s, &sess);
+    }
+    b.app.and_then(|f| f(s))
+}
+
+/// Whether the vault's copy was made with the app this node has for that kind of copy (or no
+/// app is involved): only such a copy can be taken, and kept renewed, here.
+pub(crate) fn made_with_our_app(s: &NodeState, b: &Bridge, theirs: &SignIn) -> bool {
+    b.app.is_none()
+        || theirs.client_id.is_none()
+        || theirs.client_id == node_app_for(s, b, node_settings(theirs).as_ref())
+}
+
 /// The app a node copy's tokens belong to: the node's, except an imported session's (it belongs
 /// to the app it was imported from).
 fn app_for(b: &Bridge, travels: Option<&Map<String, Value>>, node_app: Option<String>) -> Option<String> {
@@ -941,7 +978,6 @@ pub(crate) async fn sync_held(
                 continue;
             }
         };
-        let node_app = b.app.and_then(|f| f(s));
         let (mine, seen, lineage) = {
             let lib = s.library.lock().expect("library poisoned");
             let mine = match carried(&lib, b) {
@@ -976,7 +1012,14 @@ pub(crate) async fn sync_held(
             };
             (mine, seen, lineage)
         };
-        let app = app_for(b, mine.as_ref(), node_app.clone());
+        // The node's app for its own copy, and for the vault's (each kind of session has its own)
+        let my_app = node_app_for(s, b, mine.as_ref());
+        let their_app = node_app_for(
+            s,
+            b,
+            theirs.as_ref().and_then(|o| node_settings(&o.sign_in)).as_ref(),
+        );
+        let app = app_for(b, mine.as_ref(), my_app.clone());
         let my_side = mine.as_ref().map(|m| side_of(b, m, lineage.clone()));
         let their_side = theirs.as_ref().map(|o| {
             let from_a_node = node_settings(&o.sign_in);
@@ -991,7 +1034,7 @@ pub(crate) async fn sync_held(
                     },
                 },
                 from_a_node: from_a_node.is_some(),
-                our_app: b.app.is_none() || o.sign_in.client_id.is_none() || o.sign_in.client_id == node_app,
+                our_app: made_with_our_app(s, b, &o.sign_in),
             }
         });
         let wipe = Wipe {
@@ -1001,7 +1044,7 @@ pub(crate) async fn sync_held(
         };
         let mut what = decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref(), &wipe);
         // Lost here because the node's app changed, not signed out: the vault keeps it
-        if what == Do::Remove && seen.as_ref().is_some_and(|x| x.app != node_app) {
+        if what == Do::Remove && seen.as_ref().is_some_and(|x| x.app != their_app) {
             what = Do::Forget;
         }
         // Which side can be taken, and what Settings shows, for a service in conflict or not
@@ -1106,7 +1149,8 @@ pub(crate) async fn sync_held(
                       revision: u64,
                       travels: &Map<String, Value>,
                       lineage: Option<String>,
-                      conflict: bool| {
+                      conflict: bool,
+                      app: Option<String>| {
             remember(
                 lib,
                 b.service,
@@ -1118,7 +1162,7 @@ pub(crate) async fn sync_held(
                     conflict,
                     lineage,
                     client: client.clone(),
-                    app: node_app.clone(),
+                    app,
                     at: pm_library::db::now_unix().max(0) as u64,
                     marker,
                 },
@@ -1151,7 +1195,7 @@ pub(crate) async fn sync_held(
                             || x.lineage != lin
                             || x.marker != marker
                     }) {
-                        record(&lib, o.sign_in.revision, m, lin, false);
+                        record(&lib, o.sign_in.revision, m, lin, false, my_app.clone());
                     }
                 }
             }
@@ -1170,6 +1214,7 @@ pub(crate) async fn sync_held(
                             m,
                             lineage.clone(),
                             false,
+                            my_app.clone(),
                         );
                         if seen.is_none() && theirs.is_none() {
                             report.migrated.push(service);
@@ -1221,7 +1266,7 @@ pub(crate) async fn sync_held(
                         let _ = lib.delete_setting(&lineage_key(b.service));
                     }
                 }
-                record(&lib, o.sign_in.revision, &travels, lin, false);
+                record(&lib, o.sign_in.revision, &travels, lin, false, their_app.clone());
                 report.pulled.push(service);
                 if taking.is_some() {
                     report.settled = Some(settled_as("pulled"));
@@ -1267,7 +1312,7 @@ pub(crate) async fn sync_held(
                         .as_ref()
                         .is_none_or(|x| !x.conflict || x.hash != hash(m) || x.marker != marker)
                     {
-                        record(&lib, o.sign_in.revision, m, lineage.clone(), true);
+                        record(&lib, o.sign_in.revision, m, lineage.clone(), true, my_app.clone());
                     }
                 }
                 report.details.push(detail());
