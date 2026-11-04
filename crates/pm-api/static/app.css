@@ -243,12 +243,11 @@ input[type=range]:hover::-webkit-slider-thumb, input[type=range]:focus-visible::
 input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz-range-thumb { opacity: 1; }
 .player-right { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
 /* The right group never spills over the transport (a long zone name, a long sound line): its parts
-   keep their size, except the sound pill's words and the zone's name, which shrink to an ellipsis;
-   squeezed past that (a files job beside them), the pills clip their contents at their own edge */
+   keep their size, the sound line is at most 220 px, and only the zone's name shrinks, to an
+   ellipsis; squeezed past that, the zone button clips its contents at its own edge */
 html:not([data-shell="phone"]) .player-right > * { flex: none; }
-html:not([data-shell="phone"]) .player-right > :is(.quality, .zone-btn) { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-html:not([data-shell="phone"]) .player-right > .quality .qtext { min-width: 4em; }
-html:not([data-shell="phone"]) .player-right > .quality .qdot { flex: none; }
+html:not([data-shell="phone"]) .player-right > .quality .qtext { max-width: 220px; }
+html:not([data-shell="phone"]) .player-right > .zone-btn { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; }
 .quality { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; color: var(--fg-2); white-space: nowrap; }
 .quality:hover { border-color: var(--line-strong); }
@@ -1223,7 +1222,8 @@ html[data-shell="phone"] :is(.tagrow .input, .taginput) { min-height: 40px; }
   .chip, .btn.sm, .tagrow .input, .taginput { min-height: 40px; }
   .track .row-actions .icon-btn { width: 40px; height: 40px; flex: none; }
   .track .row-actions .icon-btn:not([data-act="more"]):not(.heart.on) { display: none; }
-  .q-actions .icon-btn, .srow > .icon-btn { width: 40px; height: 40px; }
+  .q-actions .icon-btn, .srow > .icon-btn, .menu-btn, .volbtn { width: 40px; height: 40px; }
+  .nav-item, .jobchip { min-height: 40px; }
   .porder-grip { padding: 12px; margin: -8px 0; }
 }
 /* No hover on a touch screen: the row's actions are always shown there, not only on hover */
@@ -1297,11 +1297,25 @@ html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-ar
   html[data-shell="desktop"] .player-right > * { flex: none; }
   html[data-shell="desktop"] .player-right > .zone-btn { flex: 0 1 auto; min-width: 0; }
   html[data-shell="desktop"] .player-right .zone-btn span { max-width: 130px; }
+}
+/* The sound pill as its badge (source mark, dot, "16/44.1"; the whole line is in the Sound panel)
+   wherever the bar has no room for the line beside the volume and the zone: under 1800 px, and at
+   any width while a files job shows its chip; the chip is its bar alone under 1367 px, and beside
+   it the volume is its button from 760 to 1599 px (narrower, the volume button is gone anyway) */
+@media (max-width: 1799px) {
   html[data-shell="desktop"] .player .quality { gap: 6px; padding: 5px 9px; }
   html[data-shell="desktop"] .player .quality :is(.qtext, .qdsp) { display: none; }
   html[data-shell="desktop"] .player .quality .qshort { display: inline-flex; }
   html[data-shell="desktop"] .player .quality .qshort .qdev { display: none; }
-  html[data-shell="desktop"] .player-right .jobchip .jc-text { display: none; }
+}
+html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .quality { gap: 6px; padding: 5px 9px; }
+html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .quality :is(.qtext, .qdsp) { display: none; }
+html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .quality .qshort { display: inline-flex; }
+html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .quality .qshort .qdev { display: none; }
+@media (max-width: 1366px) { html[data-shell="desktop"] .player-right .jobchip .jc-text { display: none; } }
+@media (min-width: 760px) and (max-width: 1599px) {
+  html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .volume { display: none; }
+  html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .volbtn { display: inline-flex; }
 }
 @media (max-width: 899px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1fr) minmax(170px, 1.1fr) auto; }
@@ -1322,6 +1336,10 @@ html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-ar
 @media (max-width: 679px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1.2fr) minmax(110px, 0.8fr) auto; }
   html[data-shell="desktop"] .player-center .seek .time, html[data-shell="desktop"] .player .quality .qsrc { display: none; }
+}
+/* A touch screen's transport has 44 px buttons: its column keeps room for them */
+@media (max-width: 679px) and (pointer: coarse) {
+  html[data-shell="desktop"] .player { grid-template-columns: minmax(130px, 1fr) minmax(150px, 0.8fr) auto; }
 }
 /* An item's hero keeps its cover beside the words down to 600 px, so they use the width */
 @media (max-width: 720px) {

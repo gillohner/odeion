@@ -75,9 +75,20 @@ const barReport = () => {
       if (w > 1 && h > 1) overlaps.push(`${name(parts[i])} × ${name(parts[j])} (${Math.round(w)}×${Math.round(h)})`);
     }
   }
-  // Characters a cut text still shows: its width over the average character width of the whole text
-  const kept = (el) => { if (!el || !shown(el)) return null; const t = el.textContent.trim(); if (!t) return null; if (el.scrollWidth <= el.clientWidth + 1) return t.length; return Math.floor(el.clientWidth / (el.scrollWidth / t.length)); };
-  return { overlaps, outside, title: kept(bar.querySelector('.np-title')), sub: kept(bar.querySelector('.np-sub')), zone: kept(bar.querySelector('#zonename')) };
+  // Characters a cut text still shows: the width left after clipping and the ellipsis, over the
+  // text's average character width
+  const ctx2d = document.createElement('canvas').getContext('2d');
+  const kept = (el) => {
+    if (!el || !shown(el)) return null; const t = el.textContent.trim(); if (!t) return null;
+    const v = seen(el); const visW = Math.min(el.clientWidth, v.right - v.left); const full = el.scrollWidth;
+    if (full <= visW + 1) return t.length;
+    const st = getComputedStyle(el); ctx2d.font = `${st.fontWeight} ${st.fontSize} ${st.fontFamily}`;
+    return Math.max(0, Math.floor((visW - ctx2d.measureText('…').width) / (full / t.length)));
+  };
+  // The quality shows whole: the badge uncut, or the whole sound line
+  const whole = (el) => { if (!el || !shown(el)) return false; const r = el.getBoundingClientRect(); const v = seen(el); return v.right - v.left >= r.width - 1 && el.scrollWidth <= el.clientWidth + 1; };
+  const quality = whole(bar.querySelector('#quality .qbadge')) || whole(bar.querySelector('#quality .qtext'));
+  return { overlaps, outside, quality, title: kept(bar.querySelector('.np-title')), sub: kept(bar.querySelector('.np-sub')), zone: kept(bar.querySelector('#zonename')) };
 };
 // Baselines of the Songs head's title, count and button (a zero-height probe sits on each one's baseline)
 const songsHead = () => {
@@ -90,7 +101,7 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
 
 (async () => {
   const browser = await chromium.launch();
-  const widths = [600, 700, 820, 1024, 1180, 1366];
+  const widths = [600, 700, 820, 1024, 1101, 1180, 1280, 1366, 1600, 1920];
   for (const w of widths) {
     for (const [orient, h] of [['portrait', Math.round(w * 4 / 3)], ['landscape', Math.round(w * 3 / 4)]]) {
       const tag = `${w}×${h}`;
@@ -108,7 +119,7 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       check(bar.title >= 8 && bar.sub >= 8 && bar.zone >= 8, `${tag}: title, artist and zone keep 8+ characters (${bar.title}, ${bar.sub}, ${bar.zone})`);
       // Every desktop feature, reachable
       check(await visible(page, '#sidebar .nav-item[data-view="queue"]'), `${tag}: the queue is in the sidebar`);
-      check(await visible(page, '#quality') && (await visible(page, '#quality .qbadge') || await visible(page, '#quality .qtext')), `${tag}: the sound pill shows the quality`);
+      check(bar.quality, `${tag}: the sound pill shows the quality whole (its badge, or the whole line)`);
       const volIn = (await visible(page, '.player .volume')) ? 'bar' : (await visible(page, '#volbtn')) ? 'button' : null;
       await page.click('#quality'); await page.waitForTimeout(200);
       const panelVol = await visible(page, '#qpanel #qpvol');
@@ -136,11 +147,25 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       await showJob(page); await page.waitForTimeout(100);
       const busy = await page.evaluate(barReport);
       check(!busy.overlaps.length && !busy.outside.length, `${tag}: with a files job showing, still nothing overlaps or leaves the bar${busy.overlaps.length || busy.outside.length ? ': ' + [...busy.overlaps, ...busy.outside].slice(0, 4).join('; ') : ''}`);
+      check(busy.quality && busy.title >= 8 && busy.sub >= 8 && busy.zone >= 8, `${tag}: with a files job, the quality whole and title, artist and zone 8+ characters (${busy.quality}, ${busy.title}, ${busy.sub}, ${busy.zone})`);
       if (orient === 'portrait' || w === 1366) {
         for (const theme of ['light', 'dark']) { await page.evaluate((t) => { document.documentElement.dataset.theme = t; }, theme); await page.screenshot({ path: path.join(SHOTS, `album-${w}x${h}-${theme}.png`) }); }
       }
       await context.close();
     }
+  }
+  // Touch screens (44 px transport buttons, 40 px targets): the bar at every width, with and without a files job
+  for (const w of widths) {
+    const h = Math.round(w * 3 / 4); const { page, context } = await open(browser, w, h, { touch: true });
+    await fx.go(page, '/album/lib-7'); await page.waitForSelector('#isongs [data-selstart]'); await page.waitForTimeout(300);
+    for (const job of [false, true]) {
+      if (job) { await showJob(page); await page.waitForTimeout(100); }
+      const b = await page.evaluate(barReport);
+      check(!b.overlaps.length && !b.outside.length && b.quality && b.title >= 8 && b.sub >= 8 && b.zone >= 8, `touch ${w}×${h}${job ? ' with a files job' : ''}: the bar fits (${b.quality}, ${b.title}, ${b.sub}, ${b.zone})${b.overlaps.length || b.outside.length ? ': ' + [...b.overlaps, ...b.outside].slice(0, 4).join('; ') : ''}`);
+    }
+    const t = await page.evaluate(() => [...document.querySelectorAll('.player button, #sidebar .nav-item, .topbar .menu-btn')].filter((e) => e.getBoundingClientRect().width > 0 && getComputedStyle(e).display !== 'none' && !e.closest('[hidden]')).filter((e) => e.getBoundingClientRect().height < 40).map((e) => e.id || e.className.split(' ')[0]));
+    check(!t.length, `touch ${w}: the bar's, sidebar's and top bar's buttons are 40 px or more${t.length ? ' (not: ' + t.join(', ') + ')' : ''}`);
+    await context.close();
   }
   // A touch screen at a tablet's width: the desktop layout with 40 px targets
   {
