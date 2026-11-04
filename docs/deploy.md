@@ -216,7 +216,9 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
 - **Your own domain instead:** Caddy on 443 in front of `127.0.0.1:6286`, ports 80, 443 and 6287
   forwarded; write the hostname into `/var/lib/pubky-music/tunnel/domain` (no token needed) and
   restart the homeserver.
-- **Updating:** replace the binary and `sudo systemctl restart pubky-homeserver` (or
+- **Updating:** install the new program and its old name
+  (`sudo install -m 755 odeiond /usr/local/bin/ && sudo ln -sf odeiond /usr/local/bin/pm-node`, so a
+  unit that still runs `pm-node` gets the new one too) and `sudo systemctl restart pubky-homeserver` (or
   `odeiond`; `pubky-music-node` on an install from before Odeion, which keeps working and can move
   as in [the Linux guide](guides/install-linux.md#installed-before-odeion-pubky-music-nodeservice)). Back up `/var/lib/pubky-homeserver` (its `secret` is the homeserver's key)
   and the PostgreSQL database together.

@@ -6,6 +6,7 @@
 # so starting either while the other runs stops the other first (one ordering edge, no cycle). Moving an install from the old unit
 # (docs/branding-compatibility.md, "Moving to odeiond.service"):
 #   systemctl cat pubky-music-node     # the old unit as it runs: its file, then its drop-ins
+#   sudo install -m 755 odeiond /usr/local/bin/ && sudo ln -sf odeiond /usr/local/bin/pm-node
 #   sudo install -m 644 odeiond.service /etc/systemd/system/
 #   # Drop-ins move with it; lines you edited in the old unit's own file (another folder in
 #   # ReadWritePaths= for backups, Environment= lines) go into a drop-in of the new one:

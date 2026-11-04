@@ -134,9 +134,10 @@ docker compose pull
 docker compose up -d
 ```
 
-**Docker with its own homeserver:** the node's version is `PM_TAG` in `.env`: `edge` (the newest
-code), `latest` (the last release) or a release number such as `0.2.0`. To change it, edit `.env`
-first.
+**Docker with its own homeserver:** the node's version is `ODEION_TAG` in `.env`, or `PM_TAG` (the
+name `setup.sh` writes, from before Odeion; when both have a value, `ODEION_TAG` wins): `edge` (the
+newest code), `latest` (the last release) or a release number such as `0.2.0`. To change it, edit
+that line in `.env` first.
 
 ```sh
 cd ~/pubky-music-node/deploy/bundle
@@ -163,8 +164,8 @@ The version a node runs is in **Settings › About and updates**. What changed:
 
 ### Going back to the previous version
 
-Set the image tag back (`PM_TAG` in the bundle's `.env`, or the `image:` line in your own compose
-file) and run `docker compose pull && docker compose up -d` again.
+Set the image tag back (`ODEION_TAG` in the bundle's `.env`, or `PM_TAG` when there is no
+`ODEION_TAG` with a value; or the `image:` line in your own compose file) and run `docker compose pull && docker compose up -d` again.
 
 When the newer version changed the library's database (its CHANGELOG entry says so), put back the
 library from the backup you made before updating; versions after 0.2.0 refuse to start on a

@@ -164,6 +164,15 @@ check("bins: odeiond.exe pm-node.exe" in rel, "the Windows archive ships odeiond
 check('--title "Odeion $GITHUB_REF_NAME"' in rel, "a release is titled Odeion")
 check('echo "Odeion $CHANNEL. What changed' in rel, "release notes say Odeion")
 has("tools/release/build-armv7.sh", "odeiond", "the armv7 build collects odeiond")
+meta = rel[rel.find("uses: docker/metadata-action"):]
+meta = meta[:meta.find("- uses:")]
+check("org.opencontainers.image.title=Odeion node" in meta and "org.opencontainers.image.description=Odeion node" in meta,
+      "the published image's OCI title and description say Odeion (metadata-action labels override the Dockerfile's)")
+bu = text("docs/guides/backup-and-update.md")
+check(bu.count("ODEION_TAG") >= 2, "the update and rollback steps name ODEION_TAG (it wins over PM_TAG)")
+dep = text("docs/deploy.md")
+upd = dep[dep.find("- **Updating:**"):][:600]
+check("odeiond" in upd and "ln -sf odeiond /usr/local/bin/pm-node" in upd, "deploy.md's update step installs odeiond and the pm-node link")
 
 ha = "integrations/home-assistant/custom_components/pubky_music"
 check(json_of(f"{ha}/manifest.json").get("name") == "Odeion", "the HA integration is named Odeion")

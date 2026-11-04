@@ -389,6 +389,11 @@ jobs:
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             type=raw,value=edge,enable=${{ needs.meta.outputs.channel == 'edge' }}
             type=sha
+          # metadata-action sets the OCI title and description from the repository, and these labels
+          # override the Dockerfile's: say Odeion here (the image keeps its name)
+          labels: |
+            org.opencontainers.image.title=Odeion node
+            org.opencontainers.image.description=Odeion node (odeiond): your music library and zones, served by your own node
       - uses: docker/build-push-action@v6
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false

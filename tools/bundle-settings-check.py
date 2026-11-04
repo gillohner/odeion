@@ -120,6 +120,45 @@ esac
           "setup.sh adds no PM_TOKEN or PM_TAG next to the ODEION_ ones")
     check("fixture-new-token" not in r.stdout + r.stderr, "setup.sh prints no token")
 
+    # An empty ODEION_TOKEN or ODEION_TAG is no token or tag (compose counts it as unset), so setup.sh
+    # still writes the PM_ one; an empty ODEION_PUBLIC_URL wins in compose, so none is added for it
+    d = base / "setup-empty"
+    shutil.copytree(BUNDLE, d, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
+    (d / ".env").write_text("ODEION_TOKEN=\nODEION_TAG=\nODEION_PUBLIC_URL=\n")
+    r = subprocess.run(["sh", str(d / "setup.sh")], cwd=d, env={"PATH": "/usr/bin:/bin", "HOME": str(base)},
+                       capture_output=True, text=True)
+    envf = (d / ".env").read_text()
+    tok = [l.split("=", 1)[1] for l in envf.splitlines() if l.startswith("PM_TOKEN=")]
+    check(r.returncode == 0 and len(tok) == 1 and len(tok[0]) >= 32 and "PM_TAG=edge" in envf,
+          "setup.sh writes a token and tag when the ODEION_ ones are empty")
+    check("PM_PUBLIC_URL=" not in envf, "setup.sh adds no PM_PUBLIC_URL next to an empty ODEION_PUBLIC_URL (it wins)")
+
+    # setting TOKEN picks what compose gives the node, for the shell and .env together
+    import json
+    compose_file = BUNDLE / "docker-compose.yml"
+    cases = [
+        ({"ODEION_TOKEN": ""}, "ODEION_TOKEN=env-new\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=env-new\nPM_TOKEN=env-old\n"),
+        ({"ODEION_TOKEN": "shell-new"}, "ODEION_TOKEN=env-new\nPM_TOKEN=env-old\n"),
+        ({"PM_TOKEN": "shell-old"}, "ODEION_TOKEN=\nPM_TOKEN=env-old\n"),
+        ({"PM_TOKEN": ""}, "PM_TOKEN=env-old\nODEION_TOKEN=\n"),
+        ({"ODEION_TOKEN": "", "PM_TOKEN": "shell-old"}, "ODEION_TOKEN=env-new\n"),
+    ]
+    for i, (shell, envtext) in enumerate(cases):
+        cd = base / f"cmp{i}"
+        cd.mkdir()
+        shutil.copy(compose_file, cd / "docker-compose.yml")
+        (cd / ".env").write_text("ADMIN_PASSWORD=fixture-admin\nDB_PASSWORD=fixture-db\n" + envtext)
+        (cd / "home").mkdir()
+        e = {"PATH": "/usr/bin:/bin", "HOME": str(cd / "home"), **shell}
+        r = subprocess.run(["docker", "compose", "-f", str(cd / "docker-compose.yml"), "--project-directory", str(cd),
+                            "config", "--format", "json"], cwd=cd, env=e, capture_output=True, text=True)
+        want = json.loads(r.stdout)["services"]["music"]["environment"].get("PM_TOKEN") if r.returncode == 0 else ("" if "missing a value" in r.stderr else f"<compose refuses: {r.stderr.strip()[-120:]}>")
+        rr = subprocess.run(["bash", "-euo", "pipefail", "-c", f'. "{BUNDLE}/settings.sh"\nsetting TOKEN'], cwd=cd,
+                            env={"PATH": "/usr/bin:/bin", **shell}, capture_output=True, text=True)
+        got = rr.stdout if rr.returncode == 0 else f"<error {rr.stderr.strip()[:80]}>"
+        check(got == want, f"setting TOKEN matches compose: shell {shell}, .env {envtext.strip()!r} (compose {want!r}, setting {got!r})")
+
     for script in ("backup.sh", "restore.sh"):
         s = (BUNDLE / script).read_text()
         check('. ./settings.sh' in s, f"{script} uses settings.sh")

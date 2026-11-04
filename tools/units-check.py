@@ -63,6 +63,11 @@ for doc in ("deploy/bare-metal/odeiond.service", "docs/guides/install-linux.md",
     check("systemctl cat pubky-music-node" in t, f"{doc}: the move starts by looking at the old unit")
     check("pubky-music-node.service.d" in t and "odeiond.service.d" in t, f"{doc}: drop-ins are carried over")
     check("ReadWritePaths=" in t and "Environment=" in t, f"{doc}: edited ReadWritePaths= and Environment= are carried over")
+for doc in ("deploy/bare-metal/odeiond.service", "docs/guides/install-linux.md", "docs/branding-compatibility.md"):
+    t = (REPO / doc).read_text()
+    move = t[t.find("systemctl cat pubky-music-node"):]
+    inst, link, enable = move.find("install -m 755"), move.find("ln -sf odeiond /usr/local/bin/pm-node"), move.find("enable --now odeiond")
+    check(-1 < inst < enable and -1 < link < enable, f"{doc}: the move installs odeiond and the pm-node link before enabling the unit")
 guide = (REPO / "docs/guides/backup-and-update.md").read_text()
 check("odeiond.service" in guide and "ReadWritePaths=" in guide, "the backup guide names the unit it edits")
 

@@ -3,14 +3,18 @@
 # (docs/branding-compatibility.md). Every setting is ODEION_<NAME>; the pre-Odeion PM_<NAME> still
 # works and loses to the ODEION_ one.
 
-# setting <NAME>: ODEION_<NAME>, else PM_<NAME>; each from the shell's environment, else .env (as
-# compose reads .env). Only for the token and the backup passphrase, where empty is never valid, so
-# an empty value counts as unset.
+# setting <NAME>: ODEION_<NAME>, else PM_<NAME>, exactly as compose resolves them: each name from the
+# shell's environment when the shell has it (even empty: then .env is not read for that name), else
+# from .env. Only for the token and the backup passphrase, where empty is never valid, so an empty
+# value goes on to the next name (compose's `${ODEION_TOKEN:-${PM_TOKEN…}}`).
 setting() {
   local k v
   for k in "ODEION_$1" "PM_$1"; do
-    v=${!k:-}
-    [ -n "$v" ] || v=$(sed -n "s/^$k=//p" .env 2>/dev/null | tail -n 1)
+    if [ -n "${!k+set}" ]; then
+      v=${!k}
+    else
+      v=$(sed -n "s/^$k=//p" .env 2>/dev/null | tail -n 1)
+    fi
     if [ -n "$v" ]; then
       printf '%s' "$v"
       return 0

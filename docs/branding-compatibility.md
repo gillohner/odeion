@@ -124,6 +124,8 @@ Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the n
   Other `.env` keys (`ADMIN_PASSWORD`, `MUSIC_DIR`, …) never had a `PM_` name and are unchanged.
 - **TrueNAS:** its settings are written under `environment:` in the YAML; an `ODEION_` key there
   works as in `docker run -e`.
+- **The Roon bridge** (`sidecars/roon-bridge`) reads `ODEION_NODE` and `ODEION_TOKEN` first, then
+  `PM_NODE` and `PM_TOKEN`; the `ODEION_` one wins, also when empty.
 - **Build-time values** (`ODEION_PROJECT_*`, `ODEION_NODE_VERSION`, `ODEION_UPDATE_CHANNEL`): the
   `ODEION_` value when set (even empty), else the `PM_` one (`pm_model::brand::build_env`). The
   release workflow keeps passing the repository variables under their `PM_` names; no value is
