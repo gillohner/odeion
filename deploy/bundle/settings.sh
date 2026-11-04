@@ -75,21 +75,49 @@ pm-node -c "$c" backup --force /tmp/pm-backup-library.db >/dev/null'
 
 # node_token_from <config file> <data dir>: the API token a node with these uses, as the node picks
 # it (crates/pm-node/src/api_token.rs): its config's [api] token, trimmed, unless empty or a
-# placeholder; else the one it made, <data dir>/api-token. Nothing printed but the token itself.
-# Kept as text too, so the same function runs inside the node's container (NODE_TOKEN_SH).
+# placeholder; else the one it made, <data dir>/api-token. node_token_pick <api-token text> does the
+# same with the config's text on stdin (so a backup's need not be written to disk). Status 2 when the
+# [api] token line is more than this reads: TOML's '…' and "…" with \" and \\ and a comment after it
+# are read; """…""", other escapes or a bare value are not, and never quietly fall back to another
+# token. Nothing printed but the token itself. Kept as text too, so the same functions run inside the
+# node's container (NODE_TOKEN_SH).
 NODE_TOKEN_FN=$(cat <<'EOF_FN'
-node_token_from() {
-  local t
-  t=$(sed -n '/^\[api\]/,/^\[/s/^[[:space:]]*token[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' "$1" 2>/dev/null | head -n 1)
+toml_api_token() {
+  local line v got
+  line=$(sed -n '/^[[:space:]]*\[api\][[:space:]]*\(#.*\)\{0,1\}$/,/^[[:space:]]*\[/{/^[[:space:]]*token[[:space:]]*=/p;}' | head -n 1)
+  [ -n "$line" ] || return 0
+  v=${line#*=}
+  v=${v#"${v%%[![:space:]]*}"}
+  case $v in
+    '"""'* | "'''"*) return 2 ;;
+    \"*) got=$(printf '%s\n' "$v" | sed -nE 's/^"(([^"\\]|\\["\\])*)"[[:space:]]*(#.*)?$/ok:\1/p')
+      [ -n "$got" ] || return 2
+      got=$(printf '%s\n' "${got#ok:}" | sed 's/\\\(["\\]\)/\1/g') ;;
+    \'*) got=$(printf '%s\n' "$v" | sed -nE "s/^'([^']*)'[[:space:]]*(#.*)?\$/ok:\1/p")
+      [ -n "$got" ] || return 2
+      got=${got#ok:} ;;
+    *) return 2 ;;
+  esac
+  printf '%s' "$got"
+}
+node_token_pick() {
+  local t rc=0
+  t=$(toml_api_token) || rc=$?
+  [ "$rc" = 0 ] || return "$rc"
   t=${t#"${t%%[![:space:]]*}"}
   t=${t%"${t##*[![:space:]]}"}
   case $(printf '%s' "$t" | tr 'A-Z' 'a-z') in '' | change-me | changeme | change-me-to-a-long-random-secret) t= ;; esac
-  if [ -z "$t" ] && [ -f "$2/api-token" ]; then
-    t=$(cat "$2/api-token")
+  if [ -z "$t" ]; then
+    t=$1
     t=${t#"${t%%[![:space:]]*}"}
     t=${t%"${t##*[![:space:]]}"}
   fi
   printf '%s' "$t"
+}
+node_token_from() {
+  local own=
+  [ ! -f "$2/api-token" ] || own=$(cat "$2/api-token")
+  if [ -f "$1" ]; then node_token_pick "$own" < "$1"; else node_token_pick "$own" < /dev/null; fi
 }
 EOF_FN
 )

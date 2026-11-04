@@ -49,7 +49,16 @@ NODE=$(cid music)
 # The API token the node uses, before anything else: its config's [api] token, else the one it made
 # for itself (read in its container, never shown; its node.toml is written once, so a token added to
 # .env later is not the node's); else .env's
-TOKEN=$(docker exec "$NODE" sh -c "$NODE_TOKEN_SH" 2>/dev/null) || TOKEN=
+rc=0
+TOKEN=$(docker exec "$NODE" sh -c "$NODE_TOKEN_SH" 2>/dev/null) || { rc=$?; TOKEN=; }
+if [ "$rc" = 2 ]; then
+  # Its config's [api] token line is more than node_token_from reads: not .env's, only one given here
+  for k in ODEION_TOKEN PM_TOKEN; do
+    eval "v=\${$k-}"
+    if [ -n "$v" ]; then TOKEN=$v; break; fi
+  done
+  [ -n "$TOKEN" ] || die "cannot read the [api] token line in the node's /data/node.toml (more than a plain \"…\" or '…' string); run it with the node's token: ODEION_TOKEN=… ./backup.sh"
+fi
 [ -n "$TOKEN" ] || TOKEN=$(setting TOKEN)
 [ -n "$TOKEN" ] || die "no API token: the node has none in its config ([api] token in /data/node.toml) or its data folder (/data/api-token), and .env has no ODEION_TOKEN (or PM_TOKEN): put the node's token in .env as ODEION_TOKEN=…"
 PROJECT=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$NODE")

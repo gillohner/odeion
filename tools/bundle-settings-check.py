@@ -75,15 +75,15 @@ esac
         r, _ = bash(f"setting {name}", env_file, proc_env)
         return r.stdout if r.returncode == 0 else f"<error {r.stderr.strip()[:120]}>"
 
-    check(setting("TOKEN", "PM_TOKEN=old-tok\n") == "old-tok", "token: the old name alone")
-    check(setting("TOKEN", "ODEION_TOKEN=new-tok\n") == "new-tok", "token: the new name alone")
-    check(setting("TOKEN", "PM_TOKEN=old-tok\nODEION_TOKEN=new-tok\n") == "new-tok", "token: the new name wins")
-    check(setting("TOKEN", "PM_TOKEN=old-tok\nODEION_TOKEN=\n") == "old-tok", "token: an empty new name counts as unset")
-    check(setting("TOKEN", "PM_TOKEN=old-tok\n", {"ODEION_TOKEN": "shell-tok"}) == "shell-tok",
+    check(setting("TOKEN", "PM_TOKEN=fixture-old-tok\n") == "fixture-old-tok", "token: the old name alone")
+    check(setting("TOKEN", "ODEION_TOKEN=fixture-new-tok\n") == "fixture-new-tok", "token: the new name alone")
+    check(setting("TOKEN", "PM_TOKEN=fixture-old-tok\nODEION_TOKEN=fixture-new-tok\n") == "fixture-new-tok", "token: the new name wins")
+    check(setting("TOKEN", "PM_TOKEN=fixture-old-tok\nODEION_TOKEN=\n") == "fixture-old-tok", "token: an empty new name counts as unset")
+    check(setting("TOKEN", "PM_TOKEN=fixture-old-tok\n", {"ODEION_TOKEN": "fixture-shell-tok"}) == "fixture-shell-tok",
           "token: the shell's environment before .env, as compose")
-    check(setting("BACKUP_PASSPHRASE", "PM_BACKUP_PASSPHRASE=old pass\n", {"ODEION_BACKUP_PASSPHRASE": "new pass ♫"})
-          == "new pass ♫", "passphrase: the new name wins, value unchanged")
-    check(setting("BACKUP_PASSPHRASE", "", {"PM_BACKUP_PASSPHRASE": "old pass"}) == "old pass", "passphrase: the old name alone")
+    check(setting("BACKUP_PASSPHRASE", "PM_BACKUP_PASSPHRASE=fixture old pass\n", {"ODEION_BACKUP_PASSPHRASE": "fixture new pass ♫"})
+          == "fixture new pass ♫", "passphrase: the new name wins, value unchanged")
+    check(setting("BACKUP_PASSPHRASE", "", {"PM_BACKUP_PASSPHRASE": "fixture old pass"}) == "fixture old pass", "passphrase: the old name alone")
     check(setting("BACKUP_PASSPHRASE", "") == "", "passphrase: none")
 
     def port(cenv):
@@ -114,13 +114,13 @@ esac
     # setup.sh keeps a token set under the new name
     d = base / "setup"
     shutil.copytree(BUNDLE, d, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
-    (d / ".env").write_text("ODEION_TOKEN=fixture-new-token\nODEION_TAG=fixture\n")
+    (d / ".env").write_text("ODEION_TOKEN=fixture-fixture-new-token\nODEION_TAG=fixture\n")
     r = subprocess.run(["sh", str(d / "setup.sh")], cwd=d, env={"PATH": "/usr/bin:/bin", "HOME": str(base)},
                        capture_output=True, text=True)
     envf = (d / ".env").read_text()
     check(r.returncode == 0 and "PM_TOKEN=" not in envf and "PM_TAG=" not in envf and "ADMIN_PASSWORD=" in envf,
           "setup.sh adds no PM_TOKEN or PM_TAG next to the ODEION_ ones")
-    check("fixture-new-token" not in r.stdout + r.stderr, "setup.sh prints no token")
+    check("fixture-fixture-new-token" not in r.stdout + r.stderr, "setup.sh prints no token")
 
     # An empty ODEION_TOKEN or ODEION_TAG is no token or tag (compose counts it as unset), so setup.sh
     # still writes the PM_ one; an empty ODEION_PUBLIC_URL wins in compose, so none is added for it
@@ -168,33 +168,33 @@ esac
     import json
     compose_file = BUNDLE / "docker-compose.yml"
     cases = [
-        ({"ODEION_TOKEN": ""}, "ODEION_TOKEN=env-new\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN=env-new\nPM_TOKEN=env-old\n"),
-        ({"ODEION_TOKEN": "shell-new"}, "ODEION_TOKEN=env-new\nPM_TOKEN=env-old\n"),
-        ({"PM_TOKEN": "shell-old"}, "ODEION_TOKEN=\nPM_TOKEN=env-old\n"),
-        ({"PM_TOKEN": ""}, "PM_TOKEN=env-old\nODEION_TOKEN=\n"),
-        ({"ODEION_TOKEN": "", "PM_TOKEN": "shell-old"}, "ODEION_TOKEN=env-new\n"),
+        ({"ODEION_TOKEN": ""}, "ODEION_TOKEN=fixture-env-new\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN=fixture-env-new\nPM_TOKEN=fixture-env-old\n"),
+        ({"ODEION_TOKEN": "fixture-shell-new"}, "ODEION_TOKEN=fixture-env-new\nPM_TOKEN=fixture-env-old\n"),
+        ({"PM_TOKEN": "fixture-shell-old"}, "ODEION_TOKEN=\nPM_TOKEN=fixture-env-old\n"),
+        ({"PM_TOKEN": ""}, "PM_TOKEN=fixture-env-old\nODEION_TOKEN=\n"),
+        ({"ODEION_TOKEN": "", "PM_TOKEN": "fixture-shell-old"}, "ODEION_TOKEN=fixture-env-new\n"),
         # compose's dotenv parser: quotes, spaces, inline comments, export, repeated keys
-        ({}, 'ODEION_TOKEN=""\nPM_TOKEN=env-old\n'),
-        ({}, "ODEION_TOKEN=''\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN=   \nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN= # a note\nPM_TOKEN=env-old\n"),
-        ({}, 'ODEION_TOKEN="abc"\nPM_TOKEN=env-old\n'),
-        ({}, "ODEION_TOKEN='abc def'\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN=abc # a note\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN=abc#no-space\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN=  padded  \nPM_TOKEN=env-old\n"),
-        ({}, 'ODEION_TOKEN="abc" # a note\nPM_TOKEN=env-old\n'),
-        ({}, "export ODEION_TOKEN=exported\nPM_TOKEN=env-old\n"),
+        ({}, 'ODEION_TOKEN=""\nPM_TOKEN=fixture-env-old\n'),
+        ({}, "ODEION_TOKEN=''\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN=   \nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN= # a note\nPM_TOKEN=fixture-env-old\n"),
+        ({}, 'ODEION_TOKEN="fixture-abc"\nPM_TOKEN=fixture-env-old\n'),
+        ({}, "ODEION_TOKEN='fixture-abc def'\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN=fixture-abc # a note\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN=fixture-abc#no-space\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN=  fixture-padded  \nPM_TOKEN=fixture-env-old\n"),
+        ({}, 'ODEION_TOKEN="fixture-abc" # a note\nPM_TOKEN=fixture-env-old\n'),
+        ({}, "export ODEION_TOKEN=fixture-exported\nPM_TOKEN=fixture-env-old\n"),
         ({}, 'PM_TOKEN=""\n'),
-        ({}, "PM_TOKEN=first\nPM_TOKEN=last\n"),
+        ({}, "PM_TOKEN=fixture-first\nPM_TOKEN=fixture-last\n"),
         # the new name alone (Compose v2 once evaluated an inner :? first and refused this)
-        ({}, "ODEION_TOKEN=env-new\n"),
+        ({}, "ODEION_TOKEN=fixture-env-new\n"),
         ({}, "ODEION_TOKEN=\nPM_TOKEN=\n"),
         # a comment starts only at space + #, not tab + #; `KEY: value` is a line too
-        ({}, "ODEION_TOKEN=abc\t# a note\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN: colon-value\nPM_TOKEN=env-old\n"),
-        ({}, "ODEION_TOKEN=first\nODEION_TOKEN:\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=fixture-abc\t# a note\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN: fixture-colon-value\nPM_TOKEN=fixture-env-old\n"),
+        ({}, "ODEION_TOKEN=fixture-first\nODEION_TOKEN:\nPM_TOKEN=fixture-env-old\n"),
     ]
     for i, (shell, envtext) in enumerate(cases):
         cd = base / f"cmp{i}"
@@ -226,17 +226,36 @@ esac
         envs = [f"PM_DATA_DIR={data}"] + [l for l in cenv.splitlines() if l]
         r = subprocess.run(["env", "-i", "PATH=/usr/bin:/bin", *envs, "sh", "-c",
                             f'. "{BUNDLE}/settings.sh"; sh -c "$NODE_TOKEN_SH"'], capture_output=True, text=True)
+        node_token.rc = r.returncode
         return r.stdout
-    check(node_token({"node.toml": 'data_dir = "/data"\n\n[api]\nlisten = "0.0.0.0:7788"\ntoken = "cfg-token"\n'}) == "cfg-token",
+    check(node_token({"node.toml": 'data_dir = "/data"\n\n[api]\nlisten = "0.0.0.0:7788"\ntoken = "fixture-cfg-token"\n'}) == "fixture-cfg-token",
           "the node's token: [api] token from its config")
-    check(node_token({"node.toml": '[api]\ntoken = ""\n', "api-token": "own-token\n"}) == "own-token",
+    check(node_token({"node.toml": '[api]\ntoken = ""\n', "api-token": "fixture-own-token\n"}) == "fixture-own-token",
           "the node's token: the one it made when its config has none")
-    check(node_token({"node.toml": '[tidal]\ntoken = "not-this"\n[api]\nlisten = "x"\n', "api-token": "own\n"}) == "own",
+    check(node_token({"node.toml": '[tidal]\ntoken = "fixture-not-this-one"\n[api]\nlisten = "x"\n', "api-token": "fixture-own\n"}) == "fixture-own",
           "the node's token: only [api]'s token line counts")
-    check(node_token({"node.toml": '[api]\ntoken = "Change-Me"\n', "api-token": "own\n"}) == "own",
+    check(node_token({"node.toml": '[api]\ntoken = "Change-Me"\n', "api-token": "fixture-own\n"}) == "fixture-own",
           "the node's token: a placeholder in the config counts as none (as api_token.rs)")
-    check(node_token({"node.toml": '[api]\ntoken = "  spaced  "\n'}) == "spaced", "the node's token: trimmed (as api_token.rs)")
+    check(node_token({"node.toml": '[api]\ntoken = "  fixture-spaced  "\n'}) == "fixture-spaced", "the node's token: trimmed (as api_token.rs)")
     check(node_token({}) == "", "the node's token: none")
+    # The [api] token line as TOML writes it: '…' literal, "…" with \" and \\, a comment after it, a
+    # comment after [api]; anything this does not read (multi-line, other escapes, a bare value) is a
+    # stop (status 2), never a quiet fall-back to another token
+    for label, toml, want in (
+        ("single-quoted", "[api]\ntoken = 'fixture-single'\n", "fixture-single"),
+        ("a comment after it", '[api]\ntoken = "fixture-commented"   # set by hand\n', "fixture-commented"),
+        ("escaped quote and backslash", '[api]\ntoken = "fixture-a\\"b\\\\c"\n', 'fixture-a"b\\c'),
+        ("a comment after [api]", '[api]  # the API\nlisten = "x"\ntoken = "fixture-after-header"\n', "fixture-after-header"),
+        ("single-quoted with a comment", "[api]\ntoken = 'fixture-sq' # note\n", "fixture-sq"),
+    ):
+        got = node_token({"node.toml": toml, "api-token": "fixture-not-this\n"})
+        check(got == want and node_token.rc == 0, f"the node's token, {label}: {got!r}")
+    for label, toml in (("multi-line", '[api]\ntoken = """fixture-multi"""\n'),
+                        ("a \\u escape", '[api]\ntoken = "fixture-\\u0041"\n'),
+                        ("a bare value", "[api]\ntoken = fixture-bare\n"),
+                        ("text after the string", '[api]\ntoken = "fixture-x" y\n')):
+        got = node_token({"node.toml": toml, "api-token": "fixture-not-this\n"})
+        check(node_token.rc == 2 and got == "", f"the node's token, {label}: not read (status 2), no fall-back ({got!r})")
 
     # backup.sh: the running node's own token when .env has none; a clear stop when there is none at all
     def backup_until_inspect(envtext, files):
@@ -268,6 +287,9 @@ esac
         r, calls = backup_until_inspect(envtext, files)
         check("docker inspect" in calls and "no API token" not in r.stderr and "fixture-" not in r.stdout + r.stderr + calls,
               f"backup.sh goes on with {label}, never showing it")
+    r, calls = backup_until_inspect("ODEION_TOKEN=fixture-env-token\n", {"node.toml": '[api]\ntoken = """fixture-multi"""\n'})
+    check(r.returncode != 0 and "cannot read" in r.stderr and "ODEION_TOKEN=" in r.stderr and "docker inspect" not in calls,
+          f"backup.sh stops when the node's token line is more than it reads, not using .env's ({r.stderr.strip()[-140:]!r})")
     r, calls = backup_until_inspect("", {})
     check(r.returncode != 0 and "no API token" in r.stderr and "ODEION_TOKEN" in r.stderr and "docker inspect" not in calls,
           f"backup.sh without any token stops before it starts, saying where the token is ({r.stderr.strip()[-160:]!r})")
@@ -298,23 +320,50 @@ esac
                        shell=True, cwd=b, check=True)
         return b
 
+    # A stand-in docker that behaves like the bundle: it keeps the restored volumes in a folder, and its
+    # node uses the token the real one would (node_token_from on its restored data; when that has none,
+    # the entrypoint writes node.toml from compose's token, and the node makes one at start), answering
+    # 401 to any other. Its restore honours skip_secrets (no sign-ins then).
     RESTORE_STUB = r'''#!/bin/bash
 echo "docker $*" >> "$CALLS"
+. "$SETTINGS"
+NODEV="$STATE/vol-ctr-music"
+node_tok() {
+  if [ -n "${FORCE_NODE_TOKEN:-}" ]; then printf '%s' "$FORCE_NODE_TOKEN"; return; fi
+  node_token_from "$NODEV/node.toml" "$NODEV" 2>/dev/null || true
+}
 case "$1" in
   compose)
     case "$2" in
       config) echo "name: pubky-music" ;;
       ps) [ "${4:-}" ] && echo "ctr-$4" ;;
+      up)
+        if [ "${3:-}" = -d ]; then
+          mkdir -p "$NODEV"
+          [ -f "$NODEV/node.toml" ] || printf '[api]\ntoken = "%s"\n' "$(setting TOKEN .env)" > "$NODEV/node.toml"
+          [ -n "$(node_tok)" ] || printf 'fixture-made-at-start\n' > "$NODEV/api-token"
+        fi ;;
     esac ;;
   volume) : ;;
   inspect) case "$*" in *Config.Env*) echo "PM_LISTEN=0.0.0.0:7788" ;; *) echo "vol-${@: -1}" ;; esac ;;
   logs) echo "init process complete" ;;
-  exec) case " $* " in *" -i "*) cat > /dev/null ;; esac ;;
+  exec)
+    shift
+    if [ "$1" = -i ]; then cat > /dev/null; exit 0; fi
+    ctr=$1; shift
+    if [ "$ctr" = ctr-music ] && [ "$1" = sh ] && [ "$2" = -c ]; then
+      [ -z "${EXEC_FAILS:-}" ] || exit 1
+      if [ -n "${FORCE_NODE_TOKEN:-}" ]; then printf '%s' "$FORCE_NODE_TOKEN"; exit 0; fi
+      exec env -i PATH=/usr/bin:/bin PM_DATA_DIR="$NODEV" sh -c "$3"
+    fi ;;
   run)
     if [[ " $* " == *" --network "* ]]; then
       read -r T; read -r P
       url=${@: -1}
-      [ "$T" = "$WANT_TOKEN" ] || { echo '{"error":"unauthorized"}'; exit 22; }
+      echo "api $url" >> "$CALLS.api"
+      if [ "$T" != "$(node_tok)" ]; then
+        echo '{"error":"unauthorized"}'; echo "curl: (22) The requested URL returned error: 401" >&2; exit 22
+      fi
       case $url in
         */v1/info) echo '{"scanning":false}' ;;
         */v1/restore*)
@@ -325,13 +374,18 @@ case "$1" in
           else echo 'That passphrase does not open this backup'; exit 22; fi ;;
       esac
     else
-      case " $* " in *" -i "*) cat > /dev/null ;; esac
+      vol=; prev=
+      for a in "$@"; do [ "$prev" = -v ] && vol=${a%%:*}; prev=$a; done
+      case " $* " in
+        *" tar xzf - -C /v "*) mkdir -p "$STATE/$vol"; tar xzf - -C "$STATE/$vol" ;;
+        *" -i "*) cat > /dev/null ;;
+      esac
     fi ;;
 esac
 exit 0
 '''
 
-    def restore(b, want_token, want_pass, shell_env=None, folder=None):
+    def restore(b, want_pass, shell_env=None, folder=None, stub_env=None):
         d = folder or Path(tempfile.mkdtemp(dir=base, prefix="restore-"))
         if folder is None:
             shutil.copytree(BUNDLE, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
@@ -342,64 +396,90 @@ exit 0
         for f in ("docker", "sleep"):
             (stub / f).chmod(0o755)
         calls = d / "calls"
-        for f in (calls, Path(str(calls) + ".restores")):
+        state = d / "state"
+        for f in (calls, Path(str(calls) + ".restores"), Path(str(calls) + ".api")):
             if f.exists():
                 f.unlink()
-        env = {"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(base), "CALLS": str(calls),
-               "WANT_TOKEN": want_token, "WANT_PASS": want_pass, **(shell_env or {})}
+        if state.exists():
+            shutil.rmtree(state)
+        state.mkdir()
+        env = {"PATH": f"{stub}:/usr/bin:/bin", "HOME": str(base), "CALLS": str(calls), "STATE": str(state),
+               "SETTINGS": str(BUNDLE / "settings.sh"), "WANT_PASS": want_pass, **(shell_env or {}), **(stub_env or {})}
         r = subprocess.run(["bash", str(d / "restore.sh"), str(b)], cwd=d, capture_output=True, text=True, env=env)
         restores = Path(str(calls) + ".restores")
+        api = Path(str(calls) + ".api")
+        restore.api_calls = api.read_text().count("api ") if api.exists() else 0
         return d, r, (calls.read_text() if calls.exists() else ""), (restores.read_text().count("restore ") if restores.exists() else 0)
 
     def snapshot(d):
         return sorted((str(p.relative_to(d)), hashlib.sha256(p.read_bytes()).hexdigest())
                       for p in d.rglob("*") if p.is_file() and "stub" not in p.parts and p.name not in ("calls",))
 
-    # No token anywhere: stops before changing anything; the shell's ODEION_TOKEN then restores
+    no_secret = lambda r: "fixture-" not in (r.stdout + r.stderr).replace("fixture-backup", "")
+    # The backup's own token comes first: a newer token passed in the shell is not the restored node's
+    b = make_backup("", {"node.toml": '[api]\ntoken = "fixture-backup-cfg"\n'})
+    d, r, calls, n = restore(b, "", {"ODEION_TOKEN": "fixture-newer-shell"})
+    check(r.returncode == 0 and '"restored":true' in r.stdout and restore.api_calls <= 4 and no_secret(r),
+          f"restore.sh uses the backup's config token over a newer one in the shell ({(r.stdout + r.stderr).strip()[-140:]!r})")
+    b = make_backup("PM_TOKEN=fixture-stale-env\n", {"node.toml": '[api]\ntoken = ""\n', "api-token": "fixture-backup-own\n"})
+    d, r, calls, n = restore(b, "")
+    check(r.returncode == 0 and '"restored":true' in r.stdout, "restore.sh uses the token the backup's node made, not a stale .env one")
+    # No node.toml in the backup: the entrypoint writes it from compose's token, as the shell or .env give it
+    b = make_backup("PM_TOKEN=fixture-env-token\n", {})
+    d, r, calls, n = restore(b, "")
+    check(r.returncode == 0 and '"restored":true' in r.stdout, "restore.sh with no node.toml in the backup: compose's token from .env")
+    d, r, calls, n = restore(b, "", {"ODEION_TOKEN": "fixture-fixture-shell-token"})
+    check(r.returncode == 0 and '"restored":true' in r.stdout, "restore.sh with no node.toml in the backup: compose's token from the shell")
+    # No token anywhere: the restored node makes one at start; restore.sh reads it there (never shown)
     b = make_backup("", {"node.toml": '[api]\ntoken = ""\n'})
+    d, r, calls, n = restore(b, "")
+    check(r.returncode == 0 and '"restored":true' in r.stdout and no_secret(r),
+          f"no token anywhere: the token the restored node made is read in its container ({(r.stdout + r.stderr).strip()[-140:]!r})")
+    # A refused token (401): read the node's own once, then stop at once, saying how to find it
+    b = make_backup("", {"node.toml": '[api]\ntoken = "fixture-backup-cfg"\n'})
+    d, r, calls, n = restore(b, "", stub_env={"FORCE_NODE_TOKEN": "fixture-node-really-uses"})
+    check(r.returncode == 0 and '"restored":true' in r.stdout, "a 401: the node's own token read in its container, then restored")
+    d, r, calls, n = restore(b, "", stub_env={"FORCE_NODE_TOKEN": "fixture-node-really-uses", "EXEC_FAILS": "1"})
+    check(r.returncode != 0 and "401" in r.stderr and "/data/api-token" in r.stderr and restore.api_calls <= 3,
+          f"a 401 it cannot get past: a stop at once (not an hour's wait), saying where the token is ({restore.api_calls} calls; {r.stderr.strip()[-160:]!r})")
+    # A token line this cannot read: a stop before anything changes, unless the shell gives the token
+    b = make_backup("PM_TOKEN=fixture-env-token\n", {"node.toml": '[api]\ntoken = """fixture-multi"""\n'})
     d = Path(tempfile.mkdtemp(dir=base, prefix="restore-"))
     shutil.copytree(BUNDLE, d, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
     before = snapshot(d)
-    d, r, calls, n = restore(b, "old-node-token", "", folder=d)
-    check(r.returncode != 0 and "ODEION_TOKEN=" in r.stderr and "./restore.sh" in r.stderr and not calls
+    d, r, calls, n = restore(b, "", folder=d, stub_env={"FORCE_NODE_TOKEN": "fixture-multi"})
+    check(r.returncode != 0 and "cannot read" in r.stderr and "ODEION_TOKEN=" in r.stderr and not calls
           and snapshot(d) == before and not (d / ".env").exists(),
-          f"restore.sh without any token stops before it changes anything ({r.stderr.strip()[-150:]!r})")
-    d, r, calls, n = restore(b, "old-node-token", "", {"ODEION_TOKEN": "old-node-token"}, folder=d)
-    check(r.returncode == 0 and '"restored":true' in r.stdout,
-          f"rerun with ODEION_TOKEN=… in the shell restores ({(r.stdout + r.stderr).strip()[-150:]!r})")
-
-    # The token from the backup's own data: its config's [api] token, else the one the node made
-    for label, files in (("config token", {"node.toml": '[api]\ntoken = "data-cfg-token"\n'}),
-                         ("own token", {"node.toml": '[api]\ntoken = ""\n', "api-token": "data-cfg-token\n"})):
-        b = make_backup("PM_TOKEN=stale-env-token\n", files)
-        d, r, calls, n = restore(b, "data-cfg-token", "")
-        check(r.returncode == 0 and '"restored":true' in r.stdout, f"restore.sh uses the backup's {label}, not a stale .env one")
+          f"a token line it cannot read: a stop before anything changes ({r.stderr.strip()[-150:]!r})")
+    d, r, calls, n = restore(b, "", {"ODEION_TOKEN": "fixture-multi"}, folder=d, stub_env={"FORCE_NODE_TOKEN": "fixture-multi"})
+    check(r.returncode == 0 and '"restored":true' in r.stdout, "then a rerun with ODEION_TOKEN=… in the shell restores")
+    check("mktemp" not in (BUNDLE / "restore.sh").read_text(), "restore.sh reads the backup's token without writing it to disk")
 
     # Passphrases, in order: as compose reads .env, as v0.2.x read it (raw), the backup's node/passphrase
-    tok = {"node.toml": '[api]\ntoken = "t"\n'}
+    tok = {"node.toml": '[api]\ntoken = "fixture-t"\n'}
     for label, envtext, pfile, locked in (
         ("quoted empty (v0.2.x locked under \"\")", 'PM_BACKUP_PASSPHRASE=""\n', None, '""'),
         ("single-quoted empty", "PM_BACKUP_PASSPHRASE=''\n", None, "''"),
-        ("quoted words", 'PM_BACKUP_PASSPHRASE="two words"\n', None, '"two words"'),
-        ("export line (v0.2.x made one: node/passphrase)", "export PM_BACKUP_PASSPHRASE=x\n", "made-1", "made-1"),
-        ("colon line", "PM_BACKUP_PASSPHRASE: x\n", "made-2", "made-2"),
-        ("leading space", " PM_BACKUP_PASSPHRASE=x\n", "made-3", "made-3"),
-        ("today's ODEION_ name", "ODEION_BACKUP_PASSPHRASE=new-pass\n", None, "new-pass"),
-        ("only node/passphrase", "", "made-4", "made-4"),
+        ("quoted words", 'PM_BACKUP_PASSPHRASE="fixture two words"\n', None, '"fixture two words"'),
+        ("export line (v0.2.x made one: node/passphrase)", "export PM_BACKUP_PASSPHRASE=fixture-x\n", "fixture-made-1", "fixture-made-1"),
+        ("colon line", "PM_BACKUP_PASSPHRASE: fixture-x\n", "fixture-made-2", "fixture-made-2"),
+        ("leading space", " PM_BACKUP_PASSPHRASE=fixture-x\n", "fixture-made-3", "fixture-made-3"),
+        ("today's ODEION_ name", "ODEION_BACKUP_PASSPHRASE=fixture-new\n", None, "fixture-new"),
+        ("only node/passphrase", "", "fixture-made-4", "fixture-made-4"),
     ):
         b = make_backup(envtext, tok, pfile)
-        d, r, calls, n = restore(b, "t", locked)
+        d, r, calls, n = restore(b, locked)
         check(r.returncode == 0 and '"signins_restored":3' in r.stdout,
               f"passphrase {label}: the sign-ins come back ({(r.stdout + r.stderr).strip()[-140:]!r})")
     b = make_backup("", tok)
-    d, r, calls, n = restore(b, "t", "never")
+    d, r, calls, n = restore(b, "fixture-never")
     check(r.returncode == 0 and '"signins_restored":0' in r.stdout and n == 1,
           "no passphrase anywhere: restored without the sign-ins (skip_secrets), as before")
-    b = make_backup("PM_BACKUP_PASSPHRASE=a\n", tok, "b")
-    d, r, calls, n = restore(b, "t", "wrong-everywhere")
+    b = make_backup("PM_BACKUP_PASSPHRASE=fixture-a\n", tok, "fixture-b")
+    d, r, calls, n = restore(b, "fixture-wrong-everywhere")
     check(r.returncode != 0 and "does not open" in r.stderr and n == 2, "wrong every way: both tried once, then a stop saying why")
-    b = make_backup('PM_BACKUP_PASSPHRASE="q"\n', tok, "f")
-    d, r, calls, n = restore(b, "t", "NOT-A-BACKUP")
+    b = make_backup('PM_BACKUP_PASSPHRASE="fixture-q"\n', tok, "fixture-f")
+    d, r, calls, n = restore(b, "NOT-A-BACKUP")
     check(r.returncode != 0 and n == 1, "a backup the node cannot read is not retried with other passphrases")
 
     for script in ("backup.sh", "restore.sh"):

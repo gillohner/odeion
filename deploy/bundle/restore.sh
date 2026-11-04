@@ -26,22 +26,38 @@ ALPINE=$(sed -n 's/^ *image: *\(alpine:[^ ]*\).*/\1/p' docker-compose.yml | head
 # The backup's .env is the one this install will use (copied below); a folder's own .env otherwise
 ENVSRC="$B/config/.env"
 [ -f "$ENVSRC" ] || ENVSRC=.env
-# The API token the restored node will use: ODEION_TOKEN (or PM_TOKEN) from the shell, else the one in
-# the backup's own data (its node.toml's [api] token, else the one it made: node_token_from), else the
-# backup's .env. Never shown.
+# The API token the restored node will use, as it will pick it (node_token_pick, read from the backup
+# in memory, never written to disk or shown): the backup's node.toml [api] token, else the token that
+# node made (api-token). Without a node.toml in the backup, the entrypoint writes one from compose's
+# token: the shell's ODEION_TOKEN (or PM_TOKEN), else the backup's .env. When the backup's node has
+# no token at all, the restored one makes a new one at start, read in its container once it runs.
+shell_token() {
+  local k v
+  for k in ODEION_TOKEN PM_TOKEN; do
+    eval "v=\${$k-}"
+    if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  done
+}
 TOKEN=
-for k in ODEION_TOKEN PM_TOKEN; do
-  eval "v=\${$k-}"
-  if [ -n "$v" ]; then TOKEN=$v; break; fi
-done
-if [ -z "$TOKEN" ] && [ -f "$B/node/data.tar.gz" ]; then
-  tok_dir=$(mktemp -d)
-  tar -xzf "$B/node/data.tar.gz" -C "$tok_dir" ./node.toml ./api-token 2>/dev/null || true
-  TOKEN=$(node_token_from "$tok_dir/node.toml" "$tok_dir")
-  rm -rf "$tok_dir"
+cfg=
+own=
+has_cfg=
+if [ -f "$B/node/data.tar.gz" ]; then
+  if cfg=$(tar -xzOf "$B/node/data.tar.gz" ./node.toml 2>/dev/null); then has_cfg=1; else cfg=; fi
+  own=$(tar -xzOf "$B/node/data.tar.gz" ./api-token 2>/dev/null) || own=
 fi
-[ -n "$TOKEN" ] || TOKEN=$(setting TOKEN "$ENVSRC")
-[ -n "$TOKEN" ] || die "no API token: the backup's node has none and its .env none either; pass the old node's token: ODEION_TOKEN=… ./restore.sh $1 (nothing was changed)"
+rc=0
+TOKEN=$(printf '%s\n' "$cfg" | node_token_pick "$own") || rc=$?
+cfg=
+own=
+if [ "$rc" = 2 ]; then
+  TOKEN=$(shell_token)
+  [ -n "$TOKEN" ] || die "cannot read the [api] token line in the backup's node.toml (more than a plain \"…\" or '…' string); pass the token: ODEION_TOKEN=… ./restore.sh $1 (nothing was changed)"
+elif [ -z "$has_cfg" ]; then
+  TOKEN=$(setting TOKEN "$ENVSRC")
+elif [ -z "$TOKEN" ]; then
+  TOKEN=$(shell_token)
+fi
 # The sign-ins' passphrase, the ways a backup may have been locked, tried in this order (only on the
 # node's "That passphrase does not open this backup" the next): as compose reads .env; as written in
 # .env, which backup.sh read up to v0.2.2 (quotes and comment included); the one backup.sh made when
@@ -151,8 +167,24 @@ if [ -n "$PASS" ]; then q=''; else q='?skip_secrets=true'; fi
 # idle answers in a row (the scan may not have begun at the first), and try again after a 409
 report=""
 idle=0
+refused=0
 for i in $(seq 720); do
-  info=$(node_api GET /v1/info 2>/dev/null || true)
+  info=$(node_api GET /v1/info 2>&1) || true
+  case $info in
+    *"returned error: 401"*)
+      # Not the token the restored node uses: read its own in its container (never shown) and use
+      # that; when that is no different, stop at once rather than wait out the hour
+      t=$(docker exec "$NODE" sh -c "$NODE_TOKEN_SH" 2>/dev/null) || t=
+      refused=$(( refused + 1 ))
+      if [ -n "$t" ] && [ "$t" != "$TOKEN" ]; then
+        TOKEN=$t
+        continue
+      fi
+      [ "$refused" -lt 3 ] || die "the node refuses the API token (401). Its token: docker compose exec -T music cat /data/api-token (or [api] token in /data/node.toml); with it, restore $B/node/library.pmbackup in Settings › Backup"
+      sleep 5
+      continue
+      ;;
+  esac
   case $info in *'"scanning":false'*) idle=$(( idle + 1 )) ;; *) idle=0 ;; esac
   if [ "$idle" -ge 2 ]; then
     if report=$(node_api POST "/v1/restore$q" "$B/node/library.pmbackup" 2>&1); then break; fi

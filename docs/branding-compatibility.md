@@ -133,10 +133,15 @@ Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the n
   its data folder, because it listens beyond localhost, so the API is never open
   (`crates/pm-node/src/api_token.rs`). `ADMIN_PASSWORD` still requires `setup.sh`. The node writes its
   `node.toml` once, so a token added to `.env` later is not the node's; the scripts therefore use the
-  token the node uses (its config's `[api] token`, else the one it made), read without showing it:
-  `backup.sh` asks the running node, then `.env`; `restore.sh` takes `ODEION_TOKEN=… ./restore.sh
-  <folder>` from the shell, else the backup's own data, else its `.env`. Without any it stops before
-  changing anything and says where the token is. CI checks this on the runner's Compose v2; it was
+  token the node uses (its config's `[api] token`, else the one it made), read without showing it
+  or writing it to disk. The config's token line may be `"…"` (with `\"` and `\\`) or `'…'`, with a
+  comment after it; anything else (`"""…"""`, other escapes, a bare value) stops the script with a
+  message instead of falling back to another token. `backup.sh` asks the running node, then `.env`.
+  `restore.sh` takes the backup's own token (its `node.toml`, else its `api-token`); without a
+  `node.toml` in the backup, compose's (shell, then `.env`); when the restored node refuses it
+  (401), the one the running node uses, read in its container; and it stops at once, saying where
+  the token is, instead of waiting. `ODEION_TOKEN=…` in the shell counts only when the backup has
+  none or its token line cannot be read. CI checks this on the runner's Compose v2; it was
   also checked locally on v5.5.1 and v2.40.3.
 - **Backups from before Odeion:** `restore.sh` tries the passphrase as compose reads `.env`, then as
   written there (how `backup.sh` read it up to v0.2.2: quotes and comment included), then the one
