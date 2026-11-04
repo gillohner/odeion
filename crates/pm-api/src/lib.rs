@@ -91,6 +91,7 @@ pub mod remote;
 pub mod reviews;
 pub mod roon_import;
 pub mod search;
+pub mod segmented;
 pub mod shared;
 pub mod signin;
 pub mod smart;

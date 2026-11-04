@@ -50,6 +50,9 @@ struct Current {
     fading: bool,
     /// What is streaming (codec, bitrate, service), worked out once when the track starts.
     format: Option<StreamInfo>,
+    /// Where the track was before a seek that hasn't given a block yet: a stream that took the
+    /// seek and then fails to read goes on from there instead of ending.
+    seek_from: Option<u64>,
 }
 
 /// What a source is streaming, with the service taken from the item's uri when the source
@@ -561,8 +564,53 @@ impl Engine {
         if c.paused_at_ms.is_some() {
             c.paused_at_ms = Some(ms);
         }
+        c.seek_from = Some(c.seek_from.unwrap_or(before));
         self.dirty = true;
         self.emit(ZoneEvent::Seeked { position_ms: ms });
+    }
+
+    /// The source took a seek, then failed to read (a stream that can't seek but said it could:
+    /// TASK-seek-segmented-streams-1104). The track is opened again and goes on from where it
+    /// was before the seek, and the caller hears that this stream cannot seek. False when that
+    /// isn't possible either (the track then ends as on any read error).
+    fn recover_from_seek(&mut self, e: &SourceError) -> bool {
+        let Some(c) = self.current.as_mut() else {
+            return false;
+        };
+        let Some(before) = c.seek_from.take() else {
+            return false;
+        };
+        let item = c.item.clone();
+        let fresh = match self.factory.open(&item) {
+            Ok(s) => s,
+            Err(open) => {
+                tracing::warn!(zone = %self.id, "reopening after a failed seek: {open}");
+                return false;
+            }
+        };
+        let Some(c) = self.current.as_mut() else {
+            return false;
+        };
+        if fresh.format() != c.source.format() {
+            return false;
+        }
+        let fps = u64::from(fresh.format().frames_per_second());
+        tracing::info!(zone = %self.id, "the stream failed after a seek ({e}); going on from {before} ms");
+        c.source = Box::new(crate::source::SkipFrames {
+            inner: fresh,
+            left: before * fps / 1000,
+        });
+        c.base_ms = before;
+        c.start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
+        if c.paused_at_ms.is_some() {
+            c.paused_at_ms = Some(before);
+        }
+        self.dirty = true;
+        self.emit(ZoneEvent::Seeked { position_ms: before });
+        self.emit(ZoneEvent::Error {
+            message: format!("this stream cannot seek ({e})"),
+        });
+        true
     }
 
     /// Stop now: discard buffered audio and close the sink.
@@ -693,6 +741,7 @@ impl Engine {
             stream_title: None,
             fading: false,
             format,
+            seek_from: None,
         });
         self.prefetch = None;
         self.error = None;
@@ -707,8 +756,16 @@ impl Engine {
             self.transport = Transport::Stopped;
             return;
         };
-        match cur.source.next_block() {
+        let read = cur.source.next_block();
+        if read.is_ok() {
+            cur.seek_from = None;
+        }
+        match read {
+            Err(e) if self.recover_from_seek(&e) => {}
             Ok(Some(block)) => {
+                let Some(cur) = self.current.as_mut() else {
+                    return;
+                };
                 let out = match cur.proc.process(block) {
                     Ok(b) => b,
                     Err(e) => return self.fail(format!("process: {e}")),
@@ -1019,6 +1076,7 @@ impl Engine {
             stream_title: None,
             fading: false,
             format,
+            seek_from: None,
         });
         self.prefetch = None;
         self.error = None;

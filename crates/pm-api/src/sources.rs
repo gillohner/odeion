@@ -669,19 +669,137 @@ pub(crate) fn frame_source_from_reader(
     ext: Option<&str>,
     name: &str,
 ) -> Result<Box<dyn FrameSource>, SourceError> {
-    let body = HttpBody(std::sync::Mutex::new(TimeoutReader::new(reader, STREAM_STALL)));
-    let media = symphonia::core::io::ReadOnlySource::new(body);
-    let inner = pm_audio::play::Source::from_media_source(Box::new(media), ext, name).map_err(|e| {
-        SourceError::Open {
-            uri: name.to_string(),
-            reason: e.to_string(),
-        }
-    })?;
     Ok(Box::new(HttpStream {
-        inner,
+        inner: decoder_for(reader, ext, name)?,
         title: Arc::new(Mutex::new(None)),
         last: None,
     }))
+}
+
+/// A decoder over a byte stream that can't seek (with the stall watchdog).
+fn decoder_for(
+    reader: Box<dyn std::io::Read + Send>,
+    ext: Option<&str>,
+    name: &str,
+) -> Result<pm_audio::play::Source, SourceError> {
+    let body = HttpBody(std::sync::Mutex::new(TimeoutReader::new(reader, STREAM_STALL)));
+    let media = symphonia::core::io::ReadOnlySource::new(body);
+    pm_audio::play::Source::from_media_source(Box::new(media), ext, name).map_err(|e| SourceError::Open {
+        uri: name.to_string(),
+        reason: e.to_string(),
+    })
+}
+
+/// A segmented stream (DASH, HLS) as a zone source that can seek: a seek opens it again at the
+/// segment holding the position (init segment first) and drops the frames before the position.
+/// Without segment times it can't seek, and says so (the engine keeps playing).
+pub(crate) fn frame_source_from_segments(
+    segments: crate::segmented::Segments,
+    ext: Option<&'static str>,
+    name: &str,
+) -> Result<Box<dyn FrameSource>, SourceError> {
+    Ok(Box::new(SegmentedStream::open(
+        http_client(),
+        segments,
+        ext,
+        name,
+    )?))
+}
+
+pub(crate) struct SegmentedStream {
+    client: &'static reqwest::blocking::Client,
+    segments: crate::segmented::Segments,
+    ext: Option<&'static str>,
+    name: String,
+    inner: pm_audio::play::Source,
+    /// Frames still to drop after a seek (from the segment's start to the position).
+    drop: u64,
+    /// A seek happened: the codec's whole-file check (FLAC's MD5) no longer applies.
+    seeked: bool,
+}
+
+impl SegmentedStream {
+    pub(crate) fn open(
+        client: &'static reqwest::blocking::Client,
+        segments: crate::segmented::Segments,
+        ext: Option<&'static str>,
+        name: &str,
+    ) -> Result<Self, SourceError> {
+        let reader = crate::segmented::SegmentReader::new(client, segments.urls());
+        let inner = decoder_for(Box::new(reader), ext, name)?;
+        Ok(Self {
+            client,
+            segments,
+            ext,
+            name: name.to_string(),
+            inner,
+            drop: 0,
+            seeked: false,
+        })
+    }
+}
+
+impl FrameSource for SegmentedStream {
+    fn format(&self) -> AudioFormat {
+        self.inner.format()
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        self.segments.end_ms.or_else(|| self.inner.duration_ms())
+    }
+    fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        loop {
+            let Some(mut b) = self
+                .inner
+                .next_block()
+                .map_err(|e| SourceError::Decode(e.to_string()))?
+            else {
+                return Ok(None);
+            };
+            if self.drop > 0 {
+                let n = self.drop.min(b.frames() as u64);
+                b.drop_front(n as usize);
+                self.drop -= n;
+                if b.is_empty() {
+                    continue;
+                }
+            }
+            return Ok(Some(b));
+        }
+    }
+    fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        let Some((k, start)) = self.segments.at(ms) else {
+            return Err(SourceError::Seek("the stream gives no segment times".into()));
+        };
+        let reader = crate::segmented::SegmentReader::new(self.client, self.segments.urls_from(k));
+        // Opened before the old decoder is let go: a seek that fails leaves playback as it was
+        let inner = decoder_for(Box::new(reader), self.ext, &self.name)
+            .map_err(|e| SourceError::Seek(e.to_string()))?;
+        if inner.format() != self.inner.format() {
+            return Err(SourceError::Seek(format!(
+                "segment {} is in {}, not {}",
+                k + 1,
+                inner.format(),
+                self.inner.format()
+            )));
+        }
+        let rate = u64::from(inner.format().frames_per_second());
+        self.inner = inner;
+        self.drop = ms.saturating_sub(start) * rate / 1000;
+        self.seeked = true;
+        Ok(())
+    }
+    fn finalize(&mut self) -> Option<bool> {
+        if self.seeked {
+            return None;
+        }
+        self.inner.finalize()
+    }
+    fn lossy_source(&self) -> bool {
+        self.inner.is_lossy()
+    }
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(self.inner.stream_info())
+    }
 }
 
 /// The URL of an API call: `path` on `base`, or `path` itself when it is a whole URL (a page's

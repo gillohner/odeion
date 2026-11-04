@@ -31,6 +31,6 @@ pub use sink::{
     SyncClass, TrackMeta,
 };
 pub use source::{
-    FrameSource, Processor, ReplayGain, SourceError, SourceFactory, StreamInfo, WithReplayGain,
+    FrameSource, Processor, ReplayGain, SkipFrames, SourceError, SourceFactory, StreamInfo, WithReplayGain,
 };
 pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

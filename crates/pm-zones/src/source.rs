@@ -90,6 +90,60 @@ impl FrameSource for WithReplayGain {
     }
 }
 
+/// A source that leaves out its first frames: a stream opened again from its start to carry on
+/// where it was (the engine, when a seek in it failed). A later seek goes to the source as is.
+pub struct SkipFrames {
+    pub inner: Box<dyn FrameSource>,
+    /// Frames still to leave out.
+    pub left: u64,
+}
+
+impl FrameSource for SkipFrames {
+    fn format(&self) -> AudioFormat {
+        self.inner.format()
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        self.inner.duration_ms()
+    }
+    fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        loop {
+            let Some(mut b) = self.inner.next_block()? else {
+                return Ok(None);
+            };
+            if self.left > 0 {
+                let n = self.left.min(b.frames() as u64);
+                b.drop_front(n as usize);
+                self.left -= n;
+                if b.is_empty() {
+                    continue;
+                }
+            }
+            return Ok(Some(b));
+        }
+    }
+    fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        self.inner.seek_ms(ms)?;
+        self.left = 0;
+        Ok(())
+    }
+    /// Not the whole stream was played: no whole-file check.
+    fn finalize(&mut self) -> Option<bool> {
+        None
+    }
+    fn replay_gain(&self) -> Option<ReplayGain> {
+        self.inner.replay_gain()
+    }
+    fn stream_info(&self) -> Option<StreamInfo> {
+        self.inner.stream_info()
+    }
+    fn lossy_source(&self) -> bool {
+        self.inner.lossy_source()
+    }
+    fn stream_title(&mut self) -> Option<String> {
+        self.inner.stream_title()
+    }
+}
+
 /// One decoded track. Methods block (file I/O); the zone calls them from its
 /// audio thread.
 pub trait FrameSource: Send {
