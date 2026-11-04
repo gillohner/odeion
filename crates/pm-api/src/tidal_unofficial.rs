@@ -5,10 +5,10 @@
 //! private playback endpoint for the full stream. TIDAL has not approved it: it can stop working
 //! at any time, and it needs a paid TIDAL plan.
 //!
-//! - **Client:** a TIDAL device client id and secret the owner enters in Settings (or
-//!   `[tidal] unofficial_client_id` / `unofficial_client_secret`). The node never extracts or
-//!   decodes credentials from another project's code, and never uses Music Assistant's bundled
-//!   ones. Without a client the mode stays off.
+//! - **Client:** a TIDAL device client id and secret: the owner's (Settings, else
+//!   `[tidal] unofficial_client_id` / `unofficial_client_secret`, else
+//!   `PM_TIDAL_UNOFFICIAL_CLIENT_*`), else this build's ([`crate::project_apps::tidal_device_client`]).
+//!   The node never uses Music Assistant's bundled ones. Without a client the mode stays off.
 //! - **Streams:** `playbackinfopostpaywall` answers with a BTS manifest (direct URLs) or a DASH
 //!   manifest; both are read as one stream into the node's usual decoder. Anything encrypted is
 //!   refused, never decrypted.
@@ -120,7 +120,7 @@ pub struct ModeState {
 pub struct Client {
     pub id: String,
     pub secret: String,
-    /// `settings` or `config`.
+    /// `settings`, `config` or `builtin` (this build's).
     pub from: String,
 }
 
@@ -198,9 +198,9 @@ pub(crate) fn app_id(s: &NodeState) -> Option<String> {
     client_of(&s.library.lock().expect("library poisoned")).map(|c| c.id)
 }
 
-/// The device client the owner set: in Settings, else from node.toml, else the
-/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment. None is built in (owner, 2026-10-31):
-/// without one, TIDAL plays the official way (30-second previews).
+/// The device client for the code sign-in: the owner's in Settings, else from node.toml, else the
+/// `PM_TIDAL_UNOFFICIAL_CLIENT_ID` / `_SECRET` environment, else this build's (owner, 2026-11-04).
+/// A client of the owner's always wins and is never swapped for the build's after a failure.
 pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     let kept: Option<Client> = lib
         .get_setting(CLIENT_KEY)
@@ -215,10 +215,17 @@ pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
     }
     let id = std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_ID").unwrap_or_default();
     let secret = std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_SECRET").unwrap_or_default();
-    (!id.trim().is_empty()).then(|| Client {
-        id: id.trim().into(),
-        secret: secret.trim().into(),
-        from: "config".into(),
+    if !id.trim().is_empty() {
+        return Some(Client {
+            id: id.trim().into(),
+            secret: secret.trim().into(),
+            from: "config".into(),
+        });
+    }
+    crate::project_apps::tidal_device_client().map(|(id, secret)| Client {
+        id,
+        secret,
+        from: "builtin".into(),
     })
 }
 
