@@ -175,8 +175,14 @@ def main():
 
     found_icann = any(ep.get("domain") for s in ("resolve_relays", "resolve_dht", "resolve_default") for ep in eps(s))
     ret = steps.get("after_return", {})
+    # The background step itself is a diagnostic: Android 15+ gives a backgrounded app no network,
+    # so a request made then cannot work (after_background.plain_get shows it). What must hold is
+    # that the sign-in's grant exchange does not run then: exchange_on_approval.
+    ex = steps.get("exchange_on_approval", {})
+    if "exchange_on_approval" not in steps:
+        failures.append("the probe made no exchange_on_approval step")
     for name, info in (("default client", default.get("info") or {}),
-                       ("default client in the background", steps.get("after_background", {}).get("info") or {}),
+                       ("grant exchange after Ring's approval came in while away", ex.get("info") or {}),
                        ("held client back in the foreground", (ret.get("held") or {}).get("info") or {}),
                        ("unused held client back in the foreground", (ret.get("held_clean") or {}).get("info") or {})):
         if found_icann and direct.get("reachable") is False and info.get("host") != "homeserver.riginode.xyz":

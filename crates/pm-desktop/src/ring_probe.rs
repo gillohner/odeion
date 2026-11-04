@@ -58,6 +58,9 @@ pub async fn run() {
     let held = PubkyHttpClient::new();
     // A second client from the start that nothing uses until the app is back in the foreground.
     let held_clean = PubkyHttpClient::new();
+    // The sign-in's own client, used as `ring_connect` uses it: the relay poll runs on it while
+    // the app is away, and the grant exchange when the app's wait lets it (`exchange_on_approval`).
+    let flow_client = PubkyHttpClient::new();
     fixture().await;
     relay_tls().await;
     public_homeserver().await;
@@ -83,6 +86,25 @@ pub async fn run() {
     let mut resumed = resumed;
     resumed["plain_get"] = plain_get().await;
     emit("after_background", resumed);
+    // Ring's approval has come in while the app is away. The app's wait decides when the grant
+    // exchange (its homeserver lookup and POST) runs; then the same lookup and request as the
+    // exchange, on the flow's client.
+    let mut exchange = json!({});
+    match &flow_client {
+        Ok(c) => {
+            // The relay poll, while away.
+            exchange["relay_poll_away"] = routed(c, Method::GET, "https://httprelay.pubky.app/", None).await;
+            let waited = Instant::now();
+            let (states, on_screen) = app_wait().await;
+            exchange["waited_ms"] = json!(waited.elapsed().as_millis() as u64);
+            exchange["states"] = json!(states);
+            exchange["on_screen"] = json!(on_screen);
+            exchange["info"] =
+                routed(c, Method::GET, &format!("https://{PUBLIC_HOMESERVER}/info"), None).await;
+        }
+        Err(e) => exchange["error"] = json!(chain(e)),
+    }
+    emit("exchange_on_approval", exchange);
     // The harness brings the app back. As soon as the network answers again, the exchange an
     // approval waiting on return would make: on the held client (its transport decision from the
     // step above is cached for 60 s) and on a client nothing used in the background.
@@ -108,6 +130,13 @@ pub async fn run() {
     }
     emit("after_return", on_return);
     emit("done", json!({ "ms": started.elapsed().as_millis() as u64 }));
+}
+
+/// The app's wait between Ring's approval arriving and the grant exchange: the shipped app has
+/// none, the exchange runs at once (returns the wait's page states and whether it ends on screen,
+/// unknown here).
+async fn app_wait() -> (Vec<&'static str>, Option<bool>) {
+    (Vec::new(), None)
 }
 
 /// One plain HTTPS GET to the homeserver's ICANN name (no PKARR), 5 s at most.
