@@ -1057,7 +1057,9 @@ impl LoginFlow {
         &self.url
     }
 
-    /// One poll: `Ok(None)` while the user has not approved yet.
+    /// One poll: `Ok(None)` while the user has not approved yet. It must not wait for anything
+    /// before pubky's `try_poll_once`: the app tells a relay listener's error (returned at once)
+    /// from the grant exchange's by that (pm-desktop `ring_wait::at_once`).
     pub async fn poll(&self) -> Result<Option<PubkySession>, HomeserverError> {
         Ok(self.flow.try_poll_once().await?)
     }

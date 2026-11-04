@@ -150,6 +150,8 @@
     ringUrl = ev.payload.url;
     $('qr').innerHTML = ev.payload.qr_svg;
     $('ring').textContent = 'Waiting for Pubky Ring…';
+    $('ring-cancel').disabled = false;
+    $('ring-cancel').textContent = 'Cancel';
     show('ring-out');
   });
 
@@ -174,7 +176,12 @@
   };
   $('ring-open').onclick = () => { if (ringUrl) invoke('open_ring', { url: ringUrl }).catch(fail); };
   // Stops the running sign-in; ring_connect then ends with 'Sign-in cancelled'.
-  $('ring-cancel').onclick = () => { invoke('ring_cancel').catch(fail); };
+  // An approval already being finished is not cut off: the button says so until the sign-in ends.
+  $('ring-cancel').onclick = () => {
+    $('ring-cancel').disabled = true;
+    $('ring-cancel').textContent = 'Cancelling…';
+    invoke('ring_cancel').catch(fail);
+  };
 
   $('manual').onsubmit = async (ev) => {
     ev.preventDefault();

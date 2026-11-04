@@ -218,7 +218,10 @@ impl crate::ring_wait::Pending for ProbeFlow {
                     }
                     _ => (false, false),
                 };
-                Err(crate::ring_wait::Failed::sort(c, at_once, transient, server))
+                let relay = crate::ring_wait::relay_host(self.flow.authorization_url().as_str());
+                Err(crate::ring_wait::Failed::sort(
+                    c, at_once, transient, server, &relay,
+                ))
             }
         }
     }

@@ -503,6 +503,7 @@ impl ring_wait::Pending for RingFlow {
                 at_once,
                 e.is_transient(),
                 e.is_server_error(),
+                &ring_wait::relay_host(self.0.url()),
             )
         })
     }

@@ -13,6 +13,9 @@
 //! died while the app was away listens again on the same relay inbox, where the approval waits
 //! until it is read (no grant has been sent then). Nothing is retried after a grant was sent.
 //! Only Android reports leaving the screen; on desktop the wait is skipped.
+//!
+//! A relay that answers 5xx gets one more listen, a few seconds later. The wait ends after
+//! [`DEADLINE`] or on the page's Cancel ([`cancel`]).
 
 // Only Android reports leaving the screen; elsewhere the app is always "on screen".
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -126,9 +129,12 @@ pub enum Failed {
 
 impl Failed {
     /// Sorts a poll error: `at_once` from [`at_once`], `transient` when it is a transport error or
-    /// a 5xx answer, `server` when it is a 5xx answer.
-    pub fn sort(error: String, at_once: bool, transient: bool, server: bool) -> Self {
-        if at_once && transient {
+    /// a 5xx answer, `server` when it is a 5xx answer, `relay` the relay host. A transport error
+    /// must also name the relay (`https://<relay>/…`): the error then cannot be the exchange's,
+    /// whatever pubky does in a later version.
+    pub fn sort(error: String, at_once: bool, transient: bool, server: bool, relay: &str) -> Self {
+        let names_relay = error.contains(&format!("://{relay}/")) || error.contains(&format!("://{relay})"));
+        if at_once && (server || (transient && names_relay)) {
             Failed::Relay { error, server }
         } else {
             Failed::Final(error)
@@ -160,7 +166,13 @@ pub trait Pending: Sized {
 pub const DEADLINE: Duration = Duration::from_secs(10 * 60);
 /// The error of a sign-in the user cancelled (the page shows no error for it).
 pub const CANCELLED: &str = "Sign-in cancelled";
-/// The error of a sign-in that ran out of time.
+/// How long a relay that answered 5xx gets before the one listen-again.
+const RELAY_5XX_PAUSE: Duration = if cfg!(test) {
+    Duration::from_secs(1)
+} else {
+    Duration::from_secs(5)
+};
+/// The error of a sign-in that ran out of time ([`DEADLINE`]).
 pub const TIMED_OUT: &str = "Pubky Ring did not answer within 10 minutes. Sign in again.";
 
 /// The latest sign-in, and the latest one the user cancelled.
@@ -279,6 +291,14 @@ pub async fn approval<F: Pending>(
             }
             Err(Failed::Relay { server: true, error }) if !resumed_after_5xx => {
                 tracing::info!("Ring: the relay answered {error}; listening again once");
+                // pubky's own three polls ran back to back: give the relay a moment first.
+                let paused = tokio::time::Instant::now();
+                while paused.elapsed() < RELAY_5XX_PAUSE {
+                    if let Some(r) = stop.reason() {
+                        return Err(r.to_string());
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
                 flow = flow.resume()?;
                 resumed_after_5xx = true;
             }
@@ -318,21 +338,36 @@ mod tests {
 
     #[test]
     fn only_an_immediate_transient_error_is_the_relay_listener() {
+        let relay = "httprelay.pubky.app";
+        let dns = "error sending request for url (https://httprelay.pubky.app/inbox/abc) <- dns error";
         assert_eq!(
-            Failed::sort("503".into(), true, true, true),
+            Failed::sort("503".into(), true, true, true, relay),
             Failed::Relay {
                 error: "503".into(),
                 server: true
             }
         );
+        assert_eq!(
+            Failed::sort(dns.into(), true, true, false, relay),
+            Failed::Relay {
+                error: dns.into(),
+                server: false
+            }
+        );
         // A 5xx after the exchange waited for the network: a grant may have been sent.
         assert_eq!(
-            Failed::sort("503".into(), false, true, true),
+            Failed::sort("503".into(), false, true, true, relay),
             Failed::Final("503".into())
+        );
+        // A transport error at once that does not name the relay: not the listener's.
+        let raw_key = "error sending request for url (https://p815/auth/grant/session) <- dns error";
+        assert_eq!(
+            Failed::sort(raw_key.into(), true, true, false, relay),
+            Failed::Final(raw_key.into())
         );
         // A bad approval, at once: not the network.
         assert_eq!(
-            Failed::sort("invalid".into(), true, false, false),
+            Failed::sort("invalid".into(), true, false, false, relay),
             Failed::Final("invalid".into())
         );
     }
@@ -456,7 +491,9 @@ mod tests {
         let _one = SERIAL.lock().await;
         let port = relay_port().await;
         let polls = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
-        // On screen, no trip away: the relay answered 502, the second listener delivers.
+        // On screen, no trip away: the relay answered 502, the second listener delivers after a
+        // pause.
+        let started = std::time::Instant::now();
         let flow = Fake::new(&polls, vec![relay_5xx()]);
         let r = tokio::time::timeout(
             Duration::from_secs(10),
@@ -465,6 +502,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(r, Ok(1));
+        assert!(
+            started.elapsed() >= RELAY_5XX_PAUSE,
+            "listens again only after the pause"
+        );
         // A second 5xx after that one listen-again is final.
         let flow = Fake::new(&polls, vec![relay_5xx(), relay_5xx()]);
         let r = tokio::time::timeout(
