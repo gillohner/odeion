@@ -147,7 +147,7 @@ def main():
             time.sleep(55)
             states["background_100s"] = process_state()
             adb(*launch)
-            steps = wait_for("done", 180)
+            steps = wait_for("done", 300)
     finally:
         time.sleep(1)
         lc.terminate()
@@ -174,8 +174,11 @@ def main():
         return ((steps.get(step, {}).get("lookup") or {}).get("endpoints") or {}).get("endpoints") or []
 
     found_icann = any(ep.get("domain") for s in ("resolve_relays", "resolve_dht", "resolve_default") for ep in eps(s))
+    ret = steps.get("after_return", {})
     for name, info in (("default client", default.get("info") or {}),
-                       ("default client after the background", steps.get("after_background", {}).get("info") or {})):
+                       ("default client in the background", steps.get("after_background", {}).get("info") or {}),
+                       ("held client back in the foreground", (ret.get("held") or {}).get("info") or {}),
+                       ("unused held client back in the foreground", (ret.get("held_clean") or {}).get("info") or {})):
         if found_icann and direct.get("reachable") is False and info.get("host") != "homeserver.riginode.xyz":
             failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, "
                             f"but it sent to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')})")

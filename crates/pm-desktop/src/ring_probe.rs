@@ -56,6 +56,8 @@ pub async fn run() {
     // Like `ring_connect`: the client exists before the user leaves for Ring, and the grant
     // exchange runs on it when the approval comes back, often after the app sat in the background.
     let held = PubkyHttpClient::new();
+    // A second client from the start that nothing uses until the app is back in the foreground.
+    let held_clean = PubkyHttpClient::new();
     fixture().await;
     relay_tls().await;
     public_homeserver().await;
@@ -76,8 +78,49 @@ pub async fn run() {
         }
         Err(e) => json!({ "away_ms": away, "error": chain(e) }),
     };
+    // A plain HTTPS request too: if it fails as well, the process has no network (Android 15+
+    // blocks a backgrounded app), not the SDK client.
+    let mut resumed = resumed;
+    resumed["plain_get"] = plain_get().await;
     emit("after_background", resumed);
+    // The harness brings the app back. As soon as the network answers again, the exchange an
+    // approval waiting on return would make: on the held client (its transport decision from the
+    // step above is cached for 60 s) and on a client nothing used in the background.
+    let back = Instant::now();
+    let mut tries = 0u32;
+    while back.elapsed() < Duration::from_secs(150) {
+        tries += 1;
+        if plain_get().await.get("status").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let waited = back.elapsed().as_millis() as u64;
+    let mut on_return = json!({ "waited_ms": waited, "tries": tries });
+    for (name, client) in [("held", &held), ("held_clean", &held_clean)] {
+        on_return[name] = match client {
+            Ok(c) => json!({
+                "info": routed(c, Method::GET, &format!("https://{PUBLIC_HOMESERVER}/info"), None).await,
+                "lookup": lookups(c.pkarr(), PUBLIC_HOMESERVER).await,
+            }),
+            Err(e) => json!({ "error": chain(e) }),
+        };
+    }
+    emit("after_return", on_return);
     emit("done", json!({ "ms": started.elapsed().as_millis() as u64 }));
+}
+
+/// One plain HTTPS GET to the homeserver's ICANN name (no PKARR), 5 s at most.
+async fn plain_get() -> Value {
+    let started = Instant::now();
+    let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": chain(&e) }),
+    };
+    match client.get("https://homeserver.riginode.xyz/info").send().await {
+        Ok(r) => json!({ "status": r.status().as_u16(), "ms": started.elapsed().as_millis() as u64 }),
+        Err(e) => json!({ "error": chain(&e), "ms": started.elapsed().as_millis() as u64 }),
+    }
 }
 
 /// The packet each backend answers with (network only), and the endpoints it gives.
