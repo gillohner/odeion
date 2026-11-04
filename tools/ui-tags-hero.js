@@ -19,10 +19,13 @@ const TOKEN = process.argv[2] || 'ci-token';
 const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const OUT = process.argv[4] || null;
 const STATIC = process.env.PM_STATIC_DIR || null;
-const ALBUM = 'https://musicbrainz.org/release/7c3a2c8e-2b8f-4c62-9f0e-6f1a4c3d9e21';
+const CANON = 'https://musicbrainz.org/recording/0c9b1d6e-4e5f-4f3a-9c11-5b7d0a6e2f41';
+const RELEASE = 'https://musicbrainz.org/release/7c3a2c8e-2b8f-4c62-9f0e-6f1a4c3d9e21';
+const GUESS = 'https://musicbrainz.org/release-group/11111111-2222-4333-8444-555555555555';
 const SONG = 'https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69';
 const ARTIST = 'https://musicbrainz.org/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711';
-const LINK = 'https://tidal.com/album/123456';
+const LINK = 'https://tidal.com/track/123456';
+const ALINK = 'https://tidal.com/album/654321';
 // Pubky ids are 52 characters of z-base-32
 const P = Array.from({ length: 8 }, (_, i) => `${'p'.repeat(4)}${String.fromCharCode(97 + i)}`.padEnd(52, 'y'));
 const NAMES = ['Ann', 'Bo', 'Cy', 'Di', 'Ed', 'Flo', 'Gus', 'Hal'];
@@ -34,7 +37,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGO4VmEDRwzEcQCKMhih3mIObwAAAABJRU5ErkJggg==', 'base64'); // 4×4, orange
 const MIME = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
-const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwide 05', section: { album: 'albums', song: 'tracks', artist: 'artists' }[kind], source: o.source || 'Your library', source_id: o.source_id || 'library', target: o.target, uri: o.uri || null, song_uri: o.song_uri || null, link: o.link || null, songs: [], albums: [], versions: [], also_on: [], about: [], open_on: [], connect: [], artist: kind === 'artist' ? null : { id: 'lib-2', name: 'Various' }, year: 2024, on_pubky: o.on_pubky || null });
+const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldwide 05', section: { album: 'albums', song: 'tracks', artist: 'artists' }[kind], source: o.source || 'Your library', source_id: o.source_id || 'library', target: o.target, uri: o.uri || null, song_uri: o.song_uri || null, link: o.link || null, songs: o.songs || [], albums: [], versions: [], also_on: [], about: [], open_on: [], connect: [], artist: kind === 'artist' ? null : { id: 'lib-2', name: 'Various' }, year: 2024, on_pubky: o.on_pubky || null });
 
 (async () => {
   const browser = await chromium.launch();
@@ -55,7 +58,7 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
         });
       }
       // ---- the mocked node ----
-      let pages = {}; let own = {}; let pub = {}; let pubHold = null; let pubFail = false; let me = null; let ownFail = null;
+      let pages = {}; let own = {}; let pub = {}; let uris = {}; let failPut = null; let pubHold = null; let pubFail = false; let me = null; let ownFail = null;
       const writes = []; const asked = [];
       await page.route(/\/v1\/item\/(album|song|artist)\/[^/?]+(\?.*)?$/, (r) => { const m = /\/v1\/item\/(\w+)\/([^/?]+)/.exec(r.request().url()); const pg = pages[`${m[1]}/${m[2]}`]; return pg ? r.fulfill({ json: pg }) : r.fallback(); });
       await page.route(/\/v1\/item\/[^?]+\/extras(\?.*)?$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
@@ -68,9 +71,10 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
         const b = m === 'PUT' ? req.postDataJSON() : q; const k = keyOf(b);
         if (m === 'GET' && k === ownFail) return r.fulfill({ status: 500, json: { error: 'database is locked' } });
         if (own[k] === 'needs_match') return m === 'GET' ? r.fulfill({ json: { needs_match: true, tags: [] } }) : r.fulfill({ status: 422, json: { error: 'no canonical identity' } });
+        if (m === 'PUT' && k === failPut) return r.fulfill({ status: 502, json: { error: 'homeserver: 502' } });
         if (m === 'PUT') { writes.push({ m, k, label: b.label }); own[k] = [...(own[k] || []).filter((t) => t.label !== b.label), { label: b.label, synced: false }]; }
         if (m === 'DELETE') { writes.push({ m, k, label: b.label }); own[k] = (own[k] || []).filter((t) => t.label !== b.label); }
-        return r.fulfill({ json: { tags: own[k] || [] } });
+        return r.fulfill({ json: { uri: k.includes('://') ? k : uris[k] || null, tags: own[k] || [] } });
       });
       await page.route(/\/v1\/discover\/uri(\?.*)?$/, async (r) => {
         const q = Object.fromEntries(new URL(r.request().url()).searchParams); const k = keyOf(q); asked.push(k);
@@ -82,29 +86,30 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
       await page.route(/\/v1\/profiles\?ids=/, (r) => { const ids = new URL(r.request().url()).searchParams.get('ids').split(','); return r.fulfill({ json: ids.map((id) => { const n = P.indexOf(id); return { id, name: n >= 0 ? NAMES[n] : id.slice(0, 4), avatar: n >= 0 && n % 2 === 0 ? `/v1/profiles/${id}/avatar` : null, you: n === 0, following: n === 1, known: n >= 0 }; }) }); });
       await page.route(/\/v1\/profiles\/[^/]+\/avatar/, (r) => r.fulfill({ body: PNG, contentType: 'image/png' }));
       await page.route(/\/v1\/me(\?.*)?$/, (r) => (me ? r.fulfill({ json: me }) : r.fallback()));
-      await page.route(/\/v1\/library\/suggestions\/albums(\?.*)?$/, (r) => r.fulfill({ json: { albums: [], songs: 0, total_albums: 0, offset: 0 } }));
+      const folder = (key, id) => ({ key, album: 'Frenchcore Worldwide 05', artist: 'Various', songs: [{ track: { id, title: 'Track one', artists: [{ name: 'Various' }], track_no: 1, duration_ms: 200000, file: { path: `/music/${key}/01.flac` } }, options: [{ id: id * 10, recording_mbid: '0c9b1d6e-4e5f-4f3a-9c11-5b7d0a6e2f41', title: 'Track one', artists: [{ name: 'Various' }], source: 'album', score: 0.9 }], status: 'single' }], ready: 1, conflicts: 0 });
+      await page.route(/\/v1\/library\/suggestions\/albums(\?.*)?$/, (r) => r.fulfill({ json: { albums: [folder('a', 300), folder('b', 400), folder('c', 501)], songs: 3, total_albums: 3, offset: 0 } }));
       const go = async (p) => { await page.goto(BASE + p); await page.locator('#main .hero').first().waitFor({ timeout: 20000 }); await sleep(400); };
       const hero = () => page.locator('#main .hero');
       const group = (scope) => page.locator(`#htags [data-tag-scope="${scope}"]`);
       const chip = (scope, label) => group(scope).locator(`.tagitem[data-label="${label}"]`);
       // Shows every chip of the page's groups (a narrow hero folds them behind "+N more")
-      const expandAll = async () => { for (const b of await page.locator('#htags [data-htag-more]:visible').all()) await b.click(); };
+      const expandAll = async () => { const more = page.locator('#htags [data-htag-more]:visible'); for (let i = 0; i < 4 && await more.count(); i++) await more.first().click(); };
       const labels = async (scope) => group(scope).locator('.tagitem:visible').evaluateAll((els) => els.map((e) => e.dataset.label));
 
-      // ---- A: a TIDAL album with a MusicBrainz match: both groups in the hero ----
-      pages['album/tidal-a'] = item('album', 'tidal-a', { source: 'TIDAL', source_id: 'tidal', target: { uri: LINK }, uri: ALBUM, song_uri: ALBUM, link: LINK, on_pubky: { uri: `${ALBUM}-older`, indexed: true, tags: [['wrong-scope', 90]], taggers: 90 } });
-      own = { [ALBUM]: [{ label: 'shared', synced: true }], [LINK]: [] };
+      // ---- A: a TIDAL song with a MusicBrainz recording: both groups in the hero ----
+      pages['song/tidal-a'] = item('song', 'tidal-a', { source: 'TIDAL', source_id: 'tidal', target: { uri: LINK }, uri: CANON, song_uri: CANON, link: LINK, on_pubky: { uri: `${CANON}-older`, indexed: true, tags: [['wrong-scope', 90]], taggers: 90 } });
+      own = { [CANON]: [{ label: 'shared', synced: true }], [LINK]: [] };
       pub = {
-        [ALBUM]: { tags: [['frenchcore', 7], ['hardcore', 3], ['shared', 2]], taggers: 8, faces: { frenchcore: P.slice(1, 7), hardcore: P.slice(5, 8), shared: [P[0], P[1]] } },
+        [CANON]: { tags: [['frenchcore', 7], ['hardcore', 3], ['shared', 2]], taggers: 8, faces: { frenchcore: P.slice(1, 7), hardcore: P.slice(5, 8), shared: [P[0], P[1]] } },
         [LINK]: { tags: [['link-only', 1], ['shared', 1]], taggers: 1, faces: { 'link-only': [P[4]], shared: [P[4]] } },
       };
-      await go('/album/tidal-a');
+      await go('/song/tidal-a');
       await group('song').locator('.tagitem').first().waitFor();
       assert.equal(await page.locator('#itags').count(), 0, 'no Tags section at the bottom');
       assert.equal(await hero().locator('#htags').count(), 1, 'the tags are in the hero');
       assert.ok(await page.evaluate(() => { const t = document.querySelector('#htags'), a = document.querySelector('.hero .actions'); return !!(t && a && (t.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING)); }), 'tags come before the Play actions');
       assert.equal(await page.locator('#tagscope').count(), 0, 'no scope switch');
-      assert.match(await group('song').locator('.tgroup-name').textContent(), /album/i);
+      assert.match(await group('song').locator('.tgroup-name').textContent(), /On this song/);
       assert.match(await group('link').locator('.tgroup-name').textContent(), /TIDAL/);
       await shot('album-folded');
       await expandAll();
@@ -147,7 +152,7 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
       assert.ok(await inSong.evaluate((e) => e === document.activeElement), 'the input takes the focus');
       assert.ok(await inSong.evaluate((e) => e.list && [...e.list.options].some((o) => o.value === 'link-only')), 'suggestions from labels in use');
       await inSong.fill('Gabber'); await inSong.press('Enter'); await sleep(500);
-      assert.deepEqual(writes.at(-1), { m: 'PUT', k: ALBUM, label: 'Gabber' });
+      assert.deepEqual(writes.at(-1), { m: 'PUT', k: CANON, label: 'Gabber' });
       await group('link').locator('[data-htag-plus]').focus(); await page.keyboard.press('Enter');
       const inLink = group('link').locator('input[data-htag-add]');
       await inLink.fill('rawstyle'); await inLink.press('Enter'); await sleep(500);
@@ -157,27 +162,41 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
       assert.equal(await group('song').locator('input[data-htag-add]').count(), 0); assert.ok(!writes.some((w) => w.label === 'nope'));
       // Remove your "shared" on the album: the link's stays
       own[LINK].push({ label: 'shared', synced: true });
-      await go('/album/tidal-a'); await group('song').locator('.tagitem').first().waitFor(); await expandAll();
+      await go('/song/tidal-a'); await group('song').locator('.tagitem').first().waitFor(); await expandAll();
       await chip('song', 'shared').locator('[data-htag-del]').click(); await sleep(500);
-      assert.deepEqual(writes.at(-1), { m: 'DELETE', k: ALBUM, label: 'shared' });
+      assert.deepEqual(writes.at(-1), { m: 'DELETE', k: CANON, label: 'shared' });
       assert.ok(own[LINK].some((t) => t.label === 'shared'), 'the link keeps its tag');
+      // Move your "rawstyle" from the link to the song: the song's write first; when it fails, nothing is deleted
+      await go('/song/tidal-a'); await chip('link', 'rawstyle').waitFor({ state: 'attached' }); await expandAll();
+      failPut = CANON; const n = writes.length;
+      await chip('link', 'rawstyle').locator('[data-htag-move]').click(); await sleep(500);
+      assert.equal(writes.length, n, 'a refused move deletes nothing'); assert.ok(own[LINK].some((t) => t.label === 'rawstyle'));
+      failPut = null;
+      await chip('link', 'rawstyle').locator('[data-htag-move]').click(); await sleep(600);
+      assert.deepEqual(writes.slice(-2), [{ m: 'PUT', k: CANON, label: 'rawstyle' }, { m: 'DELETE', k: LINK, label: 'rawstyle' }]);
       // A chip opens the tag (keyboard)
       await chip('song', 'frenchcore').locator('.ptag').focus(); await page.keyboard.press('Enter');
       await page.waitForURL(/\/tag\/frenchcore/);
       // ---- touch targets, no sideways scroll ----
-      await go('/album/tidal-a'); await chip('song', 'frenchcore').waitFor();
+      await go('/song/tidal-a'); await chip('song', 'frenchcore').waitFor();
       if (width < 1100) {
         for (const sel of ['.tagitem .ptag', '[data-htag-plus]', '.tagitem .tagfaces']) {
           const bb = await page.locator(`#htags ${sel}`).first().evaluate((e) => e.getBoundingClientRect());
           assert.ok(bb.height >= 40 && bb.width >= 40, `${sel} is 40 px to touch at ${width} (${bb.width}×${bb.height})`);
         }
+        // ×, and move, beside your own tag: each its own finger-sized target
+        await expandAll();
+        for (const sel of ['[data-htag-del]', '[data-htag-move]']) {
+          const bb = await page.locator(`#htags ${sel}`).first().evaluate((e) => e.getBoundingClientRect());
+          assert.ok(bb.height >= 36 && bb.width >= 40, `${sel} is 40 px to touch at ${width} (${bb.width}×${bb.height})`);
+        }
       }
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth) <= 0, `no sideways scroll at ${width}`);
 
       // ---- B: many tags fold to about two rows and "+N more" ----
-      own = { [ALBUM]: [], [LINK]: [] };
-      pub[ALBUM] = { tags: Array.from({ length: 30 }, (_, i) => [`tag-${String(i).padStart(2, '0')}`, 30 - i]), taggers: 30, faces: {} };
-      await go('/album/tidal-a'); await chip('song', 'tag-00').waitFor(); await sleep(300);
+      own = { [CANON]: [], [LINK]: [] };
+      pub[CANON] = { tags: Array.from({ length: 30 }, (_, i) => [`tag-${String(i).padStart(2, '0')}`, 30 - i]), taggers: 30, faces: {} };
+      await go('/song/tidal-a'); await chip('song', 'tag-00').waitFor(); await sleep(300);
       const rows = async () => group('song').locator('.tagitem:visible, [data-htag-more]:visible, [data-htag-plus]:visible').evaluateAll((els) => { const t = els.map((e) => e.getBoundingClientRect().top).sort((a, b) => a - b); return t.filter((x, k) => k === 0 || x - t[k - 1] > 8).length; });
       assert.ok(await rows() <= 2, `at most two rows of tags at ${width} (${await rows()})`);
       const more = group('song').locator('[data-htag-more]');
@@ -191,9 +210,9 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
 
       // ---- C: loading, then the public tags fill in; D: Pubky doesn't answer; E: no tags ----
       let release; pubHold = new Promise((r) => { release = r; });
-      pub[ALBUM] = { tags: [['frenchcore', 7]], taggers: 7, faces: { frenchcore: [P[1]] } };
-      own[ALBUM] = [{ label: 'mine-first', synced: true }];
-      await go('/album/tidal-a');
+      pub[CANON] = { tags: [['frenchcore', 7]], taggers: 7, faces: { frenchcore: [P[1]] } };
+      own[CANON] = [{ label: 'mine-first', synced: true }];
+      await go('/song/tidal-a');
       await chip('song', 'mine-first').waitFor({ timeout: 5000 });
       assert.ok(await group('song').locator('.tag-skel').count() > 0, 'a quiet placeholder while Pubky answers');
       await shot('album-loading');
@@ -201,27 +220,27 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
       await chip('song', 'frenchcore').waitFor();
       assert.equal(await group('song').locator('.tag-skel').count(), 0);
       pubFail = true;
-      await go('/album/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(400);
+      await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(400);
       assert.match(await page.locator('#htags').innerText(), /Pubky tags didn.t load/);
       assert.equal(await group('song').locator('[data-htag-plus]').count(), 1, 'your own tags still work');
       await shot('album-error');
       pubFail = false;
       // Your own tags on the link don't load: it says so, offers no add there, and the album's still work
       ownFail = LINK;
-      await go('/album/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(300);
+      await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(300);
       assert.match(await group('link').innerText(), /Your tags didn.t load/);
       assert.equal(await group('link').locator('[data-htag-plus]').count(), 0);
       assert.equal(await group('song').locator('[data-htag-plus]').count(), 1);
       ownFail = null;
-      own = { [ALBUM]: [], [LINK]: [] }; pub = {};
-      await go('/album/tidal-a'); await group('song').locator('[data-htag-plus]').waitFor(); await sleep(300);
+      own = { [CANON]: [], [LINK]: [] }; pub = {};
+      await go('/song/tidal-a'); await group('song').locator('[data-htag-plus]').waitFor(); await sleep(300);
       assert.match(await group('song').innerText(), /No tags yet/);
       await shot('album-empty');
 
       // ---- F: a library song and a library artist, matched: one group each ----
       pages['song/lib-1'] = item('song', 'lib-1', { title: 'Hardcore Vibes', target: { track_id: 1 }, uri: SONG, song_uri: SONG, on_pubky: { uri: SONG, indexed: true, tags: [['hardcore', 2]], taggers: 2, faces: { hardcore: [P[0], P[2]] } } });
-      pages['artist/lib-2'] = item('artist', 'lib-2', { title: 'Various', target: { artist_id: 2 }, uri: ARTIST, song_uri: ARTIST });
-      own = { 'track:1': [{ label: 'hardcore', synced: true }], 'artist:2': [] };
+      pages['artist/lib-2'] = item('artist', 'lib-2', { title: 'Various', target: { artist_id: 2 } });
+      own = { 'track:1': [{ label: 'hardcore', synced: true }], 'artist:2': [] }; uris = { 'track:1': SONG, 'artist:2': ARTIST };
       pub = { 'track:1': { tags: [['hardcore', 2]], taggers: 2, faces: { hardcore: [P[0], P[2]] } }, 'artist:2': { tags: [['dutch', 4]], taggers: 4, faces: { dutch: P.slice(2, 6) } } };
       asked.length = 0;
       await go('/song/lib-1'); await chip('song', 'hardcore').waitFor();
@@ -239,28 +258,45 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
       await shot('artist');
 
       // ---- G: the screenshot's case: a library album with no MusicBrainz match ----
-      pages['album/lib-137'] = item('album', 'lib-137', { target: { album_id: 137 } });
-      own = { 'album:137': 'needs_match' }; pub = { 'album:137': 422 };
+      pages['album/lib-137'] = item('album', 'lib-137', { target: { album_id: 137 }, songs: [{ id: 501, title: 'Track one', artist: 'Various', duration_ms: 200000, track_no: 1 }], on_pubky: { uri: GUESS, indexed: true, tags: [['guessed', 9]], taggers: 9 } });
+      own = { 'album:137': 'needs_match' }; pub = { 'album:137': 422 }; uris = {};
       await go('/album/lib-137'); await page.locator('#htags').waitFor(); await sleep(400);
+      assert.doesNotMatch(await page.locator('#htags').innerText(), /guessed/, 'a guessed identity\'s tags never show');
       assert.equal(await page.locator('#htags [data-htag-plus], #htags input[data-htag-add]').count(), 0, 'no tag goes to a guessed identity');
       assert.match(await page.locator('#htags').innerText(), /Match this album to tag it/);
       assert.equal(await page.locator('#itags').count(), 0);
       await shot('album-unmatched');
       await page.locator('#htags [data-htag-match]').click();
       await page.locator('#main h1, #main h2').filter({ hasText: /Confirm matches/ }).first().waitFor();
+      await page.waitForFunction(() => document.activeElement && document.activeElement.closest && !!document.activeElement.closest('.idalbum'), null, { timeout: 5000 }).catch(() => {});
+      assert.equal(await page.evaluate(() => { const a = document.activeElement; const sec = a && a.closest('.idalbum'); return sec ? sec.querySelector('[data-track]').dataset.track : null; }), '501', 'straight to this album\'s folder');
+      // A matched library album: the node's URI for its tags, and on_pubky about exactly that one (no second lookup)
+      pages['album/lib-7'] = item('album', 'lib-7', { target: { album_id: 7 }, on_pubky: { uri: RELEASE, indexed: true, tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } } });
+      own = { 'album:7': [] }; uris = { 'album:7': RELEASE }; pub = { 'album:7': { tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } }, 'album:137': 422 };
+      asked.length = 0;
+      await go('/album/lib-7'); await chip('song', 'gabber').waitFor();
+      assert.deepEqual(asked, []); assert.doesNotMatch(await page.locator('#htags').innerText(), /Not matched/);
       // Not matched but on TIDAL: the link's tags (others' too) and a note, no album group
-      pages['album/tidal-u'] = item('album', 'tidal-u', { source: 'TIDAL', source_id: 'tidal', target: { uri: LINK }, uri: LINK, link: LINK });
-      own = { [LINK]: [] }; pub = { [LINK]: { tags: [['raw', 3]], taggers: 3, faces: { raw: [P[3]] } } };
+      pages['album/tidal-u'] = item('album', 'tidal-u', { source: 'TIDAL', source_id: 'tidal', target: { uri: ALINK }, uri: ALINK, link: ALINK });
+      own = { [ALINK]: [] }; pub = { [ALINK]: { tags: [['raw', 3]], taggers: 3, faces: { raw: [P[3]] } } };
       await go('/album/tidal-u'); await chip('link', 'raw').waitFor();
       assert.equal(await group('song').count(), 0);
-      assert.match(await page.locator('#htags').innerText(), /not matched/i);
+      assert.match(await page.locator('#htags').innerText(), /on this TIDAL link only/);
       await shot('album-link-only');
 
       // ---- H: a listener sees the tags and their people, never an add or a remove ----
       me = { role: 'listener', key: P[3], zones: null };
-      pub = { [ALBUM]: { tags: [['frenchcore', 7]], taggers: 7, faces: { frenchcore: [P[1]] } }, [LINK]: { tags: [], taggers: 0 } };
-      await go('/album/tidal-a'); await chip('song', 'frenchcore').waitFor();
+      pub = { [CANON]: { tags: [['frenchcore', 7]], taggers: 7, faces: { frenchcore: [P[1]] } }, [LINK]: { tags: [], taggers: 0 }, 'album:7': { tags: [['gabber', 5]], taggers: 5, faces: { gabber: [P[2]] } }, 'album:137': 422 };
+      await go('/song/tidal-a'); await chip('song', 'frenchcore').waitFor();
       assert.equal(await page.locator('#htags [data-htag-plus], #htags [data-htag-del]').count(), 0);
+      // On a library album: Pubky says which URI (matched: its tags, read-only; not matched: the note, no button)
+      await go('/album/lib-7'); await chip('song', 'gabber').waitFor();
+      assert.doesNotMatch(await page.locator('#htags').innerText(), /Not matched/);
+      await go('/album/lib-137'); await page.locator('#htags .hnote').waitFor();
+      assert.equal(await group('song').count(), 0);
+      assert.match(await page.locator('#htags').innerText(), /Not matched to MusicBrainz yet/);
+      assert.equal(await page.locator('#htags [data-htag-match]').count(), 0, 'no match button for a listener');
+      assert.doesNotMatch(await page.locator('#htags').innerText(), /guessed/);
       me = null;
 
       // ---- I: the same chip and colours elsewhere ----
@@ -269,7 +305,7 @@ const item = (kind, id, o) => ({ kind, id, title: o.title || 'Frenchcore Worldwi
       const co = page.locator('#tagcotags .ptag').first();
       assert.equal(await co.evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('hardcore'), 0.3));
       assert.doesNotMatch(await co.innerText(), /#/);
-      own = { [ALBUM]: [{ label: 'frenchcore', synced: true }] };
+      own = { [CANON]: [{ label: 'frenchcore', synced: true }] };
       await page.goto(BASE + '/genres'); await page.locator('[data-mytag]').first().waitFor();
       assert.equal(await page.locator('[data-mytag]').first().evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchcore'), 0.3));
       if (width < 1100) assert.ok((await page.locator('[data-mytag]').first().boundingBox()).height >= 40);

@@ -522,7 +522,7 @@
   // What someone is typing survives the page's re-renders (an item still being read renders
   // again every few seconds): kept per item, and per comment for a reply
   const commentDrafts = new Map();
-  const commentTyping = () => $$('.comment-form textarea').some((t) => t.value.trim() || t === document.activeElement);
+  const commentTyping = () => $$('.comment-form textarea, #htags input[data-htag-add]').some((t) => t.value.trim() || t === document.activeElement);
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
     const draftKey = (f) => `${uri}|${(f && f.dataset.replyTo) || ''}`;
@@ -3590,13 +3590,13 @@
   };
   // Suggestions while adding: the labels on this page, then your own from everywhere (read once)
   const tagLabels = { mine: null };
-  const openHeroAdd = async (box, ht, b) => {
+  const openHeroAdd = async (box, ht, b, focus = true) => {
     const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
     b.hidden = true;
     b.insertAdjacentHTML('afterend', `<input class="taginput" data-htag-add="${g.scope}" list="htagsugg" maxlength="20" autocomplete="off" placeholder="Add a tag…" aria-label="Add a tag ${esc(lower1(g.name))}"><span class="muted small tag-hint">Public on your homeserver</span>`);
     const inp = b.nextElementSibling; const hint = inp.nextElementSibling;
     const close = () => { inp.remove(); hint.remove(); b.hidden = false; };
-    inp.focus();
+    if (focus) inp.focus();
     inp.onkeydown = async (e) => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); b.focus(); return; }
       if (e.key !== 'Enter' || e.isComposing || inp.disabled || !inp.value.trim()) return;
@@ -3619,7 +3619,7 @@
     // A move writes the other URI first: when that fails, the tag stays where it was
     $$('[data-htag-move]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagMove); const to = ht.groups.find((x) => x !== g); const label = b.dataset.label; if (!g || !to || b.disabled) return; b.disabled = true; try { await api('PUT', '/tags', { ...to.ref, label }); await del(g.ref, label); toast(`${label} is ${lower1(to.name)} now`); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
     $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => openHeroAdd(box, ht, b));
-    const m = $('[data-htag-match]', box); if (m) m.onclick = () => setView('identify');
+    const m = $('[data-htag-match]', box); if (m) m.onclick = () => setView('identify', { tracks: ht.match.tracks });
   };
   // The faces come with the people's names and pictures once their profiles are read
   const fillHeroFaces = async (box, ht) => {
@@ -3634,9 +3634,9 @@
     // A half-typed tag stays when the public tags come in meanwhile
     const typing = $('input[data-htag-add]', box);
     const draft = typing && { scope: typing.dataset.htagAdd, value: typing.value, focus: document.activeElement === typing };
-    box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
+    box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
     bindHeroTags(box, ht);
-    if (draft) { const b = $(`[data-htag-plus="${draft.scope}"]`, box); if (b) { openHeroAdd(box, ht, b); const inp = $('input[data-htag-add]', box); inp.value = draft.value; if (!draft.focus) inp.blur(); } }
+    if (draft) { const b = $(`[data-htag-plus="${draft.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, draft.focus); $('input[data-htag-add]', box).value = draft.value; } }
     foldHeroTags(box);
     if (!box.dataset.fold && window.ResizeObserver) { box.dataset.fold = '1'; let w = box.clientWidth; new ResizeObserver(() => { if (box.clientWidth !== w) { w = box.clientWidth; foldHeroTags(box); } }).observe(box); }
     fillHeroFaces(box, ht);
@@ -4693,7 +4693,7 @@
           if (state.view !== 'tag') return;
           sc.items = sc.items || []; sc.tags = sc.tags || [];
           const co = sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24);
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}${labels.length > 1 ? labels.map((l) => tagChip(l, { own: true, attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('') : ''}</div>` : '';
+          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}${labels.length > 1 ? labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('') : ''}</div>` : '';
           $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
           $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
           $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
@@ -4875,6 +4875,13 @@
             });
           };
           draw();
+          // From an album page ("Match this album to tag it"): to its folder, when it waits here
+          const want = state.viewArg && state.viewArg.tracks;
+          if (want && want.length) {
+            const row = want.map((t) => $(`.idrow[data-track="${Number(t)}"]`, main)).find(Boolean); const sec = row && row.closest('.idalbum');
+            if (sec) { sec.scrollIntoView({ block: 'start' }); const h = $('h3', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
+            else toast('This album has no matches waiting to be confirmed here. Identify (Settings) looks for it again.');
+          }
           break;
         }
         case 'genres': {
@@ -5656,24 +5663,29 @@
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
           // An item with no identity yet (needs_match) takes no tags: the hero says so and leads to a match
-          const ownTags = (ref) => (!ref || isListener() ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match })).catch(() => ({ tags: null })));
+          const ownTags = (ref) => (!ref || isListener() ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
           const [songOwn, linkOwn, myReview] = await Promise.all([
             ownTags(songRef), ownTags(linkRef),
             isListener() ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
-          // The hero's tag groups. Public tags and people come from Pubky for each group's own URI; the
-          // page's on_pubky stands in only when it is about exactly that URI
-          const shownSong = !!songRef && !songOwn.needsMatch && (!localRef || !!pg.song_uri || songOwn.tags !== null);
+          // The hero's tag groups. Public tags and people come from Pubky for each group's own URI: for a
+          // library item the one the node keeps its tags on (GET /tags says; a listener's page asks
+          // Pubky), never the page's guess. The page's on_pubky stands in only when it is that URI.
+          const shownSong = !!songRef && !songOwn.needsMatch;
+          const songUri = localRef ? songOwn.uri : songRef && songRef.uri;
           const pubFrom = (uri) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : { state: 'loading', tags: [], faces: {} });
           const linkName = pg.source || 'source';
           const tagGroups = [
-            ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(localRef ? pg.song_uri : songRef.uri) }] : []),
+            ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri) }] : []),
             ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri) }] : []),
           ];
-          const tagNote = localRef && !pg.song_uri && !shownSong ? 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.' : !songRef && linkRef ? `Not matched to MusicBrainz yet: tags stay on this ${linkName} link.` : '';
           const htKey = `${kind}:${id}:${++heroTagsGen}`;
-          const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: tagNote, match: tagNote && localRef && kind !== 'song' && !isListener() ? `Match this ${kind} to tag it` : '', open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
+          const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
+          // No identity: say so; the owner's album leads to its folder in the matches to confirm
+          const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.id).filter((x) => x != null) } : null; };
+          if (localRef && songOwn.needsMatch) unmatched();
+          else if (!songRef && linkRef) ht.note = `Tags here go on this ${linkName} link only: no MusicBrainz ${kind} is known for it here.`;
           state.heroTagsOpen = { page: `${kind}:${id}`, set: ht.open };
           const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
           const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Tracks', home: 'Home', playlists: 'Playlists' }[pg.section] || 'Home';
@@ -5736,7 +5748,7 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || tagNote ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
+            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
             + (aboutTop ? aboutHtml(pg) : '')
@@ -5817,8 +5829,13 @@
             if (g.pub.state !== 'loading') continue;
             api('GET', `/discover/uri?${refQs(g.ref)}`).then((r) => ({ state: 'ok', tags: r.tags || [], faces: r.faces || {} }))
               // No contact for Pubky (412) or no identity (422): nothing to show, not a failure
-              .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {} }))
-              .then((p) => { g.pub = p; drawHeroTags(ht); });
+              .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {}, unknown: e.status === 422 }))
+              .then((p) => {
+                g.pub = p;
+                // A library item with no identity, seen without own tags (a listener, or GET /tags failed)
+                if (p.unknown && g.scope === 'song' && localRef && !g.own) { ht.groups = ht.groups.filter((x) => x !== g); unmatched(); }
+                drawHeroTags(ht);
+              });
           }
           if (myReview !== undefined) bindReviewRow(target, myReview);
           $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources'));
