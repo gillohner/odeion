@@ -1,5 +1,6 @@
 //! App updates on desktops (Tauri updater). A release build checks the feed
-//! of the channel it was built for (`PM_UPDATE_CHANNEL` at build time: `edge`
+//! of the channel it was built for (`ODEION_UPDATE_CHANNEL`, or its pre-Odeion name
+//! `PM_UPDATE_CHANNEL`, at build time: `edge`
 //! for builds of main, `latest` for tagged releases) once at start. When a
 //! newer version is there it asks; on yes it installs and restarts.
 //!
@@ -15,11 +16,24 @@ use tauri::AppHandle;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_updater::UpdaterExt;
 
+// compat: pre-Odeion repository name: installed apps read this feed, so it stays where it is
 const RELEASES: &str = "https://github.com/gillohner/pubky-music-node/releases";
+
+/// The update dialog's title.
+const TITLE: &str = "Update Odeion";
+
+/// The update dialog's question.
+fn question(new: &str, current: &str) -> String {
+    format!("Odeion {new} is available (this is {current}).\n\nInstall it now? The app restarts.")
+}
 
 /// The channel this build follows, if any.
 pub fn channel() -> Option<&'static str> {
-    option_env!("PM_UPDATE_CHANNEL").filter(|c| !c.is_empty())
+    pm_model::brand::build_env(
+        option_env!("ODEION_UPDATE_CHANNEL"),
+        option_env!("PM_UPDATE_CHANNEL"),
+    )
+    .filter(|c| !c.is_empty())
 }
 
 /// Where a channel's feed is. `latest` is GitHub's latest release, never a pre-release.
@@ -61,11 +75,11 @@ async fn check(app: &AppHandle, channel: &str) -> anyhow::Result<()> {
     tracing::info!(channel, version = %update.version, "updates: a newer version is available");
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
-        .message(format!(
-            "Pubky Music {} is available (this is {}).\n\nInstall it now? The app restarts.",
-            update.version, update.current_version
+        .message(question(
+            &update.version.to_string(),
+            &update.current_version.to_string(),
         ))
-        .title("Update Pubky Music")
+        .title(TITLE)
         .kind(MessageDialogKind::Info)
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Install and restart".into(),
@@ -97,9 +111,17 @@ mod tests {
             feed("latest"),
             "https://github.com/gillohner/pubky-music-node/releases/latest/download/latest.json"
         );
-        // A local build (no PM_UPDATE_CHANNEL at build time) never checks.
-        if option_env!("PM_UPDATE_CHANNEL").is_none() {
+        // A local build (no ODEION_UPDATE_CHANNEL or PM_UPDATE_CHANNEL at build time) never checks.
+        if option_env!("ODEION_UPDATE_CHANNEL").is_none() && option_env!("PM_UPDATE_CHANNEL").is_none() {
             assert_eq!(channel(), None);
         }
+    }
+
+    #[test]
+    fn the_update_question_says_odeion() {
+        assert_eq!(TITLE, "Update Odeion");
+        let q = question("0.3.0", "0.2.2");
+        assert!(q.starts_with("Odeion 0.3.0 is available (this is 0.2.2)."), "{q}");
+        assert!(!q.contains("Pubky Music"), "{q}"); // compat: pre-Odeion name must be gone
     }
 }

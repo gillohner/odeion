@@ -356,7 +356,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             fields: vec![field("app_id", "App ID"), secret("app_secret", "App secret", false)],
             status: Some("GET /v1/sources/qobuz/unofficial"),
             limits: Some(
-                "Qobuz gives app IDs only to its partners, not to other players, so Pubky Music has none \
+                "Qobuz gives app IDs only to its partners, not to other players, so Odeion has none \
                  to build in. Without one, Qobuz doesn't play here.",
             ),
             ..app("qobuz", "Qobuz", qobuz.is_some(), qobuz)

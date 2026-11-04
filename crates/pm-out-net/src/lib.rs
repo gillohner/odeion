@@ -109,7 +109,7 @@ impl NetOutput {
         };
         if version != pm_stream::PROTOCOL_VERSION {
             let update = if version < pm_stream::PROTOCOL_VERSION {
-                "update the Pubky Music app"
+                "update the Odeion app"
             } else {
                 "update the node"
             };

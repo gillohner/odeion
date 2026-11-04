@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 pub const SOURCE_ID: &str = "jellyfin";
 pub const TRACK_URI_PREFIX: &str = "jellyfin:track:";
 const SETTING: &str = "jellyfin.server";
-const CLIENT: &str = "Pubky Music";
+const CLIENT: &str = "Odeion";
 const DEVICE: &str = "pubky-music-node";
 
 /// The signed-in server. `Debug` never shows the token.

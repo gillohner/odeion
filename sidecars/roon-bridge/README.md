@@ -1,7 +1,7 @@
 # Roon bridge
 
 A Roon Extension (official `node-roon-api`, handoff §7.4) that connects a running Roon Core to a
-Pubky Music Node:
+Odeion node:
 
 - **Scrobbling**: tracks Roon plays past the halfway mark (or 4 minutes) are posted to
   `POST /v1/activity` with `source: roon`. The node resolves title/artist against its own library
@@ -15,11 +15,14 @@ Pubky Music Node:
 cd sidecars/roon-bridge
 npm install          # the Roon API packages come from RoonLabs' GitHub repos (they are not on npm)
 npm test             # node:test: scrobble rule, 422 handling, Browse walk, API client, no Core needed
-PM_NODE=http://node:7788 PM_TOKEN=... npm start              # scrobble
-PM_NODE=http://node:7788 PM_TOKEN=... node index.js --import-playlists
+ODEION_NODE=http://node:7788 ODEION_TOKEN=... npm start              # scrobble
+ODEION_NODE=http://node:7788 ODEION_TOKEN=... node index.js --import-playlists
 ```
 
-Authorize "Pubky Music Bridge" once in Roon → Settings → Extensions.
+`PM_NODE` and `PM_TOKEN`, the names from before Odeion, still work; the `ODEION_` ones win, also
+when set to empty.
+
+Authorize "Odeion Bridge" once in Roon → Settings → Extensions.
 
 Status: the logic (`lib.js`) is unit-tested against fake zones, a fake Browse API shaped like Roon's
 responses and a fake node; the Roon wiring (`index.js`) loads the real RoonLabs packages but has not

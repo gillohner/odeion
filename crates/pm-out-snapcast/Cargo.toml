@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-snapcast"
-description = "Snapcast groups as outputs of the Pubky Music Node: tight multiroom sync on cheap players"
+description = "Snapcast groups as outputs of the Odeion node: tight multiroom sync on cheap players"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

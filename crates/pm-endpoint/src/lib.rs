@@ -323,7 +323,7 @@ impl Endpoint {
                     let update = if version < pm_stream::PROTOCOL_VERSION {
                         "update the node"
                     } else {
-                        "update the Pubky Music app"
+                        "update the Odeion app"
                     };
                     let msg = format!(
                         "endpoint speaks protocol {}, this node {version}; {update}",
@@ -576,7 +576,7 @@ pub fn machine_name() -> String {
                 .map(|s| s.trim().to_string())
                 .filter(|h| !h.is_empty())
         })
-        .unwrap_or_else(|| "Pubky Music endpoint".into())
+        .unwrap_or_else(|| "Odeion endpoint".into())
 }
 
 /// "Google Pixel 8", from the system properties every app may read.

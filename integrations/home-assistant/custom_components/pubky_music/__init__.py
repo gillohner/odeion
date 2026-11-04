@@ -1,4 +1,4 @@
-"""Pubky Music: the node's zones as media players, its library in the media browser."""
+"""Odeion (domain `pubky_music`, kept so existing entries and entity ids stay; compat: pre-Odeion): the node's zones as media players, its library in the media browser."""
 
 from __future__ import annotations
 
@@ -103,9 +103,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     dr.async_get(hass).async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, node.node_id)},
-        manufacturer="Pubky Music",
+        manufacturer="Odeion",
         model="Node",
-        name=info.get("name") or "Pubky Music",
+        name=info.get("name") or "Odeion",
         sw_version=info.get("version"),
         configuration_url=api.base,
     )

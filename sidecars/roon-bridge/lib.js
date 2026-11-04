@@ -1,8 +1,16 @@
 // The bridge's logic without the Roon wiring, so it can be tested with
 // fake zones, a fake Browse API and a fake (or real) node.
 
-export const NODE = (process.env.PM_NODE || "http://127.0.0.1:7788").replace(/\/+$/, "");
-export const TOKEN = process.env.PM_TOKEN || "";
+/**
+ * A setting: ODEION_<name>, else its pre-Odeion name PM_<name>. The new name wins, also when set to
+ * empty (as in the node; docs/branding-compatibility.md). `undefined` when neither is set.
+ */
+export function setting(name, env = process.env) {
+  return env[`ODEION_${name}`] !== undefined ? env[`ODEION_${name}`] : env[`PM_${name}`];
+}
+
+export const NODE = (setting("NODE") || "http://127.0.0.1:7788").replace(/\/+$/, "");
+export const TOKEN = setting("TOKEN") || "";
 
 /** Call the node's /v1 API. `fetchImpl` is swappable for tests. */
 export function makeApi({ node = NODE, token = TOKEN, fetchImpl = fetch } = {}) {

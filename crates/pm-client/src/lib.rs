@@ -1089,7 +1089,7 @@ pub async fn connect_via_pubky(
         .ok_or_else(|| ClientError::Api {
             status: 404,
             message:
-                "no node has published its address for this pubky yet (start `pm-node serve` with a session)"
+                "no node has published its address for this pubky yet (start `odeiond serve` with a session)"
                     .into(),
         })?;
     let client = NodeClient::new(
