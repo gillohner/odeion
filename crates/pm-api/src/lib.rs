@@ -466,6 +466,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/tidal/unofficial/client/check",
             post(tidal_unofficial::check_client),
         )
+        .route(
+            "/sources/tidal/unofficial/browser",
+            post(tidal_unofficial::start_browser),
+        )
+        .route(
+            "/sources/tidal/unofficial/browser/finish",
+            post(tidal_unofficial::finish_browser),
+        )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/callback", post(tidal::pasted_callback))
@@ -12329,8 +12337,13 @@ exec sleep 300
     /// (STEWARD-CREDENTIALS-REUSE.md).
     #[tokio::test]
     async fn tidal_sign_in_lists_the_ways_and_remembers_the_choice() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        let home = tempfile::tempdir().unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
+        // A build without TIDAL's built-in clients
+        s.tidal.write().unwrap().browser_client = None;
         s.tidal.write().unwrap().creds = tidal::TidalCredentials {
             client_id: "own-app".into(),
             client_secret: String::new(),
@@ -12338,7 +12351,8 @@ exec sleep 300
         };
         let app = router(s.clone());
         let signin = "/v1/sources/tidal/signin";
-        // No build carries a device client: the device way is open, and its page asks for one
+        // Without the build's clients: Sign in with TIDAL and the code sign-in are listed but not
+        // available, each saying why; the device client of your own is under Advanced
         let (st, si) = call(&app, "GET", signin, None).await;
         assert_eq!(st, StatusCode::OK, "{si}");
         let ids: Vec<&str> = si["ways"]
@@ -12347,23 +12361,44 @@ exec sleep 300
             .iter()
             .map(|w| w["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["app", "import", "device", "paste"]);
-        assert_eq!(si["ways"][0]["recommended"], true, "{si}");
         assert_eq!(
-            si["ways"][0]["label"], "Your own TIDAL app",
-            "no project app in a test build"
+            ids,
+            ["browser", "device", "app", "own-device", "paste"],
+            "no import way: nothing found"
         );
-        assert_eq!(si["ways"][0]["available"], true);
-        // The device way is open without a client: its page asks for one first (a step card)
-        assert_eq!(si["ways"][2]["available"], true);
         assert!(
-            si["ways"][2]["note"]
-                .as_str()
+            si["ways"]
+                .as_array()
                 .unwrap()
-                .contains("needs a TIDAL device client"),
+                .iter()
+                .all(|w| w["recommended"] == false),
             "{si}"
         );
-        assert_eq!(si["ways"][3]["available"], true);
+        assert_eq!(si["ways"][0]["available"], false);
+        assert_eq!(si["ways"][1]["available"], false);
+        assert!(
+            si["ways"][1]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Advanced › Your own device client"),
+            "{si}"
+        );
+        assert_eq!(
+            si["ways"][2]["label"], "Your own TIDAL app",
+            "no project app in a test build"
+        );
+        assert_eq!(
+            (
+                si["ways"][2]["available"].as_bool(),
+                si["ways"][2]["advanced"].as_bool()
+            ),
+            (Some(true), Some(true))
+        );
+        assert_eq!(
+            si["ways"][3]["available"], true,
+            "the owner sets a device client up"
+        );
+        assert_eq!(si["ways"][4]["available"], true);
         assert!(si["in_use"].is_null(), "{si}");
         assert_eq!(si["line"], "Not signed in");
         assert_eq!(si["details"]["unofficial"]["enabled"], false);
@@ -12375,7 +12410,7 @@ exec sleep 300
             r["error"]
                 .as_str()
                 .unwrap()
-                .contains("one of app, import, device, paste"),
+                .contains("one of browser, device, app, own-device, paste"),
             "{r}"
         );
         // Your own device client makes the device way available, labelled as yours; picking it is
@@ -12390,7 +12425,8 @@ exec sleep 300
         let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "device"}))).await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["chosen"], "device");
-        assert_eq!(r["ways"][2]["label"], "Your own device client");
+        assert_eq!(r["ways"][1]["label"], "Your own device client");
+        assert_eq!(r["ways"][1]["available"], true);
         assert_eq!(r["details"]["unofficial"]["enabled"], true, "{r}");
         assert!(r["in_use"].is_null(), "picked, not signed in yet: {r}");
         // The approval stores a session: it is in use, shown by user and expiry, never the token
@@ -12405,6 +12441,7 @@ exec sleep 300
                 country: "DE".into(),
                 session_id: None,
                 from: None,
+                client: Default::default(),
             });
             lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
                 .unwrap();
@@ -12471,6 +12508,7 @@ exec sleep 300
         assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(&app, "GET", "/v1/sources/nope/signin", None).await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 
     /// One front for the quality choice (STEWARD-UX-PLAYER-SOURCES.md §2): the options, the pick
@@ -12494,7 +12532,7 @@ exec sleep 300
         assert_eq!(ids(&q), ["max", "high"]);
         assert_eq!(q["current"], "max");
         assert_eq!(q["applies"], "next_track");
-        assert!(q["note"].as_str().unwrap().contains("device sign-in"), "{q}");
+        assert!(q["note"].as_str().unwrap().contains("Sign in with TIDAL"), "{q}");
         let (st, r) = call(
             &app,
             "PUT",
@@ -12639,10 +12677,12 @@ exec sleep 300
                 .any(|p| p.as_str().unwrap().starts_with("Music Assistant: not read")),
             "{si}"
         );
-        assert_eq!(si["ways"][1]["id"], "import");
-        assert_eq!(si["ways"][1]["available"], true);
+        // Found: listed after the code sign-in, not under Advanced
+        assert_eq!(si["ways"][2]["id"], "import", "{si}");
+        assert_eq!(si["ways"][2]["available"], true);
+        assert!(si["ways"][2].get("advanced").is_none(), "{si}");
         assert!(
-            si["ways"][1]["note"]
+            si["ways"][2]["note"]
                 .as_str()
                 .unwrap()
                 .contains("tidal-dl-ng (user 4242)"),
@@ -18794,5 +18834,793 @@ exec sleep 300
             3 + 4,
             "three failed, then four sent"
         );
+    }
+
+    // ---- TIDAL full tracks: Sign in with TIDAL (browser, PKCE), what TIDAL answered (2026-11-04) ----
+
+    /// Log lines written while a test runs, for checking that no secret is in them.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// Everything the node logs (all levels of its own crates and the HTTP stack's), into a buffer.
+    fn log_capture() -> (LogBuf, tracing::Dispatch) {
+        let buf = LogBuf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new("trace"))
+            .finish();
+        (buf, tracing::Dispatch::new(sub))
+    }
+
+    /// What the mock TIDAL was sent, by endpoint.
+    #[derive(Default)]
+    struct TidalSeen {
+        tokens: Vec<String>,
+        asked: Vec<(String, String)>,
+        agents: Vec<String>,
+    }
+
+    const FAKE_BROWSER_ID: &str = "fake-browser-client-id";
+    const FAKE_BROWSER_SECRET: &str = "fake-browser-client-secret";
+
+    /// A mock of TIDAL's auth, sessions and private playback for the full-tracks tests. Track ids:
+    /// `1` BTS FLAC 16/44.1; `2` DASH FLAC 24/96 (hi-res); `3` DASH AAC for HI_RES_LOSSLESS, BTS
+    /// FLAC for LOSSLESS; `4` DASH AAC at any quality. Every CDN address carries `SECRET-CDN`.
+    async fn full_tracks_mock(flac: Vec<u8>) -> (String, Arc<std::sync::Mutex<TidalSeen>>) {
+        use base64::Engine;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = Arc::new(std::sync::Mutex::new(TidalSeen::default()));
+        let b64 = |v: &str| base64::engine::general_purpose::STANDARD.encode(v);
+        let bts_flac = b64(&format!(
+            r#"{{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":["{base}/file.flac?token=SECRET-CDN"]}}"#
+        ));
+        let dash = |codecs: &str, rate: u32, id: &str| {
+            b64(&format!(
+                r#"<?xml version='1.0' encoding='UTF-8'?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-main:2011" type="static" minBufferTime="PT3.993S" mediaPresentationDuration="PT0M8.0S"><Period id="0"><AdaptationSet id="0" contentType="audio" mimeType="audio/mp4" segmentAlignment="true"><Representation id="{id}" codecs="{codecs}" bandwidth="2770880" audioSamplingRate="{rate}"><SegmentTemplate timescale="{rate}" initialization="{base}/seg/init?token=SECRET-CDN" media="{base}/seg/$Number$?token=SECRET-CDN" startNumber="1"><SegmentTimeline><S d="383936" r="1"/><S d="214080"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>"#
+            ))
+        };
+        let dash_flac = dash("flac", 96_000, "FLAC,96000,24");
+        let dash_aac = dash("mp4a.40.2", 44_100, "AAC,320000");
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post({
+                    let seen = seen.clone();
+                    move |body: String| {
+                        let seen = seen.clone();
+                        async move {
+                            seen.lock().unwrap().tokens.push(body.clone());
+                            let q: std::collections::HashMap<String, String> =
+                                url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
+                            let get = |k: &str| q.get(k).map(String::as_str).unwrap_or("");
+                            match get("grant_type") {
+                                "authorization_code" if get("code") == "good-code" || get("code") == "anna-code" => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({"access_token": format!("pk-at-{}", get("code")), "refresh_token": "pk-rt", "expires_in": 3600, "token_type": "Bearer", "user_id": 77, "user": {"userId": 77, "countryCode": "CH"}})),
+                                ),
+                                "authorization_code" => (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({"error": "invalid_grant", "error_description": "Authorization code is invalid"})),
+                                ),
+                                "refresh_token" if get("client_id") == FAKE_BROWSER_ID && get("client_secret") == FAKE_BROWSER_SECRET => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({"access_token": "pk-at-renewed", "expires_in": 3600})),
+                                ),
+                                "refresh_token" if get("client_id") == "dev-id" && get("client_secret") == "dev-secret" => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({"access_token": "dev-at-renewed", "refresh_token": "dev-rt-2", "expires_in": 3600})),
+                                ),
+                                _ => (
+                                    StatusCode::UNAUTHORIZED,
+                                    Json(serde_json::json!({"error": "invalid_client"})),
+                                ),
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                get(|| async { Json(serde_json::json!({"userId": 77, "countryCode": "CH", "sessionId": "sid"})) }),
+            )
+            .route(
+                "/v1/tracks/{id}/playbackinfopostpaywall",
+                get({
+                    let seen = seen.clone();
+                    move |Path(id): Path<String>, headers: HeaderMap, q: axum::extract::Query<std::collections::HashMap<String, String>>| {
+                        let seen = seen.clone();
+                        let (bts_flac, dash_flac, dash_aac) = (bts_flac.clone(), dash_flac.clone(), dash_aac.clone());
+                        async move {
+                            let asked = q.get("audioquality").cloned().unwrap_or_default();
+                            {
+                                let mut seen = seen.lock().unwrap();
+                                seen.asked.push((id.clone(), asked.clone()));
+                                seen.agents.push(
+                                    headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").to_string(),
+                                );
+                            }
+                            let bts = || serde_json::json!({"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifest": bts_flac, "bitDepth": 16, "sampleRate": 44100});
+                            let aac = || serde_json::json!({"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "HIGH", "manifestMimeType": "application/dash+xml", "manifest": dash_aac});
+                            let v = match (id.as_str(), asked.as_str()) {
+                                ("1", _) => bts(),
+                                ("2", _) => serde_json::json!({"trackId": 2, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "HI_RES_LOSSLESS", "manifestMimeType": "application/dash+xml", "manifest": dash_flac, "bitDepth": 24, "sampleRate": 96000}),
+                                ("3", "HI_RES_LOSSLESS") => aac(),
+                                ("3", _) => bts(),
+                                ("4", _) => aac(),
+                                _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"userMessage": "no such track"}))),
+                            };
+                            (StatusCode::OK, Json(v))
+                        }
+                    }
+                }),
+            )
+            .route("/file.flac", get(move || { let f = flac.clone(); async move { f } }))
+            .route("/seg/{n}", get(|Path(n): Path<String>| async move { format!("[{n}]") }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        (base, seen)
+    }
+
+    fn point_tidal_at(s: &NodeState, base: &str, browser: bool) {
+        let mut ep = s.tidal.write().unwrap();
+        ep.auth_base = base.to_string();
+        ep.login_base = base.to_string();
+        ep.v1_base = format!("{base}/v1");
+        ep.browser_client = browser.then(|| tidal_unofficial::BrowserClient {
+            id: FAKE_BROWSER_ID.into(),
+            secret: FAKE_BROWSER_SECRET.into(),
+        });
+    }
+
+    /// Opens a TIDAL track the full-tracks way on the audio thread's path and records the health,
+    /// with the test's log capture; the extension and the bytes read, or the error.
+    async fn open_full(
+        s: &Arc<NodeState>,
+        who: accounts::Who,
+        id: &'static str,
+        logs: &tracing::Dispatch,
+    ) -> Result<Option<(&'static str, bool, Vec<u8>)>, String> {
+        let s = s.clone();
+        let logs = logs.clone();
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&logs, || {
+                use std::io::Read;
+                let ep = s.tidal.read().unwrap().clone();
+                let r = crate::tidal_unofficial::open_blocking(&s.library, &ep, id, &who);
+                crate::tidal_unofficial::record(&s.library, &who, &r);
+                match r {
+                    Ok(Some(mut f)) => {
+                        let mut b = Vec::new();
+                        f.reader.read_to_end(&mut b).unwrap();
+                        Ok(Some((f.ext, f.lossy, b)))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(crate::tidal_unofficial::FullError::Mode(e)) => Err(format!("mode: {e}")),
+                    Err(crate::tidal_unofficial::FullError::Track(e)) => Err(format!("track: {e}")),
+                }
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// The pasted address of the browser sign-in: the whole tidal.com address or the bare code;
+    /// anything else (another host, a look-alike, http, no code, TIDAL's error) in plain words.
+    #[test]
+    fn tidal_browser_sign_in_paste_is_parsed_after_its_host() {
+        use tidal_unofficial::code_from_paste as code;
+        assert_eq!(
+            code(" https://tidal.com/android/login/auth?code=abc_DEF-1.2~3&state=na \n").as_deref(),
+            Ok("abc_DEF-1.2~3")
+        );
+        assert_eq!(
+            code("https://listen.tidal.com/login/auth?code=x1").as_deref(),
+            Ok("x1")
+        );
+        assert_eq!(
+            code("tidal.com/android/login/auth?code=x2").as_deref(),
+            Ok("x2"),
+            "no scheme: https"
+        );
+        assert_eq!(
+            code("HTTPS://TIDAL.COM./android/login/auth?code=x3").as_deref(),
+            Ok("x3")
+        );
+        assert_eq!(code("bare-Code_123.x~y").as_deref(), Ok("bare-Code_123.x~y"));
+        let err = |t: &str| code(t).unwrap_err();
+        for evil in [
+            "https://evil.example/android/login/auth?code=x",
+            "https://tidal.com.evil.example/android/login/auth?code=x",
+            "https://eviltidal.com/android/login/auth?code=x",
+            "https://tidal.com@evil.example/?code=x",
+        ] {
+            assert!(
+                err(evil).contains("isn't a TIDAL address"),
+                "{evil}: {}",
+                err(evil)
+            );
+        }
+        assert!(err("http://tidal.com/android/login/auth?code=x").contains("https://"));
+        assert!(err("https://tidal.com/android/login/auth?state=1").contains("no sign-in code"));
+        assert!(err("https://tidal.com/android/login/auth?code=").contains("no sign-in code"));
+        assert!(err(
+            "https://tidal.com/android/login/auth?error=access_denied&error_description=User%20cancelled"
+        )
+        .contains("User cancelled"));
+        assert!(err("  ").contains("Paste the address"));
+        assert!(err("hello world").contains("neither a TIDAL address nor a sign-in code"));
+    }
+
+    /// Sign in with TIDAL against a mock TIDAL: the login.tidal.com address carries python-tidal's
+    /// parameters and an S256 challenge of the verifier kept here; a wrong paste, a refused code,
+    /// no attempt and an expired one each say so; the code is exchanged with the verifier and the
+    /// client unique key (no secret); the session is kept marked as the browser one, is in use as
+    /// "Sign in with TIDAL", renews with the browser client, and nothing secret is ever logged.
+    #[tokio::test]
+    async fn tidal_browser_sign_in_from_a_mock() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        let home = tempfile::tempdir().unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
+        let (logs, dispatch) = log_capture();
+        let _logging = tracing::dispatcher::set_default(&dispatch);
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (base, seen) = full_tracks_mock(flac).await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let signin = "/v1/sources/tidal/signin";
+
+        // The chooser: Sign in with TIDAL first and Recommended, the code sign-in next; the rest
+        // under Advanced; no import way with nothing found
+        let (_, si) = call(&app, "GET", signin, None).await;
+        let ids: Vec<&str> = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["browser", "device", "app", "own-device", "paste"], "{si}");
+        let flags: Vec<(bool, bool)> = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (w["recommended"] == true, w["advanced"] == true))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (true, false),
+                (false, false),
+                (false, true),
+                (false, true),
+                (false, true)
+            ],
+            "{si}"
+        );
+        assert_eq!(si["ways"][0]["label"], "Sign in with TIDAL");
+        assert_eq!(si["ways"][0]["available"], true);
+        assert!(si["ways"][1]["note"].as_str().unwrap().contains("AAC"), "{si}");
+        assert_eq!(si["details"]["unofficial"]["browser_available"], true);
+
+        let finish = |text: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({ "text": text });
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/sources/tidal/unofficial/browser/finish",
+                    Some(body),
+                )
+                .await
+            }
+        };
+        // Nothing started yet
+        let (st, r) = finish("https://tidal.com/android/login/auth?code=good-code").await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("Press Sign in with TIDAL"),
+            "{r}"
+        );
+
+        // The address to open
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let url = url::Url::parse(r["url"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            url.as_str().split('?').next().unwrap(),
+            format!("{base}/authorize")
+        );
+        let pending = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner)
+            .browser
+            .unwrap();
+        assert_eq!(
+            pending.code_verifier.len(),
+            43,
+            "32 random bytes, base64url without padding"
+        );
+        assert!(pending
+            .code_verifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        let q: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        let names: Vec<&str> = q.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "response_type",
+                "redirect_uri",
+                "client_id",
+                "lang",
+                "appMode",
+                "client_unique_key",
+                "code_challenge",
+                "code_challenge_method",
+                "restrict_signup"
+            ],
+            "python-tidal's pkce_login_url, in its order"
+        );
+        let v = |k: &str| q.iter().find(|(n, _)| n == k).unwrap().1.as_str();
+        assert_eq!(v("response_type"), "code");
+        assert_eq!(v("redirect_uri"), "https://tidal.com/android/login/auth");
+        assert_eq!(v("client_id"), FAKE_BROWSER_ID);
+        assert_eq!(
+            (v("lang"), v("appMode"), v("restrict_signup")),
+            ("EN", "android", "true")
+        );
+        assert_eq!(v("client_unique_key"), pending.client_unique_key);
+        assert_eq!(v("code_challenge_method"), "S256");
+        {
+            use base64::Engine;
+            use sha2::Digest;
+            let want = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(pending.code_verifier.as_bytes()));
+            assert_eq!(v("code_challenge"), want);
+            assert_ne!(v("code_challenge"), pending.code_verifier);
+        }
+        assert!(
+            !r.to_string().contains(&pending.code_verifier),
+            "the verifier stays on the node"
+        );
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert!(
+            u["browser_pending"].as_i64().unwrap() > pm_library::db::now_unix(),
+            "{u}"
+        );
+        assert!(!u.to_string().contains(&pending.code_verifier));
+
+        // Wrong pastes: nothing is sent to TIDAL for them
+        for (text, says) in [
+            (
+                "https://evil.example/android/login/auth?code=good-code",
+                "isn't a TIDAL address",
+            ),
+            ("http://tidal.com/android/login/auth?code=good-code", "https://"),
+            ("https://tidal.com/android/login/auth", "no sign-in code"),
+        ] {
+            let (st, r) = finish(text).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{text}: {r}");
+            assert!(r["error"].as_str().unwrap().contains(says), "{text}: {r}");
+        }
+        assert!(
+            seen.lock().unwrap().tokens.is_empty(),
+            "nothing sent for a wrong paste"
+        );
+        // TIDAL refuses the code: said so, the attempt stays for another code
+        let (st, r) = finish("https://tidal.com/android/login/auth?code=old-code").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("didn't accept that sign-in code"),
+            "{r}"
+        );
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("Authorization code is invalid"),
+            "{r}"
+        );
+        // The right address
+        let (st, r) = finish("https://tidal.com/android/login/auth?code=good-code&lang=en").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["signed_in"], true, "{r}");
+        assert_eq!(r["enabled"], true, "{r}");
+        assert_eq!(r["session_client"], "pkce", "{r}");
+        assert_eq!(r["user"], "77");
+        assert!(r.get("browser_pending").is_none(), "{r}");
+        let exchange = seen.lock().unwrap().tokens.last().unwrap().clone();
+        let form: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(exchange.as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code"], "good-code");
+        assert_eq!(form["client_id"], FAKE_BROWSER_ID);
+        assert_eq!(form["redirect_uri"], "https://tidal.com/android/login/auth");
+        assert_eq!(
+            form["scope"], "r_usr+w_usr+w_sub",
+            "python-tidal's scope, as it sends it"
+        );
+        assert_eq!(form["code_verifier"], pending.code_verifier);
+        assert_eq!(form["client_unique_key"], pending.client_unique_key);
+        assert!(
+            !form.contains_key("client_secret"),
+            "python-tidal's exchange has no secret: {exchange}"
+        );
+        // Kept marked as the browser sign-in; in use as Sign in with TIDAL, the way remembered
+        let raw = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(tidal_unofficial::STATE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            raw.contains(r#""client":"pkce""#),
+            "the session says which client renews it"
+        );
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(si["in_use"]["way"], "browser", "{si}");
+        assert_eq!(si["in_use"]["label"], "Sign in with TIDAL");
+        assert_eq!(si["chosen"], "browser");
+        assert_eq!(si["line"], "Sign in with TIDAL · full tracks");
+        assert!(
+            !si.to_string().contains("pk-at") && !si.to_string().contains("pk-rt"),
+            "{si}"
+        );
+        // The attempt is used up
+        let (st, _) = finish("https://tidal.com/android/login/auth?code=good-code").await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // An expired attempt
+        call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.browser.as_mut().unwrap().expires_at = pm_library::db::now_unix() - 1;
+        });
+        let (st, r) = finish("good-code").await;
+        assert_eq!(st, StatusCode::GONE, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("expired"), "{r}");
+        assert!(
+            tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner)
+                .browser
+                .is_none()
+        );
+        // A bare code works as well as the address
+        call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        let (st, r) = finish("good-code").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+
+        // Renewal with the browser client (python-tidal's token_refresh: id and secret, no scope)
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.session.as_mut().unwrap().expires_at = pm_library::db::now_unix();
+        });
+        let (ext, lossy, bytes) = open_full(&s, accounts::Who::Owner, "2", &dispatch)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (ext, lossy),
+            ("m4a", false),
+            "hi-res DASH FLAC: fragmented MP4 into the decoder"
+        );
+        assert_eq!(String::from_utf8(bytes).unwrap(), "[init][1][2][3]");
+        let renewal = seen.lock().unwrap().tokens.last().unwrap().clone();
+        let form: std::collections::HashMap<String, String> = url::form_urlencoded::parse(renewal.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(form["grant_type"], "refresh_token");
+        assert_eq!(form["refresh_token"], "pk-rt");
+        assert_eq!(form["client_id"], FAKE_BROWSER_ID);
+        assert_eq!(form["client_secret"], FAKE_BROWSER_SECRET);
+        assert!(!form.contains_key("scope"), "{renewal}");
+        let st = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner);
+        let sess = st.session.unwrap();
+        assert_eq!(sess.access_token, "pk-at-renewed");
+        assert_eq!(
+            sess.refresh_token.as_deref(),
+            Some("pk-rt"),
+            "kept when TIDAL sends none"
+        );
+        assert_eq!(
+            sess.client,
+            tidal_unofficial::ClientKind::Pkce,
+            "still the browser one"
+        );
+        // python-tidal's Android web view headers on the private API
+        assert!(seen.lock().unwrap().agents.iter().all(|a| a.contains("Android")));
+
+        // A build without the browser client: the way is there, not available, says why, and is
+        // not recommended; its endpoints refuse; a browser session can't be renewed
+        point_tidal_at(&s, &base, false);
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(si["ways"][0]["id"], "browser");
+        assert_eq!(si["ways"][0]["available"], false);
+        assert_eq!(si["ways"][0]["recommended"], false);
+        assert!(
+            si["ways"][0]["reason"].as_str().unwrap().contains("code sign-in"),
+            "{si}"
+        );
+        let (st, _) = call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.session.as_mut().unwrap().expires_at = pm_library::db::now_unix();
+        });
+        let r = open_full(&s, accounts::Who::Owner, "1", &dispatch).await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.starts_with("mode:") && e.contains("Sign in with TIDAL")),
+            "{r:?}"
+        );
+
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
+        // Nothing secret in any log line: the client, the verifier, tokens, CDN addresses
+        let text = logs.text();
+        assert!(text.contains("signed in with TIDAL"), "the sign-in is logged");
+        for secret in [
+            FAKE_BROWSER_SECRET,
+            FAKE_BROWSER_ID,
+            pending.code_verifier.as_str(),
+            "pk-at",
+            "pk-rt",
+            "good-code",
+            "SECRET-CDN",
+        ] {
+            assert!(!text.contains(secret), "a secret in the logs: {secret}");
+        }
+    }
+
+    /// Each person's Sign in with TIDAL is their own: an attempt, its pasted address and the
+    /// session it makes belong to whoever started it.
+    #[tokio::test]
+    async fn tidal_browser_sign_in_is_per_person() {
+        let (base, _) = full_tracks_mock(Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let anna_tok = accounts::mint(&s, anna).unwrap();
+        let owner = Some("s3cret");
+        let start = "/v1/sources/tidal/unofficial/browser";
+        let finish = "/v1/sources/tidal/unofficial/browser/finish";
+        let (st, r, _) = send_as(&app, "POST", start, Some(&anna_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        // The owner has no attempt of their own: Anna's address does nothing for them
+        let body = serde_json::json!({"text": "https://tidal.com/android/login/auth?code=anna-code"});
+        let (st, r, _) = send_as(&app, "POST", finish, owner, &[], Some(body.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        let (st, r, _) = send_as(&app, "POST", finish, Some(&anna_tok), &[], Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["session_client"], "pkce");
+        let anna_who = accounts::Who::Listener(anna.to_string());
+        {
+            let lib = s.library.lock().unwrap();
+            let a = tidal_unofficial::load(&lib, &anna_who);
+            assert_eq!(a.session.unwrap().access_token, "pk-at-anna-code");
+            assert!(tidal_unofficial::load(&lib, &accounts::Who::Owner)
+                .session
+                .is_none());
+        }
+        let (_, u, _) = send_as(&app, "GET", "/v1/sources/tidal/unofficial", owner, &[], None).await;
+        assert_eq!(u["signed_in"], false, "{u}");
+        let (_, si, _) = send_as(
+            &app,
+            "GET",
+            "/v1/sources/tidal/signin",
+            Some(&anna_tok),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(si["in_use"]["way"], "browser", "{si}");
+        assert_eq!(
+            si["ways"][0]["available"], true,
+            "a listener signs in with TIDAL too: {si}"
+        );
+        // Nobody signed in to the node has no attempt to start
+        let (st, _, _) = send_as(&app, "POST", start, None, &[], None).await;
+        assert!(
+            st == StatusCode::UNAUTHORIZED || st == StatusCode::FORBIDDEN,
+            "{st}"
+        );
+    }
+
+    /// What TIDAL answered is logged per track (quality, manifest, codecs, depth and rate; no
+    /// address, no token); AAC for HI_RES_LOSSLESS is asked again as LOSSLESS before it plays; a
+    /// code sign-in that still gets AAC says so on its health line with what to do; and a session
+    /// stored before sessions said their client still loads and renews with the device client.
+    #[tokio::test]
+    async fn tidal_full_track_answers_are_logged_and_aac_is_asked_again() {
+        let (logs, dispatch) = log_capture();
+        let _logging = tracing::dispatcher::set_default(&dispatch);
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (base, seen) = full_tracks_mock(flac).await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"client_id": "dev-id", "client_secret": "dev-secret"})),
+        )
+        .await;
+        // As an older node stored it: no `client`, ran out
+        let old = format!(
+            r#"{{"enabled":true,"quality":"max","session":{{"access_token":"dev-at","refresh_token":"dev-rt","expires_at":{},"user_id":"42","country":"CH","session_id":"sid"}}}}"#,
+            pm_library::db::now_unix() - 10
+        );
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(tidal_unofficial::STATE_KEY, &old)
+            .unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(
+            (u["signed_in"].as_bool(), u["session_client"].as_str()),
+            (Some(true), Some("device")),
+            "{u}"
+        );
+        let who = accounts::Who::Owner;
+
+        // BTS FLAC (16/44.1): the old session renewed with the device client first
+        let (ext, lossy, bytes) = open_full(&s, who.clone(), "1", &dispatch).await.unwrap().unwrap();
+        assert_eq!((ext, lossy), ("flac", false));
+        assert!(bytes.starts_with(b"fLaC"));
+        let renewal = seen.lock().unwrap().tokens.last().unwrap().clone();
+        assert!(
+            renewal.contains("grant_type=refresh_token")
+                && renewal.contains("refresh_token=dev-rt")
+                && renewal.contains("client_id=dev-id")
+                && renewal.contains("client_secret=dev-secret")
+                && renewal.contains("scope=r_usr+w_usr+w_sub"),
+            "{renewal}"
+        );
+        let raw = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(tidal_unofficial::STATE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            raw.contains("dev-at-renewed") && !raw.contains(r#""client""#),
+            "still a device session"
+        );
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], "full tracks are playing", "{u}");
+        assert!(u["health"].get("lossy").is_none(), "{u}");
+
+        // DASH FLAC, hi-res
+        let (ext, lossy, bytes) = open_full(&s, who.clone(), "2", &dispatch).await.unwrap().unwrap();
+        assert_eq!(
+            (ext, lossy, bytes.as_slice()),
+            ("m4a", false, b"[init][1][2][3]".as_slice())
+        );
+        // DASH AAC for HI_RES_LOSSLESS: asked again as LOSSLESS, which is FLAC
+        let (ext, lossy, _) = open_full(&s, who.clone(), "3", &dispatch).await.unwrap().unwrap();
+        assert_eq!((ext, lossy), ("flac", false), "the LOSSLESS answer plays");
+        // AAC either way: played, and the health line says why and what to do
+        let (ext, lossy, _) = open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        assert_eq!((ext, lossy), ("m4a", true));
+        let asked: Vec<(String, String)> = seen.lock().unwrap().asked.clone();
+        let q = |id: &str| {
+            asked
+                .iter()
+                .filter(|(t, _)| t == id)
+                .map(|(_, q)| q.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(q("1"), ["HI_RES_LOSSLESS"]);
+        assert_eq!(q("2"), ["HI_RES_LOSSLESS"]);
+        assert_eq!(q("3"), ["HI_RES_LOSSLESS", "LOSSLESS"]);
+        assert_eq!(q("4"), ["HI_RES_LOSSLESS", "LOSSLESS"]);
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["ok"], true, "AAC plays: {u}");
+        assert_eq!(u["health"]["lossy"], true, "{u}");
+        assert_eq!(u["health"]["detail"], tidal_unofficial::AAC_ONLY_DEVICE);
+        assert!(tidal_unofficial::AAC_ONLY_DEVICE.contains("Sign in with TIDAL again for lossless"));
+        assert_eq!(u["enabled"], true, "AAC is not a failure of the mode");
+        // A lossless track again: OK again
+        open_full(&s, who.clone(), "1", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], "full tracks are playing", "{u}");
+        // High asks LOSSLESS only: no second question
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"quality": "high"})),
+        )
+        .await;
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        assert_eq!(
+            seen.lock().unwrap().asked.last().unwrap(),
+            &("4".to_string(), "LOSSLESS".to_string())
+        );
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .asked
+                .iter()
+                .filter(|(t, _)| t == "4")
+                .count(),
+            3
+        );
+        // A browser session's AAC track: that track, not the sign-in
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"quality": "max"})),
+        )
+        .await;
+        tidal_unofficial::update(&s, &who, |st| {
+            st.session.as_mut().unwrap().client = tidal_unofficial::ClientKind::Pkce
+        });
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], tidal_unofficial::AAC_TRACK, "{u}");
+
+        // One line per opened track with what TIDAL answered; no address or token in any line
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("TIDAL full track ")).collect();
+        let line = |id: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(&format!("TIDAL full track {id} ")))
+                .copied()
+                .unwrap_or_else(|| panic!("no line for {id}: {text}"))
+        };
+        assert!(line("1").contains("(code sign-in): asked HI_RES_LOSSLESS, TIDAL answered audioQuality=LOSSLESS manifestMimeType=application/vnd.tidal.bts codecs=flac bitDepth=16 sampleRate=44100"), "{}", line("1"));
+        assert!(line("2").contains("audioQuality=HI_RES_LOSSLESS manifestMimeType=application/dash+xml codecs=flac bitDepth=24 sampleRate=96000"), "{}", line("2"));
+        assert!(line("3").contains("asked LOSSLESS, TIDAL answered audioQuality=LOSSLESS") && line("3").contains("(HI_RES_LOSSLESS had answered audioQuality=HIGH manifestMimeType=application/dash+xml codecs=mp4a.40.2 sampleRate=44100)"), "{}", line("3"));
+        assert!(line("4").contains("codecs=mp4a.40.2"), "{}", line("4"));
+        assert!(lines.iter().any(|l| l.contains("(browser sign-in)")), "{text}");
+        for secret in [
+            "SECRET-CDN",
+            "dev-secret",
+            "dev-at",
+            "dev-rt",
+            FAKE_BROWSER_SECRET,
+        ] {
+            assert!(!text.contains(secret), "a secret in the logs: {secret}");
+        }
     }
 }

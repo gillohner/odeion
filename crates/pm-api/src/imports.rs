@@ -185,7 +185,9 @@ pub(crate) fn pasted_tidal(text: &str) -> Result<Import, String> {
 pub(crate) fn import_of(id: &str, app: &str, place: &str, session: Session) -> Import {
     let renews = session.refresh_token.as_deref().is_some_and(|r| !r.is_empty())
         && session.from.as_deref() != Some("tidal-dl")
-        && session.from.as_deref() != Some("streamrip");
+        && session.from.as_deref() != Some("streamrip")
+        // A browser sign-in's refresh token needs this build's browser client
+        && (session.client.is_device() || crate::project_apps::tidal_pkce_client().is_some());
     let expired = session.expires_at > 0 && session.expires_at <= now();
     let reason = if session.access_token.trim().is_empty() {
         Some("no access token in it".to_string())
@@ -312,6 +314,12 @@ fn python_tidal(v: &Value) -> Option<Session> {
         country: String::new(),
         session_id: field("session_id").and_then(Value::as_str).map(str::to_string),
         from: None,
+        // A python-tidal browser (PKCE) sign-in is renewed with that client, not the device one
+        client: if field("is_pkce").and_then(Value::as_bool) == Some(true) {
+            crate::tidal_unofficial::ClientKind::Pkce
+        } else {
+            crate::tidal_unofficial::ClientKind::Device
+        },
     })
 }
 
@@ -332,6 +340,7 @@ fn tidal_dl(v: &Value) -> Option<Session> {
         country: v["countryCode"].as_str().unwrap_or_default().to_string(),
         session_id: None,
         from: None,
+        client: Default::default(),
     })
 }
 
@@ -369,6 +378,7 @@ fn streamrip(text: &str) -> Option<Session> {
         country: got.get("country_code").cloned().unwrap_or_default(),
         session_id: None,
         from: None,
+        client: Default::default(),
     })
 }
 
@@ -387,6 +397,7 @@ fn bare_token(text: &str) -> Option<Session> {
         country: String::new(),
         session_id: None,
         from: None,
+        client: Default::default(),
     })
 }
 
