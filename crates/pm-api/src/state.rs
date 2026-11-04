@@ -108,6 +108,10 @@ pub struct NodeState {
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     /// HEOS players (Denon, Marantz) among the renderers: a zone of them only is a HEOS group.
     pub heos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// Every UPnP renderer by output id: its zone follows the volume by event (upnp_events.rs).
+    pub renderers: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// The renderers' event subscriptions, by callback token.
+    pub gena: crate::upnp_events::Gena,
     /// The snapserver whose groups are zones (`[outputs] snapcast`).
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
@@ -397,6 +401,8 @@ impl NodeState {
             stream_secret,
             sonos: Default::default(),
             heos: Default::default(),
+            renderers: Default::default(),
+            gena: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
             mpd: Default::default(),
@@ -513,11 +519,23 @@ impl NodeState {
         // it; the pages show what the device says), for outputs with a hardware volume. The
         // task ends with the zone.
         if zone.output().caps().hw_volume.is_some() {
+            // A UPnP renderer that sends events: followed live; the poll steps aside meanwhile
+            let following = Arc::new(crate::upnp_events::Following::default());
+            let renderer = self
+                .renderers
+                .lock()
+                .expect("renderers lock")
+                .get(&zone.output().id())
+                .cloned();
+            if let Some(out) = renderer {
+                crate::upnp_events::follow(self, &zone, out, following.clone());
+            }
             let weak = Arc::downgrade(&zone);
             let node = Arc::downgrade(self);
             let zid = zone.id().clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(volume_poll());
+                let mut first = true;
                 loop {
                     tick.tick().await;
                     // Gone from the registry (ungrouped, the device left): the poll ends too
@@ -525,6 +543,15 @@ impl NodeState {
                     if n.zones.get(&zid).is_none() {
                         break;
                     }
+                    // Read once at the start; after that only while someone is looking and no
+                    // events are coming
+                    if !first
+                        && (!n.events.watched() || following.live.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        continue;
+                    }
+                    first = false;
+                    drop(n);
                     let Some(z) = weak.upgrade() else { break };
                     z.refresh_volume().await;
                 }
@@ -1041,6 +1068,10 @@ impl NodeState {
                 .with_describe(self.describe_for_renderers()),
         );
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
+        self.renderers
+            .lock()
+            .expect("renderers lock")
+            .insert(id.clone(), out.clone());
         if pm_out_upnp::heos::is_heos(&r) {
             self.heos
                 .lock()

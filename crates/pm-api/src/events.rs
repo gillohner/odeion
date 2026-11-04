@@ -62,6 +62,17 @@ struct Inner {
     seq: Mutex<u64>,
     library_rev: AtomicU64,
     boot: String,
+    /// Controllers connected to `/v1/events` right now (the volume poll runs only while one is).
+    watchers: std::sync::atomic::AtomicUsize,
+}
+
+/// Counts one connected controller while it lives.
+pub struct Watching(Arc<Inner>);
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        self.0.watchers.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl EventBus {
@@ -73,6 +84,7 @@ impl EventBus {
                 seq: Mutex::new(0),
                 library_rev: AtomicU64::new(0),
                 boot: format!("{:016x}", rand::random::<u64>()),
+                watchers: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -87,6 +99,17 @@ impl EventBus {
         // No receivers is fine: nobody is listening.
         let _ = self.inner.tx.send(Sequenced { seq: *seq, event });
         *seq
+    }
+
+    /// A controller is watching until the returned guard drops.
+    pub fn watch(&self) -> Watching {
+        self.inner.watchers.fetch_add(1, Ordering::Relaxed);
+        Watching(self.inner.clone())
+    }
+
+    /// Whether any controller is connected to `/v1/events`.
+    pub fn watched(&self) -> bool {
+        self.inner.watchers.load(Ordering::Relaxed) > 0
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Sequenced> {
@@ -183,6 +206,7 @@ pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<Api
 }
 
 async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Option<String>) {
+    let _watching = s.events.watch();
     let (mut tx, mut rx) = socket.split();
     let (mut events, seq) = s.events.subscribe_at();
     // A listener sees file names, not where the owner keeps files (as in every JSON answer)
