@@ -1481,7 +1481,10 @@
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
     if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
     if (choosing) {
-      const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`).join('');
+      const wayHtml = (w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`;
+      // The everyday ways first; the rest under Advanced (open when one of them is picked)
+      const adv = si.ways.filter((w) => w.advanced);
+      const ways = si.ways.filter((w) => !w.advanced).map(wayHtml).join('') + (adv.length ? `<details class="ways-adv" data-sg="advanced" ${adv.some((w) => w.id === pick) ? 'open' : ''}><summary>Advanced</summary><div class="ways">${adv.map(wayHtml).join('')}</div></details>` : '');
       rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
     }
     if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
@@ -1530,62 +1533,110 @@
     const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
     if (cfg.after) cfg.after(si, h, el);
   };
-  // TIDAL: the official app in the browser, a device code with your own client; quality and
-  // health under the device way, which is what the Full tracks switch used to turn on (STEWARD-TIDAL-FULL.md).
+  // TIDAL (owner, 2026-11-04): Sign in with TIDAL (the browser sign-in, Recommended: full tracks
+  // lossless and hi-res), the code sign-in as the fallback, and under Advanced the official app,
+  // your own device client and a pasted token; quality and health under the full-tracks sign-in.
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
+  // Sign in with TIDAL: TIDAL's sign-in in a new tab (opened at the click, so no popup blocker
+  // stops it), then the page here asks for the address TIDAL lands on. In the desktop and Android
+  // apps (window.pmDesktop) another origin's window.open goes to the system browser and a blank
+  // tab would take the app's own window: TIDAL's address is opened there once it is known.
+  const tidalPkceStart = async (h, btn) => {
+    if (btn) btn.disabled = true;
+    const inApp = !!window.pmDesktop;
+    const tab = inApp ? null : window.open('about:blank', '_blank');
+    try {
+      if (!(await h.choose('browser'))) { if (tab) tab.close(); if (btn) btn.disabled = false; return; }
+      const r = await api('POST', '/sources/tidal/unofficial/browser');
+      h.m.browserUrl = r.url; h.m.way = 'browser';
+      if (inApp) window.open(r.url, '_blank');
+      else if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
+    } catch (e) { if (tab) tab.close(); toast(e.message, 'error'); }
+    // The chooser is drawn again: whoever comes back from TIDAL's tab lands on the address field
+    await h.refill();
+    const field = $('#tbfinish input[name=text]'); if (field) field.focus();
+  };
+  const tidalPkceSteps = (u, h) => {
+    const waiting = !!u.browser_pending;
+    const open = h.m.browserUrl ? `<a class="btn ghost sm" href="${esc(h.m.browserUrl)}" target="_blank" rel="noopener">${icon('external')} Open TIDAL’s sign-in again</a>` : '';
+    return stepCard(1, 'Sign in at TIDAL', waiting, 'Opens TIDAL’s sign-in in a new tab. Sign in there; TIDAL then shows a page that may say “Oops” or look empty. That is the one: keep it open.',
+      `<div class="toolbar"><button class="btn primary" id="tbin">${icon('external')} ${waiting ? 'Sign in with TIDAL again' : 'Sign in with TIDAL'}</button>${open}</div>`)
+      + (waiting ? stepCard(2, 'Paste its address', false, 'Copy the whole address of that TIDAL page from the address bar and paste it here.',
+        `<form class="stack" id="tbfinish" autocomplete="off"><div class="toolbar"><input class="input" name="text" type="text" inputmode="url" placeholder="https://tidal.com/android/login/auth?code=…" aria-label="Address of the TIDAL page" autocomplete="off" spellcheck="false" required><button class="btn primary" type="submit">Done</button></div><p class="check-out small bad" id="tbfinisherr" role="alert" hidden></p></form>`) : '');
+  };
   const tidalSigninCfg = (el) => ({
     source: 'tidal', name: 'TIDAL', el,
     actions: (pick, si, h) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
+      const own = !u.from && u.signed_in;
+      if (pick === 'browser') return own && u.session_client === 'pkce' ? h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') : tidalPkceSteps(u, h);
       if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
-        const client = u.client_from ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
-        // No device client yet: the step card first (the node never ships another party's)
-        if (!u.client_from) return stepCard(1, 'Device client ID and secret', false, `Full tracks need a TIDAL device client: enter one you are allowed to use; the node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
-          `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
         if (u.pending) return tidalCodeBox(u.pending);
-        if (u.signed_in) return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') + client;
-        return `<div class="toolbar"><button class="btn primary" id="tfin">${h.m.codeExpired ? 'New code' : 'Sign in with a code'}</button><span class="muted small">${h.m.codeExpired ? 'The code expired before it was entered. ' : ''}A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>${client}`;
+        if (own && u.session_client === 'device') return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '');
+        return `<div class="toolbar"><button class="btn primary" id="tfin">${h.m.codeExpired ? 'New code' : 'Sign in with a code'}</button><span class="muted small">${h.m.codeExpired ? 'The code expired before it was entered. ' : ''}A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>`;
+      }
+      if (pick === 'own-device') {
+        const now = u.client_from === 'settings' ? '<p class="muted small">Your device client is set here and used for the code sign-in. <button class="btn ghost sm" id="tfclientforget">Forget it</button></p>'
+          : u.client_from === 'config' ? '<p class="muted small">A device client is set in the node config; one entered here is used instead.</p>' : '';
+        return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `A TIDAL device client you are allowed to use, for the code sign-in; it replaces the built-in one for everyone here. The node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
+          `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
       }
       if (pick === 'import') return h.importArea({ fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json' });
-      if (pick === 'paste') return h.pasteArea({ label: 'Token file contents or access token', placeholder: 'Token file contents, or an access token (a refresh token on the next line)' });
+      if (pick === 'paste') return h.importArea({ withPaste: true, fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json', label: 'Token file contents or access token', placeholder: 'Token file contents, or an access token (a refresh token on the next line)' });
       return null;
     },
     wire: (pick, si, h, act) => {
-      const u = si.details.unofficial || {};
       const a = $('#tidalin'); if (a) a.onclick = async () => { if (await h.choose('app')) tidalBrowserSignIn(a); };
       wirePasteBack('tidal', 'TIDAL signed in');
+      const tb = $('#tbin'); if (tb) tb.onclick = () => tidalPkceStart(h, tb);
+      const tf = $('#tbfinish'); if (tf) tf.onsubmit = async (e) => {
+        e.preventDefault(); const btn = tf.querySelector('button[type=submit]'); const err = $('#tbfinisherr'); btn.disabled = true; err.hidden = true;
+        try { await api('POST', '/sources/tidal/unofficial/browser/finish', { text: new FormData(tf).get('text') }); h.m.browserUrl = null; toast('TIDAL signed in: full tracks, lossless'); h.done(); }
+        catch (er) { err.textContent = er.message; err.hidden = false; btn.disabled = false; }
+      };
       const d = $('#tfin'); if (d) d.onclick = async () => { d.disabled = true; h.m.codeExpired = false; if (await h.choose('device')) { try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } } h.refill(); };
       const cf = $('#tfclient'); if (cf) {
         wireSecretToggles(cf); wireAppPaste(cf, 'tidal');
         const tc = $('#tfcheck'); if (tc) tc.onclick = () => { const f = new FormData(cf); runCheck(tc, $('#tfcheckout'), '/sources/tidal/unofficial/client/check', { client_id: f.get('id'), client_secret: f.get('secret') }); };
-        cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button[type=submit]').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
+        cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button[type=submit]').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); h.m.way = 'device'; if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
       }
       const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast('Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
     },
     // The full-tracks status at the top: Off / Needs a device client / Needs sign-in / Working
     before: (si) => {
-      const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok;
+      const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok; const lossy = !!(u.health && u.health.ok && u.health.lossy);
       // A session first (also one imported or pasted, which needs no device client here), then
       // a code waiting, then what is missing
       const st = u.signed_in
         ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-          : !u.enabled ? { cls: '', label: 'Off', text: `Signed in, switched off here (pick ${u.client_from ? 'the code sign-in' : 'the way it came from'} below to use it).` }
+          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the way it came from below to use it).' }
+          // AAC only is a code sign-in's (TIDAL sends its device client AAC); a browser
+          // session's AAC track is that track (the Health row below says so)
+          : lossy && u.session_client !== 'pkce' ? { cls: 'warn', label: 'AAC only', text: 'Full tracks, but TIDAL sends them as AAC (lossy).' }
           : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
-        : !u.client_from ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (pick the code sign-in below).' }
-        : { cls: '', label: 'Needs sign-in', text: 'Needs your TIDAL sign-in with a code (pick it below).' };
+        : u.browser_pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the address of the TIDAL page you landed on (step 2 below).' }
+        : !u.client_from && !u.browser_available ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (Advanced › Your own device client below).' }
+        : { cls: '', label: 'Needs sign-in', text: `Needs your TIDAL sign-in (${u.browser_available ? 'Sign in with TIDAL' : 'the code sign-in'} below).` };
       return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your TIDAL account. ${guideLink('tidal-full-tracks.md')}`, u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : '')];
     },
     extra: (si) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const rows = [];
       const deviceOn = !!(si.in_use && si.in_use.way !== 'app');
+      // A code sign-in where the browser one is possible: one line, with the button
+      const codeSession = u.signed_in && u.enabled && !u.from && u.session_client === 'device' && u.browser_available;
+      const again = '<button class="btn primary sm" id="tbagain">Sign in with TIDAL</button>';
       if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">Full tracks switched themselves off: ${esc(u.health.detail)}. TIDAL plays 30-second previews until it works again.${u.from ? ' That sign-in came from ' + esc(u.from === 'pasted' ? 'a pasted token' : u.from) + '; pick another way below, or a newer file.' : ''}<div class="actions"><button class="btn sm" id="tfretry">Try again</button></div></div>`);
       if (deviceOn) {
         rows.push(sgRow('Quality', 'Max plays up to 24-bit/192 kHz where TIDAL has it.', `<select class="input" id="tfq" aria-label="TIDAL full track quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="high" ${u.quality === 'high' ? 'selected' : ''}>High (16-bit/44.1 kHz)</option></select>`));
-        if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+        if (u.health && u.health.ok && u.health.lossy) rows.push(sgRow('Health', `${esc(u.health.detail)}.`, `<span class="pill warn">AAC</span>${codeSession ? again : ''}`));
+        else {
+          if (codeSession) rows.push(sgRow('Lossless', 'Sign in with TIDAL again for lossless.', again));
+          if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
+        }
         if (!st.signed_in) rows.push(sgRow('Your collection', `Collection and playlist imports go through ${esc((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
-      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to the device sign-in.`, '<span class="pill warn">previews</span>'));
+      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to Sign in with TIDAL.`, '<span class="pill warn">previews</span>'));
       // The page has no general Status row (the full-tracks status leads): a problem with the
       // sign-in in use still shows, as a phone has no source list beside it
       const src = (state.sources || []).find((x) => x.id === 'tidal'); const ss = src && srcState({ ...src, enabled: true });
@@ -1598,7 +1649,9 @@
       const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
       const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
       const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
-      const out = $('#tfout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); h.m.change = false; h.m.codeExpired = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
+      // From a code sign-in to the browser one: the chooser opens on it and TIDAL's tab opens
+      const ag = $('#tbagain'); if (ag) ag.onclick = () => { h.m.change = true; h.m.way = 'browser'; tidalPkceStart(h, ag); };
+      const out = $('#tfout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); h.m.change = false; h.m.codeExpired = false; h.m.browserUrl = null; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
       clearTimeout(state.tidalFullPoll); clearInterval(state.tidalCountdown);
       if (u.pending) {
         // The time left, each second; gone, the page says so and offers a new code
@@ -2337,7 +2390,6 @@
     return `${what}${conv} · ${from}`;
   };
   // Why the node converts, from the signal path's own notes (resample, requantize, DSD to PCM)
-  const conversionWhy = (np) => (np.signal_path ? np.signal_path.stages.filter((x) => /^(resample|requantize|dither|dop|src)$/.test(x.name) || (x.name === 'decode' && x.note)).map((x) => `${x.name}${x.note ? ': ' + x.note : ''}`) : []);
   const headline = (p) => p.stages.reduce((w, s) => (ORDER[s.quality] > ORDER[w] ? s.quality : w), 'bit_perfect');
   const albumIdOf = (it) => { const t = state.trackCache.get(it.uri); return t && t.album ? t.album.id : null; };
   // The artists a credit names ("Sefa, Dr. Peacock" → two links), like the node splits them
@@ -2688,13 +2740,10 @@
       <div class="pop-title">DSP · ${esc(z.name)}</div>
       <div class="qp-dsp">${dsp}</div>
       <div class="pop-title">Volume</div>
-      <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>
-      <div class="qp-foot">${np && np.format ? '<button class="btn sm ghost" id="qpquality">Quality choices…</button>' : ''}<button class="btn sm ghost" id="qpnow">${icon('play')} Now playing</button></div>`;
+      <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>`;
     qPanelKey = qpKey();
     $$('[data-dsp]', qPanel).forEach((c) => { if (state.dspBusy) c.disabled = true; c.onchange = () => toggleDsp(c.dataset.dsp, c.checked); });
     const qd = $('#qpdsp', qPanel); if (qd) qd.onclick = () => { closeQPanel(); state.dspOpen = state.zone; setView('settings', 'playback'); };
-    const qq = $('#qpquality', qPanel); if (qq) qq.onclick = () => { closeQPanel(); qualitySheet(); };
-    const qn = $('#qpnow', qPanel); if (qn) qn.onclick = () => { closeQPanel(); toggleNowPlaying(true); };
     const v = $('#qpvol', qPanel); setFill(v);
     if (had) { const back = $(had, qPanel); if (back) back.focus(); }
     v.oninput = () => setFill(v);
@@ -2887,8 +2936,8 @@
       if (j >= 0) { e.preventDefault(); e.stopPropagation(); openSheet(ks[j]); }
     };
     $('#npsheetclose').onclick = () => { const was = sheet; state.npSheet = null; renderNowPlaying(); const t = $(`.np-tabs [data-npsheet="${was}"]`, overlay) || $('.np-tabs [data-npsheet]', overlay); if (t) t.focus(); };
-    // What is streaming opens the quality sheet (#94); without it, Details (the signal path)
-    $('#npquality').onclick = () => (np.format ? qualitySheet() : openSheet('details'));
+    // The quality line opens Details (the signal path)
+    $('#npquality').onclick = () => openSheet('details');
     {
       // Phones: drag the sheet's head down to close it
       let y0 = null; const head = $('.np-sheet-head', overlay);
@@ -2917,64 +2966,6 @@
   // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
   // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
   // Play from order and the zone's output settings.
-  // On a source's tab, bring its quality setting into view (it may load a moment after the page)
-  const focusQualityControl = (svc, tries = 20) => {
-    if (state.view !== 'sources') return; // they went elsewhere
-    // that service's own control ("Qobuz quality", "TIDAL full track quality"), not another's
-    const name = String(SERVICE_NAMES[svc] || srcName(svc) || '').toLowerCase();
-    const el = name && $$('[aria-label]', main).find((e) => { const l = e.getAttribute('aria-label').toLowerCase(); return l.startsWith(name) && l.includes('quality') && e.offsetParent !== null; });
-    if (!el) { if (tries > 0) setTimeout(() => focusQualityControl(svc, tries - 1), 200); return; }
-    el.scrollIntoView({ block: 'center' }); el.focus({ preventScroll: true });
-    const row = el.closest('.set-row') || el; row.classList.add('flash'); setTimeout(() => row.classList.remove('flash'), 1600);
-  };
-  const qualitySheet = async () => {
-    const z = currentZone(); const np = z && z.now_playing; if (!np) return;
-    const f = np.format || {};
-    const svc = f.service || '';
-    const d = document.createElement('dialog'); d.className = 'dialog qsheet';
-    const svcRow = svc ? '' : ' hidden';
-    const conv = conversionWhy(np);
-    // "As it arrives" only when the signal path says bit-perfect; else what changes the sound
-    const enhancing = np.signal_path ? np.signal_path.stages.filter((x) => x.quality !== 'bit_perfect').map((x) => `${x.name}${x.note ? ': ' + x.note : ''}`) : [];
-    const onTheWay = conv.length ? `. Changed on the way: ${esc(conv.join('; '))}`
-      : np.signal_path && headline(np.signal_path) === 'bit_perfect' ? ', as it arrives'
-        : enhancing.length ? `. On the way: ${esc(enhancing.join('; '))}` : '';
-    const arriving = streamLabel(np, true) || (np.signal_path ? fmtFormat(np.source_format) : 'Played by this browser');
-    const zonePlays = np.output_format ? `Plays it as ${np.output_format.kind === 'dsd' ? fmtFormat(np.output_format) : `${kHz(np.output_format.rate_hz)} kHz / ${np.output_format.bits} bit`}` : '';
-    d.innerHTML = `<h2>Sound quality</h2>
-      <div class="set-rows">
-        <div class="set-row"><div class="set-label"><div class="set-name">Arriving</div><p class="set-help">${esc(arriving)}</p></div></div>
-        ${zonePlays ? `<div class="set-row"><div class="set-label"><div class="set-name">On ${esc(z.name)}</div><p class="set-help">${esc(zonePlays)}${onTheWay}.</p></div></div>` : ''}
-        <div class="set-row" id="qsvc"${svcRow}><div class="set-label"><div class="set-name">${esc(svc === 'library' ? 'Your files' : SERVICE_NAMES[svc] || srcName(svc) || 'Source')}</div><p class="set-help muted">${svc === 'library' ? 'Your files play as they are.' : '<span class="spin"></span> Asking for its quality choices…'}</p></div></div>
-      </div>
-      <div class="dialog-actions">${isOwner() ? '<button class="btn ghost" data-qplay>Play from order</button><button class="btn ghost" data-qout>Output and DSP</button>' : ''}<button class="btn" data-qclose>Close</button></div>`;
-    document.body.appendChild(d);
-    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
-    const done = (fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); };
-    transients.push(tr); pushTransient();
-    $('[data-qclose]', d).onclick = () => done();
-    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
-    const qp = $('[data-qplay]', d); if (qp) qp.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); setView('settings', 'playfrom'); };
-    const qo = $('[data-qout]', d); if (qo) qo.onclick = () => { done(); if (!overlay.hidden) toggleNowPlaying(); state.dspOpen = state.zone; setView('settings', 'playback'); };
-    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
-    if (svc === 'library') return;
-    const box = $('#qsvc .set-help', d);
-    const goSource = `<button class="lnk" data-qsrc>${esc(SERVICE_NAMES[svc] || srcName(svc))} settings</button>`;
-    // Straight to the service's own quality setting (its Sources tab), for owners
-    const goQuality = isOwner() && svc && svc !== 'stream' && svc !== 'library' ? `<button class="lnk qjump" data-qsrc>${esc(SERVICE_NAMES[svc] || srcName(svc))} quality settings ›</button>` : '';
-    let qs = null;
-    if (isOwner() && svc && svc !== 'stream') { try { qs = await api('GET', `/sources/${encodeURIComponent(svc)}/quality`); } catch { qs = null; } }
-    if (!d.isConnected) return;
-    if (qs && (qs.options || []).length) {
-      const when = qs.applies === 'now' ? 'Applies now.' : 'Applies from the next song.';
-      box.classList.remove('muted');
-      box.innerHTML = goQuality + `<span class="chips" role="radiogroup" aria-label="Quality">${qs.options.map((o) => `<button class="chip scope ${o.id === qs.current ? 'on' : ''}" role="radio" aria-checked="${o.id === qs.current}" data-qopt="${esc(o.id)}" title="${esc(o.note || '')}">${esc(o.label)}</button>`).join('')}</span><span class="muted small"> ${when}</span>${qs.note ? `<span class="muted small qnote">${esc(qs.note)}</span>` : ''}`;
-      $$('[data-qopt]', box).forEach((b) => b.onclick = async () => { try { await api('PUT', `/sources/${encodeURIComponent(svc)}/quality`, { id: b.dataset.qopt }); $$('[data-qopt]', box).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); toast(`${SERVICE_NAMES[svc] || srcName(svc)}: ${b.textContent}. ${when}`); } catch (e) { toast(e.message, 'error'); } });
-    } else {
-      box.innerHTML = f.preview ? `Previews only (30 s). Full songs need another service.${isOwner() ? ' ' + goSource : ''}` : qs && qs.note ? esc(qs.note) : svc === 'stream' || !isOwner() ? 'As the stream sends it.' : `Its quality is set in ${goSource}.`;
-    }
-    const gs = $('[data-qsrc]', d); if (gs) gs.onclick = async () => { done(); if (!overlay.hidden) toggleNowPlaying(); await setView('sources', { source: svc }); focusQualityControl(svc); };
-  };
   // Put back what the last render had (scroll, focus) once the content it needs is there; for that
   // render only, and only in its first seconds so a late answer never yanks the view
   const npRestore = () => {

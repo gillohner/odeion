@@ -276,9 +276,12 @@ in use or yours, and what the service limits.
 - **Spotify through librespot (unofficial):** install librespot yourself (`cargo install librespot` or your
   distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › librespot. It can
   play on the machine's sound or into one of the node's zones.
-- **TIDAL full tracks (unofficial):** off by default; switch it on under Sources › TIDAL › Full tracks and press Sign
-  in with a code. It needs a TIDAL device client of your own, entered there or as `[tidal] unofficial_client_id/secret`:
-  no build carries one (an app from TIDAL's developer site is not a device client and won't work there).
+- **TIDAL full tracks (unofficial):** Sources › TIDAL › Sign in › **Sign in with TIDAL** (Recommended): sign in at TIDAL
+  in a new tab and paste the address of the page you land on; lossless and hi-res. **Sign in with a code** is the
+  fallback (TIDAL may send it AAC only). A release build carries both clients; a build from source without them has
+  neither: Sign in with TIDAL is then unavailable and the code sign-in needs a device client of your own (Advanced ›
+  Your own device client, or `[tidal] unofficial_client_id/secret`; an app from TIDAL's developer site is not a device
+  client). See [the guide](guides/tidal-full-tracks.md).
 - **SoundCloud (unofficial):** off by default. The node has no built-in client; you enter a SoundCloud web client ID
   you are allowed to use under Sources › SoundCloud, and, for your likes and playlists, your own sign-in token.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the
@@ -301,6 +304,12 @@ in use or yours, and what the service limits.
   fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).
 - A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps; add your
   own in Settings › This node › Service apps.
+- TIDAL's full-track clients are build inputs too, but secrets: `PM_TIDAL_PKCE_CLIENT_ID` / `_SECRET` (Sign in with
+  TIDAL) and `PM_TIDAL_DEVICE_CLIENT_ID` / `_SECRET` (the code sign-in), each pair compiled in masked only when both
+  values are set (`crates/pm-api/build.rs`; masked is not encrypted). The release workflow passes them only to the steps
+  that build, and the image build only as BuildKit secrets to its build stage, never as build arguments:
+  `docker buildx build --no-cache-filter build --secret id=PM_TIDAL_PKCE_CLIENT_ID,env=PM_TIDAL_PKCE_CLIENT_ID …`
+  (one `--secret` per name; keep `--no-cache-filter build`, since a secret's contents don't invalidate the cache).
 
 ## Phones and desktops without the native app
 
