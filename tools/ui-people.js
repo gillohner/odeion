@@ -1,4 +1,4 @@
-// Settings › People on phones and tablets (UX sweep 2026-11-01, S1–S5):
+// Settings › People on phones and tablets (UX sweep 2026-11-01, S1–S5; tablets have the desktop layout):
 // - Invite someone is three radio cards, one line each, and only the chosen one's details show;
 // - the key field takes a paste or a scanned QR code in any spelling Pubky apps show, and says so at the field when it isn't a key;
 //   other clipboard text never lands in the field, and a browser that can't read QR codes turns the camera off and says so;
@@ -104,7 +104,7 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       if (phone) {
         await page.waitForTimeout(300);
         assert.equal(await box.locator('details[data-fold="party"][open]').count(), 1, 'what was open stays open after the reload');
-        // Turned into a tablet and back: the folds follow the shell, and what was typed stays
+        // Turned into the desktop layout (a tablet's width) and back: the folds follow the shell, and what was typed stays
         await box.locator('.way', { hasText: 'Music only' }).click();
         await box.locator('#pinvname').fill('Cy');
         await page.setViewportSize({ width: 768, height: 900 });

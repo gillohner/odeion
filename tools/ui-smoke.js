@@ -28,7 +28,7 @@ if (!w.HTMLDialogElement.prototype.showModal) w.HTMLDialogElement.prototype.show
 w.addEventListener('error', (e) => errors.push('window.error: ' + e.message));
 w.addEventListener('unhandledrejection', (e) => errors.push('unhandled: ' + e.reason));
 process.on('unhandledRejection', (e) => errors.push('node unhandled: ' + (e && e.stack || e)));
-Object.defineProperty(w, 'innerWidth', { value: 1280, configurable: true }); // the desktop arrangement (jsdom is 1024 wide: a tablet)
+Object.defineProperty(w, 'innerWidth', { value: 1280, configurable: true }); // the desktop arrangement, wide (jsdom is 1024 wide)
 w.eval(js);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
@@ -194,7 +194,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (!dh) errors.push('deep link to a song page did not render');
   // Phone arrangement (Layout: Compact): tabs Home, Search, Library, Zones; Library opens the library
   // with its sections as chips; the account button's menu has Settings (and Log out); back returns.
-  w2.localStorage.setItem('pm.layout', 'compact'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
+  w2.localStorage.setItem('pm.layout', 'phone'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
   const tabs = [...w2.document.querySelectorAll('.bnav')].filter((b) => !b.classList.contains('rail-only')).map((b) => b.dataset.bnav).join(',');
   w2.document.querySelector('[data-bnav="library"]').click(); await sleep(1500);
   const libChips = [...w2.document.querySelectorAll('#main .libnav [data-libnav]')].map((b) => b.dataset.libnav);

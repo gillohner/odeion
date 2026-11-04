@@ -597,11 +597,17 @@
   };
   // Theme: System (no attribute), or Light/Dark kept in this browser (index.html applies it early).
   const themePref = () => { try { return localStorage.getItem('pm.theme') || 'system'; } catch { return 'system'; } };
-  // One design at three sizes (docs/ux/responsive.md): phone under 600 px (bottom tabs and a mini
-  // player), tablet to 1024 px (a rail), desktop above (the sidebar). Settings › Appearance › Layout
-  // can force Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop).
-  const layoutPref = () => { try { return localStorage.getItem('pm.layout') || 'auto'; } catch { return 'auto'; } };
-  const shellFor = (w, pref) => (pref === 'compact' || w < 600 ? 'phone' : pref === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop');
+  // Two layouts (docs/ux/responsive.md; owner, 2026-11-04): phone under 600 px (bottom tabs and a
+  // mini player) and desktop from 600 px (the sidebar and the full player bar), tablets included.
+  // Settings › Appearance › Layout can force either at any width. The old choices map across:
+  // Compact was the phone arrangement, Comfortable the tablet rail (now the desktop).
+  const LAYOUT_WAS = { compact: 'phone', comfortable: 'desktop' };
+  const layoutPref = () => {
+    let v = 'auto';
+    try { v = localStorage.getItem('pm.layout') || 'auto'; if (LAYOUT_WAS[v]) { v = LAYOUT_WAS[v]; localStorage.setItem('pm.layout', v); } } catch { /* no storage */ }
+    return v;
+  };
+  const shellFor = (w, pref) => (pref === 'phone' || pref === 'desktop' ? pref : w < 600 ? 'phone' : 'desktop');
   const shellMode = () => document.documentElement.dataset.shell || 'desktop';
   const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
   const setTheme = (v) => { try { if (v === 'system') localStorage.removeItem('pm.theme'); else localStorage.setItem('pm.theme', v); } catch { /* no storage */ } if (v === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; };
@@ -2260,9 +2266,8 @@
     // The devices' models: the owner's output list, fetched once
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
-  // The rail's Library: the library page last open, but never Sources on a tablet, where Sources
-  // has its own button (it may have been recorded while this was a phone)
-  const libHome = () => (state.lastLib && !(state.lastLib === 'sources' && shellMode() === 'tablet') ? state.lastLib : 'library');
+  // The tabs' Library: the library page last open
+  const libHome = () => state.lastLib || 'library';
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
@@ -2291,12 +2296,11 @@
   // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
-  // The tabs (phone) and the rail (tablet) mark the current place; again when the shell changes
+  // The phone's tabs mark the current place; again when the shell changes
   const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
   const markTabs = (v = state.view) => {
-    // The tablet rail has Sources of its own; on phones it is a Library section
-    const srcView = v === 'sources' || v === 'source-item'; const railSources = shellMode() === 'tablet';
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) && !(srcView && railSources) : k === 'sources' ? srcView && railSources : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // Sources is a Library section on phones
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   };
   const applyShell = () => {
     const now = shellFor(window.innerWidth, layoutPref());
@@ -2319,18 +2323,18 @@
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
   applyShell();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
-  const tablet = () => mq('(max-width: 1100px)');
+  const narrow = () => mq('(max-width: 1100px)'); // the sidebar is icons there unless expanded
   const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
   applySide();
   // Icon-only nav items keep their names as tooltips and accessible labels.
   $$('.nav-item').forEach((b) => { const t = (b.querySelector('span') || {}).textContent; if (t) { b.title = t; b.setAttribute('aria-label', t); } });
   $('#menu').setAttribute('aria-expanded', 'false');
   $('#menu').onclick = () => {
-    const collapsedNow = shell.classList.contains('collapsed') || (tablet() && !shell.classList.contains('expanded'));
-    const next = collapsedNow ? (tablet() ? 'names' : 'auto') : 'icons';
+    const collapsedNow = shell.classList.contains('collapsed') || (narrow() && !shell.classList.contains('expanded'));
+    const next = collapsedNow ? (narrow() ? 'names' : 'auto') : 'icons';
     try { localStorage.setItem('pm.sidebar', next); } catch { /* no storage */ }
     applySide();
-    $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(tablet() && next === 'auto')));
+    $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(narrow() && next === 'auto')));
   };
   // Menus, popovers and dialogs close on back and the page stays (STEWARD-UX-BRIEF-2 navigation).
   // Opening one adds a transient history entry; back pops it and closes them. Closing one any
@@ -2613,8 +2617,8 @@
     const live = np.stream_title;
     const links = npLinksHtml(it, live, shellMode() !== 'desktop');
     $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    // On phones and tablets the whole bar opens Now playing (the song page is one tap further, from
-    // its title there); with a mouse the bar's title and artist are links of their own
+    // On phones the whole bar opens Now playing (the song page is one tap further, from
+    // its title there); in the desktop layout the bar's title and artist are links of their own
     if (!waitHtml && !errHtml && shellMode() === 'desktop') bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
@@ -2763,7 +2767,7 @@
     openQPanel('#quality');
     const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
   };
-  // Where the bar has no room for the slider (narrow tablets and desktops): the Sound panel, at its volume
+  // Where the bar has no room for the slider (a desktop under 1100 px, tablets too): the Sound panel, at its volume
   $('#volbtn').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#volbtn');
@@ -2845,7 +2849,7 @@
   // tablets and desktops keep one open beside it. The open sheet survives re-renders (state.npSheet).
   const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
   const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
-  // Compact: the phone arrangement (sheets over the player), also on tablets narrower than two columns need
+  // Compact: the phone arrangement (sheets over the player), also in a desktop window narrower than two columns need
   const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
   const npSheetNow = () => { const k = npSheets().some(([x]) => x === state.npSheet) ? state.npSheet : null; return npCompact() ? k : k || 'queue'; };
   // What a re-render keeps: the sheet's scroll and the focused control
@@ -2918,7 +2922,7 @@
       </div>`;
     const sk = $('#npseek'); setFill(sk);
     // Now playing's own transport (phones: the mini player hides behind it)
-    // Volume in Now playing (phones and narrow tablets have none in the bar; UX sweep 11-01, A6):
+    // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
     const nv = $('#npvol', overlay); if (nv) { setFill(nv); nv.oninput = () => setFill(nv); nv.onchange = () => setZoneVol(z, nv.value); }
     else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
@@ -3275,8 +3279,7 @@
       navDepth = entry.depth;
     }
     state.view = v; state.viewArg = arg;
-    // Sources has a rail button of its own on tablets: the Library button doesn't open it there
-    if (LIB_TOP.some(([k]) => k === v) && !(v === 'sources' && shellMode() === 'tablet')) state.lastLib = v;
+    if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs(v);
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
@@ -4363,7 +4366,7 @@
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
-  const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
+  const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, at any width']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
   const colourGroup = (group, row) => group('Colour', row('Colour from where it plays', 'The player takes a tint from the service: TIDAL, Qobuz, Spotify…; your own files keep ours.', `<input type="checkbox" class="switch" role="switch" data-colour-pick="pm.srcColour" ${colourOn('pm.srcColour') ? 'checked' : ''} aria-label="Colour from where it plays">`)
@@ -4381,7 +4384,7 @@
     const dp = $('#densepick', main);
     if (dp) dp.onchange = () => { try { if (dp.checked) localStorage.setItem('pm.dense', '1'); else localStorage.removeItem('pm.dense'); } catch { /* no storage */ } applyShell(); };
   };
-  // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
+  // The library's sections as a row of chips above the page title; shown on phones (the desktop has the sidebar)
   const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
     if (!LIB_TOP.some(([k]) => k === state.view)) return '';
@@ -5179,7 +5182,7 @@
             ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : 'Public copy pending: shared on the next sync with your homeserver.')
             : (d.summary.synced ? 'Private on your homeserver.' : 'Private on this node; saved to your homeserver on the next sync.');
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button>${shellMode() === 'desktop' ? `<button class="btn danger" id="pldel">${icon('trash')} Delete</button>` : ''}</div><p class="muted small" role="status">${sharingNote}</p></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button>${shellMode() === 'desktop' && window.innerWidth > 1024 ? `<button class="btn danger" id="pldel">${icon('trash')} Delete</button>` : ''}</div><p class="muted small" role="status">${sharingNote}</p></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`
@@ -6470,7 +6473,7 @@
               const k = $$('input[name="pinvkind"]', box).find((i) => i.value === draft.kind); if (k) k.checked = true;
               ['pinvname', 'pinvquota', 'pinvkey'].forEach((id) => { $(`#${id}`, box).value = draft[id]; });
             }
-            // Turning a tablet into a phone (or back) folds the sections (or unfolds them)
+            // Turning a desktop window into a phone (or back) folds the sections (or unfolds them)
             box.reshell = () => loadPeople(true);
             const fit = () => {
               const k = kindOf(); const music = k === 'music';
