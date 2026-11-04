@@ -44,6 +44,92 @@ def adb(*args, check=True, timeout=180):
     return r.stdout
 
 
+def sh(*args, timeout=30):
+    """An adb shell command whose failure is an answer, not an error."""
+    try:
+        r = subprocess.run(["adb", "shell", *args], capture_output=True, text=True, timeout=timeout)
+        return r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        return ""
+
+
+def save_diagnostics(name):
+    """The crash and system buffers, so a harness failure on a new image has its cause."""
+    for buf in ("crash", "system"):
+        try:
+            r = subprocess.run(["adb", "logcat", "-d", "-v", "time", "-b", buf], capture_output=True,
+                               text=True, timeout=60)
+            (out / f"{name}-{buf}.txt").write_text(r.stdout[-400000:])
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def settle(steady=45, limit=600):
+    """Wait until boot is complete, the package service answers and system_server has kept the
+    same pid for `steady` seconds."""
+    adb("wait-for-device", check=False, timeout=300)
+    deadline = time.time() + limit
+    pid, since, pids = None, time.time(), []
+    while time.time() < deadline:
+        booted = sh("getprop", "sys.boot_completed").strip() == "1"
+        now = sh("pidof", "system_server").strip() or None
+        pm_ok = "package:android" in sh("pm", "path", "android")
+        if now != pid:
+            if now:
+                pids.append(now)
+            pid, since = now, time.time()
+        if booted and pm_ok and pid and time.time() - since >= steady:
+            log(f"system steady: system_server pid {pid} for {steady} s (pids seen {pids})")
+            return
+        time.sleep(3)
+    save_diagnostics("settle")
+    log(f"the system did not settle in {limit} s (system_server pids {pids}); going on")
+
+
+def installed():
+    return "package:" in sh("pm", "path", PKG)
+
+
+def install(tries=4):
+    for attempt in range(tries):
+        try:
+            adb("install", "-r", apk, timeout=600)
+            if installed():
+                return
+            raise RuntimeError("adb install returned, but pm path does not list the app")
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            log(f"install attempt {attempt + 1} failed: {e}")
+            save_diagnostics(f"install{attempt + 1}")
+            if attempt == tries - 1:
+                raise
+            time.sleep(10)
+            settle(steady=30)
+
+
+def wait_for_network(limit=300):
+    """The emulator's network comes up after boot: start the app only once it is validated or a
+    name resolves (ICMP can be missing on newer emulator networking, so either counts)."""
+    deadline = time.time() + limit
+    kicked = False
+    while time.time() < deadline:
+        conn = sh("dumpsys", "connectivity")
+        if "&VALIDATED" in conn:
+            log("network validated (dumpsys connectivity)")
+            return
+        if "1 received" in sh("ping", "-c", "1", "-W", "2", "pkarr.pubky.app", timeout=10):
+            log("network: pkarr.pubky.app answers ping")
+            return
+        if not kicked and time.time() > deadline - limit / 2:
+            log("no network yet: enabling wifi and data, airplane mode off")
+            sh("cmd", "connectivity", "airplane-mode", "disable")
+            sh("svc", "wifi", "enable")
+            sh("svc", "data", "enable")
+            kicked = True
+        time.sleep(3)
+    log(f"the emulator has no network after {limit} s")
+    (out / "connectivity.txt").write_text(sh("dumpsys", "connectivity", timeout=60))
+
+
 class Fixture(http.server.BaseHTTPRequestHandler):
     """The fixture homeserver's ICANN endpoint: answers /info, refuses every grant."""
 
@@ -106,30 +192,19 @@ def main():
     api = adb("shell", "getprop", "ro.build.version.sdk").strip()
     release = adb("shell", "getprop", "ro.build.version.release").strip()
     log(f"Android {release} (API {api})")
+    # The API 37 image reports boot_completed while system_server is still settling: early
+    # installs fail ("device offline", "Failure calling service package: Broken pipe") and
+    # system_server can restart once, which loses an install made before it. So wait until the
+    # system is steady, install, and check the app is still there right before it starts.
+    settle()
     adb("reverse", f"tcp:{PORT}", f"tcp:{PORT}")
-    # The API 37 image reports boot_completed before its package service takes an install
-    # ("device offline", "Failure calling service package: Broken pipe"): wait for it, try 3 times.
-    for attempt in range(3):
-        adb("wait-for-device", check=False, timeout=300)
-        for _ in range(60):
-            if "package:" in adb("shell", "pm", "path", "android", check=False, timeout=30):
-                break
-            time.sleep(5)
-        try:
-            adb("install", "-r", apk, timeout=600)
-            break
-        except (RuntimeError, subprocess.TimeoutExpired) as e:
-            log(f"install attempt {attempt + 1} failed: {e}")
-            if attempt == 2:
-                raise
-            time.sleep(20)
-    # The emulator's network comes up after boot: start the app only once a name resolves.
-    for _ in range(90):
-        if "1 received" in adb("shell", "ping", "-c", "1", "-W", "2", "pkarr.pubky.app", check=False):
-            break
-        time.sleep(2)
-    else:
-        log("the emulator has no network after 3 min")
+    install()
+    wait_for_network()
+    if not installed():
+        log("the app is gone after the system settled (system_server restarted): installing again")
+        settle()
+        install()
+    adb("reverse", f"tcp:{PORT}", f"tcp:{PORT}")
     adb("logcat", "-c")
     logfile = out / "logcat.txt"
     lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
@@ -152,7 +227,15 @@ def main():
 
     try:
         launch = ["shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1"]
-        adb(*launch)
+        try:
+            adb(*launch)
+        except RuntimeError as e:
+            log(f"launch failed ({e}); settling, checking the install and trying once more")
+            save_diagnostics("launch")
+            settle(steady=30)
+            if not installed():
+                install()
+            adb(*launch)
         steps = wait_for("phase1_done", 420)
         if "phase1_done" in steps:
             # As when the user switches to Ring to approve: the app goes to the background.
@@ -166,6 +249,7 @@ def main():
     finally:
         time.sleep(1)
         lc.terminate()
+        save_diagnostics("end")
     report = {"android": release, "api": api, "steps": steps, "fixture_requests": seen, "process_states": states}
     (out / "ring-probe.json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))
