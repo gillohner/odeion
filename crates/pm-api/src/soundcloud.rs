@@ -241,18 +241,16 @@ fn mark_down(s: &NodeState, why: &str) {
 
 // ---- API ---------------------------------------------------------------------------------------
 
-/// `GET <api>/<path>?client_id=…` (or a full `next_href`), signed in when the owner gave a token.
+/// `GET <api>/<path>?client_id=…` (or a full `next_href`, only on the API's own origin: the
+/// client ID and token go with it), signed in when the owner gave a token.
 async fn get_json(
     s: &NodeState,
     c: &Client,
     path: &str,
     query: &[(&str, String)],
 ) -> Result<Value, ApiError> {
-    let url = if path.starts_with("http://") || path.starts_with("https://") {
-        path.to_string()
-    } else {
-        format!("{}/{}", api_base(), path.trim_start_matches('/'))
-    };
+    let url = crate::sources::api_url(&api_base(), path)
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("SoundCloud: {e}")))?;
     // The sign-in token is the owner's: anyone else's request goes with the client ID alone
     let c = &for_person(c, &crate::accounts::asking());
     let mut req = s

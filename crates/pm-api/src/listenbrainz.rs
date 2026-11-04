@@ -248,7 +248,10 @@ pub(crate) fn track_started(s: &Arc<NodeState>, zone: Arc<pm_zones::Zone>, item:
                 .filter(|np| np.item.id == item.id && np.item.uri == item.uri)
             {
                 Some(np) if np.position_ms >= need_ms => {
-                    count_once(&s, &key);
+                    // Not if the zone went to a listener or a party meanwhile
+                    if crate::listens::plays_are_the_owners(&s, &zone.id().0) {
+                        count_once(&s, &key);
+                    }
                     break;
                 }
                 Some(_) => {}
@@ -261,7 +264,13 @@ pub(crate) fn track_started(s: &Arc<NodeState>, zone: Arc<pm_zones::Zone>, item:
 
 /// A zone played `item` to its end: that counts.
 pub(crate) fn track_ended(s: &Arc<NodeState>, zone: &pm_zones::ZoneId, item: &pm_zones::QueueItem) {
-    count_once(s, &(s.node_id.clone(), zone.0.clone(), item.id));
+    let key = (s.node_id.clone(), zone.0.clone(), item.id);
+    // The zone went to a listener or a party since the song started: not the owner's play
+    if !crate::listens::plays_are_the_owners(s, &zone.0) {
+        playing().lock().expect("playing").remove(&key);
+        return;
+    }
+    count_once(s, &key);
 }
 
 /// Send listens with any that are waiting; keep them all when ListenBrainz cannot take them.

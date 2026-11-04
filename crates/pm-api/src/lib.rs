@@ -2399,7 +2399,9 @@ async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResu
 /// public URL (constraint 2).
 /// A whole body or the byte range a browser asked for (seeking, resuming),
 /// with `Accept-Ranges` so the browser knows seeking is possible.
-pub(crate) fn ranged_response(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -> Response {
+/// `bytes` is shared, not copied: a range is a slice of it.
+pub(crate) fn ranged_response(headers: &HeaderMap, bytes: impl Into<bytes::Bytes>, mime: &str) -> Response {
+    let bytes: bytes::Bytes = bytes.into();
     let total = bytes.len();
     let range = headers
         .get(header::RANGE)
@@ -2422,7 +2424,7 @@ pub(crate) fn ranged_response(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -
                 (header::CONTENT_TYPE, mime.to_string()),
                 (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
             ],
-            axum::body::Body::from(bytes[start..=end].to_vec()),
+            axum::body::Body::from(bytes.slice(start..=end)),
         )
             .into_response(),
         None => (
@@ -17039,12 +17041,10 @@ exec sleep 300
         let (s, anna, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
         let app = router(s.clone());
         let at = std::time::Instant::now();
-        tidal::stream_cache().lock().unwrap().push((
-            format!("{anna}/9990001"),
-            at,
-            Arc::new(vec![1]),
-            "audio/mp4".into(),
-        ));
+        tidal::keep_stream(
+            &mut tidal::stream_cache().lock().unwrap(),
+            (format!("{anna}/9990001"), at, vec![1].into(), "audio/mp4".into()),
+        );
         {
             let mut a = s.search_answers.lock().unwrap();
             a.insert(
@@ -17462,5 +17462,334 @@ exec sleep 300
             "the stored token's key is unchanged"
         );
         assert!(js.contains("‹ Odeion</a>"));
+    }
+
+    /// A listener's play (or a party's) is not the owner's listen: nothing of it goes to the owner's
+    /// ListenBrainz (or Last.fm), not even "playing now"; the owner's own play still does
+    /// (security review 2026-11-02, medium 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listeners_plays_are_not_scrobbled_to_the_owner() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let g1 = got.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "owner"})) }),
+            )
+            .route(
+                "/1/submit-listens",
+                post(move |Json(b): Json<serde_json::Value>| {
+                    let g = g1.clone();
+                    async move {
+                        g.lock().unwrap().push(b);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/song.flac",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.listenbrainz_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"token": "LBT"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let play = || {
+            let app = app.clone();
+            let (zid, port) = (zid.clone(), port);
+            async move {
+                call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+                    {"uri": format!("http://127.0.0.1:{port}/song.flac"), "title": "Song", "artist": "Band"}], "replace": true, "play": true}))).await;
+            }
+        };
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+
+        // A party has the zone: its plays are the guests', whoever queues
+        let (st, party) = call(&app, "POST", "/v1/party", Some(serde_json::json!({"zone": zid}))).await;
+        assert_eq!(st, StatusCode::OK, "{party}");
+        play().await;
+        assert_eq!(zone.wait_stopped().await.error, None);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let sent = got.lock().unwrap().clone();
+        assert!(sent.is_empty(), "{sent:?}");
+
+        // The owner's again
+        let (st, _) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/party/{}", party["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+        assert!(st.is_success(), "{st}");
+        play().await;
+        assert_eq!(zone.wait_stopped().await.error, None);
+        for _ in 0..100 {
+            if got
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|b| b["listen_type"] != "playing_now")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            got.lock()
+                .unwrap()
+                .iter()
+                .any(|b| b["listen_type"] != "playing_now"),
+            "the owner's play counts"
+        );
+    }
+
+    /// TIDAL tracks kept for browsers are bounded by their bytes, not only by their count, and a
+    /// byte range is served as a slice of the kept track, never a copy of it (security review
+    /// 2026-11-02, medium 4).
+    #[tokio::test]
+    async fn tidal_tracks_kept_for_browsers_are_bounded_and_ranges_not_copied() {
+        let at = std::time::Instant::now();
+        let mut cache = Vec::new();
+        // Zeroed allocations: the pages are never touched
+        let track = |n: usize| bytes::Bytes::from(vec![0u8; n]);
+        for i in 0..6 {
+            tidal::keep_stream(
+                &mut cache,
+                (format!("k/{i}"), at, track(100 * 1024 * 1024), "audio/mp4".into()),
+            );
+            let held: usize = cache.iter().map(|(_, _, b, _)| b.len()).sum();
+            assert!(held <= tidal::STREAM_CACHE_BYTES, "{held} bytes kept after {i}");
+            assert_eq!(cache.last().unwrap().0, format!("k/{i}"), "the newest is kept");
+        }
+        // One bigger than all of it is served, not kept
+        tidal::keep_stream(
+            &mut cache,
+            (
+                "k/big".into(),
+                at,
+                track(tidal::STREAM_CACHE_BYTES + 1),
+                "audio/mp4".into(),
+            ),
+        );
+        assert!(cache.iter().all(|(k, _, _, _)| k != "k/big"));
+
+        let kept: bytes::Bytes = (0..=255u8).cycle().take(1 << 20).collect::<Vec<u8>>().into();
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=1000-1999".parse().unwrap());
+        let resp = ranged_response(&h, kept.clone(), "audio/mp4");
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], &kept[1000..2000]);
+        assert_eq!(
+            body.as_ptr(),
+            kept[1000..].as_ptr(),
+            "the range is the kept bytes, not a copy"
+        );
+        let resp = ranged_response(&HeaderMap::new(), kept.clone(), "audio/mp4");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.as_ptr(),
+            kept.as_ptr(),
+            "the whole track is not a copy either"
+        );
+    }
+
+    /// A page's next link is followed only on the service's own API origin: an answer that points
+    /// the next page at another host never gets the account's token sent there (security review
+    /// 2026-11-02, low). TIDAL and Spotify end to end; SoundCloud's API base is process-wide in
+    /// tests, so its `get_json` is covered through the same `sources::api_url` it now goes by.
+    #[tokio::test]
+    async fn a_next_page_on_another_host_is_not_followed() {
+        let stolen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let noted = stolen.clone();
+        let thief = Router::new().fallback(move |h: HeaderMap| {
+            let noted = noted.clone();
+            async move {
+                let auth = h.get("authorization").and_then(|v| v.to_str().ok());
+                noted.lock().unwrap().push(auth.unwrap_or("").to_string());
+                Json(serde_json::json!({"data": [], "items": []}))
+            }
+        });
+        let tl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let next = format!("http://{}/steal?page=2", tl.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(tl, thief).await.unwrap() });
+        let (n1, n2) = (next.clone(), next.clone());
+        let api = Router::new()
+            .route(
+                "/playlists",
+                get(move || {
+                    let n = n1.clone();
+                    async move { Json(serde_json::json!({"data": [], "links": {"next": n}})) }
+                }),
+            )
+            .route(
+                "/me/playlists",
+                get(move || {
+                    let n = n2.clone();
+                    async move { Json(serde_json::json!({"items": [], "next": n})) }
+                }),
+            );
+        let al = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", al.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(al, api).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.tidal.write().unwrap().api_base = base.clone();
+        s.spotify.write().unwrap().api_base = base.clone();
+        {
+            let lib = s.library.lock().unwrap();
+            let until = pm_library::db::now_unix() + 3600;
+            lib.set_setting(
+                "tidal.user",
+                &serde_json::json!({"access_token": "tidal-token", "refresh_token": "r", "expires_at": until, "user_id": "4242", "scope": "playback"}).to_string(),
+            )
+            .unwrap();
+            lib.set_setting(
+                "spotify.user",
+                &serde_json::json!({"access_token": "spotify-token", "expires_at": until}).to_string(),
+            )
+            .unwrap();
+        }
+        let app = router(s.clone());
+        for path in ["/v1/sources/tidal/playlists", "/v1/sources/spotify/playlists"] {
+            let (st, v) = call(&app, "GET", path, None).await;
+            assert_eq!(st, StatusCode::BAD_GATEWAY, "{path}: {v}");
+            assert!(
+                v["error"].as_str().unwrap_or("").contains("another host"),
+                "{path}: {v}"
+            );
+        }
+        let seen = stolen.lock().unwrap().clone();
+        assert!(seen.is_empty(), "{seen:?}");
+
+        // Each service's own next links still go
+        for (base, next) in [
+            (
+                "https://openapi.tidal.com/v2",
+                "https://openapi.tidal.com/v2/playlists?page%5Bcursor%5D=x",
+            ),
+            (
+                "https://api.spotify.com/v1",
+                "https://api.spotify.com/v1/me/playlists?offset=50&limit=50",
+            ),
+            (
+                "https://api-v2.soundcloud.com",
+                "https://api-v2.soundcloud.com/me/playlists?offset=50",
+            ),
+        ] {
+            assert_eq!(sources::api_url(base, next).as_deref(), Ok(next));
+        }
+        assert_eq!(
+            sources::api_url("https://openapi.tidal.com/v2", "/playlists?x=1").as_deref(),
+            Ok("https://openapi.tidal.com/v2/playlists?x=1")
+        );
+        assert_eq!(
+            sources::api_url("https://api-v2.soundcloud.com", "search/tracks").as_deref(),
+            Ok("https://api-v2.soundcloud.com/search/tracks")
+        );
+        // Anywhere else does not: another host, scheme or port, a look-alike, a user-info trick
+        for bad in [
+            "https://evil.example/me/playlists",
+            "http://api-v2.soundcloud.com/me/playlists",
+            "https://api-v2.soundcloud.com:8443/me/playlists",
+            "https://api-v2.soundcloud.com.evil.example/me/playlists",
+            "https://api-v2.soundcloud.com@evil.example/me/playlists",
+        ] {
+            assert!(
+                sources::api_url("https://api-v2.soundcloud.com", bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    /// A song the owner started whose zone goes to a listener (or a party) before its listen is
+    /// due is not the owner's listen: its waiting entry is dropped, so even the zone coming back
+    /// to the owner doesn't count it (security review 2026-11-02, medium 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zone_changing_hands_mid_song_drops_its_scrobble() {
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let g1 = got.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "owner"})) }),
+            )
+            .route(
+                "/1/submit-listens",
+                post(move |Json(b): Json<serde_json::Value>| {
+                    let g = g1.clone();
+                    async move {
+                        g.lock().unwrap().push(b);
+                        StatusCode::OK
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.listenbrainz_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"token": "LBT"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = ZoneId::new(zones[0]["id"].as_str().unwrap());
+        let zone = s.zones.get(&zid).unwrap();
+        let item: pm_zones::QueueItem = serde_json::from_value(serde_json::json!({
+            "id": 7, "uri": "http://127.0.0.1:9/song.flac", "title": "Song", "artist": "Band", "duration_ms": 200000
+        }))
+        .unwrap();
+        let listens =
+            |g: &Vec<serde_json::Value>| g.iter().filter(|b| b["listen_type"] != "playing_now").count();
+
+        // The owner's song starts: "playing now"
+        listenbrainz::track_started(&s, zone.clone(), item.clone());
+        for _ in 0..100 {
+            if !got.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(got.lock().unwrap().len(), 1, "playing now");
+        // A listener takes the zone before it counts; it plays to its end
+        s.zones_in_listeners_hands.lock().unwrap().insert(zid.0.clone());
+        listenbrainz::track_ended(&s, &zid, &item);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(listens(&got.lock().unwrap()), 0, "not the owner's listen");
+        // Back in the owner's hands, the dropped entry stays dropped
+        s.zones_in_listeners_hands.lock().unwrap().remove(&zid.0);
+        listenbrainz::track_ended(&s, &zid, &item);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let sent = got.lock().unwrap().clone();
+        assert_eq!(listens(&sent), 0, "{sent:?}");
     }
 }
