@@ -85,14 +85,18 @@ Stop or the default.
 ## Where it is kept, and for how long
 
 In `usage.sqlite` in the node's data folder, readable only by the node's user (0600). The file is made when the owner first turns usage insights on, or when someone first records a choice (Stop, or that they read the notice); until the switch is on it holds only those choices. It is never in
-a backup or a restore, and never copied to a homeserver.
+a backup or a restore (Settings › Backup, and the bundle's `backup.sh` and `restore.sh`, which also
+leaves out a copy in a backup made before), and never copied to a homeserver.
 
 - Raw events: 14 days.
 - Daily counts: 90 days.
-- At most 400 000 events and 64 MiB on disk (the file with its journal). Over that, free space is
-  given back first, then the oldest day goes. When free space can't be given back (that needs room
-  on the disk for a copy of the file), no more events are written until it can: they are counted
-  as evicted, and the file does not grow past the cap.
+- At most 400 000 events and 64 MiB on disk. A write that would make the file bigger than that
+  first makes room (the oldest day goes, or the oldest tenth when only one day is left), and what
+  still doesn't fit is counted as evicted, so the file itself never grows past the cap; while a
+  write runs, SQLite's journal is extra, and an event over the count is gone at the end of that
+  write. Free space is given back when most of the file is free. That needs room on the disk for a
+  copy of the file: when it fails, it is tried again an hour later, and events fill the free space
+  meanwhile.
 - Times are kept to the minute.
 - One person can have at most 8 browsers taking part at once and open 30 a minute, so nobody can
   crowd out anyone else.
@@ -107,7 +111,7 @@ reads as complete when it isn't.
 - **Download** (`GET /v1/node/usage/export`): the raw events of the last 14 days, each browser
   renamed `s1`, `s2`… for that download only. Review it before you share it. A downloaded copy is
   outside the node's limits: delete it when you no longer need it.
-- **On the node itself:** `pm-node usage summary` and `pm-node usage export` read the file and print
+- **On the node itself:** `odeiond usage summary` and `odeiond usage export` read the file and print
   JSON. They change nothing.
 
 Nothing is sent anywhere by itself. There is no third-party service.

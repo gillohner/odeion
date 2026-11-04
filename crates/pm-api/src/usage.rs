@@ -29,7 +29,7 @@
 //!   [`AGG_RETENTION`], at most [`MAX_EVENTS`] events and [`MAX_STORE_BYTES`]; over a cap the oldest
 //!   day goes first. What was dropped on the way is counted.
 //! - **Reading it.** The owner's summary (aggregates only) and export (raw events, renamed per
-//!   export) are owner-authenticated; `pm-node usage summary|export` reads the file on the node.
+//!   export) are owner-authenticated; `odeiond usage summary|export` reads the file on the node.
 //!   Nothing is sent anywhere by itself.
 
 use crate::accounts::{Caller, Role};
@@ -870,7 +870,12 @@ struct Store {
     salt: [u8; 32],
     /// The file (its size on disk, with its journal or WAL, is what the cap holds).
     path: PathBuf,
+    /// After a VACUUM failed (no room for its copy), none is tried before this (unix seconds).
+    vacuum_after: u64,
 }
+
+/// How long after a failed VACUUM the next is tried (housekeeping runs hourly).
+const VACUUM_BACKOFF: u64 = 3_600;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
@@ -921,10 +926,11 @@ impl Store {
             conn,
             salt,
             path: path.to_path_buf(),
+            vacuum_after: 0,
         }))
     }
 
-    /// Opens the file read-only (the `pm-node usage` commands).
+    /// Opens the file read-only (the `odeiond usage` commands).
     fn open_read_only(path: &FsPath) -> Result<Option<Store>, Refusal> {
         if !path.exists() {
             return Ok(None);
@@ -938,6 +944,7 @@ impl Store {
             conn,
             salt,
             path: path.to_path_buf(),
+            vacuum_after: 0,
         }))
     }
 
@@ -1000,12 +1007,19 @@ impl Store {
             .map_err(storage)
     }
 
+    /// Writes the rows and counts in one transaction. With `cap`, a write that would make the file
+    /// bigger than `cap` bytes is undone instead (false): it may only fill free pages then.
     fn write(
         &mut self,
         rows: &[Row],
         opens: &[(u64, &'static str, Viewport)],
         dropped: Dropped,
-    ) -> Result<(), Refusal> {
+        cap: Option<u64>,
+    ) -> Result<bool, Refusal> {
+        let pages_before: i64 = self
+            .conn
+            .query_row("PRAGMA page_count", [], |r| r.get(0))
+            .map_err(storage)?;
         let tx = self.conn.transaction().map_err(storage)?;
         {
             let mut ins = tx
@@ -1059,7 +1073,60 @@ impl Store {
                 }
             }
         }
-        tx.commit().map_err(storage)
+        if let Some(cap) = cap {
+            let pages: i64 = tx
+                .query_row("PRAGMA page_count", [], |r| r.get(0))
+                .map_err(storage)?;
+            let size: i64 = tx
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .map_err(storage)?;
+            if pages > pages_before && (pages.max(0) * size) as u64 > cap {
+                // Dropped: undone
+                return Ok(false);
+            }
+        }
+        tx.commit().map_err(storage)?;
+        Ok(true)
+    }
+
+    /// Makes room under the cap: the oldest day goes, or the oldest tenth when only one day is
+    /// left (counted as evicted). How many raw events went.
+    fn make_room(&mut self, unix: u64) -> Result<u64, Refusal> {
+        let (count, _, _) = self.sizes()?;
+        let oldest: Option<i64> = self
+            .conn
+            .query_row("SELECT MIN(day) FROM event", [], |r| r.get(0))
+            .map_err(storage)?;
+        let Some(oldest) = oldest else { return Ok(0) };
+        let newest: i64 = self
+            .conn
+            .query_row("SELECT MAX(day) FROM event", [], |r| r.get(0))
+            .map_err(storage)?;
+        let gone = if oldest < newest {
+            self.conn
+                .execute("DELETE FROM event WHERE day = ?1", [oldest])
+                .map_err(storage)?
+        } else {
+            // One day left: its oldest tenth
+            let n = (count / 10).max(1) as i64;
+            self.conn
+                .execute(
+                    "DELETE FROM event WHERE seq IN (SELECT seq FROM event ORDER BY seq LIMIT ?1)",
+                    [n],
+                )
+                .map_err(storage)?
+        };
+        let gone = gone as u64;
+        if gone > 0 {
+            self.conn
+                .execute(
+                    "INSERT INTO daily (day, metric, key, n) VALUES (?1, 'dropped', 'evicted', ?2)
+                     ON CONFLICT(day, metric, key) DO UPDATE SET n = n + ?2",
+                    rusqlite::params![(unix / DAY) as i64, gone as i64],
+                )
+                .map_err(storage)?;
+        }
+        Ok(gone)
     }
 
     /// Deletes what is past its retention, then the oldest days while over a cap; how many raw
@@ -1082,54 +1149,23 @@ impl Store {
                 break;
             }
             // Only free pages (or the journal) are over: give them back first, once. Without room
-            // for its copy that fails: the rows stay, and the writer takes no more until it works
+            // for its copy that fails: the rows stay, and writes only fill the free pages
             if count <= limits.max_events && live <= limits.max_store_bytes && !compacted {
-                if self.vacuum().is_err() {
+                if self.vacuum(unix).is_err() {
                     tracing::warn!(
-                        "usage insights: the file could not be compacted; no more events until it can"
+                        "usage insights: the file could not be compacted; events only fill its free pages until it can"
                     );
                     break;
                 }
                 compacted = true;
                 continue;
             }
-            let oldest: Option<i64> = self
-                .conn
-                .query_row("SELECT MIN(day) FROM event", [], |r| r.get(0))
-                .map_err(storage)?;
-            let Some(oldest) = oldest else { break };
-            let newest: i64 = self
-                .conn
-                .query_row("SELECT MAX(day) FROM event", [], |r| r.get(0))
-                .map_err(storage)?;
-            let gone = if oldest < newest {
-                self.conn
-                    .execute("DELETE FROM event WHERE day = ?1", [oldest])
-                    .map_err(storage)?
-            } else {
-                // One day left: its oldest tenth
-                let n = (count / 10).max(1) as i64;
-                self.conn
-                    .execute(
-                        "DELETE FROM event WHERE seq IN (SELECT seq FROM event ORDER BY seq LIMIT ?1)",
-                        [n],
-                    )
-                    .map_err(storage)?
-            };
+            let gone = self.make_room(unix)?;
             if gone == 0 {
                 break;
             }
-            evicted += gone as u64;
+            evicted += gone;
             compacted = false;
-        }
-        if evicted > 0 {
-            self.conn
-                .execute(
-                    "INSERT INTO daily (day, metric, key, n) VALUES (?1, 'dropped', 'evicted', ?2)
-                     ON CONFLICT(day, metric, key) DO UPDATE SET n = n + ?2",
-                    rusqlite::params![today as i64, evicted as i64],
-                )
-                .map_err(storage)?;
         }
         // Give space back when most of the file is free
         let (page_count, free): (i64, i64) = (
@@ -1142,13 +1178,23 @@ impl Store {
         );
         if page_count > 0 && free * 4 > page_count {
             // Best effort: the cap does not depend on it
-            let _ = self.vacuum();
+            let _ = self.vacuum(unix);
         }
         Ok(evicted)
     }
 
-    /// Gives free pages back (it needs room for a copy of the file).
-    fn vacuum(&self) -> Result<(), Refusal> {
+    /// Gives free pages back (it needs room for a copy of the file). After it fails, it is not
+    /// tried again for [`VACUUM_BACKOFF`]: each try can fill the disk until it fails.
+    fn vacuum(&mut self, unix: u64) -> Result<(), Refusal> {
+        if unix < self.vacuum_after {
+            return Err(Refusal::Storage);
+        }
+        let done = self.try_vacuum();
+        self.vacuum_after = if done.is_ok() { 0 } else { unix + VACUUM_BACKOFF };
+        done
+    }
+
+    fn try_vacuum(&self) -> Result<(), Refusal> {
         #[cfg(test)]
         {
             VACUUM_TRIES.with(|n| n.set(n.get() + 1));
@@ -2228,19 +2274,18 @@ impl Usage {
             let (count, bytes) = s.size()?;
             Ok(count > limits.max_events || bytes > limits.max_store_bytes)
         };
+        let cap = Some(limits.max_store_bytes);
         let written = self.with_store(true, |s| {
-            let mut rows: &[Row] = &rows;
-            let mut dropped = dropped;
-            // Still over the cap (it could not be compacted): tried again, and while it stays
-            // over, events are not written (counted as evicted) so the file never grows past it
-            if over(s)? {
-                let _ = s.housekeep(unix, limits);
-                if over(s)? {
-                    dropped.evicted += rows.len() as u64;
-                    rows = &[];
-                }
+            // Never past the cap on disk: a batch that would grow the file past it makes room
+            // first (the oldest go), and if it still does not fit, its events count as evicted
+            if !s.write(&rows, &opens, dropped, cap)?
+                && (s.make_room(unix)? == 0 || !s.write(&rows, &opens, dropped, cap)?)
+            {
+                let mut dropped = dropped;
+                dropped.evicted += rows.len() as u64;
+                // The day's counts alone (a few rows; room was just made)
+                s.write(&[], &opens, dropped, None)?;
             }
-            s.write(rows, &opens, dropped)?;
             // Written: what happens next is never a failure to write them
             if over(s).unwrap_or(false) {
                 let _ = s.housekeep(unix, limits);
@@ -2585,7 +2630,7 @@ fn export_of(s: &Store, limits: &Limits, app_version: &str, unix: u64) -> Result
     }))
 }
 
-/// The summary from a node's data folder, read-only (`pm-node usage summary`).
+/// The summary from a node's data folder, read-only (`odeiond usage summary`).
 pub fn summary_of_folder(data_dir: &FsPath, app_version: &str) -> Result<serde_json::Value, String> {
     let limits = Limits::default();
     match Store::open_read_only(&data_dir.join(FILE)).map_err(|_| "can't read the usage file".to_string())? {
@@ -2596,7 +2641,7 @@ pub fn summary_of_folder(data_dir: &FsPath, app_version: &str) -> Result<serde_j
     }
 }
 
-/// The export from a node's data folder, read-only (`pm-node usage export`).
+/// The export from a node's data folder, read-only (`odeiond usage export`).
 pub fn export_of_folder(data_dir: &FsPath, app_version: &str) -> Result<serde_json::Value, String> {
     let limits = Limits::default();
     match Store::open_read_only(&data_dir.join(FILE)).map_err(|_| "can't read the usage file".to_string())? {

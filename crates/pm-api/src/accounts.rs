@@ -791,9 +791,11 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
 /// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
-    sign_out_everywhere(s, key)?;
-    // Their usage choice and what is still linked to them go (usage.rs)
+    let signed_out = sign_out_everywhere(s, key);
+    // Their usage choice and what is still linked to them go (usage.rs), also when the token list
+    // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
+    signed_out?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
     crate::tidal::pending()
