@@ -67,8 +67,10 @@ impl AppState {
 /// Links that would open a second window (`target="_blank"`, a
 /// cross-origin `window.open`) become plain navigations, which the
 /// navigation guard sends to the system browser. WebKitGTK does not always
-/// raise a new-window request for them, and Android never does.
-const EXTERNAL_LINKS_JS: &str = "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[target=_blank]');if(a&&a.href&&!e.defaultPrevented){e.preventDefault();location.assign(a.href);}});var wo=window.open;window.open=function(u){try{var x=new URL(u,location.href);if(x.origin!==location.origin){location.assign(x.href);return null;}}catch(e){}return wo.apply(window,arguments);};";
+/// raise a new-window request for them, and Android never does. An `about:`
+/// window (`about:blank`, origin "null") opens nothing: as a navigation it
+/// would replace the app's own page, which the guard allows.
+const EXTERNAL_LINKS_JS: &str = "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[target=_blank]');if(a&&a.href&&!e.defaultPrevented){e.preventDefault();location.assign(a.href);}});var wo=window.open;window.open=function(u){try{var x=new URL(u,location.href);if(x.protocol==='about:')return null;if(x.origin!==location.origin){location.assign(x.href);return null;}}catch(e){}return wo.apply(window,arguments);};";
 
 /// Run before every page: the node's page gets the token in the
 /// localStorage key the web UI reads (only on the node's origin), and every
@@ -717,6 +719,21 @@ mod tests {
         assert!(js.contains("location.origin===o"));
         // Nothing to hand over before the first connection.
         assert!(init_script(None).contains(r#"var o="",t="""#));
+    }
+
+    #[test]
+    fn a_blank_window_does_not_replace_the_app_page() {
+        // about:blank's origin is "null", never the page's: the override must stop it before the
+        // cross-origin branch, whose navigation the guard would allow (an app page)
+        let js = init_script(None);
+        let blank = js
+            .find("x.protocol==='about:')return null;")
+            .expect("about: is refused");
+        let away = js
+            .find("x.origin!==location.origin")
+            .expect("other origins go out");
+        assert!(blank < away, "{js}");
+        assert!(is_app_page(&url::Url::parse("about:blank").unwrap()));
     }
 
     #[test]

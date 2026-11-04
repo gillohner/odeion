@@ -1537,15 +1537,19 @@
   // your own device client and a pasted token; quality and health under the full-tracks sign-in.
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
   // Sign in with TIDAL: TIDAL's sign-in in a new tab (opened at the click, so no popup blocker
-  // stops it), then the page here asks for the address TIDAL lands on
+  // stops it), then the page here asks for the address TIDAL lands on. In the desktop and Android
+  // apps (window.pmDesktop) another origin's window.open goes to the system browser and a blank
+  // tab would take the app's own window: TIDAL's address is opened there once it is known.
   const tidalPkceStart = async (h, btn) => {
     if (btn) btn.disabled = true;
-    const tab = window.open('about:blank', '_blank');
+    const inApp = !!window.pmDesktop;
+    const tab = inApp ? null : window.open('about:blank', '_blank');
     try {
-      if (!(await h.choose('browser'))) { if (tab) tab.close(); return; }
+      if (!(await h.choose('browser'))) { if (tab) tab.close(); if (btn) btn.disabled = false; return; }
       const r = await api('POST', '/sources/tidal/unofficial/browser');
       h.m.browserUrl = r.url; h.m.way = 'browser';
-      if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
+      if (inApp) window.open(r.url, '_blank');
+      else if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
     } catch (e) { if (tab) tab.close(); toast(e.message, 'error'); }
     // The chooser is drawn again: whoever comes back from TIDAL's tab lands on the address field
     await h.refill();

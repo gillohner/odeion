@@ -1610,7 +1610,11 @@ pub(crate) fn sign_in(
 /// the refresh token came from the client this build carries.
 pub(crate) fn import_sign_in(s: &NodeState, who: &Who, session: crate::tidal_unofficial::Session) {
     crate::tidal_unofficial::update_signed_in(s, who, "tidal-full", |st| {
-        st.session = Some(session);
+        // What the file said made it was for the import's check only
+        st.session = Some(crate::tidal_unofficial::Session {
+            named_client: None,
+            ..session
+        });
         st.login = None;
         st.enabled = true;
         st.health = None;
@@ -1695,11 +1699,13 @@ impl crate::signin::SignInSource for TidalSignIn {
 }
 
 /// Sign out of one way: the device way also goes off, so TIDAL falls back to the official app.
+/// A browser sign-in on its way is dropped too, so its token answer is not kept after this.
 pub(crate) fn sign_out_of(s: &NodeState, who: &Who, way: &str) -> Result<(), ApiError> {
     if way != WAY_APP {
         crate::tidal_unofficial::update(s, who, |st| {
             st.session = None;
             st.login = None;
+            st.browser = None;
             st.enabled = false;
         });
         Ok(())

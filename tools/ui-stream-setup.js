@@ -21,6 +21,27 @@ const pillOf = (p, root) => p.locator(`${root} .set-name .pill`).first().textCon
 // A paste into a field, as the browser would deliver it
 const pasteInto = (p, sel, text) => p.evaluate(([s, t]) => { const el = document.querySelector(s); el.focus(); const dt = new DataTransfer(); dt.setData('text/plain', t); el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); }, [sel, text]);
 
+// The desktop and Android shell's script (pm-desktop's EXTERNAL_LINKS_JS), as the app injects it
+// before every page. Its navigations go through a stand-in for the shell's navigation guard
+// (allow_navigation): app pages (about:) and the node's origin load in the app's window, anything
+// else goes to the system browser and the window stays where it is.
+const SHELL_JS = (() => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'crates', 'pm-desktop', 'src', 'lib.rs'), 'utf8');
+  const m = src.match(/const EXTERNAL_LINKS_JS: &str = "([^"\\]*)";/);
+  assert.ok(m && m[1].includes('window.open=function'), "pm-desktop's EXTERNAL_LINKS_JS is found");
+  return m[1].replaceAll('location.assign(', 'window.pmShellNavigate(');
+})();
+// The same script as apps released before it refused about: windows (the node's page is newer
+// than the app around it)
+const SHELL_JS_BEFORE = SHELL_JS.replace("if(x.protocol==='about:')return null;", '');
+const inTheApp = async (ctx, shellJs) => ctx.addInitScript(([t, js]) => {
+  localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
+  window.pmOpenedOutside = [];
+  window.pmShellNavigate = (u) => { const x = new URL(u, location.href); if (x.protocol === 'about:' || x.origin === location.origin) location.assign(x.href); else window.pmOpenedOutside.push(x.href); };
+  window.pmDesktop = { version: 'ui-test', platform: 'linux' };
+  (0, eval)(js);
+}, [TOKEN, shellJs]);
+
 const qobuzMocks = async (p, log) => {
   const U = { enabled: false, signed_in: false, hires: false, quality: 'max', warning: WARN };
   const SI = { ways: [], imports: [], places: ['streamrip: ~/.config/streamrip/config.toml (not read)'], in_use: null, chosen: null, line: 'Not signed in', details: {} };
@@ -70,6 +91,7 @@ const tidalMocks = async (p, log, si0) => {
   si.details = { status: { configured: false, signed_in: false }, unofficial: U };
   const T = { si, U, log };
   await p.route(/\/v1\/sources\/tidal\/signin$/, (r) => {
+    if (r.request().method() === 'PUT' && T.failWay) { T.failWay = false; log.push(['WAY-FAILED']); return r.fulfill({ status: 500, json: { error: 'The node could not keep the way' } }); }
     if (r.request().method() === 'PUT') { si.chosen = r.request().postDataJSON().way; log.push(['WAY', si.chosen]); }
     if (r.request().method() === 'DELETE') { si.in_use = null; U.signed_in = false; U.enabled = false; }
     return r.fulfill({ json: si });
@@ -298,6 +320,38 @@ const tidalMocks = async (p, log, si0) => {
       }
       check(errors.length === 0, `${w} no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
+
+      // ---- Sign in with TIDAL inside the desktop and Android apps ----
+      for (const [shell, shellJs] of [['the app', SHELL_JS], ['an older app', SHELL_JS_BEFORE]]) {
+        const actx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: 'reduce' });
+        await inTheApp(actx, shellJs);
+        // Never the real TIDAL, should anything navigate there
+        await actx.route(/^https:\/\/login\.tidal\.com\//, (r) => r.fulfill({ contentType: 'text/html', body: '<title>TIDAL</title><p>sign in</p>' }));
+        const ap = await actx.newPage();
+        const aerrors = []; ap.on('pageerror', (e) => aerrors.push(e.message));
+        let pages = 0; actx.on('page', () => { pages++; });
+        const aw = `${w} in ${shell}:`;
+        const log = []; const T = await tidalMocks(ap, log, tidalSi);
+        await ap.goto(BASE + '/sources/tidal');
+        const root = '#tidalsignin';
+        await ap.waitForSelector('#tbin', { timeout: 20000 });
+        check(await ap.evaluate(() => !!window.pmDesktop && typeof window.pmShellNavigate === 'function'), `${aw} the shell's script is in the page`);
+        // Picking the way fails: said, and the button can be pressed again
+        T.failWay = true;
+        await ap.click('#tbin');
+        check(await until(async () => log.some((l) => l[0] === 'WAY-FAILED') && /could not keep the way/.test(await ap.textContent('#toast')) && await ap.isEnabled('#tbin')), `${aw} a failed pick is said and Sign in with TIDAL works again`);
+        check(!log.some((l) => l[0] === 'BROWSER'), `${aw} and no sign-in was started`);
+        // Sign in with TIDAL: TIDAL's sign-in goes to the system browser, the app stays on its page
+        await ap.click('#tbin');
+        check(await until(async () => await ap.isVisible('#tbfinish').catch(() => false)), `${aw} the address field shows`);
+        const opened = await ap.evaluate(() => window.pmOpenedOutside).catch(() => null);
+        check(Array.isArray(opened) && opened.length === 1 && /^https:\/\/login\.tidal\.com\/authorize\?/.test(opened[0]), `${aw} TIDAL's sign-in, and only it, goes to the system browser (${JSON.stringify(opened)})`);
+        check(ap.url() === BASE + '/sources/tidal' && await ap.locator(root).count() === 1 && /Odeion/.test(await ap.title()), `${aw} the app's window stays on Odeion (${ap.url()})`);
+        check(pages === 0, `${aw} no window of its own is opened (${pages})`);
+        check(await until(async () => ap.evaluate(() => document.activeElement && document.activeElement.matches('#tbfinish input[name=text]'))), `${aw} the address field has the focus`);
+        check(aerrors.length === 0, `${aw} no page errors${aerrors.length ? ': ' + aerrors.join(' | ') : ''}`);
+        await actx.close();
+      }
     }
   } finally { await browser.close(); }
   if (problems.length) { console.log(`${problems.length} failed`); process.exit(1); }

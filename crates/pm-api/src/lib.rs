@@ -12442,6 +12442,7 @@ exec sleep 300
                 session_id: None,
                 from: None,
                 client: Default::default(),
+                named_client: None,
             });
             lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
                 .unwrap();
@@ -19775,5 +19776,90 @@ exec sleep 300
             decide(Some(&seen), Some(&refreshed), Some(&ours), &wipe),
             Do::Pull
         );
+    }
+
+    /// The chooser's Sign out while TIDAL is asked for the browser sign-in's tokens: the attempt
+    /// ends with the sign-out, so the answer is not kept (`tidal::sign_out_of`).
+    #[tokio::test]
+    async fn tidal_sign_out_during_the_browser_exchange_is_not_undone() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post({
+                    let (arrived, release) = (arrived.clone(), release.clone());
+                    move || {
+                        let (arrived, release) = (arrived.clone(), release.clone());
+                        async move {
+                            arrived.notify_one();
+                            release.notified().await;
+                            Json(serde_json::json!({"access_token": "late-at", "refresh_token": "late-rt", "expires_in": 3600, "user_id": 77, "user": {"userId": 77, "countryCode": "CH"}}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                get(|| async { Json(serde_json::json!({"userId": 77, "countryCode": "CH", "sessionId": "sid"})) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let signin = "/v1/sources/tidal/signin";
+        // A code sign-in in use, then Sign in with TIDAL started
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.enabled = true;
+            st.session = Some(tidal_unofficial::Session {
+                access_token: "code-at".into(),
+                refresh_token: Some("code-rt".into()),
+                expires_at: 4_000_000_000,
+                user_id: Some("42".into()),
+                ..Default::default()
+            });
+        });
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(si["in_use"]["way"], "device", "{si}");
+        // The paste goes in; TIDAL holds its answer while the person signs out
+        let finish = tokio::spawn({
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/sources/tidal/unofficial/browser/finish",
+                    Some(
+                        serde_json::json!({ "text": "https://tidal.com/android/login/auth?code=late-code" }),
+                    ),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified())
+            .await
+            .expect("the token request reached TIDAL");
+        let (st, si) = call(&app, "DELETE", signin, None).await;
+        assert_eq!(st, StatusCode::OK, "{si}");
+        assert!(si["in_use"].is_null(), "{si}");
+        let m = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner);
+        assert!(m.browser.is_none(), "the sign-out ends the attempt");
+        release.notify_one();
+        let (st, r) = finish.await.unwrap();
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("changed meanwhile"), "{r}");
+        let m = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner);
+        assert!(
+            m.session.is_none() && !m.enabled,
+            "signed out stays signed out (session kept: {})",
+            m.session.is_some()
+        );
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert!(si["in_use"].is_null(), "{si}");
     }
 }

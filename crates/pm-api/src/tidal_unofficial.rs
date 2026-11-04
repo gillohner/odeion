@@ -115,6 +115,10 @@ pub struct Session {
     /// a device session.
     #[serde(default, skip_serializing_if = "ClientKind::is_device")]
     pub client: ClientKind,
+    /// The client an imported file says made it, when it names one (only for the import's
+    /// "renews here" check; never stored).
+    #[serde(skip)]
+    pub(crate) named_client: Option<crate::imports::ClientTag>,
 }
 
 /// Which client a session belongs to (TIDAL renews a session only with the client that made it).
@@ -370,6 +374,7 @@ fn session_from(v: &Value, previous: Option<&Session>) -> Option<Session> {
         session_id: previous.and_then(|p| p.session_id.clone()),
         from: previous.and_then(|p| p.from.clone()),
         client: previous.map(|p| p.client).unwrap_or_default(),
+        named_client: None,
     })
 }
 
