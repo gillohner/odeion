@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-net"
-description = "Network endpoint output for the Pubky Music Node (pm-stream protocol)"
+description = "Network endpoint output for the Odeion node (pm-stream protocol)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

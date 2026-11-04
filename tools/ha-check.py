@@ -8,7 +8,7 @@ Home Assistant, onboards Home Assistant through its own API, and checks:
         URL on the zone, sets the volume, pauses, resumes and stops it, and HA's state follows
         the zone (GENA events). Every step is checked against the node's own zone state.
   integration
-        The Pubky Music custom integration (integrations/home-assistant): zeroconf finds the node,
+        The Odeion custom integration (integrations/home-assistant): zeroconf finds the node,
         the config flow takes the API token, each zone is a media_player; the media browser shows
         the library (Home, albums, artists, playlists, genres) with covers; search; play_media of an
         album, a track and a URL; next, seek, repeat, shuffle; a zone started on the node shows up

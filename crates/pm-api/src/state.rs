@@ -157,6 +157,8 @@ pub struct NodeState {
     /// What the Pinakes in use ships (the names of its `/v1/info` limits), asked at most every
     /// ten minutes (`home::pinakes_limits`).
     pub pinakes_caps: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+    /// Copies to the homeserver: the queue, kept across restarts (copy_jobs.rs).
+    pub(crate) copy_jobs: crate::copy_jobs::CopyJobs,
     /// A fake homeserver and disk for the copy jobs' tests (copy_guard.rs); none in use.
     #[allow(clippy::type_complexity)]
     pub(crate) copy_seams: std::sync::Mutex<(
@@ -232,6 +234,9 @@ pub struct NodeState {
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// `/v1/search`'s answers, cached a few minutes per query and source (search.rs).
     pub(crate) search_answers: crate::search::AnswerCache,
+    /// The services whose app node.toml or the environment sets, recorded before the admin's own
+    /// apps are applied (apps.rs `from_config`).
+    pub(crate) apps_from_config: std::sync::OnceLock<Vec<&'static str>>,
     /// Who on this node listens where, and the listen-along groups (presence.rs).
     pub presence: crate::presence::Presence,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -426,6 +431,7 @@ impl NodeState {
             upload_jobs: Default::default(),
             pinakes_caps: Default::default(),
             copy_seams: Default::default(),
+            copy_jobs: Default::default(),
             events,
             sources_off,
             sync: Mutex::new(None),
@@ -460,6 +466,7 @@ impl NodeState {
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
+            apps_from_config: Default::default(),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
@@ -545,9 +552,17 @@ impl NodeState {
                                     );
                                 }
                             }
+                            // Scrobbles too: a listener's or a party's plays never go to the owner's
+                            // Last.fm or ListenBrainz
                             if let Some(n) = node.upgrade() {
-                                crate::listenbrainz::track_started(&n, zone_for_radio.clone(), item.clone());
-                                crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
+                                if crate::listens::plays_are_the_owners(&n, &id.0) {
+                                    crate::listenbrainz::track_started(
+                                        &n,
+                                        zone_for_radio.clone(),
+                                        item.clone(),
+                                    );
+                                    crate::lastfm::track_started(&n, zone_for_radio.clone(), item.clone());
+                                }
                             }
                         }
                         if let pm_zones::ZoneEvent::TrackEnded { item, .. } = &event {

@@ -505,12 +505,9 @@ fn country(s: &NodeState) -> String {
 }
 
 /// GET a v2 path (or an absolute `links.next` URL) as JSON:API.
+/// A whole URL is followed only on the API's own origin (the token goes with it).
 async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result<Value, ApiError> {
-    let url = if path.starts_with("http") {
-        path.to_string()
-    } else {
-        format!("{}{}", api_base(s), path)
-    };
+    let url = crate::sources::api_url(&api_base(s), path).map_err(upstream)?;
     let token = bearer(s).await?;
     let q: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
     for attempt in 0..3 {
@@ -1354,7 +1351,7 @@ pub(crate) const WAY_PASTE: &str = "paste";
 fn app_label(c: &TidalCredentials) -> &'static str {
     let project = crate::project_apps::tidal_client_id().is_some_and(|id| id == c.client_id);
     if project {
-        "Pubky Music's app"
+        "Odeion's app"
     } else {
         "Your own TIDAL app"
     }
@@ -2273,9 +2270,10 @@ pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Versi
 
 /// Whole tracks fetched for browsers, kept a short while so seeking and
 /// replaying do not hit TIDAL again. Previews are tiny; full tracks are tens
-/// of megabytes, so only a few are kept.
-/// (track id, fetched at, bytes, media type).
-type CachedStream = (String, std::time::Instant, Arc<Vec<u8>>, String);
+/// of megabytes, so only a few are kept, [`STREAM_CACHE_BYTES`] at most.
+/// (track id, fetched at, bytes, media type). The bytes are shared: a range
+/// served from them is a slice, never a copy of the track.
+pub(crate) type CachedStream = (String, std::time::Instant, bytes::Bytes, String);
 
 pub(crate) fn stream_cache() -> &'static Mutex<Vec<CachedStream>> {
     static C: std::sync::OnceLock<Mutex<Vec<CachedStream>>> = std::sync::OnceLock::new();
@@ -2291,8 +2289,27 @@ pub(crate) fn forget_streams_of(tag: &str) {
         .retain(|(k, _, _, _)| !k.starts_with(&prefix));
 }
 const STREAM_CACHE_ENTRIES: usize = 6;
+/// The most the kept tracks may hold together: six full hi-res tracks were up to 1.8 GB.
+pub(crate) const STREAM_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const STREAM_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const STREAM_MAX_BYTES: usize = 300 * 1024 * 1024;
+
+/// Keep a fetched track in `cache` (replacing one of the same key), dropping the oldest until
+/// there are at most [`STREAM_CACHE_ENTRIES`] of at most [`STREAM_CACHE_BYTES`] together. A
+/// track bigger than that on its own is served but not kept.
+pub(crate) fn keep_stream(cache: &mut Vec<CachedStream>, entry: CachedStream) {
+    cache.retain(|(k, _, _, _)| *k != entry.0);
+    if entry.2.len() > STREAM_CACHE_BYTES {
+        return;
+    }
+    let held = |c: &Vec<CachedStream>| c.iter().map(|(_, _, b, _)| b.len()).sum::<usize>();
+    while !cache.is_empty()
+        && (cache.len() >= STREAM_CACHE_ENTRIES || held(cache) + entry.2.len() > STREAM_CACHE_BYTES)
+    {
+        cache.remove(0);
+    }
+    cache.push(entry);
+}
 
 /// `GET /v1/sources/tidal/stream/{id}`: the track as one `audio/mp4` body
 /// with a known length and byte ranges, so browsers (the web UI's own zone)
@@ -2358,18 +2375,16 @@ pub(crate) async fn stream(
     let (bytes, mime) = match (cached, full) {
         (Some(c), _) => c,
         (None, Some((b, mime))) => {
-            let bytes = Arc::new(b);
-            let mut c = stream_cache().lock().expect("stream cache");
-            c.retain(|(k, _, _, _)| *k != key);
-            if c.len() >= STREAM_CACHE_ENTRIES {
-                c.remove(0);
-            }
-            c.push((
-                key.clone(),
-                std::time::Instant::now(),
-                bytes.clone(),
-                mime.clone(),
-            ));
+            let bytes = bytes::Bytes::from(b);
+            keep_stream(
+                &mut stream_cache().lock().expect("stream cache"),
+                (
+                    key.clone(),
+                    std::time::Instant::now(),
+                    bytes.clone(),
+                    mime.clone(),
+                ),
+            );
             tracing::info!(track = %id, bytes = bytes.len(), "TIDAL full track fetched for a browser (unofficial)");
             (bytes, mime)
         }
@@ -2428,23 +2443,21 @@ pub(crate) async fn stream(
             .await
             .map_err(|e| upstream(e.to_string()))?
             .map_err(upstream)?;
-            let bytes = Arc::new(bytes);
-            let mut c = stream_cache().lock().expect("stream cache");
-            c.retain(|(k, _, _, _)| *k != key);
-            if c.len() >= STREAM_CACHE_ENTRIES {
-                c.remove(0);
-            }
-            c.push((
-                key.clone(),
-                std::time::Instant::now(),
-                bytes.clone(),
-                mime.clone(),
-            ));
+            let bytes = bytes::Bytes::from(bytes);
+            keep_stream(
+                &mut stream_cache().lock().expect("stream cache"),
+                (
+                    key.clone(),
+                    std::time::Instant::now(),
+                    bytes.clone(),
+                    mime.clone(),
+                ),
+            );
             tracing::info!(track = %id, bytes = bytes.len(), presentation = %m.presentation, "TIDAL stream fetched for a browser");
             (bytes, mime)
         }
     };
-    let mut resp = crate::ranged_response(&headers, bytes.as_ref().clone(), &mime);
+    let mut resp = crate::ranged_response(&headers, bytes, &mime);
     resp.headers_mut().insert(
         "Cache-Control",
         axum::http::HeaderValue::from_static("private, max-age=600"),

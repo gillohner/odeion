@@ -1,4 +1,4 @@
-# pm-desktop: the Pubky Music app
+# pm-desktop: the Odeion app
 
 The node's web UI in a native window, built with Tauri 2 for macOS, Windows, Linux and Android
 (ADR 0012). It starts on a connect page (`ui/`): Pubky Ring finds the node through your

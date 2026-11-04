@@ -83,8 +83,8 @@ pub fn device_description(udn: &str, name: &str, base: &str, version: &str) -> S
 <root xmlns=\"urn:schemas-upnp-org:device-1-0\" xmlns:dlna=\"urn:schemas-dlna-org:device-1-0\">\
 <specVersion><major>1</major><minor>0</minor></specVersion>\
 <device><deviceType>{DEVICE_TYPE}</deviceType><friendlyName>{name}</friendlyName>\
-<manufacturer>Pubky Music</manufacturer><manufacturerURL>https://github.com/gillohner/pubky-music-node</manufacturerURL>\
-<modelDescription>A zone of a Pubky Music node</modelDescription><modelName>Pubky Music zone</modelName>\
+<manufacturer>Odeion</manufacturer><manufacturerURL>https://github.com/gillohner/pubky-music-node</manufacturerURL>\
+<modelDescription>A zone of an Odeion node</modelDescription><modelName>Odeion zone</modelName>\
 <modelNumber>{version}</modelNumber><UDN>uuid:{udn}</UDN><dlna:X_DLNADOC>DMR-1.50</dlna:X_DLNADOC>\
 <serviceList>{}{}{}</serviceList></device></root>",
         svc(AVT, "AVTransport", "avt"),

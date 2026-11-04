@@ -1,16 +1,18 @@
-//! Shared types for the Pubky Music Node.
+//! Shared types for the Odeion node.
 //!
 //! This crate holds the vocabulary every other crate speaks: audio formats and
 //! capabilities (§6.3 of the handoff), the signal-path trace (§6.1), the
 //! in-memory audio block that flows from decoder to output, canonical music
 //! identity (§8.2 as overridden by §12: MusicBrainz URLs, never a `music:`
-//! scheme), and the library entities.
+//! scheme), the library entities, and the product's names ([`brand`]).
 //!
-//! It has no I/O and no async; it is safe to depend on from every layer,
+//! It has no I/O and no async (apart from [`brand::apply_env_compat`], which
+//! each program calls once at start); it is safe to depend on from every layer,
 //! including the client core over FFI.
 
 pub mod audio;
 pub mod block;
+pub mod brand;
 pub mod ids;
 pub mod library;
 pub mod path;

@@ -1,4 +1,5 @@
-"""Constants for the Pubky Music integration."""
+"""Constants for the Odeion integration. DOMAIN keeps its pre-Odeion value (compat: pre-Odeion):
+existing config entries and entity ids depend on it."""
 
 DOMAIN = "pubky_music"
 DEFAULT_PORT = 7788

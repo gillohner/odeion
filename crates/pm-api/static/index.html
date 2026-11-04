@@ -6,23 +6,25 @@
 <meta name="color-scheme" content="light dark">
 <script>try { var t = localStorage.getItem('pm.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) { /* no storage */ }
 (function () { var l = 'auto'; try { l = localStorage.getItem('pm.layout') || 'auto'; } catch (e) { /* no storage */ } var w = window.innerWidth; document.documentElement.dataset.shell = l === 'compact' || w < 600 ? 'phone' : l === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop'; try { if (localStorage.getItem('pm.dense') === '1') document.documentElement.dataset.dense = '1'; } catch (e) { /* no storage */ } })();</script>
-<title>Pubky Music</title>
+<title>Odeion</title>
 <meta name="theme-color" content="#0f1014" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f5f5f8" media="(prefers-color-scheme: light)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Pubky Music">
-<link rel="manifest" href="/manifest.webmanifest">
+<meta name="apple-mobile-web-app-title" content="Odeion">
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/pwa.css">
+<script src="/pwa.js"></script>
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true"></span>
-      <span class="brand-name">Pubky Music</span>
+      <span class="brand-mark" aria-hidden="true"><svg class="ic" viewBox="0 0 512 512"><use href="#i-odeion"/></svg></span>
+      <span class="brand-name">Odeion</span>
     </div>
     <nav class="nav" aria-label="Main">
       <div class="nav-group">
@@ -131,8 +133,15 @@
     <div id="loginbody" aria-live="polite"></div>
     <details class="logintoken" id="logintoken"><summary class="muted small">Use the node’s API token instead</summary>
       <form id="tokform">
-        <p class="muted small">The node makes one and keeps it in the <code>api-token</code> file in its data folder (Docker: <code>docker exec pubky-music cat /data/api-token</code>). One set by hand is <code>[api] token</code> in node.toml or <code>PM_TOKEN</code>. <a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">Where to find it</a>. It stays in this browser.</p>
-        <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off" aria-describedby="tokerr"></label>
+        <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off" aria-describedby="tokhint tokerr"></label>
+        <p class="muted small" id="tokhint">It’s in the <code>api-token</code> file in the node’s data folder, and stays in this browser.</p>
+        <details class="tokwhere"><summary class="muted small">Where to find it</summary>
+          <ul class="muted small tokplaces">
+            <li>With Docker: <code>docker exec pubky-music cat /data/api-token</code></li>
+            <li>Set by hand: <code>[api] token</code> in node.toml, or <code>PM_TOKEN</code></li>
+            <li><a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">More in the troubleshooting guide</a></li>
+          </ul>
+        </details>
         <p class="warn-text small" id="tokerr" role="alert"></p>
         <div class="dialog-actions"><button class="btn" type="submit">Log in with the token</button></div>
       </form>
@@ -142,6 +151,7 @@
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
+    <symbol id="i-odeion" viewBox="0 0 512 512"><g fill="none" stroke="currentColor" stroke-width="25" stroke-linecap="round"><path d="M 394.36055 224.05695 A 142 142 0 1 1 333.33874 136.90878"/><path d="M 347.59079 234.85460 A 94 94 0 1 1 307.19607 177.16497"/><path d="M 300.82102 245.65225 A 46 46 0 1 1 281.05340 217.42115"/></g></symbol>
     <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 8a4.3 4.3 0 0 1 7.5 2.5c0 5.4-7.5 10-7.5 10z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
     <symbol id="i-heart-fill" viewBox="0 0 24 24"><path d="M12 20.5s-7.5-4.6-7.5-10A4.3 4.3 0 0 1 12 8a4.3 4.3 0 0 1 7.5 2.5c0 5.4-7.5 10-7.5 10z" fill="currentColor"/></symbol>

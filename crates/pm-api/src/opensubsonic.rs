@@ -1,5 +1,5 @@
 //! Your own (Open)Subsonic server as a source (STEWARD-PLAN step 5.1): Navidrome, Airsonic, Gonic,
-//! Ampache, LMS or another Pubky Music node. One server per node: its URL, a user and a password,
+//! Ampache, LMS or another Odeion node. One server per node: its URL, a user and a password,
 //! kept in the node's database and never returned by the API. Every request signs itself with a
 //! fresh salt (`t` = md5(password + salt), the protocol's token auth), so no password travels.
 //!
@@ -253,7 +253,8 @@ fn server_name(srv: &Server) -> String {
         Some("ampache") => "Ampache".into(),
         Some("airsonic") | Some("airsonic-advanced") => "Airsonic".into(),
         Some("lms") => "LMS".into(),
-        Some("pubky-music-node") => "Pubky Music node".into(),
+        // compat: pre-Odeion server type, as this node reports it
+        Some("pubky-music-node") => "Odeion node".into(),
         Some(k) if !k.is_empty() => k.to_string(),
         _ => "Your server".into(),
     }

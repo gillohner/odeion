@@ -281,7 +281,7 @@ async fn sync_with(s: &NodeState, a: &mut Account) -> Result<SyncReport, String>
             seg(&a.username),
             seg(&a.device)
         );
-        let body = serde_json::json!({"caption": "Pubky Music", "type": "server"});
+        let body = serde_json::json!({"caption": "Odeion", "type": "server"});
         send::<serde_json::Value>(a, http.post(url).json(&body)).await?;
     }
 

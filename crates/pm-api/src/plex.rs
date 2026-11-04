@@ -24,7 +24,7 @@ pub const SOURCE_ID: &str = "plex";
 pub const TRACK_URI_PREFIX: &str = "plex:track:";
 const SETTING: &str = "plex.server";
 const CLIENT_ID_SETTING: &str = "plex.client_id";
-const PRODUCT: &str = "Pubky Music";
+const PRODUCT: &str = "Odeion";
 pub const PLEX_TV: &str = "https://plex.tv";
 const AUTH_APP: &str = "https://app.plex.tv/auth";
 

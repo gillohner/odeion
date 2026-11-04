@@ -1,6 +1,6 @@
-# Pubky Music for Home Assistant
+# Odeion for Home Assistant
 
-A Home Assistant custom integration for a [Pubky Music](https://github.com/gillohner/pubky-music-node) node:
+A Home Assistant custom integration for an [Odeion](https://github.com/gillohner/pubky-music-node) node:
 every zone becomes a `media_player`, and the node's library is in Home Assistant's media browser.
 
 It talks to the node's own HTTP API and its live events socket (`/v1/events`) with the node's API token.
@@ -38,16 +38,19 @@ Nothing leaves your network.
 ## Install
 
 **HACS:** add this integration's repository as a custom repository (category *Integration*), install
-*Pubky Music*, then restart Home Assistant.
+*Odeion*, then restart Home Assistant.
 
 **By hand:** copy `custom_components/pubky_music` into your Home Assistant `config/custom_components/`
 folder and restart.
+
+The folder and the integration's domain stay `pubky_music`, the names from before Odeion: existing
+entries, devices and entity ids keep working, and nothing needs adding again.
 
 ## Set up
 
 Home Assistant finds nodes on your network by themselves (zeroconf, `_pubky-music._tcp`). Look under
 Settings › Devices & services › Discovered and enter the node's API token. You can also add it by hand:
-*Add integration › Pubky Music*, then enter the node's address, its port (7788 unless you changed it) and
+*Add integration › Odeion*, then enter the node's address, its port (7788 unless you changed it) and
 its API token. The token is in the node's Settings › Node, or `[api] token` in `node.toml`.
 
 Each node is one device, and each zone is a device under it.

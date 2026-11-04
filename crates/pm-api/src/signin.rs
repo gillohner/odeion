@@ -23,7 +23,7 @@ use crate::{accounts::Who, state::NodeState, ApiError, ApiResult};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Way {
     pub id: String,
-    /// Plainly by where it comes from: "Pubky Music's app", "Your own device client", "Your own app".
+    /// Plainly by where it comes from: "Odeion's app", "Your own device client", "Your own app".
     pub label: String,
     pub note: String,
     /// `browser` (a sign-in page opens and comes back), `code` (a code to enter on another

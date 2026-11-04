@@ -1,14 +1,22 @@
 [package]
 name = "pm-node"
-description = "The Pubky Music Node binary"
+description = "The Odeion node: the odeiond daemon (pm-node, its pre-Odeion name, is the same program)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# `cargo run -p pm-node` runs odeiond (the package also builds pm-node)
+default-run = "odeiond"
+
+# The daemon. compat: pre-Odeion name: `pm-node` is the same program (src/bin/pm-node.rs), kept so
+# scripts, units and images that run it keep working (docs/branding-compatibility.md).
+[[bin]]
+name = "odeiond"
+path = "src/main.rs"
 
 [[bin]]
 name = "pm-node"
-path = "src/main.rs"
+path = "src/bin/pm-node.rs"
 
 [features]
 default = []

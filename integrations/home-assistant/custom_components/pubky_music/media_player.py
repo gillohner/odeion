@@ -94,7 +94,7 @@ class ZonePlayer(MediaPlayerEntity):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._attr_unique_id)},
             name=z.get("name") or zone_id,
-            manufacturer="Pubky Music",
+            manufacturer="Odeion",
             model=f"Zone ({out.get('protocol', 'output')})",
             via_device=(DOMAIN, node.node_id),
         )
@@ -360,7 +360,7 @@ class ZonePlayer(MediaPlayerEntity):
     async def async_join_players(self, group_members: list[str]) -> None:
         members = [self._zone_of_entity(e) for e in group_members]
         if None in members:
-            raise ServiceValidationError("Only Pubky Music zones of the same node can be grouped")
+            raise ServiceValidationError("Only Odeion zones of the same node can be grouped")
         outputs = [self.zone.get("output")] + [
             self.node.zones[m].get("output") for m in members if m in self.node.zones
         ]

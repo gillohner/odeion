@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-bluos"
-description = "BluOS players (Bluesound, NAD) as outputs of the Pubky Music Node, with BluOS groups"
+description = "BluOS players (Bluesound, NAD) as outputs of the Odeion node, with BluOS groups"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

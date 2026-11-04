@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-local"
-description = "Local outputs for the Pubky Music Node: bit-perfect ALSA hw: (Linux), and a shared-mode cpal backend (CoreAudio, WASAPI, AAudio) for the app"
+description = "Local outputs for the Odeion node: bit-perfect ALSA hw: (Linux), and a shared-mode cpal backend (CoreAudio, WASAPI, AAudio) for the app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

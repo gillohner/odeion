@@ -191,5 +191,34 @@ class MovedNode(unittest.TestCase):
         self.assertEqual((r["type"], r["step_id"]), ("form", "zeroconf_confirm"))
 
 
+
+class Names(unittest.TestCase):
+    """Odeion is the name people see; the domain, and so every existing entry and entity id, stays
+    `pubky_music` (docs/branding-compatibility.md)."""
+
+    def setUp(self) -> None:
+        FakeApi.calls, FakeApi.nodes = [], {}
+        self.hass = types.SimpleNamespace(config_entries=Entries([]))
+
+    def test_a_node_that_gives_no_name_is_shown_as_odeion(self):
+        f = config_flow.PubkyMusicConfigFlow()
+        f.hass, f.context = self.hass, {"source": "zeroconf"}
+        r = step(f.async_step_zeroconf(ZeroconfServiceInfo("10.0.0.9", 7788, {"role": "node", "id": "node-9"})))
+        self.assertEqual(r["step_id"], "zeroconf_confirm", r)
+        self.assertEqual(f.context["title_placeholders"], {"name": "Odeion"})
+
+    def test_the_display_name_is_odeion_and_the_domain_is_unchanged(self):
+        import json
+
+        manifest = json.loads((PKG_DIR / "manifest.json").read_text())
+        self.assertEqual(manifest["name"], "Odeion")
+        self.assertEqual(manifest["domain"], "pubky_music")
+        self.assertEqual(importlib.import_module("pubky_music.const").DOMAIN, "pubky_music")
+        for f in ("strings.json", "translations/en.json"):
+            text = (PKG_DIR / f).read_text()
+            self.assertIn("Odeion", text, f)
+            self.assertNotIn("Pubky Music", text, f)  # compat: pre-Odeion name must be gone
+
+
 if __name__ == "__main__":
     unittest.main()

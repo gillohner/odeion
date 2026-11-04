@@ -132,7 +132,7 @@ class Browser:
             return await media_source.async_browse_media(self.hass, content_id)
         kind, ident = parse(content_id)
         if kind == "root":
-            root = self.folder("root", "", "Pubky Music", MediaClass.DIRECTORY, children_cls=MediaClass.DIRECTORY)
+            root = self.folder("root", "", "Odeion", MediaClass.DIRECTORY, children_cls=MediaClass.DIRECTORY)
             root.children = [self.folder(k, "", t, MediaClass.DIRECTORY, children_cls=c) for k, t, c in LIBRARY]
             try:
                 root.children.append(await media_source.async_browse_media(self.hass, None))
@@ -238,7 +238,7 @@ class Browser:
             )
             node.children = [self.track(t) for t in p.get("tracks", []) if t]
             return node
-        raise BrowseError(f"Unknown Pubky Music item {content_id}")
+        raise BrowseError(f"Unknown Odeion item {content_id}")
 
     async def search(self, query: str, classes: list[MediaClass] | None) -> list[BrowseMedia]:
         r = await self.api.get("/library/search", q=query, limit=25)

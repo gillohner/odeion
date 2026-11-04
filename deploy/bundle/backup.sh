@@ -9,8 +9,8 @@
 #   KEEP=14 ./backup.sh
 #
 # Each backup is a folder readable by you only: it holds every secret of the node (.env, the
-# sign-ins). The sign-ins in node/library.pmbackup are locked with PM_BACKUP_PASSPHRASE from
-# .env or the environment; without one, a new passphrase is made and saved next to it as
+# sign-ins). The sign-ins in node/library.pmbackup are locked with ODEION_BACKUP_PASSPHRASE (or
+# PM_BACKUP_PASSPHRASE, its pre-Odeion name) from the environment or .env; without one, a new passphrase is made and saved next to it as
 # node/passphrase. Put it back with ./restore.sh <folder>.
 set -euo pipefail
 umask 077
@@ -29,7 +29,8 @@ CURL=curlimages/curl:8.17.0@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4
 ALPINE=$(sed -n 's/^ *image: *\(alpine:[^ ]*\).*/\1/p' docker-compose.yml | head -n 1)
 [ -n "$ALPINE" ] || die "no alpine image in docker-compose.yml"
 
-env_get() { sed -n "s/^$1=//p" .env | tail -n 1; }
+# setting, node_port, NODE_BACKUP_SH: ODEION_ settings first, then PM_ ones
+. ./settings.sh
 cid() { docker compose ps -q "$1" 2>/dev/null; }
 # The volume (or host folder) a container has at a path
 vol_of() {
@@ -45,13 +46,27 @@ PG=$(cid postgres)
 HS=$(cid homeserver)
 NODE=$(cid music)
 [ -n "$PG" ] && [ -n "$HS" ] && [ -n "$NODE" ] || die "the bundle is not running: docker compose up -d first"
+# The API token the node uses, before anything else: its config's [api] token, else the one it made
+# for itself (read in its container, never shown; its node.toml is written once, so a token added to
+# .env later is not the node's); else .env's
+rc=0
+TOKEN=$(docker exec "$NODE" sh -c "$NODE_TOKEN_SH" 2>/dev/null) || { rc=$?; TOKEN=; }
+if [ "$rc" = 2 ]; then
+  # Its config's [api] token line is more than node_token_from reads: not .env's, only one given here
+  for k in ODEION_TOKEN PM_TOKEN; do
+    eval "v=\${$k-}"
+    if [ -n "$v" ]; then TOKEN=$v; break; fi
+  done
+  [ -n "$TOKEN" ] || die "cannot read the API token in the node's /data/node.toml: this reads only a plain [api] table with a plain token = \"…\" or '…' line (no quoted or escaped keys or headers, no api.… or api = { … }); run it with the node's token: ODEION_TOKEN=… ./backup.sh"
+fi
+[ -n "$TOKEN" ] || TOKEN=$(setting TOKEN)
+[ -n "$TOKEN" ] || die "no API token: the node has none in its config ([api] token in /data/node.toml) or its data folder (/data/api-token), and .env has no ODEION_TOKEN (or PM_TOKEN): put the node's token in .env as ODEION_TOKEN=…"
 PROJECT=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$NODE")
 NODE_DATA=$(vol_of "$NODE" /data)
 TUNNEL=$(vol_of "$NODE" /tunnel)
 HS_DATA=$(vol_of "$HS" /data)
 [ -n "$NODE_DATA" ] && [ -n "$HS_DATA" ] || die "cannot find the node's or the homeserver's data volume"
-PORT=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NODE" | sed -n 's/^PM_LISTEN=.*:\([0-9][0-9]*\)$/\1/p')
-PORT=${PORT:-7788}
+PORT=$(node_port "$NODE")
 
 kb_in() { docker run --rm -v "$1:/v:ro" "$ALPINE" du -sk /v | cut -f1; }
 need=$(( $(kb_in "$NODE_DATA") + $(kb_in "$HS_DATA") + $(docker exec "$PG" du -sk /var/lib/postgresql/data | cut -f1) ))
@@ -116,23 +131,21 @@ fi
 [ -s "$DEST/config/host-shares.txt" ] || rm -f "$DEST/config/host-shares.txt"
 
 # --- the node ---------------------------------------------------------------------------------
-TOKEN=$(env_get PM_TOKEN)
-PASS=${PM_BACKUP_PASSPHRASE:-$(env_get PM_BACKUP_PASSPHRASE)}
+PASS=$(setting BACKUP_PASSPHRASE)
 if [ -z "$PASS" ]; then
   PASS=$(secret)
   printf '%s\n' "$PASS" > "$DEST/node/passphrase"
 fi
 # node_api <method> <path> [file to post]: the node's API from inside its own network, so this
-# works whether it is on the host network or not; the token and passphrase go through stdin and a
-# header file, never a command line
+# works whether it is on the host network or not; the token and passphrase go through stdin (curl
+# -H @-), never a command line or a file
 node_api() {
   local mount=() body=()
   if [ -n "${3:-}" ]; then mount=(-v "$3:/in:ro"); body=(--data-binary @/in); fi
   printf '%s\n%s\n' "$TOKEN" "$PASS" |
     docker run --rm -i --user "$(id -u):$(id -g)" --network "container:$NODE" "${mount[@]}" "$CURL" sh -c '
       read -r T; read -r P
-      printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" > /tmp/h
-      exec curl -sS --fail-with-body -H @/tmp/h "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
+      printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" | curl -sS --fail-with-body -H @- "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
 }
 # 1. Settings › Backup's file: the library database, with the sign-ins, the Pubky session, the
 #    remote-access key and the node's config locked under the passphrase
@@ -140,7 +153,7 @@ node_api POST /v1/backup > "$DEST/node/library.pmbackup" || die "the node did no
 node_api POST '/v1/restore?check=true' "$DEST/node/library.pmbackup" > "$DEST/node/library-check.json" ||
   die "the node cannot read its own backup"
 # 2. a snapshot of the whole database (keeps this node's id; sign-ins come from step 1)
-docker exec "$NODE" sh -c 'pm-node -c "${PM_CONFIG:-${PM_DATA_DIR:-/data}/node.toml}" backup --force /tmp/pm-backup-library.db >/dev/null'
+docker exec "$NODE" sh -c "$NODE_BACKUP_SH"
 docker cp "$NODE:/tmp/pm-backup-library.db" "$DEST/node/library.db" > /dev/null
 docker exec "$NODE" rm -f /tmp/pm-backup-library.db
 # 3. the rest of the data folder (vault key, Pubky session, remote key, config, covers) and the
@@ -158,7 +171,7 @@ docker run --rm -v "$HS_DATA:/data:ro" "$ALPINE" tar czf - -C /data --exclude ./
   > "$DEST/homeserver/data.tar.gz"
 
 cat > "$DEST/README.txt" <<EOF
-Pubky Music bundle backup, $(date). Every secret of the node is in here: keep it private.
+Odeion bundle backup, $(date). Every secret of the node is in here: keep it private.
 Restore on a new disk or machine: ./restore.sh $DEST
 (docs/guides/backup-and-update.md, "Restore on a new disk or machine").
 config/      .env, the compose files, the images, the music mounts, recreate-volumes.sh

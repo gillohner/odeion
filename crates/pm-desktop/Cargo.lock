@@ -4871,6 +4871,7 @@ dependencies = [
  "jni 0.22.4",
  "pm-discovery",
  "pm-endpoint",
+ "pm-model",
  "pm-offline",
  "pm-pubky",
  "pm-remote",

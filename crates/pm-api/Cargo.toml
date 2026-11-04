@@ -1,6 +1,6 @@
 [package]
 name = "pm-api"
-description = "Native HTTP + WebSocket API (/v1) of the Pubky Music Node"
+description = "Native HTTP + WebSocket API (/v1) of the Odeion node"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

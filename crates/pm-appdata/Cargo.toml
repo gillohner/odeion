@@ -1,6 +1,6 @@
 [package]
 name = "pm-appdata"
-description = "Pubky Music's own data on a person's homeserver (/priv/pubky.music/): the paths, and the sources vault (VAULT.md)"
+description = "Odeion's own data on a person's homeserver (/priv/pubky.music/): the paths, and the sources vault (VAULT.md)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

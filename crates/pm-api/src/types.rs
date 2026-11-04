@@ -576,11 +576,24 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
-    Snapshot { zones: Vec<ZoneState> },
-    Zone { state: ZoneState },
-    ZoneEvent { zone: ZoneId, event: ZoneEvent },
-    ZoneRemoved { zone: ZoneId },
+    Snapshot {
+        zones: Vec<ZoneState>,
+    },
+    Zone {
+        state: ZoneState,
+    },
+    ZoneEvent {
+        zone: ZoneId,
+        event: ZoneEvent,
+    },
+    ZoneRemoved {
+        zone: ZoneId,
+    },
     LibraryChanged,
+    /// The files jobs changed (a state, or ~2 s of progress while one runs): the owner's only.
+    Jobs {
+        jobs: Box<JobsView>,
+    },
 }
 
 // ---- playlists (ADR 0006) ----
@@ -2142,14 +2155,50 @@ pub struct UploadRequest {
     /// The whole library.
     #[serde(default)]
     pub all: bool,
+    /// Library folders (a music folder, a folder in one, a share's or drive's key): every song
+    /// under them.
+    #[serde(default)]
+    pub paths: Vec<String>,
     /// Only say how many files and bytes it would be.
     #[serde(default)]
     pub dry_run: bool,
 }
 
+/// One file a files job couldn't do, and why.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct JobError {
+    /// The file (empty for a problem with the whole job).
+    pub path: String,
+    pub reason: String,
+}
+
+impl From<String> for JobError {
+    fn from(reason: String) -> Self {
+        JobError {
+            path: String::new(),
+            reason,
+        }
+    }
+}
+
+/// `GET /v1/pubky/files/jobs`: what the job chip shows.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct JobsView {
+    /// The job running or paused now (a copy, an import or bringing files here).
+    pub current: Option<UploadProgress>,
+    /// Copies waiting their turn, in order.
+    pub queued: Vec<UploadProgress>,
+    /// The last copy's summary, until the next one starts or it is dismissed.
+    pub last: Option<UploadProgress>,
+}
+
+fn no_count(n: &usize) -> bool {
+    *n == 0
+}
+
 /// A files job between the node and the homeserver (`copy`: library → homeserver; `bring`:
 /// homeserver → this node): planned (`dry_run`), running or finished.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct UploadProgress {
     pub id: String,
     /// `copy` or `bring`.
@@ -2175,8 +2224,43 @@ pub struct UploadProgress {
     /// The file being sent.
     pub current: Option<String>,
     pub finished: bool,
-    /// The last few problems, plainly.
-    pub errors: Vec<String>,
+    /// The last problems (50 for a copy), plainly, with the file each was about.
+    pub errors: Vec<JobError>,
+    /// Copies: `queued`, `running`, `paused`, `finished`, `cancelled` or `failed`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// Copies: what was picked, in a few words (`2 folders`, an album's title, `Your library`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<i64>,
+    /// Bytes per second over the last ~10 s, and the seconds left at that pace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_bps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eta_s: Option<u64>,
+    /// The folder of the file being sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_folder: Option<String>,
+    /// Every problem so far (`errors` keeps the last ones).
+    #[serde(default, skip_serializing_if = "no_count")]
+    pub errors_count: usize,
+    /// Failed files a retry would send again; for a copy always there, also `0` once retried
+    /// (the page then stops offering Retry failed, #237 review), left out for other jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_retryable: Option<usize>,
+    /// It stopped because the homeserver is full.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full: bool,
+    /// Why it failed as a whole, plainly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Planned: the bytes of the files already there (`skipped`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_skipped: Option<u64>,
     /// Files left out because they are not audio (`._*` AppleDouble files, anything that doesn't
     /// probe as audio).
     #[serde(default)]

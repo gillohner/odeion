@@ -90,3 +90,15 @@ test("track keys round-trip", () => {
   const np = { three_line: { line1: "a", line2: "b", line3: "c" } };
   assert.deepEqual(keyLines(trackKey(np)), np.three_line);
 });
+
+// Settings are ODEION_<NAME>, with the pre-Odeion PM_<NAME> still read; the new name wins, also when
+// empty (docs/branding-compatibility.md)
+import { setting } from "./lib.js";
+
+test("ODEION_ settings first, PM_ still read, the new name wins even when empty", () => {
+  assert.equal(setting("NODE", { PM_NODE: "http://old:7788" }), "http://old:7788");
+  assert.equal(setting("NODE", { ODEION_NODE: "http://new:7788" }), "http://new:7788");
+  assert.equal(setting("TOKEN", { PM_TOKEN: "fixture-old", ODEION_TOKEN: "fixture-new" }), "fixture-new");
+  assert.equal(setting("TOKEN", { PM_TOKEN: "fixture-old", ODEION_TOKEN: "" }), "");
+  assert.equal(setting("TOKEN", {}), undefined);
+});
