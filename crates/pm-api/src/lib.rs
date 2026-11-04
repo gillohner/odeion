@@ -20038,4 +20038,40 @@ exec sleep 300
             "{tr}"
         );
     }
+
+    /// PR #268 review (Claude H1): a node-only favourite of a song whose file is gone for a while
+    /// (a NAS share not mounted at a scan) is kept, and is there again when the file is back.
+    #[tokio::test]
+    async fn a_favourite_survives_its_file_going_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let nas = dir.path().join("nas");
+        let id = {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(nas.join("01.flac"), "Song", "Someone"))
+                .unwrap()
+                .0
+        };
+        let body = serde_json::json!({ "track_id": id });
+        let (st, b) = call(&app, "PUT", "/v1/bookmarks", Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+        {
+            let lib = s.library.lock().unwrap();
+            let scan = lib.begin_scan(&nas).unwrap();
+            lib.mark_missing_under(&nas, scan).unwrap();
+        }
+        // Reading the favourites tidies node-only ones: the gone song must stay
+        let (st, _) = call(&app, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+        {
+            let lib = s.library.lock().unwrap();
+            let scan = lib.begin_scan(&nas).unwrap();
+            lib.mark_file_seen(&nas.join("01.flac"), scan).unwrap();
+        }
+        let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+    }
 }
