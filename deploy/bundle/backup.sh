@@ -137,16 +137,15 @@ if [ -z "$PASS" ]; then
   printf '%s\n' "$PASS" > "$DEST/node/passphrase"
 fi
 # node_api <method> <path> [file to post]: the node's API from inside its own network, so this
-# works whether it is on the host network or not; the token and passphrase go through stdin and a
-# header file, never a command line
+# works whether it is on the host network or not; the token and passphrase go through stdin (curl
+# -H @-), never a command line or a file
 node_api() {
   local mount=() body=()
   if [ -n "${3:-}" ]; then mount=(-v "$3:/in:ro"); body=(--data-binary @/in); fi
   printf '%s\n%s\n' "$TOKEN" "$PASS" |
     docker run --rm -i --user "$(id -u):$(id -g)" --network "container:$NODE" "${mount[@]}" "$CURL" sh -c '
       read -r T; read -r P
-      printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" > /tmp/h
-      exec curl -sS --fail-with-body -H @/tmp/h "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
+      printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" | curl -sS --fail-with-body -H @- "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
 }
 # 1. Settings › Backup's file: the library database, with the sign-ins, the Pubky session, the
 #    remote-access key and the node's config locked under the passphrase

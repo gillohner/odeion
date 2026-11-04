@@ -157,8 +157,7 @@ node_api() {
   printf '%s\n%s\n' "$TOKEN" "$PASS" |
     docker run --rm -i --user "$(id -u):$(id -g)" --network "container:$NODE" "${mount[@]}" "$CURL" sh -c '
       read -r T; read -r P
-      printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" > /tmp/h
-      exec curl -sS --fail-with-body -H @/tmp/h "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
+      printf "Authorization: Bearer %s\nx-backup-passphrase: %s\n" "$T" "$P" | curl -sS --fail-with-body -H @- "$@"' sh -X "$1" "${body[@]}" "http://127.0.0.1:$PORT$2"
 }
 # --- sign-ins: begin
 tried=0

@@ -83,8 +83,37 @@ pm-node -c "$c" backup --force /tmp/pm-backup-library.db >/dev/null'
 # node's container (NODE_TOKEN_SH).
 NODE_TOKEN_FN=$(cat <<'EOF_FN'
 toml_api_token() {
-  local line v got
-  line=$(sed -n '/^[[:space:]]*\[api\][[:space:]]*\(#.*\)\{0,1\}$/,/^[[:space:]]*\[/{/^[[:space:]]*token[[:space:]]*=/p;}' | head -n 1)
+  local cfg sec line v got loose strict
+  cfg=$(cat)
+  # The node reads node.toml with a full TOML parser; this reads one spelling: a plain [api] table
+  # with a plain token key. Any other spelling of the API token (a quoted or spaced [api] header, a
+  # quoted "token" key in it, api.token = …, api = { token = … }) is refused (status 2), so a script
+  # never takes another token than the node's. (Heredocs, not pipes: no early-exit SIGPIPE.)
+  loose=$(grep -Ec "^[[:space:]]*\[[[:space:]]*[\"']?api[\"']?[[:space:]]*\]" <<EOT || true
+$cfg
+EOT
+)
+  strict=$(grep -Ec '^[[:space:]]*\[api\][[:space:]]*(#.*)?$' <<EOT || true
+$cfg
+EOT
+)
+  [ "$loose" = "$strict" ] || return 2
+  if grep -Eq "^[[:space:]]*[\"']?api[\"']?[[:space:]]*(\.[[:space:]]*[\"']?token[\"']?[[:space:]]*=|=[[:space:]]*\{.*token)" <<EOT
+$cfg
+EOT
+  then return 2; fi
+  sec=$(sed -n '/^[[:space:]]*\[api\][[:space:]]*\(#.*\)\{0,1\}$/,/^[[:space:]]*\[/p' <<EOT
+$cfg
+EOT
+)
+  if grep -Eq "^[[:space:]]*[\"'][[:space:]]*token[[:space:]]*[\"'][[:space:]]*=" <<EOT
+$sec
+EOT
+  then return 2; fi
+  line=$(sed -n '/^[[:space:]]*token[[:space:]]*=/{p;q;}' <<EOT
+$sec
+EOT
+)
   [ -n "$line" ] || return 0
   v=${line#*=}
   v=${v#"${v%%[![:space:]]*}"}

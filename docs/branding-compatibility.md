@@ -135,8 +135,10 @@ Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the n
   `node.toml` once, so a token added to `.env` later is not the node's; the scripts therefore use the
   token the node uses (its config's `[api] token`, else the one it made), read without showing it
   or writing it to disk. The config's token line may be `"…"` (with `\"` and `\\`) or `'…'`, with a
-  comment after it; anything else (`"""…"""`, other escapes, a bare value) stops the script with a
-  message instead of falling back to another token. `backup.sh` asks the running node, then `.env`.
+  comment after it, in a plain `[api]` table under a plain `token` key. Any other spelling the node's
+  TOML parser takes (`"token" =`, `api.token =`, `["api"]`, `[ api ]`, `api = { token = … }`) or any other
+  string form (`"""…"""`, other escapes, a bare value) stops the script with a message instead of
+  falling back to another token; the token can then be given as `ODEION_TOKEN=…` in the shell. `backup.sh` asks the running node, then `.env`.
   `restore.sh` takes the backup's own token (its `node.toml`, else its `api-token`); without a
   `node.toml` in the backup, compose's (shell, then `.env`); when the restored node refuses it
   (401), the one the running node uses, read in its container; and it stops at once, saying where
