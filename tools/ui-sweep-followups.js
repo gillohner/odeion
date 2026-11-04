@@ -68,7 +68,7 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       }
       // ---- A10: the play-from order's grips, on touch ----
       if (touch(w)) {
-        await p.goto(BASE + '/settings/playback'); await p.waitForSelector('[data-ogrip]', { timeout: 20000 }).catch(() => {});
+        await p.goto(BASE + '/settings/playfrom'); await p.waitForSelector('[data-ogrip]', { timeout: 20000 }).catch(() => {});
         const g = await boxes(p, '[data-ogrip]');
         check(g.length && g.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: the play-from order's grips are 40 px (${JSON.stringify(g.slice(0, 2))})`);
       }
