@@ -84,15 +84,20 @@ jobs:
 
   probe:
     needs: build
-    name: ring transport (API ${{ matrix.api }})
+    name: ring transport (API ${{ matrix.api }}, ${{ matrix.gpu }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         # 30: the oldest the release check covers; 35; 37.0: Android 17, where the app's
         # target (API 37) turns on certificate transparency and local-network protection.
         api: ["30", "35", "37.0"]
+        gpu: [swiftshader_indirect]
+        include:
+          # In case the newest image does not boot with the software renderer on the runner.
+          - api: "37.0"
+            gpu: guest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
@@ -110,12 +115,15 @@ jobs:
           api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none -no-audio
+          ram-size: 4096M
+          cores: 4
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu ${{ matrix.gpu }} -no-snapshot -no-boot-anim -camera-back none -no-audio
           disable-animations: true
           script: python3 -I tools/android-ring-probe.py probe/app.apk probe /tmp/rp
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: ring-probe-api${{ matrix.api }}
+          name: ring-probe-api${{ matrix.api }}-${{ matrix.gpu }}
           path: /tmp/rp/
           if-no-files-found: ignore

@@ -108,23 +108,50 @@ def main():
     log(f"Android {release} (API {api})")
     adb("reverse", f"tcp:{PORT}", f"tcp:{PORT}")
     adb("install", "-r", apk, timeout=600)
+    # The emulator's network comes up after boot: start the app only once a name resolves.
+    for _ in range(90):
+        if "1 received" in adb("shell", "ping", "-c", "1", "-W", "2", "pkarr.pubky.app", check=False):
+            break
+        time.sleep(2)
+    else:
+        log("the emulator has no network after 3 min")
     adb("logcat", "-c")
     logfile = out / "logcat.txt"
-    lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "*:S"],
+    lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
                           stdout=open(logfile, "w"), stderr=subprocess.STDOUT)
-    try:
-        adb("shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1")
-        deadline = time.time() + 420
-        steps = {}
+    states = {}
+
+    def wait_for(step, timeout):
+        deadline = time.time() + timeout
         while time.time() < deadline:
             steps = probe_lines(logfile.read_text(errors="replace"))
-            if "done" in steps:
-                break
+            if step in steps:
+                return steps
             time.sleep(2)
+        return probe_lines(logfile.read_text(errors="replace"))
+
+    def process_state():
+        text = adb("shell", "dumpsys", "activity", "processes", PKG, check=False)
+        keep = [l.strip() for l in text.splitlines() if any(k in l.lower() for k in ("frozen", "procstate", "cached", "oom adj", "setprocstate"))]
+        return keep[:12]
+
+    try:
+        launch = ["shell", "monkey", "-p", PKG, "-c", "android.intent.category.LAUNCHER", "1"]
+        adb(*launch)
+        steps = wait_for("phase1_done", 420)
+        if "phase1_done" in steps:
+            # As when the user switches to Ring to approve: the app goes to the background.
+            adb("shell", "input", "keyevent", "KEYCODE_HOME")
+            time.sleep(45)
+            states["background_45s"] = process_state()
+            time.sleep(55)
+            states["background_100s"] = process_state()
+            adb(*launch)
+            steps = wait_for("done", 180)
     finally:
         time.sleep(1)
         lc.terminate()
-    report = {"android": release, "api": api, "steps": steps, "fixture_requests": seen}
+    report = {"android": release, "api": api, "steps": steps, "fixture_requests": seen, "process_states": states}
     (out / "ring-probe.json").write_text(json.dumps(report, indent=1))
     print(json.dumps(report, indent=1))
 
@@ -143,12 +170,15 @@ def main():
 
     direct = steps.get("direct_tcp", {})
     default = steps.get("resolve_default", {})
-    found_icann = any(ep.get("domain") for s in ("resolve_relays", "resolve_dht", "resolve_default")
-                      for ep in (steps.get(s, {}).get("lookup", {}).get("endpoints") or []))
-    info = default.get("info") or {}
-    if found_icann and direct.get("reachable") is False and info.get("host") not in (None, "", "homeserver.riginode.xyz"):
-        failures.append(f"public homeserver: direct endpoint unreachable and an ICANN endpoint exists, "
-                        f"but the default client sent to {info.get('sent_to')!r} ({info.get('outcome')})")
+    def eps(step):
+        return ((steps.get(step, {}).get("lookup") or {}).get("endpoints") or {}).get("endpoints") or []
+
+    found_icann = any(ep.get("domain") for s in ("resolve_relays", "resolve_dht", "resolve_default") for ep in eps(s))
+    for name, info in (("default client", default.get("info") or {}),
+                       ("default client after the background", steps.get("after_background", {}).get("info") or {})):
+        if found_icann and direct.get("reachable") is False and info.get("host") != "homeserver.riginode.xyz":
+            failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, "
+                            f"but it sent to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')})")
     if not found_icann:
         failures.append("public homeserver: no lookup (relays, DHT, default) found its ICANN endpoint "
                         f"(relays: {steps.get('resolve_relays', {}).get('lookup')}, "

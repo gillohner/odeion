@@ -53,10 +53,50 @@ fn chain(e: &(dyn std::error::Error + 'static)) -> String {
 pub async fn run() {
     let started = Instant::now();
     emit("start", json!({}));
+    // Like `ring_connect`: the client exists before the user leaves for Ring, and the grant
+    // exchange runs on it when the approval comes back, often after the app sat in the background.
+    let held = PubkyHttpClient::new();
     fixture().await;
     relay_tls().await;
     public_homeserver().await;
+    emit(
+        "phase1_done",
+        json!({ "ms": started.elapsed().as_millis() as u64 }),
+    );
+    // The harness sends the app to the background now and brings it back later. A frozen
+    // process wakes past this deadline, so the step below runs as an exchange does on return.
+    let wall = std::time::SystemTime::now();
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let away = wall.elapsed().map(|d| d.as_millis() as u64).unwrap_or_default();
+    let resumed = match &held {
+        Ok(c) => {
+            let info = routed(c, Method::GET, &format!("https://{PUBLIC_HOMESERVER}/info"), None).await;
+            let lookup = lookups(c.pkarr(), PUBLIC_HOMESERVER).await;
+            json!({ "away_ms": away, "info": info, "lookup": lookup })
+        }
+        Err(e) => json!({ "away_ms": away, "error": chain(e) }),
+    };
+    emit("after_background", resumed);
     emit("done", json!({ "ms": started.elapsed().as_millis() as u64 }));
+}
+
+/// The packet each backend answers with (network only), and the endpoints it gives.
+async fn lookups(pkarr: &pkarr::Client, z32: &str) -> Value {
+    let started = Instant::now();
+    let packet = match pkarr::PublicKey::try_from(z32) {
+        Err(e) => json!({ "error": e.to_string() }),
+        Ok(pk) => match tokio::time::timeout(
+            STEP_TIMEOUT,
+            pkarr.resolve(&pk, pkarr::ResolvePolicy::NetworkOnly),
+        )
+        .await
+        {
+            Err(_) => json!({ "error": "timed out" }),
+            Ok(Err(e)) => json!({ "error": chain(&e) }),
+            Ok(Ok(p)) => json!({ "timestamp_us": p.timestamp().as_u64(), "bytes": p.encoded_packet().len() }),
+        },
+    };
+    json!({ "packet": packet, "packet_ms": started.elapsed().as_millis() as u64, "endpoints": endpoints(pkarr, z32).await })
 }
 
 /// Build a request through the SDK's transport routing, note where it goes, then send it.
@@ -229,7 +269,7 @@ async fn public_homeserver() {
                 continue;
             }
         };
-        let eps = endpoints(client.pkarr(), PUBLIC_HOMESERVER).await;
+        let eps = lookups(client.pkarr(), PUBLIC_HOMESERVER).await;
         // The default client is the one Ring sign-in uses (`Pubky::new`): where would it send?
         let info = if configure.is_none() {
             // A fresh client, so the endpoint lookup above cannot have warmed its caches.
