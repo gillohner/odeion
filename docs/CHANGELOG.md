@@ -11,7 +11,9 @@ Newest first. Dates are when the change landed on `main`.
   - **Album and item pages:** the cover stays beside the title down to 600 px, and "Songs · 16 songs · Select" sits on one line, the count beside the title.
   - **Touch screens keep 40 px targets** in the desktop layout (`pointer: coarse`), whatever the width.
   - **Installed on an iPad or a phone:** the top bar, the sidebar and Now playing start below the status bar, and the sidebar keeps its top corner free for the iPadOS window controls.
-  - **Settings › Appearance › Layout:** Automatic, Phone or Desktop. A saved Compact becomes Phone, Comfortable becomes Desktop.
+  - **Settings › Appearance › Layout:** Automatic, Phone or Desktop. A saved Compact becomes Phone; Comfortable becomes Automatic (it was the rail from 600 px and a phone below, so a phone stays a phone).
+  - **A touch screen keeps the phone's bar behaviour:** the whole player bar opens Now playing; with a mouse its title and artist are links.
+  - **On a wide desktop** the player bar's right group gets a little more of the width (columns 1 : 1.2 : 1.2, from 1 : 1.3 : 1), so the volume slider, the sound line and the zone name fit beside each other.
 
 - **Signing in with Pubky Ring works again in the Android app on Android 15 and newer** (owner's report, Android 17). Android gives an app in the background no network, so the sign-in that finished while you approved in Ring failed. Odeion now finishes it once you are back in the app: the page says "Come back to Odeion to finish signing in", then "Waiting for Pubky Ring…". A Ring connection that dropped while you were away is opened again, a sign-in Ring does not answer within 10 minutes stops and says so, and a Cancel button ends it. The sign-in itself is never sent twice. Checked in CI inside the app on Android 11, 15 and 17 emulators.
 - **TIDAL full tracks arrive lossless: Sign in with TIDAL** (owner's ask). TIDAL sent the code sign-in AAC (`AAC → 24/44.1 lossy` on the player) where Max asks for hi-res FLAC.

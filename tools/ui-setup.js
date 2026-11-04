@@ -192,7 +192,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           const off = await p.evaluate(() => { document.body.classList.add('offline'); const d = getComputedStyle(document.querySelector('#volbtn')).display; document.body.classList.remove('offline'); return d; });
           check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
         }
-        if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
+        // A phone, or a desktop window under 760 px (no volume button there): the sound pill's panel
+        if (!vol && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         // A phone with nothing playing has no sound pill (UX sweep A4): volume is on the zone's card
         // (Zones, one tap), and in Now playing while something plays
         let where = (await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel';

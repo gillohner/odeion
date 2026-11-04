@@ -21,7 +21,7 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
   try {
     for (const width of [390, 768]) {
       const phone = width < 600;
-      const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: 'reduce', hasTouch: phone, isMobile: phone, permissions: ['clipboard-read', 'clipboard-write'] });
+      const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: 'reduce', hasTouch: width < 1025, isMobile: phone, permissions: ['clipboard-read', 'clipboard-write'] });
       await ctx.addInitScript((t) => {
         localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
         // A camera that sees a QR code with whatever window.__scanValue holds

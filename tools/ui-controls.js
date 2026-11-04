@@ -10,7 +10,7 @@
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const SKIP = /compact|comfortable|at any width|share on pubky|add my|bring my|make private|delete|remove|trash|sign (in|out)|sign in again|log ?out|forget|clear|reset|rescan|scan|sync|import|mirror|upload|download|backup|restore|tag my whole|identify|accept|write ids|write into|fixgo|tag every|copy library|bring files|restart|stop|change token|add folder|create|save|apply|disconnect|connect|pubky ring|copy/i;
+const SKIP = /compact|comfortable|share on pubky|add my|bring my|make private|delete|remove|trash|sign (in|out)|sign in again|log ?out|forget|clear|reset|rescan|scan|sync|import|mirror|upload|download|backup|restore|tag my whole|identify|accept|write ids|write into|fixgo|tag every|copy library|bring files|restart|stop|change token|add folder|create|save|apply|disconnect|connect|pubky ring|copy/i;
 const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Authorization: 'Bearer ' + TOKEN } })).json();
 
 (async () => {
@@ -54,7 +54,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
     await p.goto(BASE + view); await settle();
     const list = await kinds();
     for (const k of list) {
-      if (SKIP.test(k.words) || SKIP.test(k.id)) { skipped++; continue; }
+      if (SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig)) { skipped++; continue; }
       await p.goto(BASE + view); await settle();
       const now = await kinds(); const target = now.find((x) => x.sig === k.sig);
       if (!target) continue;

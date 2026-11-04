@@ -4,14 +4,15 @@
 // 1366 px, portrait and landscape, light and dark, with a long zone name playing:
 //   * the desktop layout: the sidebar with every desktop place (reachable when the window is short),
 //     no bottom tabs;
-//   * the player bar: no two of its parts overlap, nothing leaves the bar, and the title, artist and
-//     zone name each keep at least 8 characters when cut;
+//   * the player bar: no two of its parts overlap (as drawn, after any clipping), nothing leaves the
+//     bar, also with a files job showing, and the title, artist and zone name each keep at least 8
+//     characters when cut;
 //   * every desktop feature reachable: the queue, the volume (bar, button or the Sound panel),
 //     shuffle and repeat (bar or Now playing), the sound pill and the zone picker;
 //   * the album page: the cover beside the words, and "Songs · count · Select" on one baseline;
 //   * a touch screen keeps 40 px targets in the desktop layout.
 // Also: 390 px is still the phone (tabs, mini player), and the old Layout choices map across
-// (Compact = Phone, Comfortable = Desktop). Screenshots of each width go to the shots folder.
+// (Compact = Phone, Comfortable = Automatic). Screenshots of each width go to the shots folder.
 //   node tools/ui-tablet.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -34,6 +35,8 @@ const zone = { id: 'linn-klimax-ds3-upnp-av', name: 'Linn Klimax DS/3 (UPnP-AV)'
   now_playing: { item: { id: 1, uri: 'track:100', title: 'Nothing Can Save Me (live at the Crossroad sessions)', artist: 'Calvin Russell', album: 'Crossroad: Unplugged Live', duration_ms: 254000 }, index: 0, position_ms: 61000, duration_ms: 254000, source_format: fmt, output_format: fmt,
     signal_path: { stages: [{ name: 'decode', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }, { name: 'output', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }] }, format: { codec: 'FLAC', lossless: true, service: 'library', preview: false } } };
 
+// A files job beside the sound pill (its chip has words and a bar): the right group's busiest state
+const showJob = (page) => page.evaluate(() => { const c = document.querySelector('#jobchip'); c.hidden = false; c.innerHTML = '<svg class="ic"><use href="#i-upload"/></svg><span class="jc-text">1234/5678</span><span class="jc-bar"><span style="width:40%"></span></span>'; });
 async function open(browser, w, h, opts = {}) {
   if (opts.touch) return openTouch(browser, w, h);
   const run = await fx.create(browser, w, { fixtures: { '/zones': { body: [zone] }, ...(opts.layout ? {} : { '/outputs': { body: outputs } }), '/item/album/lib-7': { body: albumPage }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } } } });
@@ -57,15 +60,17 @@ async function openTouch(browser, w, h) {
 const barReport = () => {
   const shown = (el) => { const r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return false; const st = getComputedStyle(el); return st.display !== 'none' && st.visibility !== 'hidden' && Number(st.opacity) > 0.05 && !el.closest('[hidden]'); };
   const bar = document.querySelector('.player'); const br = bar.getBoundingClientRect();
-  const parts = [...bar.querySelectorAll('button, input, .time, .np-title, .np-sub, .qsrc, .qdot, .qbadge, #zonename, .ic')].filter(shown);
+  const parts = [...bar.querySelectorAll('button, input, .time, .np-title, .np-sub, .qsrc, .qdot, .qtext, .qbadge, #zonename, .jc-text, .jc-bar, .ic')].filter(shown);
+  // What shows of a part: its box cut by every ancestor in the bar that clips (overflow other than visible)
+  const seen = (el) => { let r = el.getBoundingClientRect(); let { left, right, top, bottom } = r; for (let a = el.parentElement; a && a !== bar; a = a.parentElement) { const st = getComputedStyle(a); if (st.overflowX !== 'visible' || st.overflowY !== 'visible') { const c = a.getBoundingClientRect(); left = Math.max(left, c.left); right = Math.min(right, c.right); top = Math.max(top, c.top); bottom = Math.min(bottom, c.bottom); } } return { left, right, top, bottom }; };
   const name = (e) => `${e.tagName.toLowerCase()}${e.id ? '#' + e.id : ''}${typeof e.className === 'string' && e.className ? '.' + e.className.split(' ')[0] : ''}`;
   const overlaps = []; const outside = [];
   for (let i = 0; i < parts.length; i++) {
-    const a = parts[i].getBoundingClientRect();
+    const a = seen(parts[i]); if (a.right - a.left < 1 || a.bottom - a.top < 1) continue;
     if (a.left < br.left - 1 || a.right > br.right + 1 || a.top < br.top - 1 || a.bottom > br.bottom + 1) outside.push(name(parts[i]));
     for (let j = i + 1; j < parts.length; j++) {
       if (parts[i].contains(parts[j]) || parts[j].contains(parts[i])) continue;
-      const b = parts[j].getBoundingClientRect();
+      const b = seen(parts[j]);
       const w = Math.min(a.right, b.right) - Math.max(a.left, b.left); const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
       if (w > 1 && h > 1) overlaps.push(`${name(parts[i])} × ${name(parts[j])} (${Math.round(w)}×${Math.round(h)})`);
     }
@@ -128,6 +133,9 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       check(!state.errors.length, `${tag}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
       check(overflow <= 0, `${tag}: no sideways scroll (${overflow})`);
+      await showJob(page); await page.waitForTimeout(100);
+      const busy = await page.evaluate(barReport);
+      check(!busy.overlaps.length && !busy.outside.length, `${tag}: with a files job showing, still nothing overlaps or leaves the bar${busy.overlaps.length || busy.outside.length ? ': ' + [...busy.overlaps, ...busy.outside].slice(0, 4).join('; ') : ''}`);
       if (orient === 'portrait' || w === 1366) {
         for (const theme of ['light', 'dark']) { await page.evaluate((t) => { document.documentElement.dataset.theme = t; }, theme); await page.screenshot({ path: path.join(SHOTS, `album-${w}x${h}-${theme}.png`) }); }
       }
@@ -159,11 +167,12 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await context.close();
   }
   // Settings › Appearance › Layout: Automatic / Phone / Desktop; the old choices map across
-  for (const [was, now, w] of [['compact', 'phone', 1024], ['comfortable', 'desktop', 1024], ['comfortable', 'desktop', 500], ['desktop', 'desktop', 390], ['phone', 'phone', 1366]]) {
+  // Comfortable (the tablet rail from 600 px, a phone below) becomes Automatic: the same at every width
+  for (const [was, now, w, kept] of [['compact', 'phone', 1024, 'phone'], ['comfortable', 'desktop', 1024, null], ['comfortable', 'phone', 500, null], ['desktop', 'desktop', 390, 'desktop'], ['phone', 'phone', 1366, 'phone']]) {
     const { page, context, state } = await open(browser, w, 800, { layout: was });
     await fx.go(page, '/settings/appearance'); await page.waitForSelector('[data-layout-pick]', { state: 'attached' }).catch(() => {});
     const s = await page.evaluate(() => ({ shell: document.documentElement.dataset.shell, kept: localStorage.getItem('pm.layout'), picks: [...document.querySelectorAll('[data-layout-pick]')].map((b) => `${b.dataset.layoutPick}${b.classList.contains('on') ? '*' : ''}`).join(',') }));
-    check(!state.errors.length && s.shell === now && s.kept === now && s.picks === `auto,phone,desktop`.replace(now, now + '*'), `Layout "${was}" at ${w}: ${now} (${JSON.stringify(s)})`);
+    check(!state.errors.length && s.shell === now && s.kept === kept && s.picks === `auto,phone,desktop`.replace(kept || 'auto', (kept || 'auto') + '*'), `Layout "${was}" at ${w}: ${now} (${JSON.stringify(s)})`);
     await context.close();
   }
   await browser.close();

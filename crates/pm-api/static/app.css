@@ -243,9 +243,10 @@ input[type=range]:hover::-webkit-slider-thumb, input[type=range]:focus-visible::
 input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz-range-thumb { opacity: 1; }
 .player-right { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
 /* The right group never spills over the transport (a long zone name, a long sound line): its parts
-   keep their size, except the sound pill's words and the zone's name, which shrink to an ellipsis */
+   keep their size, except the sound pill's words and the zone's name, which shrink to an ellipsis;
+   squeezed past that (a files job beside them), the pills clip their contents at their own edge */
 html:not([data-shell="phone"]) .player-right > * { flex: none; }
-html:not([data-shell="phone"]) .player-right > :is(.quality, .zone-btn) { flex: 0 1 auto; min-width: 0; }
+html:not([data-shell="phone"]) .player-right > :is(.quality, .zone-btn) { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 html:not([data-shell="phone"]) .player-right > .quality .qtext { min-width: 4em; }
 html:not([data-shell="phone"]) .player-right > .quality .qdot { flex: none; }
 html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; }

@@ -600,13 +600,17 @@
   // Two layouts (docs/ux/responsive.md; owner, 2026-11-04): phone under 600 px (bottom tabs and a
   // mini player) and desktop from 600 px (the sidebar and the full player bar), tablets included.
   // Settings › Appearance › Layout can force either at any width. The old choices map across:
-  // Compact was the phone arrangement, Comfortable the tablet rail (now the desktop).
-  const LAYOUT_WAS = { compact: 'phone', comfortable: 'desktop' };
+  // Compact (the phone arrangement at any width) becomes Phone; Comfortable (the tablet rail from
+  // 600 px, a phone below) becomes Automatic, which is now the desktop layout from 600 px.
+  const LAYOUT_WAS = { compact: 'phone', comfortable: 'auto' };
   const layoutPref = () => {
     let v = 'auto';
-    try { v = localStorage.getItem('pm.layout') || 'auto'; if (LAYOUT_WAS[v]) { v = LAYOUT_WAS[v]; localStorage.setItem('pm.layout', v); } } catch { /* no storage */ }
+    try { v = localStorage.getItem('pm.layout') || 'auto'; if (LAYOUT_WAS[v]) { v = LAYOUT_WAS[v]; if (v === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', v); } } catch { /* no storage */ }
     return v;
   };
+  // A touch screen (a tablet in the desktop layout too): the player bar is one target that opens
+  // Now playing, as on a phone; with a mouse its title and artist are links of their own
+  const barPlain = () => shellMode() !== 'desktop' || matchMedia('(pointer: coarse)').matches;
   const shellFor = (w, pref) => (pref === 'phone' || pref === 'desktop' ? pref : w < 600 ? 'phone' : 'desktop');
   const shellMode = () => document.documentElement.dataset.shell || 'desktop';
   const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
@@ -2615,11 +2619,11 @@
     }
     const it = np.item;
     const live = np.stream_title;
-    const links = npLinksHtml(it, live, shellMode() !== 'desktop');
+    const links = npLinksHtml(it, live, barPlain());
     $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    // On phones the whole bar opens Now playing (the song page is one tap further, from
-    // its title there); in the desktop layout the bar's title and artist are links of their own
-    if (!waitHtml && !errHtml && shellMode() === 'desktop') bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+    // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
+    // its title there); with a mouse the bar's title and artist are links of their own
+    if (!waitHtml && !errHtml && !barPlain()) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
