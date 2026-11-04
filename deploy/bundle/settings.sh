@@ -1,19 +1,42 @@
-# shellcheck shell=bash
-# Sourced by backup.sh and restore.sh: the bundle's settings, read as compose and the node read them
-# (docs/branding-compatibility.md). Every setting is ODEION_<NAME>; the pre-Odeion PM_<NAME> still
-# works and loses to the ODEION_ one.
+# shellcheck shell=sh
+# Sourced by backup.sh, restore.sh and setup.sh: the bundle's settings, read as compose and the node
+# read them (docs/branding-compatibility.md). Every setting is ODEION_<NAME>; the pre-Odeion
+# PM_<NAME> still works and loses to the ODEION_ one. POSIX sh, so setup.sh (sh) can use it too.
+
+# dotenv_get <KEY> [file]: KEY's value in .env (or file) as compose's .env parser reads it; status 1
+# when no line sets KEY. The last line wins; `export KEY=` counts; around the value, spaces go; "…"
+# and '…' give what is between the quotes (anything after the closing quote is dropped); unquoted, a
+# ` #` and what follows is a comment (a value that starts with # is a value). Not handled: escapes
+# in "…" and ${VAR} in values (the bundle's generated values have neither).
+dotenv_get() {
+  local line v
+  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" "${2:-.env}" 2>/dev/null | tail -n 1) || true
+  [ -n "$line" ] || return 1
+  v=${line#*=}
+  v=${v#"${v%%[![:space:]]*}"}
+  case $v in
+    \"*) v=${v#\"}; v=${v%%\"*} ;;
+    \'*) v=${v#\'}; v=${v%%\'*} ;;
+    *)
+      case $v in *[[:space:]]\#*) v=$(printf '%s' "$v" | sed 's/[[:space:]]#.*//') ;; esac
+      v=${v%"${v##*[![:space:]]}"}
+      ;;
+  esac
+  printf '%s' "$v"
+}
 
 # setting <NAME>: ODEION_<NAME>, else PM_<NAME>, exactly as compose resolves them: each name from the
 # shell's environment when the shell has it (even empty: then .env is not read for that name), else
-# from .env. Only for the token and the backup passphrase, where empty is never valid, so an empty
-# value goes on to the next name (compose's `${ODEION_TOKEN:-${PM_TOKEN…}}`).
+# from .env (dotenv_get). Only for the token and the backup passphrase, where empty is never valid, so
+# an empty value goes on to the next name (compose's `${ODEION_TOKEN:-${PM_TOKEN…}}`).
 setting() {
-  local k v
+  local k v isset
   for k in "ODEION_$1" "PM_$1"; do
-    if [ -n "${!k+set}" ]; then
-      v=${!k}
+    eval "isset=\${$k+set}"
+    if [ "$isset" = set ]; then
+      eval "v=\${$k}"
     else
-      v=$(sed -n "s/^$k=//p" .env 2>/dev/null | tail -n 1)
+      v=$(dotenv_get "$k") || v=
     fi
     if [ -n "$v" ]; then
       printf '%s' "$v"

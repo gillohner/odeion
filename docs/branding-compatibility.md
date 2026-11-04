@@ -121,6 +121,10 @@ Every setting is now `ODEION_<NAME>`; `PM_<NAME>` still works for at least the n
   `ODEION_NAME`, `ODEION_CONTACT` or `ODEION_PUBLIC_URL` wins; an empty token, image or tag counts
   as unset, because empty is never valid there. `backup.sh` and `restore.sh` read the token, the
   backup passphrase, the port and the node's config file the same way (`deploy/bundle/settings.sh`).
+  `.env` values are read as compose's `.env` parser reads them (`dotenv_get`): quotes, spaces and
+  an inline ` #` comment are dropped, so `ODEION_TOKEN=""` is empty and `"abc"` is `abc`. A value
+  that starts with `#` stays a value (`ODEION_TOKEN= # x` is `# x` to compose too). Checked against
+  the real `docker compose config` in `tools/bundle-settings-check.py`, which CI runs (`branding` job).
   Other `.env` keys (`ADMIN_PASSWORD`, `MUSIC_DIR`, …) never had a `PM_` name and are unchanged.
 - **TrueNAS:** its settings are written under `environment:` in the YAML; an `ODEION_` key there
   works as in `docker run -e`.

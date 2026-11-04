@@ -74,6 +74,19 @@ jobs:
       - uses: actions/checkout@v6
       - run: tools/release/node-docs.sh /tmp/archive && python3 -I tools/release/node-docs-check.py /tmp/archive
       - run: python3 -I tools/truenas-check.py deploy/truenas/docker-compose.yaml
+  # The Odeion names and what kept its old name (docs/branding-compatibility.md): the branding check
+  # with its self-test, the bundle's settings against the runner's real `docker compose config`, the
+  # compose files and the systemd units (systemd-analyze verify). No build; like deploy-docs it runs
+  # on every change, docs-only included, so deploy/, tools/, docs/ and this file are always covered.
+  branding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 -I tools/branding-check.py --self-test
+      - run: python3 -I tools/bundle-settings-check.py
+      - run: python3 -I tools/units-check.py
+      - run: python3 -I tools/compose-check.py
   desktop:
     needs: changes
     if: needs.changes.outputs.code == 'true'

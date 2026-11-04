@@ -8,14 +8,15 @@ ENV=.env
 touch "$ENV"
 chmod 600 "$ENV"
 
-# A PM_ setting counts as there when .env has it under its ODEION_ name (the one from now on). The
-# token and the tag only with a value: compose takes an empty ODEION_TOKEN or ODEION_TAG as unset.
+# dotenv_get: .env values as compose reads them (quotes, spaces, comments)
+. ./settings.sh
+# A setting counts as there when .env sets it, also under its ODEION_ name (the one from now on). The
+# token and the tag only with a value as compose reads it: compose takes an empty one as unset.
 has() {
-  grep -q "^$1=" "$ENV" && return 0
   case $1 in
-    PM_TOKEN | PM_TAG) grep -q "^ODEION_${1#PM_}=." "$ENV" ;;
-    PM_*) grep -q "^ODEION_${1#PM_}=" "$ENV" ;;
-    *) return 1 ;;
+    PM_TOKEN | PM_TAG) [ -n "$(dotenv_get "$1" "$ENV")" ] || [ -n "$(dotenv_get "ODEION_${1#PM_}" "$ENV")" ] ;;
+    PM_*) dotenv_get "$1" "$ENV" >/dev/null || dotenv_get "ODEION_${1#PM_}" "$ENV" >/dev/null ;;
+    *) dotenv_get "$1" "$ENV" >/dev/null ;;
   esac
 }
 put() { has "$1" || printf '%s=%s\n' "$1" "$2" >> "$ENV"; }

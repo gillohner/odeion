@@ -133,6 +133,35 @@ esac
           "setup.sh writes a token and tag when the ODEION_ ones are empty")
     check("PM_PUBLIC_URL=" not in envf, "setup.sh adds no PM_PUBLIC_URL next to an empty ODEION_PUBLIC_URL (it wins)")
 
+    # Values compose reads as empty (quoted empty, spaces, a comment) count as no token or tag: after
+    # setup.sh, compose gives the node a token and the image a tag; a value compose reads keeps setup quiet
+    import json as _json
+    for i, envtext in enumerate(['ODEION_TOKEN=""\nODEION_TAG=""\n', "ODEION_TOKEN=''\nODEION_TAG=''\n",
+                                 "ODEION_TOKEN=   \nODEION_TAG=   \n", "ODEION_TOKEN= # a note\nODEION_TAG= # a note\n",
+                                 'PM_TOKEN=""\nPM_TAG=""\n', 'ODEION_TOKEN="fixture-kept"\nODEION_TAG="fixture-tag"\n']):
+        d = base / f"setup-dotenv{i}"
+        shutil.copytree(BUNDLE, d, ignore=shutil.ignore_patterns(".env", "music", "hsdata", "ci"))
+        (d / ".env").write_text(envtext)
+        r = subprocess.run(["sh", str(d / "setup.sh")], cwd=d, env={"PATH": "/usr/bin:/bin", "HOME": str(base)},
+                           capture_output=True, text=True)
+        (d / "home").mkdir()
+        c = subprocess.run(["docker", "compose", "-f", str(d / "docker-compose.yml"), "--project-directory", str(d),
+                            "config", "--format", "json"], cwd=d, env={"PATH": "/usr/bin:/bin", "HOME": str(d / "home")},
+                           capture_output=True, text=True)
+        music = _json.loads(c.stdout)["services"]["music"] if c.returncode == 0 else {}
+        tok = music.get("environment", {}).get("PM_TOKEN", "")
+        img = music.get("image", "")
+        # compose reads "= # a note" as the value "# a note" (a comment needs a value before it): a token
+        kept = "fixture-kept" in envtext or "# a note" in envtext
+        if "# a note" in envtext:
+            check(r.returncode == 0 and tok == "# a note" and "PM_TOKEN=" not in (d / ".env").read_text(),
+                  "setup.sh then compose: '= # a note' is a value to compose, so setup adds no token (as compose reads it)")
+            continue
+        want_tok = (tok == "fixture-kept") if kept else len(tok) >= 32
+        want_img = img.endswith(":fixture-tag") if kept else img.endswith(":edge")
+        check(r.returncode == 0 and c.returncode == 0 and want_tok and want_img,
+              f"setup.sh then compose: {envtext.strip()!r} gives a token and tag ({c.stderr.strip()[-100:]!r}, tag {img.rsplit(':', 1)[-1]!r})")
+
     # setting TOKEN picks what compose gives the node, for the shell and .env together
     import json
     compose_file = BUNDLE / "docker-compose.yml"
@@ -143,6 +172,20 @@ esac
         ({"PM_TOKEN": "shell-old"}, "ODEION_TOKEN=\nPM_TOKEN=env-old\n"),
         ({"PM_TOKEN": ""}, "PM_TOKEN=env-old\nODEION_TOKEN=\n"),
         ({"ODEION_TOKEN": "", "PM_TOKEN": "shell-old"}, "ODEION_TOKEN=env-new\n"),
+        # compose's dotenv parser: quotes, spaces, inline comments, export, repeated keys
+        ({}, 'ODEION_TOKEN=""\nPM_TOKEN=env-old\n'),
+        ({}, "ODEION_TOKEN=''\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=   \nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN= # a note\nPM_TOKEN=env-old\n"),
+        ({}, 'ODEION_TOKEN="abc"\nPM_TOKEN=env-old\n'),
+        ({}, "ODEION_TOKEN='abc def'\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=abc # a note\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=abc#no-space\nPM_TOKEN=env-old\n"),
+        ({}, "ODEION_TOKEN=  padded  \nPM_TOKEN=env-old\n"),
+        ({}, 'ODEION_TOKEN="abc" # a note\nPM_TOKEN=env-old\n'),
+        ({}, "export ODEION_TOKEN=exported\nPM_TOKEN=env-old\n"),
+        ({}, 'PM_TOKEN=""\n'),
+        ({}, "PM_TOKEN=first\nPM_TOKEN=last\n"),
     ]
     for i, (shell, envtext) in enumerate(cases):
         cd = base / f"cmp{i}"

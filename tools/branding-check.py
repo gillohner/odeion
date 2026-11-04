@@ -169,7 +169,18 @@ meta = meta[:meta.find("- uses:")]
 check("org.opencontainers.image.title=Odeion node" in meta and "org.opencontainers.image.description=Odeion node" in meta,
       "the published image's OCI title and description say Odeion (metadata-action labels override the Dockerfile's)")
 bu = text("docs/guides/backup-and-update.md")
-check(bu.count("ODEION_TAG") >= 2, "the update and rollback steps name ODEION_TAG (it wins over PM_TAG)")
+ci = text(".github/workflows/ci.yml")
+m = re.search(r"\n  branding:\n(.*?)(?=\n  [a-z][\w-]*:\n|\Z)", ci, re.S)
+ci_job = m.group(1) if m else ""
+for t in ("tools/branding-check.py", "tools/bundle-settings-check.py", "tools/units-check.py", "tools/compose-check.py"):
+    check(f"python3 -I {t}" in ci_job, f"CI's branding job runs {t}")
+check(bool(ci_job) and "needs:" not in ci_job and "runs-on: ubuntu-24.04" in ci_job, "CI's branding job runs on ubuntu-24.04 on every change, docs-only included")
+upd_sec = bu[bu.find("**Docker with its own homeserver:** the node's version"):]
+upd_sec = upd_sec[:upd_sec.find("\n\n")]
+rb_sec = bu[bu.find("### Going back to the previous version"):]
+rb_sec = rb_sec[:rb_sec.find("\n\n", rb_sec.find("\n\n") + 2)]
+check(upd_sec.startswith("**Docker") and "ODEION_TAG" in upd_sec, "the update step names ODEION_TAG (it wins over PM_TAG)")
+check(rb_sec.startswith("### Going back") and "ODEION_TAG" in rb_sec, "the rollback step names ODEION_TAG (it wins over PM_TAG)")
 dep = text("docs/deploy.md")
 upd = dep[dep.find("- **Updating:**"):][:600]
 check("odeiond" in upd and "ln -sf odeiond /usr/local/bin/pm-node" in upd, "deploy.md's update step installs odeiond and the pm-node link")
@@ -277,6 +288,11 @@ if len(left) > 40:
     print(f"      … and {len(left) - 40} more")
 
 if SELF_TEST:
+    # The ODEION_TAG checks look at each section on its own: the rollback losing it must fail
+    _bu_rb = "### Going back to the previous version\n\nSet the image tag back (`PM_TAG` in the bundle's `.env`)\n\nmore"
+    _rb = _bu_rb[_bu_rb.find("### Going back"):]
+    _rb = _rb[:_rb.find("\n\n", _rb.find("\n\n") + 2)]
+    check("ODEION_TAG" not in _rb, "self-test: a rollback section without ODEION_TAG is seen as such")
     # The checks must not depend on how rustfmt lays the code out (and must not let more through)
     one_line = 'pm_model::brand::build_env(option_env!("ODEION_UPDATE_CHANNEL"), option_env!("PM_UPDATE_CHANNEL")).filter(|c| !c.is_empty())'
     split = 'pm_model::brand::build_env(\n        option_env!("ODEION_UPDATE_CHANNEL"),\n        option_env!("PM_UPDATE_CHANNEL"),\n    )\n    .filter(|c| !c.is_empty())'
