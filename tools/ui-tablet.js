@@ -42,6 +42,8 @@ async function open(browser, w, h, opts = {}) {
   const run = await fx.create(browser, w, { fixtures: { '/zones': { body: [zone] }, ...(opts.layout ? {} : { '/outputs': { body: outputs } }), '/item/album/lib-7': { body: albumPage }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } } } });
   await run.page.setViewportSize({ width: w, height: h });
   await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+  // The layout index.html's inline script picks, before app.js runs (the first data-shell set)
+  await run.context.addInitScript(() => { new MutationObserver((ms, o) => { const e = document.documentElement; if (e && e.dataset.shell) { window.__firstShell = e.dataset.shell; o.disconnect(); } }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-shell'] }); });
   await run.context.addInitScript(([z, theme, layout]) => { localStorage.setItem('pm.zone', z); if (theme) localStorage.setItem('pm.theme', theme); if (layout) localStorage.setItem('pm.layout', layout); }, [zone.id, opts.theme || '', opts.layout || '']);
   return run;
 }
@@ -191,13 +193,24 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await page.screenshot({ path: path.join(SHOTS, 'album-390x844-light.png') });
     await context.close();
   }
+  // Desktop forced on a 500 px window: the bar has no overlaps and the page doesn't scroll sideways
+  {
+    const { page, context } = await open(browser, 500, 800, { layout: 'desktop' });
+    await fx.go(page, '/album/lib-7'); await page.waitForSelector('#isongs [data-selstart]'); await page.waitForTimeout(300);
+    for (const job of [false, true]) {
+      if (job) { await showJob(page); await page.waitForTimeout(100); }
+      const b = await page.evaluate(barReport); const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
+      check(!b.overlaps.length && !b.outside.length && b.quality && over <= 0, `Desktop at 500${job ? ' with a files job' : ''}: the bar fits, no sideways scroll (${over})${b.overlaps.length || b.outside.length ? ': ' + [...b.overlaps, ...b.outside].slice(0, 4).join('; ') : ''}`);
+    }
+    await context.close();
+  }
   // Settings › Appearance › Layout: Automatic / Phone / Desktop; the old choices map across
   // Comfortable (the tablet rail from 600 px, a phone below) becomes Automatic: the same at every width
-  for (const [was, now, w, kept] of [['compact', 'phone', 1024, 'phone'], ['comfortable', 'desktop', 1024, null], ['comfortable', 'phone', 500, null], ['desktop', 'desktop', 390, 'desktop'], ['phone', 'phone', 1366, 'phone']]) {
+  for (const [was, now, w, kept] of [['compact', 'phone', 1024, 'phone'], ['comfortable', 'desktop', 1024, null], ['comfortable', 'phone', 500, null], ['desktop', 'desktop', 500, 'desktop'], ['desktop', 'phone', 390, 'desktop'], ['phone', 'phone', 1366, 'phone']]) {
     const { page, context, state } = await open(browser, w, 800, { layout: was });
     await fx.go(page, '/settings/appearance'); await page.waitForSelector('[data-layout-pick]', { state: 'attached' }).catch(() => {});
-    const s = await page.evaluate(() => ({ shell: document.documentElement.dataset.shell, kept: localStorage.getItem('pm.layout'), picks: [...document.querySelectorAll('[data-layout-pick]')].map((b) => `${b.dataset.layoutPick}${b.classList.contains('on') ? '*' : ''}`).join(',') }));
-    check(!state.errors.length && s.shell === now && s.kept === kept && s.picks === `auto,phone,desktop`.replace(kept || 'auto', (kept || 'auto') + '*'), `Layout "${was}" at ${w}: ${now} (${JSON.stringify(s)})`);
+    const s = await page.evaluate(() => ({ first: window.__firstShell, shell: document.documentElement.dataset.shell, kept: localStorage.getItem('pm.layout'), picks: [...document.querySelectorAll('[data-layout-pick]')].map((b) => `${b.dataset.layoutPick}${b.classList.contains('on') ? '*' : ''}`).join(',') }));
+    check(!state.errors.length && s.first === now && s.shell === now && s.kept === kept && s.picks === `auto,phone,desktop`.replace(kept || 'auto', (kept || 'auto') + '*'), `Layout "${was}" at ${w}: ${now} (${JSON.stringify(s)})`);
     await context.close();
   }
   await browser.close();

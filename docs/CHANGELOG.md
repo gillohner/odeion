@@ -11,7 +11,7 @@ Newest first. Dates are when the change landed on `main`.
   - **Album and item pages:** the cover stays beside the title down to 600 px, and "Songs · 16 songs · Select" sits on one line, the count beside the title.
   - **Touch screens keep 40 px targets** in the desktop layout (`pointer: coarse`): sidebar places, ☰, the bar's buttons, chips, row actions. On a touch phone the song rows' ⋯ grows from 36 to 40 px too.
   - **Installed on an iPad or a phone:** the top bar, the sidebar and Now playing start below the status bar, and the sidebar keeps its top corner free for the iPadOS window controls.
-  - **Settings › Appearance › Layout:** Automatic, Phone or Desktop. A saved Compact becomes Phone; Comfortable becomes Automatic (it was the rail from 600 px and a phone below, so a phone stays a phone).
+  - **Settings › Appearance › Layout:** Automatic, Phone (at any width) or Desktop (from 480 px). A saved Compact becomes Phone; Comfortable becomes Automatic (it was the rail from 600 px and a phone below, so a phone stays a phone).
   - **A touch screen keeps the phone's bar behaviour:** the whole player bar opens Now playing; with a mouse its title and artist are links.
   - **On a wide desktop** the player bar's right group gets a little more of the width (columns 1 : 1.2 : 1.2, from 1 : 1.3 : 1), so the volume slider and the zone name fit beside the sound pill; the seek bar is a little shorter.
 

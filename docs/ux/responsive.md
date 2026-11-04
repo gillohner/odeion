@@ -64,7 +64,7 @@ The 10-26 tablet drawing (`responsive/tablet-now-playing.png`, a rail) is kept f
 
 ## Layout option
 Settings › Home and layout:
-- **Layout:** Automatic (phone under 600 px, desktop from there), Phone or Desktop (either at any width). The old Compact becomes Phone; Comfortable (the rail from 600 px, a phone below) becomes Automatic.
+- **Layout:** Automatic (phone under 600 px, desktop from there), Phone (at any width) or Desktop (from 480 px; a narrower window has no room for the sidebar and the bar). The old Compact becomes Phone; Comfortable (the rail from 600 px, a phone below) becomes Automatic.
 - **Dense lists**, in the desktop layout.
 - **Home rows.**
 

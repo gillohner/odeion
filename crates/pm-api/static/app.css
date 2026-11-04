@@ -1315,7 +1315,7 @@ html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .quality 
 @media (max-width: 1366px) { html[data-shell="desktop"] .player-right .jobchip .jc-text { display: none; } }
 @media (min-width: 760px) and (max-width: 1599px) {
   html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .volume { display: none; }
-  html[data-shell="desktop"] .player-right:has(> #jobchip:not([hidden])) .volbtn { display: inline-flex; }
+  html[data-shell="desktop"] body:not(.offline) .player-right:has(> #jobchip:not([hidden])) .volbtn { display: inline-flex; }
 }
 @media (max-width: 899px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1fr) minmax(170px, 1.1fr) auto; }
