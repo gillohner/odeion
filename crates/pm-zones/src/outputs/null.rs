@@ -78,6 +78,14 @@ impl NullOutput {
         Self { caps, ..Self::new() }
     }
 
+    /// The device's own level changed behind the node's back (its remote): what the next read
+    /// sees. Only an output made with [`NullOutput::with_volume`] has one.
+    pub fn pretend_level(&self, v: ZoneVolume) {
+        if let Some(l) = &self.level {
+            *l.lock().expect("null volume") = v;
+        }
+    }
+
     /// How many sinks were opened on this output (gapless = one per format run).
     pub fn opens_total(&self) -> u64 {
         self.opens.load(Ordering::Relaxed)

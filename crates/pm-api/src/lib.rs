@@ -1950,10 +1950,15 @@ async fn volume(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Apply a zone's volume limit to an absolute dB request.
+/// Apply a zone's volume limit (dB) to an absolute request: a dB request is capped at it, a
+/// percent request at the same point on the 0–100 scale the outputs map -60…0 dB to.
 fn cap_volume(v: pm_model::Volume, limit: Option<f32>) -> pm_model::Volume {
     match (v, limit) {
         (pm_model::Volume::Db(db), Some(max)) if db > max => pm_model::Volume::Db(max),
+        (pm_model::Volume::Percent(p), Some(max)) => {
+            let cap = ((max.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).round() as u8;
+            pm_model::Volume::Percent(p.min(cap))
+        }
         (v, _) => v,
     }
 }
@@ -5117,8 +5122,10 @@ mod tests {
             max: 0.0,
             step: 1.0,
         }));
-        let pc_out: Arc<dyn pm_zones::Output> =
-            Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        // The poll runs fast here (the env is read when a zone's poll starts)
+        std::env::set_var("PM_VOLUME_POLL_MS", "200");
+        let pc_out_raw = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let pc_out: Arc<dyn pm_zones::Output> = pc_out_raw.clone();
         s.outputs.register(db_out.clone());
         s.outputs.register(pc_out.clone());
         let db_zone = s.create_zone("Null dB", db_out);
@@ -5190,6 +5197,22 @@ mod tests {
         db_zone.wait_acked().await;
         let (_, z) = call(&app, "GET", &format!("/v1/zones/{dz}"), None).await;
         assert_eq!(z["volume"]["db"], -30.0, "capped: {z}");
+        // The device's own level changes behind the node's back (its remote): the poll shows it
+        pc_out_raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(33),
+            muted: false,
+        });
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pc_zone.state().volume.map(|v| v.level) != Some(pm_model::VolumeLevel::Percent(33)) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            seen.is_ok(),
+            "the poll never showed the device's own change: {:?}",
+            pc_zone.state().volume
+        );
         // Percent and mute, on a percent output
         let pz = pc_zone.id().0.clone();
         for (body, want) in [
@@ -5212,6 +5235,26 @@ mod tests {
             let (_, z) = call(&app, "GET", &format!("/v1/zones/{pz}"), None).await;
             assert_eq!(z["volume"], want, "{z}");
         }
+        // The limit caps a percent request too (-30 dB is 50 % on the outputs' scale)
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{pz}/dsp"),
+            Some(serde_json::json!({"max_volume_db": -30.0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{pz}/volume"),
+            Some(serde_json::json!({"volume": {"percent": 100}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        pc_zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{pz}"), None).await;
+        assert_eq!(z["volume"]["percent"], 50, "capped: {z}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

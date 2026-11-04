@@ -700,7 +700,7 @@
       box.innerHTML = rowsOf(ROOT) || (node(ROOT).kids ? '<p class="muted small">No music folders on this node yet.</p>' : '');
       const n = node(ROOT); if (n.loading) slowNote(box, () => n.loading);
       $$('.ctwait', box).forEach((w) => { const p = w.parentElement; if (p) slowNote(w, () => w.isConnected); });
-      if (had != null) { const r = box.querySelector(`[data-cpath="${CSS.escape(had)}"]`); if (r) r.focus(); }
+      if (had != null) { const r = box.querySelector(`[data-cpath="${cssStr(had)}"]`); if (r) r.focus(); }
     };
     // Only the boxes change on a tick: no redraw of the whole tree
     const refreshBoxes = () => $$('#ctree .ctrow', d).forEach((r) => r.setAttribute('aria-checked', boxState(r.dataset.cpath)));
@@ -1380,7 +1380,7 @@
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
-  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); };
+  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
@@ -1390,12 +1390,16 @@
     if (z.id === BROWSER) return { kind: 'db', min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))), muted: !!audio.muted };
     const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume; const hk = typeof hv === 'string' ? hv : hv && hv.kind;
     const v = z.volume || null;
-    const kind = v && v.percent != null ? 'percent' : v && v.db != null ? 'db' : hk === 'db' ? 'db' : hk === 'percent' ? 'percent' : null;
+    // No level yet and no output list to say the scale (a listener never gets one): a plain 0–100
+    // slider still lets them set a level; the owner's bar waits for the list instead
+    const kind = v && v.percent != null ? 'percent' : v && v.db != null ? 'db' : hk === 'db' ? 'db' : hk === 'percent' ? 'percent' : (!state.outputs && !isOwner()) ? 'percent' : null;
     if (!kind) return null;
     if (kind === 'percent') return { kind, min: 0, max: 100, step: 1, value: v && v.percent != null ? v.percent : null, muted: !!(v && v.muted) };
     const r = hk === 'db' ? hv : { min: -60, max: 0, step: 1 };
     return { kind, min: r.min, max: r.max, step: r.step || 1, value: v && v.db != null ? Math.min(r.max, Math.max(r.min, v.db)) : null, muted: !!(v && v.muted) };
   };
+  // A zone id inside an attribute selector (no CSS.escape: ui-smoke's jsdom has none)
+  const cssStr = (v) => String(v).replace(/["\\]/g, '\\$&');
   const levelText = (r) => (!r ? '' : r.muted ? 'Muted' : r.value == null ? 'Level unknown' : r.kind === 'percent' ? `${Math.round(r.value)} %` : `${Math.round(r.value)} dB`);
   // A slider shows the zone's level; one being dragged is left alone until it is let go
   const applyVol = (el, r) => {
@@ -1405,34 +1409,37 @@
     el.value = r.value == null ? r.min : r.value;
     el.setAttribute('aria-valuetext', levelText(r)); setFill(el);
   };
-  const volSliders = (z) => { const els = new Set(); if (z.id === state.zone) for (const el of [$('#vol'), $('#npvol'), $('#volpopvol')]) if (el) els.add(el); for (const el of $$(`[data-zvol="${CSS.escape(z.id)}"]`)) els.add(el); return [...els]; };
+  const volSliders = (z) => { const els = new Set(); if (z.id === state.zone) for (const el of [$('#vol'), $('#npvol'), $('#volpopvol')]) if (el) els.add(el); for (const el of $$(`[data-zvol="${cssStr(z.id)}"]`)) els.add(el); return [...els]; };
   const syncVolumeSliders = (z, except) => {
     if (!z) return;
+    // The owner's output list says the scale (and whether there is a volume at all); asked once
+    if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; syncVolumeSliders(z); }).catch(() => {}).finally(() => { state.outputsP = null; });
     const r = zoneVolume(z);
     if (z.id === state.zone) $('.player').classList.toggle('novol', !r);
     if (!r) return;
     for (const el of volSliders(z)) if (el !== except) applyVol(el, r);
-    for (const t of $$(`[data-vollevel="${CSS.escape(z.id)}"]`)) t.textContent = levelText(r);
-    for (const b of $$(`[data-volmute="${CSS.escape(z.id)}"]`)) { b.setAttribute('aria-pressed', String(!!r.muted)); b.title = r.muted ? 'Unmute' : 'Mute'; }
-    // The owner's output list says the dB range; asked once
-    if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; syncVolumeSliders(z); }).catch(() => {}).finally(() => { state.outputsP = null; });
+    for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = levelText(r);
+    for (const b of $$(`[data-volmute="${cssStr(z.id)}"]`)) { b.setAttribute('aria-pressed', String(!!r.muted)); b.title = r.muted ? 'Unmute' : 'Mute'; }
   };
   const setZoneVol = async (z, value, from) => {
     const r = zoneVolume(z); if (!r) return;
     const num = Number(value);
     if (z.id === BROWSER) { audio.volume = Math.pow(10, num / 20); syncVolumeSliders(z, from); return; }
     const body = r.kind === 'percent' ? { percent: Math.round(num) } : { db: num };
-    // Shown as set until the node's read-back arrives (its zone event syncs every slider)
+    // Shown as set until the node's read-back arrives (its zone event syncs every slider); a
+    // refused request puts the old value back
+    const was = z.volume;
     z.volume = { ...(z.volume || {}), ...body };
     syncVolumeSliders(z, from);
-    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: body }); } catch (e) { toast(e.message, 'error'); }
+    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: body }); } catch (e) { z.volume = was; syncVolumeSliders(z); toast(e.message, 'error'); }
   };
   const setZoneMute = async (z, m) => {
     if (!z) return;
     if (z.id === BROWSER) { audio.muted = m; syncVolumeSliders(z); return; }
+    const was = z.volume;
     z.volume = { ...(z.volume || {}), muted: m };
     syncVolumeSliders(z);
-    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { mute: m } }); } catch (e) { toast(e.message, 'error'); }
+    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { mute: m } }); } catch (e) { z.volume = was; syncVolumeSliders(z); toast(e.message, 'error'); }
   };
   const bindVolSlider = (el, zoneOf) => {
     if (!el) return;
@@ -1441,13 +1448,13 @@
     // Let go: the slider catches up with the zone (after `change`, which follows the pointer)
     const letGo = () => { done(); setTimeout(() => syncVolumeSliders(zoneOf()), 0); };
     el.addEventListener('pointerup', letGo); el.addEventListener('pointercancel', letGo);
-    el.addEventListener('input', () => { setFill(el); const z = zoneOf(); const r = zoneVolume(z); if (r) for (const t of $$(`[data-vollevel="${CSS.escape(z.id)}"]`)) t.textContent = levelText({ ...r, value: Number(el.value), muted: false }); });
+    el.addEventListener('input', () => { setFill(el); const z = zoneOf(); const r = zoneVolume(z); if (r) for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = levelText({ ...r, value: Number(el.value), muted: false }); });
     el.addEventListener('change', () => { done(); const z = zoneOf(); if (z) setZoneVol(z, el.value, el); });
   };
   const volPop = () => $('#volpop');
   const closeVolPop = (fromBack) => {
     const vp = volPop(); if (!vp || vp.hidden) return;
-    const inside = vp.contains(document.activeElement);
+    const inside = vp.contains(document.activeElement) || document.activeElement === document.body;
     vp.hidden = true; $('#scrim').hidden = true; $('#volbtn').setAttribute('aria-expanded', 'false');
     const k = transients.indexOf(volTr); if (k >= 0) transients.splice(k, 1);
     if (fromBack !== true) popTransient();

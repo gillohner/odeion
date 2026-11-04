@@ -290,7 +290,7 @@ impl Output for SnapcastOutput {
         let Some(first) = self.group.clients.first().map(|(id, _)| id.clone()) else {
             return Ok(None);
         };
-        std::thread::spawn(move || -> Result<Option<pm_model::ZoneVolume>, SnapError> {
+        tokio::task::spawn_blocking(move || -> Result<Option<pm_model::ZoneVolume>, SnapError> {
             let mut c = Control::connect(&server)?;
             let status = c.call("Server.GetStatus", Value::Null)?;
             Ok(status
@@ -309,8 +309,8 @@ impl Output for SnapcastOutput {
                     })
                 }))
         })
-        .join()
-        .map_err(|_| SinkError::Device("snapcast thread panicked".into()))?
+        .await
+        .map_err(|_| SinkError::Device("snapcast volume read panicked".into()))?
         .map_err(snap_err)
     }
 

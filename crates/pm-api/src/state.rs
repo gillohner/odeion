@@ -514,10 +514,17 @@ impl NodeState {
         // task ends with the zone.
         if zone.output().caps().hw_volume.is_some() {
             let weak = Arc::downgrade(&zone);
+            let node = Arc::downgrade(self);
+            let zid = zone.id().clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(VOLUME_POLL);
+                let mut tick = tokio::time::interval(volume_poll());
                 loop {
                     tick.tick().await;
+                    // Gone from the registry (ungrouped, the device left): the poll ends too
+                    let Some(n) = node.upgrade() else { break };
+                    if n.zones.get(&zid).is_none() {
+                        break;
+                    }
                     let Some(z) = weak.upgrade() else { break };
                     z.refresh_volume().await;
                 }
@@ -1700,10 +1707,16 @@ impl NodeState {
 
 const CONTACT_KEY: &str = "node.contact";
 
-/// Where a zone's crossfade length (ms) is kept.
-/// How often a zone reads its output's level back.
-const VOLUME_POLL: std::time::Duration = std::time::Duration::from_secs(10);
+/// How often a zone reads its output's level back (`PM_VOLUME_POLL_MS` for tests).
+fn volume_poll() -> std::time::Duration {
+    std::env::var("PM_VOLUME_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10))
+}
 
+/// Where a zone's crossfade length (ms) is kept.
 pub fn crossfade_key(zone: &ZoneId) -> String {
     format!("crossfade/{}", zone.0)
 }

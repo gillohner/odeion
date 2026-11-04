@@ -355,7 +355,15 @@ impl Engine {
                 }
             }
             Command::Seek(ms) => self.seek(ms),
-            Command::Volume(v) => self.state.send_modify(|s| s.volume = v),
+            Command::Volume(v) => {
+                self.state.send_if_modified(|s| {
+                    if s.volume == v {
+                        return false;
+                    }
+                    s.volume = v;
+                    true
+                });
+            }
         }
         Flow::Continue
     }

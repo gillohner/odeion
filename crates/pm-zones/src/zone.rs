@@ -156,6 +156,9 @@ pub struct Zone {
     state: watch::Receiver<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
     crossfade: Arc<AtomicU64>,
+    /// A set and its read-back, or a poll's read, one at a time: a poll that started before a
+    /// set can't publish after it.
+    volume_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Zone {
@@ -203,6 +206,7 @@ impl Zone {
             state,
             events,
             crossfade,
+            volume_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -337,22 +341,52 @@ impl Zone {
     }
 
     /// Hardware volume on the output; the audio path is untouched. The level is read back into
-    /// the state afterwards, so every controller shows what the device took.
+    /// the state afterwards, so every controller shows what the device took. An output that
+    /// can't read its level keeps the last absolute level set (and the mute), so a change still
+    /// shows; up and down leave it as it was.
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        let _held = self.volume_lock.lock().await;
         self.output.set_volume(v).await?;
-        self.refresh_volume().await;
+        match self.output.volume().await {
+            Ok(Some(read)) => self.publish_volume(Some(read)),
+            Ok(None) => {
+                let was = self.state().volume;
+                let level = match v {
+                    Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
+                    Volume::Percent(p) => Some(pm_model::VolumeLevel::Percent(p.min(100))),
+                    _ => was.map(|w| w.level),
+                };
+                let muted = match v {
+                    Volume::Mute(m) => m,
+                    _ => was.is_some_and(|w| w.muted),
+                };
+                if let Some(level) = level {
+                    self.publish_volume(Some(pm_model::ZoneVolume { level, muted }));
+                }
+            }
+            Err(_) => {}
+        }
         Ok(())
     }
 
-    /// Read the output's level and publish it in the state. A read that fails leaves the last
-    /// value; an output that can't say publishes `None` ("level unknown").
+    /// Read the output's level and publish it in the state (the poll). A read that fails, or an
+    /// output that can't say, leaves the last value.
     pub async fn refresh_volume(&self) -> Option<pm_model::ZoneVolume> {
+        let _held = self.volume_lock.lock().await;
         match self.output.volume().await {
-            Ok(v) => {
-                self.send(Command::Volume(v));
-                v
+            Ok(Some(v)) => {
+                self.publish_volume(Some(v));
+                Some(v)
             }
+            Ok(None) => self.state().volume,
             Err(_) => None,
+        }
+    }
+
+    /// The state's `volume`, through the engine; nothing is sent when it is the same.
+    fn publish_volume(&self, v: Option<pm_model::ZoneVolume>) {
+        if self.state().volume != v {
+            self.send(Command::Volume(v));
         }
     }
 

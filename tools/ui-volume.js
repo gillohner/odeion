@@ -35,11 +35,13 @@ const visibleRanges = (p, within) => p.$$eval(within, (els) => els.filter((e) =>
       await until(async () => (await p.$eval('#zonename', (e) => e.textContent)) === dbZone.name, 10000);
       const phone = w < 600;
       // Exactly one slider for the zone in the bar area, with the Sound panel open where it can be
-      const bar = await visibleRanges(p, '.player input');
       const hasBtn = await p.$eval('#volbtn', (b) => !!b.offsetParent);
+      // Counted with the Sound panel open, as the task asks: one slider for the zone, or none and the button
       if (!phone && await p.$eval('#quality', (q) => !!q.offsetParent)) { await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden])'); }
+      const bar = await visibleRanges(p, '.player input');
       const panel = await visibleRanges(p, '#qpanel input');
       check(panel.length === 0, `${w}: the Sound panel has no volume slider`);
+      check(bar.length + panel.length === (hasBtn || phone ? 0 : 1), `${w}: with the Sound panel open, ${hasBtn || phone ? 'no slider in the bar area' : 'exactly one slider in the bar area'} (${JSON.stringify([...bar, ...panel])})`);
       await p.keyboard.press('Escape'); await sleep(200);
       if (phone) {
         check(bar.length === 0 && !hasBtn, `${w}: a phone's bar has no volume slider or button (Now playing and Zones have it)`);
@@ -71,9 +73,12 @@ const visibleRanges = (p, within) => p.$$eval(within, (els) => els.filter((e) =>
         await p.mouse.move(box[0], box[1]); await p.mouse.down(); await sleep(100);
         await api('POST', `/zones/${dbZone.id}/volume`, { volume: { db: -50 } }); await sleep(1500);
         const held = await p.$eval('#vol', (e) => e.value);
-        await p.mouse.up(); await sleep(400);
+        await p.mouse.up(); await sleep(600);
         const after = await p.$eval('#vol', (e) => e.value);
-        check(held !== '-50' && after === '-50', `${w}: held, the slider keeps its value (${held}); let go, it catches up (${after})`);
+        // Two browsers differ here: a press may move the thumb to where it was pressed (then
+        // letting go sets that), or leave it (then letting go catches up with the zone)
+        if (held !== '-35') check(held !== '-50' && after === held && await until(async () => { const v = await zoneVol(dbZone.id); return v && String(v.db) === held; }), `${w}: held, the slider keeps its own value (${held}), not the change from elsewhere; let go, that value is what the zone takes (${after})`);
+        else check(after === '-50' && (await zoneVol(dbZone.id)).db === -50, `${w}: held, the slider keeps its value (${held}) while a change from elsewhere arrives; let go without a change, it catches up (${after})`);
       }
       // The Zones page: its slider for the zone agrees, in the zone's own scale (the developer
       // zones list once the page knows they're switched on)

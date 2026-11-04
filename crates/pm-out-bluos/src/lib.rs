@@ -99,7 +99,6 @@ fn get_within(host: &str, port: u16, path: &str, timeout: Duration) -> Result<St
     Ok(body.to_string())
 }
 
-/// The value of `attr` on the first `<tag …>` element.
 /// The text of the first `<tag>…</tag>` in a BluOS answer (`<volume>40</volume>`).
 fn text(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
@@ -108,6 +107,7 @@ fn text(xml: &str, tag: &str) -> Option<String> {
     Some(unescape(xml[start..end].trim()))
 }
 
+/// The value of `attr` on the first `<tag …>` element.
 fn attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
     let start = xml.find(&format!("<{tag}"))?;
     let rest = &xml[start..];

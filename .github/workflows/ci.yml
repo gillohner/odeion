@@ -574,7 +574,7 @@ jobs:
           cast = false
           slimproto_port = 0
           TOML
-          nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
+          PM_DEV_OUTPUTS=1 nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
           # The node scans its config folders at start
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
