@@ -23,7 +23,7 @@ impl MediaPlaylist {
                     .iter()
                     .map(|ms| {
                         let s = at;
-                        at += ms;
+                        at = at.saturating_add(*ms);
                         s
                     })
                     .collect();
@@ -90,9 +90,9 @@ pub fn parse(base: &str, text: &str) -> Result<Playlist, String> {
                 is_master = true;
                 pending_bandwidth = attr(line, "BANDWIDTH").and_then(|b| b.parse().ok());
             } else if let Some(inf) = rest.strip_prefix("EXTINF:") {
-                // `#EXTINF:<seconds>,<title>`
+                // `#EXTINF:<seconds>[ <attributes>],<title>`
                 pending_inf = inf
-                    .split(',')
+                    .split([',', ' ', '\t'])
                     .next()
                     .and_then(|v| v.trim().parse::<f64>().ok())
                     .filter(|v| v.is_finite() && *v >= 0.0)
@@ -226,5 +226,16 @@ mod tests {
             panic!("a media playlist")
         };
         assert_eq!(m.into_segments().starts_ms, None);
+        // Attributes after the duration (IPTV style), and a duration too big to add up
+        let Playlist::Media(m) = parse(
+            "https://h/p.m3u8",
+            "#EXTM3U\n#EXTINF:2.5 tvg-id=\"x\",t\na.ts\n#EXTINF:1e300,\nb.ts\n#EXTINF:1,\nc.ts\n",
+        )
+        .unwrap() else {
+            panic!("a media playlist")
+        };
+        let s = m.into_segments();
+        assert_eq!(s.starts_ms.as_ref().unwrap()[..2], [0, 2500]);
+        assert_eq!(s.end_ms, Some(u64::MAX));
     }
 }

@@ -105,7 +105,10 @@ impl FrameSource for SkipFrames {
     fn duration_ms(&self) -> Option<u64> {
         self.inner.duration_ms()
     }
+    /// Leaves out at most 64 blocks a call (an empty block then), so the engine keeps answering
+    /// stop, pause and next while a long stretch is skipped.
     fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        let mut dropped = 0;
         loop {
             let Some(mut b) = self.inner.next_block()? else {
                 return Ok(None);
@@ -114,7 +117,8 @@ impl FrameSource for SkipFrames {
                 let n = self.left.min(b.frames() as u64);
                 b.drop_front(n as usize);
                 self.left -= n;
-                if b.is_empty() {
+                dropped += 1;
+                if b.is_empty() && dropped < 64 {
                     continue;
                 }
             }
@@ -229,5 +233,52 @@ mod stream_info_tests {
             json,
             serde_json::json!({"codec": "FLAC", "lossless": true, "service": "", "preview": false})
         );
+    }
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use super::*;
+
+    /// Blocks of 10 frames, each sample its frame number.
+    struct Count(u64);
+
+    impl FrameSource for Count {
+        fn format(&self) -> AudioFormat {
+            AudioFormat::pcm(1000, 16, 1)
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+        fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+            let from = self.0;
+            self.0 += 10;
+            Ok(Some(AudioBlock::pcm_i32(
+                self.format(),
+                (from..from + 10).map(|f| f as i32).collect(),
+            )))
+        }
+        fn seek_ms(&mut self, _: u64) -> Result<(), SourceError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn skip_frames_leaves_out_the_start_and_hands_back_control_on_a_long_skip() {
+        let mut s = SkipFrames {
+            inner: Box::new(Count(0)),
+            left: 25,
+        };
+        let b = s.next_block().unwrap().unwrap();
+        assert_eq!(b.samples, pm_model::Samples::PcmI32((25..30).collect()));
+        // 64 blocks dropped, then an empty block: the engine gets a turn
+        let mut s = SkipFrames {
+            inner: Box::new(Count(0)),
+            left: 1000,
+        };
+        assert!(s.next_block().unwrap().unwrap().is_empty());
+        assert_eq!(s.left, 1000 - 640);
+        let b = s.next_block().unwrap().unwrap();
+        assert_eq!(b.samples, pm_model::Samples::PcmI32((1000..1010).collect()));
     }
 }

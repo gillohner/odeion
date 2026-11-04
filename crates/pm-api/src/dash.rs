@@ -90,7 +90,7 @@ pub fn parse(xml: &str) -> Result<DashManifest, String> {
                         let mut at = attr(&e, "t").and_then(|v| v.parse().ok()).or(now).unwrap_or(0);
                         for _ in 0..1 + r.max(0) as u64 {
                             starts.push(at);
-                            at += d;
+                            at = at.saturating_add(d);
                         }
                         now = Some(at);
                         segments += 1 + r.max(0) as u64;
