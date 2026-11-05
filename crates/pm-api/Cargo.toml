@@ -37,6 +37,9 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 blake3 = { workspace = true }
+# Usage insights keep their own small file (usage.rs); tests also use it for a library write
+# made to fail (a trigger), for the identify job's error paths
+rusqlite = { workspace = true }
 quick-xml = "0.42" # podcast feeds, DASH manifests (TIDAL full tracks)
 md-5 = "0.10"
 hex = "0.4"
@@ -66,14 +69,16 @@ tracing = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+# Hermetic authenticated homeserver health tests over local HTTPS.
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true }
 # The spec's v0-to-v1 transforms (what pubky-social-migrator runs), for the testnet check that it
 # and the node's own move converge. Tests only.
 pubky-social-specs = { workspace = true, features = ["migrator"] }
 tempfile = "3"
 pm-endpoint = { workspace = true }
-# A library write made to fail (a trigger), for the identify job's error paths.
-rusqlite = { workspace = true }
 id3 = { workspace = true }
 hound = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

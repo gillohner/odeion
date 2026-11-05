@@ -21,6 +21,27 @@ const pillOf = (p, root) => p.locator(`${root} .set-name .pill`).first().textCon
 // A paste into a field, as the browser would deliver it
 const pasteInto = (p, sel, text) => p.evaluate(([s, t]) => { const el = document.querySelector(s); el.focus(); const dt = new DataTransfer(); dt.setData('text/plain', t); el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); }, [sel, text]);
 
+// The desktop and Android shell's script (pm-desktop's EXTERNAL_LINKS_JS), as the app injects it
+// before every page. Its navigations go through a stand-in for the shell's navigation guard
+// (allow_navigation): app pages (about:) and the node's origin load in the app's window, anything
+// else goes to the system browser and the window stays where it is.
+const SHELL_JS = (() => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'crates', 'pm-desktop', 'src', 'lib.rs'), 'utf8');
+  const m = src.match(/const EXTERNAL_LINKS_JS: &str = "([^"\\]*)";/);
+  assert.ok(m && m[1].includes('window.open=function'), "pm-desktop's EXTERNAL_LINKS_JS is found");
+  return m[1].replaceAll('location.assign(', 'window.pmShellNavigate(');
+})();
+// The same script as apps released before it refused about: windows (the node's page is newer
+// than the app around it)
+const SHELL_JS_BEFORE = SHELL_JS.replace("if(x.protocol==='about:')return null;", '');
+const inTheApp = async (ctx, shellJs) => ctx.addInitScript(([t, js]) => {
+  localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
+  window.pmOpenedOutside = [];
+  window.pmShellNavigate = (u) => { const x = new URL(u, location.href); if (x.protocol === 'about:' || x.origin === location.origin) location.assign(x.href); else window.pmOpenedOutside.push(x.href); };
+  window.pmDesktop = { version: 'ui-test', platform: 'linux' };
+  (0, eval)(js);
+}, [TOKEN, shellJs]);
+
 const qobuzMocks = async (p, log) => {
   const U = { enabled: false, signed_in: false, hires: false, quality: 'max', warning: WARN };
   const SI = { ways: [], imports: [], places: ['streamrip: ~/.config/streamrip/config.toml (not read)'], in_use: null, chosen: null, line: 'Not signed in', details: {} };
@@ -63,18 +84,20 @@ const qobuzMocks = async (p, log) => {
 };
 
 const tidalMocks = async (p, log, si0) => {
-  const U = { service: 'tidal', enabled: false, signed_in: false, quality: 'max', builtin: false, warning: WARN };
+  const U = { service: 'tidal', enabled: false, signed_in: false, quality: 'max', browser_available: true, warning: WARN };
   const si = structuredClone(si0); si.in_use = null; si.chosen = null; si.line = 'Not signed in';
-  si.ways.forEach((w) => { w.available = true; delete w.reason; });
+  // As a release build answers: both built-in clients there, Sign in with TIDAL recommended
+  si.ways.forEach((w) => { w.available = true; delete w.reason; w.recommended = w.id === 'browser'; });
   si.details = { status: { configured: false, signed_in: false }, unofficial: U };
   const T = { si, U, log };
   await p.route(/\/v1\/sources\/tidal\/signin$/, (r) => {
+    if (r.request().method() === 'PUT' && T.failWay) { T.failWay = false; log.push(['WAY-FAILED']); return r.fulfill({ status: 500, json: { error: 'The node could not keep the way' } }); }
     if (r.request().method() === 'PUT') { si.chosen = r.request().postDataJSON().way; log.push(['WAY', si.chosen]); }
     if (r.request().method() === 'DELETE') { si.in_use = null; U.signed_in = false; U.enabled = false; }
     return r.fulfill({ json: si });
   });
   await p.route(/\/v1\/sources\/tidal\/unofficial$/, (r) => {
-    if (r.request().method() === 'PUT') { const b = r.request().postDataJSON(); log.push(['PUT', b]); if (b.client_id) U.client_from = 'settings'; else if (b.client_id === '') delete U.client_from; if (b.enabled !== undefined) U.enabled = b.enabled; }
+    if (r.request().method() === 'PUT') { const b = r.request().postDataJSON(); log.push(['PUT', b]); if (b.client_id) { U.client_from = 'settings'; si.ways.forEach((w) => { if (w.id === 'device') { w.available = true; delete w.reason; w.label = 'Your own device client'; } }); } else if (b.client_id === '') delete U.client_from; if (b.enabled !== undefined) U.enabled = b.enabled; }
     return r.fulfill({ json: U });
   });
   await p.route(/\/v1\/sources\/tidal\/unofficial\/client\/check$/, (r) => {
@@ -84,6 +107,18 @@ const tidalMocks = async (p, log, si0) => {
       : b.client_secret !== 'dev-secret' ? { ok: false, detail: "TIDAL knows this client ID, but the secret doesn't go with it. Check the secret." }
       : { ok: true, detail: 'OK: TIDAL accepts this device client. Sign in with a code next.' };
     return r.fulfill({ json: out });
+  });
+  // Sign in with TIDAL: the address to open, then the pasted address back
+  await p.route(/\/v1\/sources\/tidal\/unofficial\/browser$/, (r) => {
+    log.push(['BROWSER']); U.browser_pending = Math.floor(Date.now() / 1000) + 600;
+    return r.fulfill({ json: { url: 'https://login.tidal.com/authorize?response_type=code&client_id=ui-test&code_challenge_method=S256', expires_at: U.browser_pending } });
+  });
+  await p.route(/\/v1\/sources\/tidal\/unofficial\/browser\/finish$/, (r) => {
+    const b = r.request().postDataJSON(); log.push(['FINISH', b.text]);
+    if (!/^https:\/\/tidal\.com\//.test(b.text)) return r.fulfill({ status: 400, json: { error: "That isn't a TIDAL address (evil.example). Paste the address of the tidal.com page you landed on after signing in." } });
+    Object.assign(U, { signed_in: true, enabled: true, user: '77', session_client: 'pkce', health: { ok: true, detail: 'signed in', at: 1 } }); delete U.browser_pending;
+    si.in_use = { way: 'browser', label: 'Sign in with TIDAL', user: '77', gives: 'full tracks, lossless' }; si.line = 'Sign in with TIDAL · full tracks'; si.chosen = 'browser';
+    return r.fulfill({ json: U });
   });
   await p.route(/\/v1\/sources\/tidal\/unofficial\/login$/, (r) => {
     if (r.request().method() === 'DELETE') { U.signed_in = false; delete U.pending; U.enabled = false; si.in_use = null; return r.fulfill({ json: U }); }
@@ -173,12 +208,68 @@ const tidalMocks = async (p, log, si0) => {
       // ---- TIDAL full tracks ----
       {
         const log = []; const T = await tidalMocks(p, log, tidalSi);
+        // TIDAL's sign-in page opens in a new tab: answered here, never the real one
+        await ctx.route(/^https:\/\/login\.tidal\.com\//, (r) => r.fulfill({ contentType: 'text/html', body: '<title>TIDAL</title><p>sign in</p>' }));
         await p.goto(BASE + '/sources/tidal');
         const root = '#tidalsignin';
         await p.waitForSelector(`${root} input[type=radio]`, { timeout: 20000 });
-        check(await pillOf(p, root) === 'Needs client', `${w} TIDAL: no device client, the status says so`);
-        check(await p.locator(`${root} input[value="own"]`).count() === 0, `${w} TIDAL: no separate "Your own app" way`);
-        await p.locator(`${root} input[value="device"]`).check();
+        // The chooser: Sign in with TIDAL first and Recommended, picked; the code sign-in second; the
+        // rest under a closed Advanced; nothing found, so no import way
+        const ids = await p.$$eval(`${root} .ways input[type=radio]`, (es) => es.map((e) => e.value));
+        check(JSON.stringify(ids.slice(0, 2)) === '["browser","device"]' && !ids.includes('import'), `${w} TIDAL: Sign in with TIDAL first, the code sign-in second (${ids.join(', ')})`);
+        check(/Sign in with TIDAL\s*Recommended/.test(await p.textContent(`${root} label.way:has(input[value="browser"]) .way-name`)) && await p.locator(`${root} .pill.ok:text("Recommended")`).count() === 1, `${w} TIDAL: only Sign in with TIDAL is Recommended`);
+        check(await p.isChecked(`${root} input[value="browser"]`), `${w} TIDAL: and picked`);
+        check(/AAC/.test(await p.textContent(`${root} label.way:has(input[value="device"]) .way-note`)), `${w} TIDAL: the code sign-in says it may be AAC only`);
+        const adv = await p.$$eval(`${root} details.ways-adv input[type=radio]`, (es) => es.map((e) => e.value));
+        check(JSON.stringify(adv) === '["app","own-device","paste"]' && !(await p.$eval(`${root} details.ways-adv`, (d) => d.open)) && !(await p.isVisible(`${root} input[value="paste"]`)), `${w} TIDAL: the official app, your own device client and Paste a token under a closed Advanced (${adv.join(', ')})`);
+        check(await p.locator(`${root} details.ways-adv .pill`).count() === 0, `${w} TIDAL: no badge under Advanced`);
+        check(await pillOf(p, root) === 'Needs sign-in', `${w} TIDAL: the status asks for the sign-in`);
+        check(await p.locator(`${root} input[name=secret], ${root} input[name=id]`).count() === 0, `${w} TIDAL: no client id or secret to enter for Sign in with TIDAL`);
+        await shot('tidal-chooser');
+        // Step 1 opens TIDAL's sign-in in a new tab; step 2 asks for its address
+        const [tab] = await Promise.all([ctx.waitForEvent('page'), p.click('#tbin')]);
+        check(await until(async () => /^https:\/\/login\.tidal\.com\/authorize\?/.test(tab.url()), 5000), `${w} TIDAL: TIDAL's sign-in opens in a new tab (${tab.url()})`);
+        await tab.close();
+        check(await until(async () => await p.isVisible('#tbfinish')), `${w} TIDAL: then a field for the address`);
+        check(await until(async () => p.evaluate(() => document.activeElement && document.activeElement.matches('#tbfinish input[name=text]'))), `${w} TIDAL: and the address field has the focus`);
+        check(log.some((l) => l[0] === 'WAY' && l[1] === 'browser') && log.some((l) => l[0] === 'BROWSER'), `${w} TIDAL: the way was picked and the sign-in started`);
+        check(await pillOf(p, root) === 'Waiting' && await p.locator(`${root} .setup-step[data-step="1"].done`).count() === 1, `${w} TIDAL: waiting for the address, step 1 done`);
+        await shot('tidal-browser-paste');
+        await p.fill('#tbfinish input[name=text]', 'https://evil.example/android/login/auth?code=x'); await p.click('#tbfinish button[type=submit]');
+        check(await until(async () => await p.isVisible('#tbfinisherr') && /isn't a TIDAL address/.test(await p.textContent('#tbfinisherr'))), `${w} TIDAL: a wrong address is said in place`);
+        await p.fill('#tbfinish input[name=text]', 'https://tidal.com/android/login/auth?code=ui-code'); await p.click('#tbfinish button[type=submit]');
+        check(await until(async () => (await pillOf(p, root)) === 'Working'), `${w} TIDAL: pasted, signed in, Working`);
+        check(/Sign in with TIDAL · full tracks, lossless/.test(await p.textContent(root)) && await p.locator('#tbagain').count() === 0, `${w} TIDAL: in use, no "again" line`);
+        await shot('tidal-browser-working');
+        // A code sign-in sees one line: Sign in with TIDAL again for lossless, with the button
+        T.U.session_client = 'device'; T.si.in_use = { way: 'device', label: 'Sign in with a code', user: '42', gives: 'full tracks' };
+        await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        const againLines = async () => (await p.textContent(root)).split('Sign in with TIDAL again for lossless').length - 1;
+        check(await p.isVisible('#tbagain') && await againLines() === 1, `${w} TIDAL: a code sign-in gets one "Sign in with TIDAL again for lossless" line with the button`);
+        // AAC only: the health line says so and what to do, still one line
+        T.U.health = { ok: true, lossy: true, detail: 'TIDAL sends this sign-in AAC only (lossy). Sign in with TIDAL again for lossless', at: 1 };
+        await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'AAC only' && !/full tracks are playing/.test(await p.textContent(root)) && await againLines() === 1 && await p.isVisible('#tbagain'), `${w} TIDAL: AAC only is said on the health line, with the button, once`);
+        await shot('tidal-aac');
+        // A browser session's AAC track is that track: Working, the Health line says why
+        T.U.session_client = 'pkce'; T.si.in_use = { way: 'browser', label: 'Sign in with TIDAL', user: '77', gives: 'full tracks, lossless' }; T.U.health = { ok: true, lossy: true, detail: 'TIDAL sent the last track as AAC (lossy): it may have no lossless version', at: 1 };
+        await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Working' && /may have no lossless version/.test(await p.textContent(root)), `${w} TIDAL: a browser session's AAC track is not "AAC only"`);
+        T.U.session_client = 'device'; T.si.in_use = { way: 'device', label: 'Sign in with a code', user: '42', gives: 'full tracks' }; T.U.health = { ok: true, lossy: true, detail: 'TIDAL sends this sign-in AAC only (lossy). Sign in with TIDAL again for lossless', at: 1 };
+        await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        // The button: the chooser opens on Sign in with TIDAL and TIDAL's tab opens
+        const [tab2] = await Promise.all([ctx.waitForEvent('page'), p.click('#tbagain')]);
+        await tab2.close();
+        check(await until(async () => await p.isVisible('#tbfinish') && await p.isChecked(`${root} input[value="browser"]`)), `${w} TIDAL: "Sign in with TIDAL" from there goes straight to the paste step`);
+        // Back to nothing: your own device client, under Advanced
+        Object.assign(T.U, { signed_in: false, enabled: false, browser_available: false }); delete T.U.session_client; delete T.U.health; delete T.U.browser_pending; T.si.in_use = null; T.si.chosen = null;
+        T.si.ways.forEach((w2) => { w2.recommended = false; if (w2.id === 'browser' || w2.id === 'device') { w2.available = false; w2.reason = w2.id === 'browser' ? 'This build has no client for Sign in with TIDAL (a release build carries it). Use the code sign-in instead.' : 'This build has no device client: add one under Advanced › Your own device client.'; } });
+        await p.reload(); await p.waitForSelector(`${root} input[type=radio]`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Needs client', `${w} TIDAL: a build without its clients needs a device client, the status says so`);
+        check(await p.isDisabled(`${root} input[value="browser"]`) && /no client for Sign in with TIDAL/.test(await p.textContent(`${root} label.way:has(input[value="browser"])`)), `${w} TIDAL: Sign in with TIDAL is there, unavailable, saying why`);
+        // Nothing everyday usable: the first usable way is an Advanced one, so Advanced is open
+        check(await p.$eval(`${root} details.ways-adv`, (d) => d.open), `${w} TIDAL: Advanced opens by itself when only its ways are usable`);
+        await p.locator(`${root} input[value="own-device"]`).check();
         await p.waitForSelector('#tfclient', { timeout: 5000 });
         check(await p.locator(`${root} .setup-step[data-step="1"]`).count() === 1 && await p.locator(`${root} a[href*="guides/tidal-full-tracks.md"]`).count() >= 1, `${w} TIDAL: the client step card, with the guide`);
         await pasteInto(p, '#tfclient input[name=id]', 'client_id=dev-id\nclient_secret=dev-secret');
@@ -198,10 +289,10 @@ const tidalMocks = async (p, log, si0) => {
         check(await p.locator('[data-copylink="ABCDE"]').count() === 1, `${w} TIDAL: a Copy button`);
         check(await until(async () => /good for 4:5\d/.test(await p.textContent('#tfcount'))), `${w} TIDAL: the time left counts down (${(await p.textContent('#tfcount')).trim()})`);
         check(await pillOf(p, root) === 'Waiting', `${w} TIDAL: the status waits for the code`);
-        check(log.some((l) => l[0] === 'PUT' && l[1].client_id === 'dev-id' && l[1].client_secret === 'dev-secret') && log.some((l) => l[0] === 'WAY' && l[1] === 'device') && log.some((l) => l[0] === 'LOGIN'), `${w} TIDAL: the client was saved, the way picked and the sign-in started`);
+        check(log.some((l) => l[0] === 'PUT' && l[1].client_id === 'dev-id' && l[1].client_secret === 'dev-secret') && log.some((l) => l[0] === 'WAY' && l[1] === 'device') && log.some((l) => l[0] === 'LOGIN'), `${w} TIDAL: the client was saved, the code sign-in picked and started`);
         await shot('tidal-code');
         // TIDAL says yes: the page continues by itself
-        Object.assign(T.U, { signed_in: true, enabled: true, user: '42', health: { ok: true, detail: 'signed in', at: 1 } }); delete T.U.pending;
+        Object.assign(T.U, { signed_in: true, enabled: true, user: '42', session_client: 'device', health: { ok: true, detail: 'signed in', at: 1 } }); delete T.U.pending;
         T.si.in_use = { way: 'device', label: 'Your own device client', user: '42', gives: 'full tracks' }; T.si.line = 'Your own device client · full tracks';
         check(await until(async () => (await pillOf(p, root)) === 'Working', 8000), `${w} TIDAL: signed in by itself, Working`);
         check(/up to 24-bit\/192 kHz/.test(await p.textContent(`${root} .set-row`)) && await p.isVisible('#tfout'), `${w} TIDAL: the quality and Sign out`);
@@ -229,6 +320,38 @@ const tidalMocks = async (p, log, si0) => {
       }
       check(errors.length === 0, `${w} no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
+
+      // ---- Sign in with TIDAL inside the desktop and Android apps ----
+      for (const [shell, shellJs] of [['the app', SHELL_JS], ['an older app', SHELL_JS_BEFORE]]) {
+        const actx = await browser.newContext({ viewport: { width, height: width === 390 ? 844 : 1000 }, reducedMotion: 'reduce' });
+        await inTheApp(actx, shellJs);
+        // Never the real TIDAL, should anything navigate there
+        await actx.route(/^https:\/\/login\.tidal\.com\//, (r) => r.fulfill({ contentType: 'text/html', body: '<title>TIDAL</title><p>sign in</p>' }));
+        const ap = await actx.newPage();
+        const aerrors = []; ap.on('pageerror', (e) => aerrors.push(e.message));
+        let pages = 0; actx.on('page', () => { pages++; });
+        const aw = `${w} in ${shell}:`;
+        const log = []; const T = await tidalMocks(ap, log, tidalSi);
+        await ap.goto(BASE + '/sources/tidal');
+        const root = '#tidalsignin';
+        await ap.waitForSelector('#tbin', { timeout: 20000 });
+        check(await ap.evaluate(() => !!window.pmDesktop && typeof window.pmShellNavigate === 'function'), `${aw} the shell's script is in the page`);
+        // Picking the way fails: said, and the button can be pressed again
+        T.failWay = true;
+        await ap.click('#tbin');
+        check(await until(async () => log.some((l) => l[0] === 'WAY-FAILED') && /could not keep the way/.test(await ap.textContent('#toast')) && await ap.isEnabled('#tbin')), `${aw} a failed pick is said and Sign in with TIDAL works again`);
+        check(!log.some((l) => l[0] === 'BROWSER'), `${aw} and no sign-in was started`);
+        // Sign in with TIDAL: TIDAL's sign-in goes to the system browser, the app stays on its page
+        await ap.click('#tbin');
+        check(await until(async () => await ap.isVisible('#tbfinish').catch(() => false)), `${aw} the address field shows`);
+        const opened = await ap.evaluate(() => window.pmOpenedOutside).catch(() => null);
+        check(Array.isArray(opened) && opened.length === 1 && /^https:\/\/login\.tidal\.com\/authorize\?/.test(opened[0]), `${aw} TIDAL's sign-in, and only it, goes to the system browser (${JSON.stringify(opened)})`);
+        check(ap.url() === BASE + '/sources/tidal' && await ap.locator(root).count() === 1 && /Odeion/.test(await ap.title()), `${aw} the app's window stays on Odeion (${ap.url()})`);
+        check(pages === 0, `${aw} no window of its own is opened (${pages})`);
+        check(await until(async () => ap.evaluate(() => document.activeElement && document.activeElement.matches('#tbfinish input[name=text]'))), `${aw} the address field has the focus`);
+        check(aerrors.length === 0, `${aw} no page errors${aerrors.length ? ': ' + aerrors.join(' | ') : ''}`);
+        await actx.close();
+      }
     }
   } finally { await browser.close(); }
   if (problems.length) { console.log(`${problems.length} failed`); process.exit(1); }
