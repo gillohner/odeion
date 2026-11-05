@@ -6,7 +6,9 @@
 //   * the page doesn't scroll sideways;
 //   * the search, "?", the warning, Install and the account button are each wholly on screen, none under
 //     another;
-//   * the search keeps its magnifier (44 px).
+//   * the search keeps its magnifier (44 px);
+//   * what gives way stays: a screen reader still reads "Scanning library…", and the warning's dot
+//     is drawn on screen.
 // Screenshots of the crowded bar go to the shots folder.
 //   node tools/ui-topbar.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -43,8 +45,9 @@ const STATES = [
       const m = await page.evaluate(() => {
         const box = (e) => { const r = e.getBoundingClientRect(); return { id: e.id || e.className.split(' ')[0], left: r.left, right: r.right, w: r.width }; };
         const shown = (e) => e && !e.hidden && e.getBoundingClientRect().width > 0 && getComputedStyle(e).display !== 'none';
-        const parts = ['.topbar .search', '#help button.fb-help', '.topbar #upstreams', '#installbtn', '#me'].map((s) => document.querySelector(s)).filter(shown).map(box);
-        return { scroll: document.documentElement.scrollWidth - innerWidth, inner: innerWidth, parts, search: box(document.querySelector('.topbar .search')) };
+        const parts = ['.topbar .search', '#status', '#help button.fb-help', '.topbar #upstreams', '#installbtn', '#me'].map((s) => document.querySelector(s)).filter(shown).map(box);
+        const dot = document.querySelector('.topbar #upstreams:not([hidden]) .dot');
+        return { scroll: document.documentElement.scrollWidth - innerWidth, inner: innerWidth, parts, search: box(document.querySelector('.topbar .search')), dot: dot && box(dot) };
       });
       const where = `${width} px, ${name}`;
       check(m.scroll <= 0, `${where}: no sideways scroll (${m.scroll} px)`);
@@ -53,6 +56,11 @@ const STATES = [
       const under = m.parts.slice(1).filter((p, i) => p.left < m.parts[i].right - 0.5).map((p) => p.id);
       check(!under.length, `${where}: none under another${under.length ? ': ' + under.join(', ') : ''}`);
       check(m.search.w >= 43.5, `${where}: the search keeps its magnifier (${m.search.w.toFixed(0)} px)`);
+      if (scanning) {
+        const said = await page.locator('#status').ariaSnapshot();
+        check(said.includes('Scanning library…'), `${where}: a screen reader reads the scan (${JSON.stringify(said)})`);
+      }
+      if (health === bad) check(!!m.dot && m.dot.w >= 6 && m.dot.left >= 0 && m.dot.right <= m.inner, `${where}: the warning's dot is on screen (${m.dot ? m.dot.w.toFixed(0) + ' px at ' + m.dot.left.toFixed(0) : 'none'})`);
       check(!state.errors.length, `${where}: no page errors ${state.errors.join('; ')}`);
       if (scanning && health === bad) await page.screenshot({ path: path.join(SHOTS, `topbar-${width}.png`), clip: { x: 0, y: 0, width, height: 72 } });
       await context.close();
