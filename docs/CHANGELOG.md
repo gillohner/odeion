@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-05
 
+- **A playlist's Delete follows the window** (from #269's review): beside Play in a desktop window wider than 1024 px, in ⋯ otherwise, also when the window is resized with the playlist open (it was decided when the page was drawn, so a window made narrower kept Delete beside Play and none in ⋯).
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.

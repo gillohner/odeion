@@ -1687,3 +1687,7 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 /* The account button: on every shell (Log out is always one tap away) */
 .me-btn.has-face { padding: 0; overflow: hidden; }
 .me-btn .face { width: 100%; height: 100%; border-radius: 50%; }
+/* A playlist's Delete beside Play: a wide desktop window only (narrower, it is in ⋯), following a
+   resize */
+.pldel { display: none; }
+@media (min-width: 1025px) { html[data-shell="desktop"] .pldel { display: inline-flex; } }
