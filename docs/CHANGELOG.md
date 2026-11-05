@@ -8,6 +8,14 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Workflows use each action at a fixed commit** (with its version beside it), checkouts keep no credentials, and `ci.yml` and `compat.yml` read the repository only. `tools/workflow-pins-check.py` runs in CI and fails on an action used by tag; Dependabot proposes the updates.
 
+- **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
+  - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
+  - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
+  - Then open http://odeion.local:7788 for the usual web setup.
+  - The box gets Debian 13 with security updates by themselves, a nightly backup (with the homeserver), a firewall that opens only Odeion's ports to the outside (speakers on the home network get what they need), and a watchdog. No SSH.
+  - When the homeserver is published through a tunnel, the box reaches it directly.
+  - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
