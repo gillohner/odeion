@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 /// The files [`tighten`] makes the node's alone: the library database and its journal files,
 /// the config (it may hold the API token and service secrets), the made API token, the Pubky session secret, the
-/// remote-access key, the app players' keys and a config a restore brought back. Only those that
-/// are in the data folder are changed ([`tighten`]).
+/// remote-access key, the app players' keys, a config a restore brought back, usage insights and
+/// problem reports. Only those that are in the data folder are changed ([`tighten`]).
 pub fn private_files(
     data_dir: &Path,
     db: &Path,
@@ -33,6 +33,11 @@ pub fn private_files(
         "usage.sqlite-journal",
         "usage.sqlite-wal",
         "usage.sqlite-shm",
+        // Problem reports (the inbox makes the file 0600) and their journal files
+        "feedback.sqlite",
+        "feedback.sqlite-journal",
+        "feedback.sqlite-wal",
+        "feedback.sqlite-shm",
     ] {
         v.push(data_dir.join(name));
     }
