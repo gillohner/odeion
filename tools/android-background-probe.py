@@ -114,6 +114,7 @@ def node_toml():
 folders = ["{out}/music"]
 [api]
 listen = "{os.environ.get('PM_TEST_LISTEN', '127.0.0.1:7788')}"
+token = "{ep.TOKEN}"
 announce = false
 [outputs]
 discover = false
@@ -141,6 +142,10 @@ def connect_app():
     tap(lambda n: "connect by address" in n, "“Or connect by address”")
     tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
     adb("shell", "input", "text", "10.0.2.2:7788")
+    # The node has a token (as android-endpoint.py sets it up): a node without one answers only at
+    # its loopback names, and the app reaches it as 10.0.2.2
+    tap(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field")
+    adb("shell", "input", "text", ep.TOKEN)
     adb("shell", "input", "keyevent", "66")
     until("the node's page in the app", lambda: any("Now playing" in n for n in ui_nodes()), timeout=120, every=3)
     until("the player service", lambda: "player service started" in ep.logcat(), timeout=90)
