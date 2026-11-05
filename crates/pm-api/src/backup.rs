@@ -325,6 +325,50 @@ pub fn strip_signins(copy: &Library) -> Result<(), pm_library::LibraryError> {
     Ok(())
 }
 
+/// Settings that hold a way in for someone else besides what they are: unused homeserver invites
+/// (the people list's invite tokens), the owner's own signup token and party codes. A plain copy
+/// keeps them without it ([`scrub_plain_copy`]); a backup with a passphrase carries the whole
+/// setting in its locked part and a restore puts it back.
+const CARRIED: &[&str] = &[
+    crate::people::SETTING,
+    crate::bundled::OWNER_TOKEN,
+    crate::party::PARTIES,
+];
+
+/// Makes a plain copy of the database safe to keep anywhere: no sign-in (the owner's or a
+/// listener's), nothing that belongs to this node only ([`NODE_OWN`]: its stream key, the backup
+/// schedule's passphrase, the owner sessions' hash…), nothing of the vault cache, no signup token,
+/// no invite's token and no party (codes are ways in; parties end within hours anyway). Invites
+/// stay, without their link: it is made again. `odeiond backup` and the web backup's snapshot.
+pub fn scrub_plain_copy(copy: &Library) -> Result<(), pm_library::LibraryError> {
+    strip_signins(copy)?;
+    for key in NODE_OWN {
+        copy.delete_setting(key)?;
+    }
+    for (key, _) in copy.settings_with_prefix("vault.")? {
+        copy.delete_setting(&key)?;
+    }
+    copy.delete_setting(crate::bundled::OWNER_TOKEN)?;
+    copy.delete_setting(crate::party::PARTIES)?;
+    if let Some(j) = copy.get_setting(crate::people::SETTING)? {
+        match serde_json::from_str::<serde_json::Value>(&j) {
+            Ok(mut v) => {
+                if let Some(invites) = v.get_mut("invites").and_then(|i| i.as_array_mut()) {
+                    for i in invites.iter_mut().filter_map(|i| i.as_object_mut()) {
+                        i.remove("token");
+                    }
+                }
+                copy.set_setting(crate::people::SETTING, &v.to_string())?;
+            }
+            // Unreadable: nothing of it is kept rather than a token by accident
+            Err(_) => {
+                copy.delete_setting(crate::people::SETTING)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn person_signins(lib: &Library) -> Result<Vec<(String, String)>, BackupError> {
     Ok(lib
         .settings_with_prefix(crate::accounts::PERSON_PREFIX)?
@@ -347,6 +391,11 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
         for (key, v) in person_signins(&lib)? {
             secrets.settings.insert(key, v);
         }
+        for key in CARRIED {
+            if let Some(v) = lib.get_setting(key)? {
+                secrets.settings.insert((*key).to_string(), v);
+            }
+        }
         let folders = lib
             .list_folders()?
             .into_iter()
@@ -358,16 +407,9 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
     let db = (|| -> Result<Vec<u8>, BackupError> {
         {
             let copy = Library::open(&snap)?;
-            strip_signins(&copy)?;
-            for key in NODE_OWN {
-                copy.delete_setting(key)?;
-            }
-            // The vault cache's state belongs to this machine (its records name its vault key,
-            // and sign-ins moved aside after "Sign out everywhere" are still tokens): never in a
-            // backup
-            for (key, _) in copy.settings_with_prefix("vault.")? {
-                copy.delete_setting(&key)?;
-            }
+            // The vault cache's state belongs to this machine too (its records name its vault
+            // key, and sign-ins moved aside after "Sign out everywhere" are still tokens)
+            scrub_plain_copy(&copy)?;
             copy.vacuum_into_place()?;
         }
         Ok(std::fs::read(&snap)?)
@@ -415,6 +457,9 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
             }
             if secrets.config.is_some() {
                 left_out.push("the node's config file".into());
+            }
+            if CARRIED.iter().any(|k| secrets.settings.contains_key(*k)) {
+                left_out.push("invite links, the homeserver's signup token and parties".into());
             }
             None
         }
@@ -635,6 +680,12 @@ async fn restore_locked(
             .filter(|(k, _)| is_person_signin(k))
         {
             lib.set_setting(k, v)?;
+        }
+        // Invites with their links, the signup token and parties, from the locked part
+        for key in CARRIED {
+            if let Some(v) = secrets.as_ref().and_then(|x| x.settings.get(*key)) {
+                lib.set_setting(key, v)?;
+            }
         }
         lib.drop_missing_art()?;
         report.restored = counts_of(&lib)?;

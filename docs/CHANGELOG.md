@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Backups without a passphrase keep no way in.**
+  - Besides sign-ins, a backup made without a passphrase (and `odeiond backup`'s copy) now also leaves out: the homeserver's signup token, the links of unused invites, parties, the scheduled backup's passphrase and this node's own keys.
+  - Invites come back without their links, so make the link again.
+  - With a passphrase, invite links, the signup token and parties are locked in with the sign-ins and come back on restore.
+  - `odeiond backup` writes its copy readable by you only.
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.

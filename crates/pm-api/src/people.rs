@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-const SETTING: &str = "people";
+pub(crate) const SETTING: &str = "people";
 
 /// What an invite gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -18,18 +18,45 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
         std::fs::remove_file(file)?;
     }
     let lib = open(cfg)?;
-    lib.backup_to(file)
-        .with_context(|| format!("writing backup {}", file.display()))?;
+    if file.exists() {
+        anyhow::bail!("{} exists (--force replaces it)", file.display());
+    }
+    // Made and cleaned in a private folder beside it, then moved into place: the file is its
+    // maker's alone (0600), and a copy that still holds secrets is never where it is kept
+    let dir = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let work = dir.join(format!(".odeion-backup-{}", std::process::id()));
+    let mut b = std::fs::DirBuilder::new();
+    #[cfg(unix)]
     {
-        // Sign-ins, the owner's and each listener's own, never go into a plain database copy
-        // (Settings › Backup locks them with a passphrase instead)
-        let copy = Library::open(file)?;
-        pm_api::backup::strip_signins(&copy)?;
-        copy.vacuum_into_place()?;
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
     }
-    for ext in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{ext}", file.display()));
-    }
+    b.create(&work)
+        .with_context(|| format!("creating {}", work.display()))?;
+    let made = (|| -> anyhow::Result<()> {
+        let tmp = work.join("library.sqlite");
+        lib.backup_to(&tmp)
+            .with_context(|| format!("writing backup {}", file.display()))?;
+        {
+            // No sign-in, signup token, invite link, party code, passphrase or key of this node
+            // goes into a plain database copy (Settings › Backup locks sign-ins with a passphrase)
+            let copy = Library::open(&tmp)?;
+            pm_api::backup::scrub_plain_copy(&copy)?;
+            copy.vacuum_into_place()?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&tmp, file).with_context(|| format!("writing backup {}", file.display()))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    made?;
     let s = lib.stats()?;
     let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -305,5 +332,70 @@ mod tests {
             Some("app"),
             "not a sign-in"
         );
+    }
+
+    /// The plain copy keeps no way in at all: besides sign-ins, not the backup schedule's
+    /// passphrase, a vault record, the stream key, an unused invite's token, the signup token or a
+    /// party; invites stay without their link. The file is its maker's alone.
+    #[test]
+    fn the_backup_command_keeps_no_way_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        // Fake values, put together at run time
+        let v = |n: &str| ["fixture", "value", n].join("-");
+        {
+            let lib = open(&cfg).unwrap();
+            lib.set_setting(
+                "backup.schedule",
+                &format!("{{\"passphrase\":\"{}\"}}", v("pass")),
+            )
+            .unwrap();
+            lib.set_setting("vault.signed_out.tidal", &v("vault")).unwrap();
+            lib.set_setting("stream.secret", &v("stream")).unwrap();
+            lib.set_setting("homeserver.owner_signup_token", &v("signup"))
+                .unwrap();
+            lib.set_setting("party.parties", &format!("[{{\"code\":\"{}\"}}]", v("party")))
+                .unwrap();
+            lib.set_setting(
+                "people",
+                &format!(
+                    "{{\"people\":[],\"invites\":[{{\"id\":\"i1\",\"access\":\"music\",\"token\":\"{}\",\"created_at\":1}}]}}",
+                    v("invite")
+                ),
+            )
+            .unwrap();
+        }
+        let file = dir.path().join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        let raw = String::from_utf8_lossy(&std::fs::read(&file).unwrap()).into_owned();
+        for n in ["pass", "vault", "stream", "signup", "party", "invite"] {
+            assert!(!raw.contains(&v(n)), "{n} in the plain copy");
+        }
+        let copy = Library::open(&file).unwrap();
+        let people = copy.get_setting("people").unwrap().unwrap();
+        assert!(
+            people.contains("\"i1\""),
+            "the invite stays, without its link: {people}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        // Nothing left beside it
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        // An existing file isn't overwritten without --force
+        assert!(backup(&cfg, &file, false).is_err());
+        backup(&cfg, &file, true).unwrap();
     }
 }
