@@ -32,6 +32,8 @@ const DEVICE_SESSIONS: &str = "accounts.device_sessions";
 const OWNER_SESSIONS_CAP: usize = 20;
 /// Devices of the owner kept at once (an app signing in again and again, say reinstalled).
 const DEVICE_SESSIONS_CAP: usize = 50;
+// Room for more devices than browsers: a device signs in once and stays
+const _: () = assert!(DEVICE_SESSIONS_CAP > OWNER_SESSIONS_CAP);
 /// A hash of the API token the owner's browser sessions were made under: one changed in the config
 /// ends them at the next start, as Make a new token does.
 /// Never in a backup (`backup::NODE_OWN`).
@@ -1128,6 +1130,5 @@ mod tests {
         }
         assert_eq!(all.len(), OWNER_SESSIONS_CAP);
         assert_eq!(all[0].hash, hash("pmo_3"), "the three oldest went");
-        assert!(DEVICE_SESSIONS_CAP > OWNER_SESSIONS_CAP);
     }
 }
