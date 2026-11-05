@@ -4734,7 +4734,7 @@
     // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
     // (a sidebar place) and the bar never stay busy for good
     let mo = null; let cap = 0; let drawing = null;
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (pageDrawn(before)) { if (drawing) drawing.on = false; res(); } }); mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
     const rendering = render(); navRendering = rendering; drawing = lastDrawing;
     return Promise.race([rendering, superseded, drawn]).finally(end);
@@ -6311,6 +6311,7 @@
           if (isListener()) {
             const me = state.me; const info = state.info || await api('GET', '/info');
             const [who] = await loadProfiles([me.key]);
+            if (state.view !== 'settings') return; // they went elsewhere while the profile was looked up
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
