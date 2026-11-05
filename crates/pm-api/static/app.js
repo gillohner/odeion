@@ -4451,6 +4451,15 @@
       + (tiles.length ? `<div data-hgrid>${itemTileGrid(tiles.slice(0, full ? 60 : 12).map(asTile), 'album')}</div>` : '')
       + (events.length ? `<div class="list">${events.slice(0, full ? 60 : 6).map((it, k) => `<div class="list-row clickable" data-hopen="${k}"><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.description, it.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div>` : '');
   };
+  // Tiles of discovered items (an item page's "Tagged alike on Pubky"), bound to the list they were
+  // drawn from: a tile opens the item's page (a song's for a track; a podcast its site), ▶ plays it
+  const SIMILAR_KINDS = ['track', 'album', 'artist', 'podcast', 'playlist'];
+  const openDiscovered = (it) => { if (it.kind === 'podcast') return openWeb(it.page || it.uri); setView('item', { kind: homeKind(it), id: idOf(it.page || it.uri) }); };
+  const bindDiscoverTiles = (box, items) => {
+    if (!box) return;
+    $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; const it = items[Number(b.dataset.tile)]; if (it) openDiscovered(it); });
+    $$('[data-tileplay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.tileplay)]; if (it) return discoverPlay(it, null, b); });
+  };
   const bindHome = (el, sec) => {
     const songs = sec.items.filter((it) => it.kind === 'track'); const tiles = sec.items.filter((it) => ['album', 'artist', 'podcast', 'playlist'].includes(it.kind)); const events = sec.items.filter((it) => it.kind === 'concert' || it.kind === 'other');
     if (songs.length) bindSongRows(el, songs.map(asRow), {});
@@ -5967,10 +5976,13 @@
               const mineSongs = kind === 'song' ? mine.map((h) => ({ ...h, artist: h.subtitle })) : [];
               const mineTiles = kind === 'song' ? [] : mine.map((h) => ({ ...h, year: h.subtitle || h.year || '' }));
               const part = (label, body, id) => `<div class="simpart" id="${id}"><h4 class="simhead muted small">${label}</h4>${body}</div>`;
+              // Tagged alike on Pubky: music only, by the item's own kind (a coin, a paper, a place or a
+              // game tagged alike isn't similar music); drawn and bound from this one list
+              const rel = pg.related.filter((it) => SIMILAR_KINDS.includes(it.kind));
               const parts = [
                 mine.length ? part('In your library', kind === 'song' ? songRows(mineSongs, { showAlbum: true, covers: true }) : itemTileGrid(mineTiles, kind), 'isimlib') : '',
                 fmArtists.length ? part('From Last.fm', `<div class="chips">${fmArtists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div>`, 'isimfm') : '',
-                pg.related.length ? part('Tagged alike on Pubky', itemTileGrid(pg.related.map(asTile), 'album'), 'irelated') : '',
+                rel.length ? part('Tagged alike on Pubky', itemTileGrid(rel.map(asTile), 'album'), 'irelated') : '',
               ].filter(Boolean);
               if (!parts.length) { ss.remove(); return; }
               ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar</h3></div>${parts.join('')}</section>`;
@@ -5978,7 +5990,7 @@
               if (lib && kind === 'song') bindSongRows(lib, mineSongs, {}); else if (lib) bindItemTiles(lib, mineTiles, kind);
               $$('[data-simlib]', main).forEach((b) => b.onclick = () => setView('item', { kind: 'artist', id: 'lib-' + b.dataset.simlib }));
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
-              if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });
+              if (rel.length) bindDiscoverTiles($('#irelated', main), rel);
             })();
             // In collections (TASK-in-collections-client): the public collections on Pubky holding this
             // item, from Pinakes; the count, the first few (yours first, marked), each opening the
