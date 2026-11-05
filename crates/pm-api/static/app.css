@@ -120,7 +120,10 @@ p { margin: 0; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: var(--surface-3); color: var(--fg-2); padding: 2px 6px; border-radius: 5px; }
 ::selection { background: var(--accent-soft); }
 :focus { outline: none; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+/* The ring follows each element's own radius (a round button stays round); no painted tap highlight
+   on Android (it covers the box, not the radius): round buttons press with :active instead */
+html { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ic { width: 20px; height: 20px; flex: none; display: inline-block; vertical-align: middle; }
 [hidden] { display: none !important; }
 
@@ -226,10 +229,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
   transition: background 0.15s var(--ease), color 0.15s var(--ease), transform 0.1s var(--ease);
 }
-.icon-btn:hover { background: var(--surface-3); color: var(--fg); }
-.icon-btn:active { transform: scale(0.95); }
+@media (hover: hover) { .icon-btn:hover { background: var(--surface-3); color: var(--fg); } }
+.icon-btn:active { transform: scale(0.95); background: var(--surface-3); }
 .icon-btn.play { width: 44px; height: 44px; background: var(--fg); color: var(--bg); }
-.icon-btn.play:hover { background: var(--play-hover); }
+@media (hover: hover) { .icon-btn.play:hover { background: var(--play-hover); } }
 .icon-btn.play .ic { width: 22px; height: 22px; }
 .seek { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 560px; }
 .time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; }
@@ -493,7 +496,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .zone-card .zc-text .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .zone-card .zc-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .zone-card .icon-btn.big { width: 40px; height: 40px; background: var(--accent); color: var(--on-accent); border-radius: 50%; }
-.zone-card .icon-btn.big:hover { background: var(--accent-strong); }
+@media (hover: hover) { .zone-card .icon-btn.big:hover { background: var(--accent-strong); } }
 .zone-card .zc-controls input[type=range] { flex: 1; min-width: 100px; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .toolbar .input { width: 260px; }
@@ -1697,7 +1700,7 @@ html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
 :root { --pl-accent: var(--src-d, var(--accent)); --pl-strong: color-mix(in srgb, var(--src-d, var(--accent-strong)) 75%, #fff); --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 12% / 0.5); }
 html[data-src] .player, html[data-src] #nowplaying { --accent: var(--pl-accent); --accent-strong: var(--pl-strong); --accent-soft: color-mix(in srgb, var(--pl-accent) 16%, transparent); }
 html[data-src] .player .icon-btn.play, html[data-src] #nowplaying .icon-btn.play { background: var(--accent); color: var(--on-accent); }
-html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-btn.play:hover { background: var(--accent-strong); }
+@media (hover: hover) { html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-btn.play:hover { background: var(--accent-strong); } }
 html[data-src] .player .quality, html[data-src] #nowplaying .np-quality { border-color: var(--accent); color: var(--accent-strong); }
 /* and a soft gradient from the cover behind Now playing */
 html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%, var(--np-tint), transparent 70%), var(--bg); }
