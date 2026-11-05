@@ -116,12 +116,13 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
   lines.forEach((l, i) => {
     const was = inBlock; if (/\/\*/.test(l) && !/\*\//.test(l)) inBlock = true; if (/\*\//.test(l)) inBlock = false;
     if (was || HELPER.test(l) || /^\s*(\/\/|\*|\/\*)/.test(l)) return;
-    for (const m of PHRASES.flatMap((re) => [...l.matchAll(re)])) {
-      const before = l.slice(0, m.index);
-      // The else branch: `appPlatform() ? '…' : '<here>` on this line, the phrase at the start of that literal
+    const code = l.replace(/\s\/\/.*$/, ''); // a trailing comment (a URL's // has no space before it)
+    for (const m of PHRASES.flatMap((re) => [...code.matchAll(re)])) {
+      const before = code.slice(0, m.index);
+      // The else branch: `appPlatform() ? '…' : '<here>` on this line, the phrase inside that literal
       const q = before.lastIndexOf('appPlatform() ?');
-      const elseBranch = q >= 0 && /\s:\s['"`][^'"`]{0,12}$/.test(before.slice(q));
-      if (!elseBranch) bad.push(`${i + 1}: …${l.slice(Math.max(0, m.index - 30), m.index + 24).trim()}…`);
+      const elseBranch = q >= 0 && /\s:\s['"`][^'"`]{0,80}$/.test(before.slice(q));
+      if (!elseBranch) bad.push(`${i + 1}: …${code.slice(Math.max(0, m.index - 30), m.index + 24).trim()}…`);
     }
   });
   check(!bad.length, `app.js: every "this browser" the page can show goes through the helpers${bad.length ? ': ' + bad.slice(0, 5).join(' | ') : ''}`);
