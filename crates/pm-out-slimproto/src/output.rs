@@ -279,7 +279,8 @@ impl Output for SlimOutput {
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let gain = match v {
-            Volume::Db(db) => 10f64.powf(db.clamp(-60.0, 0.0) as f64 / 20.0),
+            // Below -60 dB too: a volume limit under it still holds
+            Volume::Db(db) => 10f64.powf(db.min(0.0) as f64 / 20.0),
             Volume::Percent(p) => (p.min(100) as f64 / 100.0).powi(2),
             Volume::Mute(true) => 0.0,
             Volume::Mute(false) => 1.0,
