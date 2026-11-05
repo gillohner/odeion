@@ -50,19 +50,22 @@ const DEFAULT = /^Your library · 24\/96 FLAC · 41\.2 MB · plays by default$/;
     const r = await page.evaluate(() => {
       const marks = [...document.querySelectorAll('#isongs .vmark')];
       const m = marks[0]; if (!m) return { n: 0 };
-      const row = m.closest('.srow'); const rr = row.getBoundingClientRect(); const mr = m.getBoundingClientRect();
+      // Its words as drawn (on a touch screen its target reaches further, invisibly)
+      const row = m.closest('.srow'); const rr = row.getBoundingClientRect(); const rg = document.createRange(); rg.selectNodeContents(m); const mr = rg.getBoundingClientRect(); const box = m.getBoundingClientRect();
       const parts = [...row.children, ...row.querySelectorAll('.grow > *, .sub > *')].filter((c) => c.getBoundingClientRect().width > 0 && !c.contains(m) && !m.contains(c));
       let overlap = 0; for (const c of parts) { const b = c.getBoundingClientRect(); if (Math.min(mr.right, b.right) - Math.max(mr.left, b.left) > 1 && Math.min(mr.bottom, b.bottom) - Math.max(mr.top, b.top) > 1) overlap++; }
       const probe = document.createElement('span'); probe.style.color = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim(); document.body.append(probe); const mutedRgb = getComputedStyle(probe).color; probe.remove();
       const hit = document.elementFromPoint(mr.right - 2, mr.top + mr.height / 2);
       const sub = row.querySelector('.sub');
-      return { n: marks.length, row: row.dataset.srow, text: m.textContent.trim(), inside: mr.left >= rr.left - 1 && mr.right <= rr.right + 1 && mr.top >= rr.top - 1 && mr.bottom <= rr.bottom + 1, overlap, whole: !!hit && (hit === m || m.contains(hit)), color: getComputedStyle(m).color, mutedRgb, size: parseFloat(getComputedStyle(m).fontSize), subSize: parseFloat(getComputedStyle(sub).fontSize), height: mr.height };
+      const rows = [...document.querySelectorAll('#isongs .srow')].map((x) => Math.round(x.getBoundingClientRect().height));
+      return { rows, n: marks.length, row: row.dataset.srow, text: m.textContent.trim(), inside: mr.left >= rr.left - 1 && mr.right <= rr.right + 1 && mr.top >= rr.top - 1 && mr.bottom <= rr.bottom + 1, overlap, whole: !!hit && (hit === m || m.contains(hit)), color: getComputedStyle(m).color, mutedRgb, size: parseFloat(getComputedStyle(m).fontSize), subSize: parseFloat(getComputedStyle(sub).fontSize), height: box.height };
     });
     check(r.n === 1 && r.row === '1', `${at}: one marker, on the song with two copies (${r.n} on row ${r.row})`);
     check(r.text === '2 versions' && r.whole, `${at}: it says "2 versions", wholly shown beside a long artist name`);
     check(r.color === r.mutedRgb && r.size <= r.subSize, `${at}: quiet: the secondary text colour and size (${r.color} vs ${r.mutedRgb})`);
     check(r.inside && r.overlap === 0, `${at}: inside its row, nothing in the row overlaps it (${r.overlap})`);
     if (touch) check(r.height >= 28, `${at}: on a touch screen its target is at least 28 px high (${Math.round(r.height)})`);
+    check(r.rows && Math.max(...r.rows) - Math.min(...r.rows) <= 2, `${at}: the row with the marker is as tall as the others (${(r.rows || []).join(', ')})`);
     await page.screenshot({ path: path.join(SHOTS, `album-${w}.png`) });
     // The chooser
     if (r.n) { await page.click('#isongs .vmark'); await sleep(300); }
