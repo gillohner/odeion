@@ -1489,7 +1489,7 @@
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
-  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden) drawVolPop(); };
+  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
@@ -1508,7 +1508,7 @@
     return { kind, min: r.min, max: r.max, step: r.step || 1, value: v && v.db != null ? Math.min(r.max, Math.max(r.min, v.db)) : null, muted: !!(v && v.muted) };
   };
   // A zone id inside an attribute selector (no CSS.escape: ui-smoke's jsdom has none)
-  const cssStr = (v) => String(v).replace(/["\\]/g, '\\$&');
+  const cssStr = (v) => String(v).replace(/["\\]/g, '\\$&').replace(/[\n\r\f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `);
   const levelText = (r) => (!r ? '' : r.muted ? 'Muted' : r.value == null ? 'Level unknown' : r.kind === 'percent' ? `${Math.round(r.value)} %` : `${Math.round(r.value)} dB`);
   // A slider shows the zone's level; one being dragged is left alone until it is let go
   const applyVol = (el, r) => {
@@ -1522,7 +1522,7 @@
   const syncVolumeSliders = (z, except) => {
     if (!z) return;
     // The owner's output list says the scale (and whether there is a volume at all); asked once
-    if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; syncVolumeSliders(z); }).catch(() => {}).finally(() => { state.outputsP = null; });
+    if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; for (const cur of Object.values(state.zones || {})) syncVolumeSliders(cur); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     const r = zoneVolume(z);
     if (z.id === state.zone) $('.player').classList.toggle('novol', !r);
     if (!r) return;
@@ -1557,7 +1557,7 @@
     // Let go: the slider catches up with the zone (after `change`, which follows the pointer)
     const letGo = () => { done(); setTimeout(() => syncVolumeSliders(zoneOf()), 0); };
     el.addEventListener('pointerup', letGo); el.addEventListener('pointercancel', letGo);
-    el.addEventListener('input', () => { setFill(el); const z = zoneOf(); const r = zoneVolume(z); if (r) for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = levelText({ ...r, value: Number(el.value), muted: false }); });
+    el.addEventListener('input', () => { setFill(el); const z = zoneOf(); const r = zoneVolume(z); if (!r) return; const now = levelText({ ...r, value: Number(el.value), muted: false }); el.classList.remove('unknown'); el.setAttribute('aria-valuetext', now); for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = now; });
     el.addEventListener('change', () => { done(); const z = zoneOf(); if (z) setZoneVol(z, el.value, el); });
   };
   const volPop = () => $('#volpop');
@@ -1571,8 +1571,10 @@
   };
   const volTr = { open: () => !volPop().hidden, close: closeVolPop };
   // Where the bar has no room for the slider: the volume button opens this, the zone's one slider
+  // What the open popover shows: its zone and scale (a redraw would drop the slider being moved)
+  const volPopKey = () => { const z = currentZone(); const r = zoneVolume(z); return `${z ? z.id : ''}|${r ? r.kind : ''}`; };
   const drawVolPop = () => {
-    const vp = volPop(); const z = currentZone(); const r = zoneVolume(z);
+    const vp = volPop(); const z = currentZone(); const r = zoneVolume(z); vp.dataset.drawn = volPopKey();
     vp.innerHTML = `<div class="pop-title">Volume · ${esc(z ? z.name : 'Zone')}</div>` + (r && z
       ? `<div class="volpop-row"><button class="icon-btn" data-volmute="${esc(z.id)}" aria-pressed="${!!r.muted}" title="${r.muted ? 'Unmute' : 'Mute'}" aria-label="Mute">${icon('volume')}</button><input type="range" id="volpopvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}">${esc(levelText(r))}</span></div>`
       : '<p class="qp-note">This zone sets its volume on the device.</p>');

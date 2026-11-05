@@ -279,6 +279,11 @@ impl BluosOutput {
 
 #[async_trait]
 impl Output for BluosOutput {
+    /// Levels are set as an amplitude (`volume_path`/`set_volume` map dB with `10^(dB/20)`).
+    fn percent_for_db(&self, db: f32) -> u8 {
+        pm_zones::amplitude_percent(db)
+    }
+
     fn id(&self) -> OutputId {
         OutputId::new("bluos", &self.player.id)
     }
@@ -365,6 +370,11 @@ impl BluosGroup {
 
 #[async_trait]
 impl Output for BluosGroup {
+    /// Levels are set as an amplitude (`volume_path`/`set_volume` map dB with `10^(dB/20)`).
+    fn percent_for_db(&self, db: f32) -> u8 {
+        pm_zones::amplitude_percent(db)
+    }
+
     fn id(&self) -> OutputId {
         let mut ids = vec![self.lead.id().0];
         ids.extend(self.members.iter().map(|m| m.id().0));

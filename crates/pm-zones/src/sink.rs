@@ -231,6 +231,11 @@ pub type Describe = Arc<dyn Fn(&crate::QueueItem) -> TrackMeta + Send + Sync>;
 
 /// One place audio can go (handoff §6.4).
 #[async_trait]
+/// The percent level of `db` as an amplitude (`10^(dB/20)`), as BluOS, MPD and Cast map it.
+pub fn amplitude_percent(db: f32) -> u8 {
+    (10f64.powf(f64::from(db.clamp(-80.0, 0.0)) / 20.0) * 100.0).round() as u8
+}
+
 pub trait Output: Send + Sync {
     fn id(&self) -> OutputId;
     fn name(&self) -> String;
@@ -260,6 +265,13 @@ pub trait Output: Send + Sync {
 
     async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
         Err(SinkError::NoVolume(self.id()))
+    }
+
+    /// The percent level this output sets for `db` (a zone's volume limit caps percent requests
+    /// with it). The default is linear over -60…0 dB; outputs that map dB as an amplitude
+    /// (BluOS, MPD, Cast) say so with [`amplitude_percent`].
+    fn percent_for_db(&self, db: f32) -> u8 {
+        ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).round() as u8
     }
 
     /// The level the output reports now, with its mute; `None` when it can't be read (the

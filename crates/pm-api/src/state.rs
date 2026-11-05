@@ -517,7 +517,10 @@ impl NodeState {
             let node = Arc::downgrade(self);
             let zid = zone.id().clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(volume_poll());
+                let every = volume_poll();
+                let mut tick = tokio::time::interval(every);
+                // A slow device doesn't get reads back to back (a set waits on the same lock)
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     tick.tick().await;
                     // Gone from the registry (ungrouped, the device left): the poll ends too
@@ -526,7 +529,12 @@ impl NodeState {
                         break;
                     }
                     let Some(z) = weak.upgrade() else { break };
-                    z.refresh_volume().await;
+                    // An unreachable device holds the lock no longer than this
+                    let _ = tokio::time::timeout(
+                        every.min(std::time::Duration::from_secs(4)),
+                        z.refresh_volume(),
+                    )
+                    .await;
                 }
             });
         }
@@ -1707,8 +1715,15 @@ impl NodeState {
 
 const CONTACT_KEY: &str = "node.contact";
 
-/// How often a zone reads its output's level back (`PM_VOLUME_POLL_MS` for tests).
+/// A shorter volume poll for tests (ms; 0 = none), set without touching the environment.
+pub static VOLUME_POLL_MS_FOR_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How often a zone reads its output's level back (`PM_VOLUME_POLL_MS`, or the tests' value).
 fn volume_poll() -> std::time::Duration {
+    let t = VOLUME_POLL_MS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+    if t > 0 {
+        return std::time::Duration::from_millis(t);
+    }
     std::env::var("PM_VOLUME_POLL_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())

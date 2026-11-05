@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-05
 
+- **One volume, one source** (owner's report: the bar's volume and the Sound panel's disagreed, and a Linn's showed empty). A zone now says its output's level (`volume`: dB or percent, with mute), read back from the device after every change and every 10 s (UPnP, BluOS, MPD, Snapcast; the others until they can say), so a change made on the device or in its own app shows. Every volume slider reads that one value: the player bar, Now playing on phones, and the Zones page; a level the node hasn't read shows no thumb and says "Level unknown" instead of a made-up -20 dB. The Sound panel has no volume any more. The bar has one slider when there is room; where there isn't, the volume button opens a small volume popover (slider, mute, the level) that Esc, Back and a tap outside close. The button now stays in windows under 760 px too, where it used to move into the Sound panel (beside a files job's chip there, the volume is in Now playing). A zone's volume limit caps a percent request where that output itself puts the limit (BluOS, MPD and Cast set an amplitude, so a -30 dB limit is 3 % there and 50 % on a UPnP renderer), and after every change the pages hear the level the device kept, also when it is the one they had.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
@@ -15,8 +17,6 @@ Newest first. Dates are when the change landed on `main`.
   - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
 
 ### 2026-11-04
-
-- **One volume, one source** (owner's report: the bar's volume and the Sound panel's disagreed, and a Linn's showed empty). A zone now says its output's level (`volume`: dB or percent, with mute), read back from the device after every change and every 10 s (UPnP, BluOS, MPD, Snapcast; the others until they can say), so a change made on the device or in its own app shows. Every volume slider reads that one value: the player bar, Now playing on phones, and the Zones page; a level the node hasn't read shows no thumb and says "Level unknown" instead of a made-up -20 dB. The Sound panel has no volume any more. The bar has one slider when there is room; where there isn't, the volume button opens a small volume popover (slider, mute, the level) that Esc, Back and a tap outside close. The button now stays in windows under 760 px too, where it used to move into the Sound panel (beside a files job's chip there, the volume is in Now playing).
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
 

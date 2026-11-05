@@ -125,7 +125,7 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       check(bar.quality, `${tag}: the sound pill shows the quality whole (its badge, or the whole line)`);
       const volIn = (await visible(page, '.player .volume')) ? 'bar' : (await visible(page, '#volbtn')) ? 'button' : null;
       await page.click('#quality'); await page.waitForTimeout(200);
-      const panelVol = await visible(page, '#qpanel #qpvol');
+      const panelVol = await visible(page, '#qpanel input[type="range"]');
       check(!!volIn && !panelVol, `${tag}: the volume is in the bar, as its slider or its button, and not in the Sound panel (${volIn || 'not in the bar'}${panelVol ? ', and in the Sound panel' : ''})`);
       check(await visible(page, '#qpanel'), `${tag}: the sound pill opens the Sound panel (signal path)`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(150);

@@ -1954,20 +1954,20 @@ async fn volume(
     let zone = zone_of(&s, &id)?;
     // A zone's volume limit (DSP settings) caps absolute requests.
     let limit = s.sources.dsp_for(&zone.output().id()).max_volume_db;
-    zone.set_volume(cap_volume(body.volume, limit)).await?;
+    let out = zone.output().clone();
+    zone.set_volume(cap_volume(body.volume, limit, |db| out.percent_for_db(db)))
+        .await?;
     announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Apply a zone's volume limit (dB) to an absolute request: a dB request is capped at it, a
-/// percent request at the same point on the 0–100 scale the outputs map -60…0 dB to.
-fn cap_volume(v: pm_model::Volume, limit: Option<f32>) -> pm_model::Volume {
+/// percent request at the level the zone's own output sets for that dB (`percent_for`: linear
+/// on UPnP and Snapcast, an amplitude on BluOS, MPD and Cast).
+fn cap_volume(v: pm_model::Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8) -> pm_model::Volume {
     match (v, limit) {
         (pm_model::Volume::Db(db), Some(max)) if db > max => pm_model::Volume::Db(max),
-        (pm_model::Volume::Percent(p), Some(max)) => {
-            let cap = ((max.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).round() as u8;
-            pm_model::Volume::Percent(p.min(cap))
-        }
+        (pm_model::Volume::Percent(p), Some(max)) => pm_model::Volume::Percent(p.min(percent_for(max))),
         (v, _) => v,
     }
 }
@@ -5131,8 +5131,8 @@ mod tests {
             max: 0.0,
             step: 1.0,
         }));
-        // The poll runs fast here (the env is read when a zone's poll starts)
-        std::env::set_var("PM_VOLUME_POLL_MS", "200");
+        // The poll runs fast here (read when a zone's poll starts)
+        crate::state::VOLUME_POLL_MS_FOR_TESTS.store(200, std::sync::atomic::Ordering::Relaxed);
         let pc_out_raw = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
         let pc_out: Arc<dyn pm_zones::Output> = pc_out_raw.clone();
         s.outputs.register(db_out.clone());
@@ -5206,6 +5206,27 @@ mod tests {
         db_zone.wait_acked().await;
         let (_, z) = call(&app, "GET", &format!("/v1/zones/{dz}"), None).await;
         assert_eq!(z["volume"]["db"], -30.0, "capped: {z}");
+        // Asked again, the level stays at the cap: controllers still hear the read-back (a page
+        // showing the -10 it asked for learns the device kept -30)
+        let mut w = db_zone.watch();
+        w.borrow_and_update();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{dz}/volume"),
+            Some(serde_json::json!({"volume": {"db": -10.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let heard = tokio::time::timeout(std::time::Duration::from_secs(2), w.changed()).await;
+        assert!(
+            matches!(heard, Ok(Ok(()))),
+            "no zone update after an unchanged read-back"
+        );
+        assert_eq!(
+            w.borrow().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Db(-30.0))
+        );
         // The device's own level changes behind the node's back (its remote): the poll shows it
         pc_out_raw.pretend_level(pm_model::ZoneVolume {
             level: pm_model::VolumeLevel::Percent(33),
@@ -6680,10 +6701,31 @@ mod tests {
         assert_eq!(cfg["max_volume_db"], -20.0);
         // Requests are capped before they reach the output.
         use pm_model::Volume;
-        assert_eq!(cap_volume(Volume::Db(-3.0), Some(-20.0)), Volume::Db(-20.0));
-        assert_eq!(cap_volume(Volume::Db(-30.0), Some(-20.0)), Volume::Db(-30.0));
-        assert_eq!(cap_volume(Volume::Db(-3.0), None), Volume::Db(-3.0));
-        assert_eq!(cap_volume(Volume::Up, Some(-20.0)), Volume::Up);
+        let linear = |db: f32| ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).round() as u8;
+        assert_eq!(
+            cap_volume(Volume::Db(-3.0), Some(-20.0), linear),
+            Volume::Db(-20.0)
+        );
+        assert_eq!(
+            cap_volume(Volume::Db(-30.0), Some(-20.0), linear),
+            Volume::Db(-30.0)
+        );
+        assert_eq!(cap_volume(Volume::Db(-3.0), None, linear), Volume::Db(-3.0));
+        assert_eq!(cap_volume(Volume::Up, Some(-20.0), linear), Volume::Up);
+        // Percent is capped where the output itself puts the limit: -30 dB is 50 % on a linear
+        // output (UPnP), 3 % on one that sets an amplitude (BluOS, MPD, Cast)
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-30.0), linear),
+            Volume::Percent(50)
+        );
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-30.0), pm_zones::amplitude_percent),
+            Volume::Percent(3)
+        );
+        assert_eq!(
+            cap_volume(Volume::Percent(2), Some(-30.0), pm_zones::amplitude_percent),
+            Volume::Percent(2)
+        );
         // The null output has no volume control at all: the request is refused as before.
         let (st, body) = call(
             &app,

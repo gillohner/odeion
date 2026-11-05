@@ -220,6 +220,11 @@ impl MpdOutput {
 
 #[async_trait]
 impl Output for MpdOutput {
+    /// Levels are set as an amplitude (`volume_path`/`set_volume` map dB with `10^(dB/20)`).
+    fn percent_for_db(&self, db: f32) -> u8 {
+        pm_zones::amplitude_percent(db)
+    }
+
     fn id(&self) -> OutputId {
         OutputId::new("mpd", &self.server.address())
     }

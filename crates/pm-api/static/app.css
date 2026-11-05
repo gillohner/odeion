@@ -1290,7 +1290,8 @@ html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-ar
 
 /* Volume: the slider when the bar has room, else a button that opens a small volume popover (one
    slider for the zone in the bar area at any width; the Sound panel has none) */
-html .player.novol .volume, html .player.novol .volbtn { display: none; }
+/* A zone without a volume has neither, whatever the width or a files job says */
+html .player.novol .volume, html .player.novol .volbtn { display: none !important; }
 #volpop { width: min(300px, calc(100vw - 32px)); }
 .volpop-row { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
 .volpop-row input[type="range"] { flex: 1; }
