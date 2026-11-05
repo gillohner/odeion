@@ -120,7 +120,10 @@ p { margin: 0; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: var(--surface-3); color: var(--fg-2); padding: 2px 6px; border-radius: 5px; }
 ::selection { background: var(--accent-soft); }
 :focus { outline: none; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+/* The ring follows each element's own radius (a round button stays round); no painted tap highlight
+   on Android (it covers the box, not the radius): round buttons press with :active instead */
+html { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ic { width: 20px; height: 20px; flex: none; display: inline-block; vertical-align: middle; }
 [hidden] { display: none !important; }
 
@@ -226,10 +229,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
   display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
   transition: background 0.15s var(--ease), color 0.15s var(--ease), transform 0.1s var(--ease);
 }
-.icon-btn:hover { background: var(--surface-3); color: var(--fg); }
-.icon-btn:active { transform: scale(0.95); }
+@media (hover: hover) { .icon-btn:hover { background: var(--surface-3); color: var(--fg); } }
+.icon-btn:active { transform: scale(0.95); background: var(--surface-3); }
 .icon-btn.play { width: 44px; height: 44px; background: var(--fg); color: var(--bg); }
-.icon-btn.play:hover { background: var(--play-hover); }
+@media (hover: hover) { .icon-btn.play:hover { background: var(--play-hover); } }
 .icon-btn.play .ic { width: 22px; height: 22px; }
 .seek { display: flex; align-items: center; gap: 10px; width: 100%; max-width: 560px; }
 .time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 34px; text-align: center; }
@@ -493,7 +496,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .zone-card .zc-text .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .zone-card .zc-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .zone-card .icon-btn.big { width: 40px; height: 40px; background: var(--accent); color: var(--on-accent); border-radius: 50%; }
-.zone-card .icon-btn.big:hover { background: var(--accent-strong); }
+@media (hover: hover) { .zone-card .icon-btn.big:hover { background: var(--accent-strong); } }
 .zone-card .zc-controls input[type=range] { flex: 1; min-width: 100px; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .toolbar .input { width: 260px; }
@@ -611,12 +614,35 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .notes-edit textarea { resize: vertical; font: inherit; }
 
 /* ---- tags ---- */
-.tagrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
-.chip.tag { padding: 0; overflow: hidden; }
-.chip.tag .chiplink { background: none; border: 0; color: var(--fg-2); padding: 5px 4px 5px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-.chip.tag .chiplink:hover { color: var(--accent-strong); }
-.chip.tag .chipx { background: none; border: 0; color: var(--muted); padding: 5px 9px 5px 4px; cursor: pointer; font: inherit; font-size: 13px; line-height: 1; }
-.chip.tag .chipx:hover { color: var(--bad); }
+/* Tags as pubky.app draws them (its Tag and TaggedItem): the label's own colour at 0.3, yours with a
+   border at 0.5, a glow inside on hover; the people who used it beside it. --tag-bg and --tag-line
+   come with each chip (tagChip in app.js). */
+.ptag { display: inline-flex; align-items: center; gap: 6px; height: 32px; max-width: 100%; min-width: 0; padding: 0 12px; border-radius: 6px; border: 1px solid transparent; background: var(--tag-bg, var(--surface-2)); color: var(--fg); font: inherit; font-size: 14px; font-weight: 700; line-height: 1; cursor: pointer; transition: box-shadow 0.2s; }
+.ptag:not(.own):not(.tag-skel):hover { box-shadow: inset 0 0 10px 2px var(--tag-line); }
+.ptag.own { border-color: var(--tag-line); }
+.ptag:focus-visible, .ptag .chiplink:focus-visible, .ptag .chipx:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ptag-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ptag-n { flex: none; font-weight: 500; opacity: 0.5; }
+.ptag .chiplink { gap: 6px; height: 100%; min-width: 0; padding: 0; border-radius: 0; color: inherit; font-weight: inherit; }
+.ptag .chiplink:hover { background: none; color: inherit; }
+.ptag .chipx { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 100%; background: none; border: 0; padding: 0; color: inherit; opacity: 0.7; cursor: pointer; font: inherit; font-size: 14px; }
+.ptag .chipx:hover { opacity: 1; }
+.ptag .chipx .ic { width: 13px; height: 13px; }
+.ptag-add { width: 32px; padding: 0; justify-content: center; background: transparent; border: 1px dashed var(--line-strong); color: var(--muted); }
+.ptag-add .ic { width: 16px; height: 16px; }
+.ptag-more { background: var(--surface-2); color: var(--fg-2); font-weight: 500; }
+.tag-skel { width: 72px; cursor: default; background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+.tagitem { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; }
+.tagfaces { gap: 0; padding: 0 2px; }
+.tagfaces .face { width: 28px; height: 28px; }
+.tagfaces .face + .face, .tagfaces .face-more { margin-left: -8px; }
+.face-more { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--muted); background: var(--bg); color: var(--fg); font-size: 11px; font-weight: 500; position: relative; z-index: 1; }
+/* The item page's tags in its top card: one labelled group per identity (the item, the source link) */
+.htags { display: grid; gap: 8px; margin-top: 12px; min-width: 0; }
+.tgroup { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.tgroup-name { display: inline-flex; align-items: center; gap: 6px; flex: none; min-height: 32px; margin-right: 2px; font-size: 12px; color: var(--muted); }
+.tgroup > .muted.small { min-height: 32px; display: inline-flex; align-items: center; }
+.hnote { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0; }
 .taginput { background: var(--surface-2); border: 1px solid var(--line); color: var(--fg); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12px; width: 130px; }
 .taginput:focus { border-color: var(--accent); outline: none; }
 .fmt { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.02em; background: var(--surface-3); color: var(--fg-2); vertical-align: 1px; }
@@ -682,8 +708,22 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .idmark:hover { color: var(--accent-strong); border-color: var(--accent); }
 .track:hover .idmark, .track:focus-within .idmark, .idmark:focus-visible { opacity: 1; }
 @media (hover: none) { .idmark { opacity: .8; } }
-.idbar { height: 6px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin: 6px 0 8px; }
-.idbar span { display: block; height: 100%; background: var(--accent); }
+/* Identify: one bar, a segment per state (identified, to confirm, not found, not checked), no wider
+   than the text beside it; the legend repeats the colours */
+.idbar { display: flex; gap: 2px; height: 8px; max-width: 520px; border-radius: 999px; background: var(--surface-3); overflow: hidden; margin: 6px 0 8px; }
+.idseg { display: block; height: 100%; flex: 0 1 auto; min-width: 0; }
+.idseg.identified, .idswatch.identified { background: var(--accent); }
+.idseg.suggested, .idswatch.suggested { background: var(--warn); }
+.idseg.unknown, .idswatch.unknown { background: var(--muted); }
+.idseg.unchecked, .idswatch.unchecked { background: var(--surface-3); }
+.idlegend { margin: 0 0 8px; }
+.idkeys { display: inline-flex; flex-wrap: wrap; gap: 4px 14px; margin-left: 6px; }
+.idkey { display: inline-flex; align-items: center; gap: 6px; }
+.idswatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.idswatch.unchecked { box-shadow: inset 0 0 0 1px var(--line-strong); }
+/* The AcoustID key is short: the field keeps to 320 px, with Check, Save key and Remove beside it */
+.set-body #acidform .input, #acidform .input { flex: 0 1 320px; width: auto; min-width: 0; }
+html[data-shell="phone"] .idbar { max-width: none; }
 .idrow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; padding: 12px 14px; border-top: 1px solid var(--line); }
 .idrow:first-child { border-top: 0; }
 .idopts { display: flex; flex-direction: column; gap: 6px; }
@@ -780,6 +820,21 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 /* Where the About text and picture come from, and their licences */
 .credit { max-width: 72ch; line-height: 1.5; margin: -4px 0 12px; }
 /* About under the header (F6): a few lines of the article, then More; the credits small */
+/* The music first (owner, 2026-11-05): under the hero the blurb, a small Wikipedia link, one facts line
+   without labels, the library line; the ids, links and credits in Details at the foot */
+.about-top .blurb { margin-bottom: 6px; }
+.blurb-foot { display: flex; align-items: baseline; gap: 12px; margin: 0 0 10px; }
+.facts-line .fact { overflow-wrap: anywhere; }
+.wikilink { color: var(--muted); }
+.facts-line { color: var(--fg-2); font-size: 14px; line-height: 1.5; margin: 0 0 4px; }
+.facts-line .dot { color: var(--muted); }
+.libline { margin: 0; }
+details.idetails > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+details.idetails > summary::-webkit-details-marker { display: none; }
+details.idetails > summary::before { content: ''; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); transition: transform 0.15s; flex: none; }
+details.idetails[open] > summary::before { transform: rotate(45deg); }
+details.idetails > summary h3 { margin: 0; }
+details.idetails > .credit, details.idetails > .kv { margin-top: 12px; }
 .blurb.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; }
 #iblurbmore { display: inline-block; margin-bottom: 8px; }
 .credit a { color: inherit; text-decoration: underline; }
@@ -789,6 +844,9 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 /* The icons say what they are (UX sweep 11-01, A11) */
 .also-icons .also-label { margin-right: 2px; }
 .also-icons .src-badge.ico { width: 24px; height: 24px; margin: 0; box-shadow: none; }
+/* "Open in": the group that leaves Odeion, marked by the arrow after its label */
+.also-icons.open-in { margin-left: 10px; }
+.also-icons.open-in .also-label .ic { width: 12px; height: 12px; vertical-align: -1px; margin-left: 2px; }
 .btn.icon-only { padding-left: 10px; padding-right: 10px; }
 .idfile { min-width: 0; }
 .eq-row .eq-kind { text-transform: capitalize; }
@@ -1127,13 +1185,22 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .set-fold[open] > summary::after { transform: rotate(225deg); }
 .set-fold:not([open]) > .set-rows { display: none; }
 /* Tag chips: 40 px to touch on phones and touch screens (UX sweep 2026-11-01 S4) */
-html[data-shell="phone"] :is(.tag-chip, .chip.tag) { min-height: 40px; }
-html[data-shell="phone"] .chip.tag :is(.chiplink, .chipx) { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+html[data-shell="phone"] :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
+html[data-shell="phone"] .ptag-add { width: 40px; }
+/* × and move: a finger-sized target each, the chip a little wider for them */
+html[data-shell="phone"] .ptag .chipx { min-width: 40px; }
+html[data-shell="phone"] span.ptag { padding-right: 0; gap: 0; }
+html[data-shell="phone"] span.ptag .chiplink { padding-right: 4px; }
+html[data-shell="phone"] .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; }
 @media (pointer: coarse) {
-  :is(.tag-chip, .chip.tag) { min-height: 40px; }
-  .chip.tag :is(.chiplink, .chipx) { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+  :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
+  .ptag-add { width: 40px; }
+  .ptag .chipx { min-width: 40px; }
+  span.ptag { padding-right: 0; gap: 0; }
+  span.ptag .chiplink { padding-right: 4px; }
+  .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; }
 }
-.tag-hint { margin: 8px 0 0; }
+.tag-hint { margin: 0; }
 .switch { appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; flex: none; margin: 0 4px; border-radius: 999px; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: background 0.15s; }
 .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg-2); transition: transform 0.15s, background 0.15s; }
 .switch:checked { background: var(--accent); box-shadow: none; }
@@ -1180,9 +1247,6 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .set-warn { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; color: var(--warn); }
 /* Item pages: one instance per page, the same recording elsewhere one click away */
 .opened-as { margin: 6px 0 0; }
-.chip.tag.tag-link { border-style: dashed; padding-left: 6px; }
-.chip.tag .chipx .ic { width: 12px; height: 12px; vertical-align: -1px; }
-.tagrow select.input { width: auto; padding: 4px 8px; font-size: 12px; height: auto; }
 /* Shuffle and repeat beside the transport: quieter than play, the accent when repeat is on */
 .transport .mode-btn { color: var(--muted); width: 40px; height: 40px; }
 .transport .mode-btn:hover { color: var(--fg); }
@@ -1197,11 +1261,8 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 /* People on tags: faces of who tagged, stacked */
 .faces { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; padding: 2px 4px; cursor: pointer; color: var(--muted); font: inherit; border-radius: 999px; }
 .faces:hover { background: var(--surface-2); color: var(--fg); }
-.facestack { display: inline-flex; }
-.facestack .face + .face { margin-left: -7px; }
 .face { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; border: 2px solid var(--bg); flex: none; }
 .face.mono { display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; }
-.faces-line { gap: 8px; }
 .hero.person .blurb { max-width: 60ch; }
 /* The shell in two layouts (docs/ux/responsive.md; owner, 2026-11-04). html[data-shell] comes from
    the window width and Settings › Appearance › Layout: phone under 600 px (tabs, a mini player
@@ -1279,6 +1340,11 @@ html[data-shell="phone"] .quality.idle, html[data-shell="phone"] .quality:not(:h
 html[data-shell="phone"] .player-right { min-width: 0; overflow: hidden; }
 html[data-shell="phone"] .player-right .zone-btn { min-width: 0; flex: 0 1 auto; }
 html[data-shell="phone"] .player-right .zone-btn span { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A files job's chip beside them (#269 review: the parts overlapped or were cut at the card's edge):
+   the zone button is its icon (its label names the zone) and the pill its quality badge (no badge,
+   no pill); on the narrowest phones the pill makes way (the Sound panel is in Now playing) */
+html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) :is(.zone-btn span, .quality .qsrc, .quality:not(:has(.qbadge))) { display: none; }
+@media (max-width: 374px) { html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) .quality { display: none; } }
 html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
 html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
 html[data-shell="phone"] body.np-open .player { display: none; }
@@ -1288,12 +1354,25 @@ html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56p
 /* Now playing fills the screen down to the tabs */
 html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
 
+/* Volume: the slider when the bar has room, else a button that opens a small volume popover (one
+   slider for the zone in the bar area at any width; the Sound panel has none) */
+/* A zone without a volume has neither, whatever the width or a files job says */
+html .player.novol .volume, html .player.novol .volbtn { display: none !important; }
+#volpop { width: min(300px, calc(100vw - 32px)); }
+.volpop-row { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
+.volpop-row input[type="range"] { flex: 1; }
+.vol-level { min-width: 56px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+/* A level the node hasn't read yet: the track shows, the thumb doesn't (nothing made up) */
+input[type="range"].unknown::-webkit-slider-thumb { opacity: 0; }
+input[type="range"].unknown::-moz-range-thumb { opacity: 0; }
+input[type="range"].muted { opacity: 0.5; }
 /* The desktop layout down to 600 px, tablets included (owner, 2026-11-04). The player bar's three
    groups shrink and never overlap: the seek bar takes the free width, the sound pill is its source
    mark, dot and quality badge (the zone button names the device), and the zone's name ellipsizes.
    Under 900 px shuffle and repeat move to Now playing and the zone button drops its chevron; under
-   760 px the volume button goes too (the volume is the Sound panel's first control, and in Now
-   playing); under 680 px the seek bar drops its times and the pill its source mark. */
+   680 px the seek bar drops its times and the pill its source mark. The volume button stays at
+   every width without the slider (beside a files job's chip under 760 px, Now playing has it): it is
+   the bar's one way to the volume (the Sound panel has none). */
 @media (max-width: 1100px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1fr) minmax(200px, 1.3fr) auto; gap: 12px; padding: 0 16px; }
   html[data-shell="desktop"] .player-right { gap: 8px; }
@@ -1304,7 +1383,7 @@ html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-ar
 /* The sound pill as its badge (source mark, dot, "16/44.1"; the whole line is in the Sound panel)
    wherever the bar has no room for the line beside the volume and the zone: under 1800 px, and at
    any width while a files job shows its chip; the chip is its bar alone under 1367 px, and beside
-   it the volume is its button from 760 to 1599 px (narrower, the volume button is gone anyway) */
+   it the volume is its button up to 1599 px */
 @media (max-width: 1799px) {
   html[data-shell="desktop"] .player .quality { gap: 6px; padding: 5px 9px; }
   html[data-shell="desktop"] .player .quality :is(.qtext, .qdsp) { display: none; }
@@ -1333,7 +1412,8 @@ html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(>
 @media (max-width: 759px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1fr) auto; gap: 10px; padding: 0 12px; }
   html[data-shell="desktop"] .player .np-art { width: 48px; height: 48px; }
-  html[data-shell="desktop"] .player-right .volbtn { display: none; }
+  /* Beside a files job's chip there is no room for the volume button: the volume is in Now playing */
+  html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .volbtn { display: none; }
 }
 /* The narrowest windows: the seek bar without its times (Now playing has them), the pill without the source mark */
 @media (max-width: 679px) {
@@ -1437,7 +1517,7 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="favourites"], body.listener .nav-item[data-view="playlists"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
 body.listener .bnav[data-bnav="home"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
-body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark, body.listener #itags,
+body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark,
 body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
 /* Library › Add music */
 .addm { padding: 18px 20px; }
@@ -1635,7 +1715,7 @@ html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
 :root { --pl-accent: var(--src-d, var(--accent)); --pl-strong: color-mix(in srgb, var(--src-d, var(--accent-strong)) 75%, #fff); --np-tint: hsl(var(--np-h, 250) var(--np-s, 50%) 12% / 0.5); }
 html[data-src] .player, html[data-src] #nowplaying { --accent: var(--pl-accent); --accent-strong: var(--pl-strong); --accent-soft: color-mix(in srgb, var(--pl-accent) 16%, transparent); }
 html[data-src] .player .icon-btn.play, html[data-src] #nowplaying .icon-btn.play { background: var(--accent); color: var(--on-accent); }
-html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-btn.play:hover { background: var(--accent-strong); }
+@media (hover: hover) { html[data-src] .player .icon-btn.play:hover, html[data-src] #nowplaying .icon-btn.play:hover { background: var(--accent-strong); } }
 html[data-src] .player .quality, html[data-src] #nowplaying .np-quality { border-color: var(--accent); color: var(--accent-strong); }
 /* and a soft gradient from the cover behind Now playing */
 html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%, var(--np-tint), transparent 70%), var(--bg); }
@@ -1702,3 +1782,8 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
 .pager { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; margin: 20px 0 8px; }
 .pageinfo { text-align: center; }
 .relsecs .art.skeleton { aspect-ratio: 1; }
+
+/* A playlist's Delete beside Play: a wide desktop window only (narrower, it is in ⋯), following a
+   resize */
+.pldel { display: none; }
+@media (min-width: 1025px) { html[data-shell="desktop"] .pldel { display: inline-flex; } }

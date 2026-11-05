@@ -13,12 +13,22 @@ live transport or relay exists today (handoff §11, "relay design; who operates 
 ## Decision
 
 - **Discovery by pubkey now.** When the node has a session, `pm-node serve` writes
-  `/priv/pubky.music/node.json` on the user's homeserver: `{name, api_url, token, version,
-  updated_at}`. The folder is private, so only the user's own devices (with their session) read
-  it, which makes carrying the API token there acceptable: it is how the user's phone learns where
-  and how to reach their node without typing anything. `api_url` comes from `[api] public_url`
-  (a hostname the user already exposes: LAN name, Tailscale, a reverse proxy) and falls back to
-  the listen address.
+  `/priv/pubky.music/node.json` on the user's homeserver: `{name, api_url, version, updated_at}`
+  (plus `iroh`, ADR 0013). It says **where** the node is, never how to sign in to it.
+  - `/priv` is private to the owner's grants, but it is not encrypted: whoever runs the homeserver
+    can read it. So no credential goes there.
+  - A device that finds the node through the record gets its own credential by signing in to the
+    node itself with Pubky Ring (`/v1/auth/pubky/start` and `/poll`, the same sign-in the web page
+    uses). The first connect of a new device therefore takes two approvals in Ring: one to read the
+    record, one to sign in to the node.
+  - That credential is a device sign-in, kept apart from browser sessions: a browser's Log out and
+    the browsers' cap leave it; Make a new token and a change of the node's identity end it, and the
+    app then signs in again by itself (one approval in Ring).
+  - Revised 2026-11-05: earlier versions also wrote the node's API token into the record. A node
+    that finds such a record rewrites it without the token and replaces a token it made itself. A
+    token set in the config can't be replaced by the node, so Health asks the owner to change it.
+  - `api_url` comes from `[api] public_url` (a hostname the user already exposes: LAN name,
+    Tailscale, a reverse proxy) and falls back to the listen address.
 - **Transport unchanged.** Clients still speak HTTPS/WebSocket to that URL. Encryption and
   authentication on the wire are the URL's business (TLS at a proxy, an overlay network); the
   node never exposes the endpoint protocol port this way.

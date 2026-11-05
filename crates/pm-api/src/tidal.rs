@@ -2493,8 +2493,9 @@ pub(crate) async fn stream(
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(ApiError::bad_request("bad TIDAL track id"));
     }
-    // With the caller's own account; what one person fetched is never served to another
-    let who = Who::of(&caller);
+    // With the account the caller plays with (their own, or the node's under its source policy);
+    // what one person fetched is never served to another
+    let who = Who::of(&caller).resolved(&s.library.lock().expect("library poisoned"));
     if who == Who::Nobody {
         return Err(ApiError::new(StatusCode::FORBIDDEN, not_connected(&who)));
     }
@@ -2676,6 +2677,7 @@ pub(crate) fn not_connected(who: &Who) -> String {
     match who {
         Who::Owner => "TIDAL: sign in on the Sources page first".into(),
         Who::Listener(_) => "Connect TIDAL (Settings › You › Services) to play this".into(),
+        Who::ListenerOnNode(_) => "This node has no TIDAL sign-in: ask its owner to sign in".into(),
         Who::Nobody => "TIDAL plays with the account of whoever queued it, and this has none".into(),
     }
 }

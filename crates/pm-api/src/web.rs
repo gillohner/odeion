@@ -45,7 +45,11 @@ fn policy(pages: &[&str]) -> String {
         let digest = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
         hashes.push_str(&format!(" 'sha256-{digest}'"));
     }
-    format!("script-src 'self'{hashes} {YOUTUBE_API}; object-src 'none'; base-uri 'self'")
+    // `frame-ancestors 'none'`: no other site shows the node's pages in a frame, with
+    // `X-Frame-Options: DENY` for browsers that predate it
+    format!(
+        "script-src 'self'{hashes} {YOUTUBE_API}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    )
 }
 
 /// The YouTube IFrame API (videos play in "This browser" through it): its loader and the player
@@ -63,7 +67,7 @@ fn inline_scripts(page: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Fact;
+    use crate::types::{Fact, FactKind};
 
     #[test]
     fn only_web_links_pass() {
@@ -95,6 +99,7 @@ mod tests {
         let fact = |href: &str| Fact {
             label: "Homepage".into(),
             value: href.into(),
+            kind: FactKind::Fact,
             href: Some(href.into()),
         };
         let out = serde_json::to_value(fact("javascript:alert(document.cookie)")).unwrap();

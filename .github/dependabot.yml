@@ -1,0 +1,8 @@
+# Proposes updates to the actions the workflows use; they are pinned to commit SHAs
+# (tools/workflow-pins-check.py), and these PRs keep the SHA and its version comment current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

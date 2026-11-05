@@ -5,9 +5,10 @@
 //   * the desktop layout: the sidebar with every desktop place (reachable when the window is short),
 //     no bottom tabs;
 //   * the player bar: no two of its parts overlap (as drawn, after any clipping), nothing leaves the
-//     bar, also with a files job showing, and the title, artist and zone name each keep at least 8
+//     bar, also with a files job showing (on phones too, nothing cut at the edge), and the title, artist and zone name each keep at least 8
 //     characters when cut;
-//   * every desktop feature reachable: the queue, the volume (bar, button or the Sound panel),
+//   * every desktop feature reachable: the queue, the volume (the bar's slider or its button, never
+//     the Sound panel),
 //     shuffle and repeat (bar or Now playing), the sound pill and the zone picker;
 //   * the album page: the cover beside the words, and "Songs · count · Select" on one baseline;
 //   * a touch screen keeps 40 px targets in the desktop layout.
@@ -124,8 +125,8 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       check(bar.quality, `${tag}: the sound pill shows the quality whole (its badge, or the whole line)`);
       const volIn = (await visible(page, '.player .volume')) ? 'bar' : (await visible(page, '#volbtn')) ? 'button' : null;
       await page.click('#quality'); await page.waitForTimeout(200);
-      const panelVol = await visible(page, '#qpanel #qpvol');
-      check(!!volIn || panelVol, `${tag}: the volume is reachable (${volIn || (panelVol ? 'Sound panel' : 'nowhere')})`);
+      const panelVol = await visible(page, '#qpanel input[type="range"]');
+      check(!!volIn && !panelVol, `${tag}: the volume is in the bar, as its slider or its button, and not in the Sound panel (${volIn || 'not in the bar'}${panelVol ? ', and in the Sound panel' : ''})`);
       check(await visible(page, '#qpanel'), `${tag}: the sound pill opens the Sound panel (signal path)`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(150);
       await page.click('#zonebtn'); await page.waitForTimeout(150);
@@ -186,6 +187,19 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await fx.go(page, '/album/lib-7'); await page.waitForTimeout(800);
     const bar = await page.evaluate(barReport);
     check(!bar.overlaps.length && !bar.outside.length, `${w}${touch ? ' touch' : ''}: the mini player's parts don't overlap or leave it${bar.overlaps.length || bar.outside.length ? ': ' + [...bar.overlaps, ...bar.outside].slice(0, 4).join('; ') : ''}`);
+    // With a files job's chip too (#269 review): nothing overlaps, and nothing is cut at the edge of
+    // its group (the group clips what doesn't fit, so overlaps alone don't show it)
+    await showJob(page); await page.waitForTimeout(150);
+    const jb = await page.evaluate(barReport);
+    // (every part inside the group, not only its children: a shrunk button would clip its own icon)
+    const cut = await page.evaluate(() => { const g = document.querySelector('.player-right').getBoundingClientRect(); return [...document.querySelectorAll('.player-right *')].filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && getComputedStyle(e).visibility !== 'hidden'; }).filter((e) => { const b = e.getBoundingClientRect(); return b.right > g.right + 0.5 || b.left < g.left - 0.5; }).map((e) => e.id || e.getAttribute('class') || e.tagName); });
+    // A pill without a quality badge (nothing known of the format) isn't drawn empty beside the chip
+    const bare = await page.evaluate(() => { const b = document.querySelector('#quality .qbadge'); if (!b) return null; const keep = b.outerHTML; b.remove(); const q = document.querySelector('#quality'); const shown = q.getBoundingClientRect().width > 0; q.querySelector('.qshort').insertAdjacentHTML('beforeend', keep); return shown; });
+    check(bare === false, `${w}${touch ? ' touch' : ''} with a files job: a pill without a quality badge isn't drawn empty (${bare})`);
+    const job = await visible(page, '#jobchip'); const zone = await visible(page, '#zonebtn');
+    check(job && zone && !jb.overlaps.length && !jb.outside.length && !cut.length, `${w}${touch ? ' touch' : ''} with a files job: the chip and the zone button show, nothing overlaps or is cut${jb.overlaps.length || jb.outside.length || cut.length ? ': ' + [...jb.overlaps, ...jb.outside, ...cut.map((c) => `${c} cut`)].slice(0, 4).join('; ') : ''}`);
+    await page.screenshot({ path: path.join(SHOTS, `mini-job-${w}${touch ? '-touch' : ''}.png`), clip: { x: 0, y: h - 170, width: w, height: 170 } });
+    await page.evaluate(() => { document.querySelector('#jobchip').hidden = true; });
     if (w !== 390 || touch) { await context.close(); continue; }
     const p = await page.evaluate(() => ({ shell: document.documentElement.dataset.shell, tabs: [...document.querySelectorAll('.bottomnav .bnav')].filter((b) => b.getBoundingClientRect().width > 0).map((b) => b.dataset.bnav).join(',') }));
     check(p.shell === 'phone' && p.tabs === 'home,search,library,zones', `390: the phone, with its four tabs (${p.shell}: ${p.tabs})`);
@@ -211,6 +225,26 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await fx.go(page, '/downloads'); await page.waitForFunction(() => document.body.classList.contains('offline')); await page.waitForTimeout(400);
     const b = await page.evaluate(barReport); const vol = await visible(page, '.player-right .volume input');
     check(vol && !b.overlaps.length && !b.outside.length, `offline at ${w}: the volume slider is in the bar and the bar fits${b.overlaps.length || b.outside.length ? ': ' + [...b.overlaps, ...b.outside].slice(0, 4).join('; ') : ''}`);
+    await context.close();
+  }
+  // A playlist's Delete follows the window (#269 review): beside Play in a wide desktop window, in
+  // ⋯ otherwise, also after a resize without reopening the page
+  for (const widths of [[1280, 800, 1280], [800, 1280]]) {
+    const { page, context, state } = await open(browser, widths[0], 800);
+    await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plplay'); await page.waitForTimeout(300);
+    const menuHasDelete = async () => {
+      await page.click('#plmore'); await page.waitForTimeout(250);
+      const items = await page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
+      await page.keyboard.press('Escape'); await page.waitForTimeout(200);
+      return items.some((t) => /^Delete playlist/.test(t));
+    };
+    for (const w of widths) {
+      await page.setViewportSize({ width: w, height: 800 }); await page.waitForTimeout(300);
+      const beside = await visible(page, '#pldel'); const inMenu = await menuHasDelete();
+      const wide = w > 1024;
+      check(beside === wide && inMenu === !wide, `playlist opened at ${widths[0]}, at ${w}: Delete ${wide ? 'beside Play, not in ⋯' : 'in ⋯, not beside Play'} (beside ${beside}, in ⋯ ${inMenu})`);
+    }
+    check(!state.errors.length, `playlist resize: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
   // Settings › Appearance › Layout: Automatic / Phone / Desktop; the old choices map across

@@ -883,7 +883,18 @@ fn mb_fact(label: &str, entity: &str, mbid: &str) -> Fact {
     Fact {
         label: label.into(),
         value: mbid.into(),
+        kind: FactKind::Ref,
         href: Some(format!("https://musicbrainz.org/{entity}/{mbid}")),
+    }
+}
+
+/// A reference (an id, a raw URL, a file): the Details at the foot of the page.
+fn reference(label: &str, value: impl Into<String>) -> Fact {
+    Fact {
+        label: label.into(),
+        value: value.into(),
+        kind: FactKind::Ref,
+        href: None,
     }
 }
 
@@ -891,6 +902,7 @@ fn fact(label: &str, value: impl Into<String>) -> Fact {
     Fact {
         label: label.into(),
         value: value.into(),
+        kind: FactKind::Fact,
         href: None,
     }
 }
@@ -932,12 +944,12 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         None => None,
     };
     let mut about = vec![
-        fact("Format", t.file.format.to_string()),
-        fact("File", t.file.path.display().to_string()),
+        reference("Format", t.file.format.to_string()),
+        reference("File", t.file.path.display().to_string()),
     ];
     // Where the file lives decides nothing else in the UI; the details say it (STEWARD-BUNDLED-HOMESERVER §7)
     if let Some(hs) = s.homeserver_files_dir() {
-        about.push(fact(
+        about.push(reference(
             "Stored",
             if t.file.path.starts_with(hs) {
                 "On your homeserver".to_string()
@@ -947,25 +959,26 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         ));
     }
     if let Some(g) = t.replaygain_track_gain_db {
-        about.push(fact("ReplayGain", format!("{g:+.1} dB")));
+        about.push(reference("ReplayGain", format!("{g:+.1} dB")));
     }
     if let Some(i) = &t.isrc {
-        about.push(fact("ISRC", i.to_string()));
+        about.push(reference("ISRC", i.to_string()));
     }
     match &t.canonical {
         Some((MusicUri::Recording { mbid }, c)) => {
             about.push(mb_fact("MusicBrainz", "recording", &mbid.to_string()));
-            about.push(fact("Identified by", c.label().replace('_', " ")));
+            about.push(reference("Identified by", c.label().replace('_', " ")));
         }
         Some((u, c)) => {
             about.push(Fact {
                 label: "Identity".into(),
                 value: u.to_url(),
+                kind: FactKind::Ref,
                 href: Some(u.to_url()),
             });
-            about.push(fact("Identified by", c.label().replace('_', " ")));
+            about.push(reference("Identified by", c.label().replace('_', " ")));
         }
-        None => about.push(fact("Identity", "not identified yet")),
+        None => about.push(reference("Identity", "not identified yet")),
     }
     // The work it records, and that work's Wikipedia article
     let recording = t.recording_mbid.or(match &t.canonical {
@@ -1034,6 +1047,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: None,
         link: None,
         on_pubky,
         about,
@@ -1096,12 +1110,9 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         None => None,
     };
     let mut about = Vec::new();
-    if let Some(y) = a.year {
-        about.push(fact("Year", y.to_string()));
-    }
-    about.push(fact("Songs", tracks.len().to_string()));
+    about.push(reference("Songs", tracks.len().to_string()));
     if let Some(t) = tracks.first() {
-        about.push(fact("Format", t.file.format.to_string()));
+        about.push(reference("Format", t.file.format.to_string()));
     }
     if let Some(m) = a.release_mbid {
         about.push(mb_fact("MusicBrainz release", "release", &m.to_string()));
@@ -1114,7 +1125,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         ));
     }
     if let Some(u) = &a.upc {
-        about.push(fact("UPC", u.to_string()));
+        about.push(reference("UPC", u.to_string()));
     }
     // Label, release date, the Wikipedia article and "Also on" by the release group
     let (more, about_pending) = match mb_match {
@@ -1122,6 +1133,13 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         None => (None, false),
     };
     let about_text = more.as_ref().and_then(|m| m.text.clone());
+    // The library's year, unless the release group brings a release date (one of the two)
+    let released = more
+        .as_ref()
+        .is_some_and(|m| m.facts.iter().any(|f| f.label == "Released"));
+    if let (Some(y), false) = (a.year, released) {
+        about.push(fact("Year", y.to_string()));
+    }
     // Its links become sources like the rest: "Also on" and "Open on"
     if let Some(m) = more {
         versions.extend(m.links);
@@ -1168,6 +1186,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: None,
         song_uri: None,
         link: None,
         on_pubky,
@@ -1255,6 +1274,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
                 about.push(Fact {
                     label: label.into(),
                     value: u.clone(),
+                    kind: FactKind::Ref,
                     href: Some(u.clone()),
                 });
             }
@@ -1326,6 +1346,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: None,
         song_uri: None,
         link: None,
         open_on: Vec::new(),
@@ -1423,13 +1444,13 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str, refresh: 
         }
         let isrcs = r.isrcs();
         if !isrcs.is_empty() {
-            about.push(fact(
+            about.push(reference(
                 "ISRC",
                 isrcs.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
             ));
         }
         if let Some(u) = r.upc() {
-            about.push(fact("UPC", u));
+            about.push(reference("UPC", u));
         }
         if let Some(d) = f.duration_secs() {
             about.push(fact("Length", format!("{}:{:02}", d / 60, d % 60)));
@@ -1441,13 +1462,14 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str, refresh: 
             about.push(fact("Type", t.clone()));
         }
         if let Some(g) = &r.card.group {
-            about.push(fact("Pinakes", format!("{} links in its group", g.size)));
+            about.push(reference("Pinakes", format!("{} links in its group", g.size)));
         }
     }
     if let Some(site) = &it.site {
         about.push(Fact {
             label: "Link".into(),
             value: site.clone(),
+            kind: FactKind::Ref,
             href: it.page.clone(),
         });
     }
@@ -1484,7 +1506,12 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str, refresh: 
                     .to_lowercase()
                     .replace(' ', "-")
             }),
-        plays_from: c.plays_from.clone().or_else(|| it.plays_from.clone()),
+        // Nothing here plays (the archive restricts the item): no "plays from" either
+        plays_from: if c.unavailable.is_some() {
+            None
+        } else {
+            c.plays_from.clone().or_else(|| it.plays_from.clone())
+        },
         connect: if c.connect.is_empty() {
             it.connect.clone()
         } else {
@@ -1505,6 +1532,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str, refresh: 
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: c.unavailable.clone(),
         song_uri: song_uri.or_else(|| it.uri.contains("://musicbrainz.org/").then(|| it.uri.clone())),
         link: Some(
             it.page

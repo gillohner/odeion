@@ -457,7 +457,11 @@ case "$1" in
       vol=; prev=
       for a in "$@"; do [ "$prev" = -v ] && vol=${a%%:*}; prev=$a; done
       case " $* " in
-        *" tar xzf - -C /v "*) mkdir -p "$STATE/$vol"; tar xzf - -C "$STATE/$vol" ;;
+        *" tar xzf - -C /v "*)
+          # what comes after the folder (--exclude ...) goes to tar as restore.sh gives it
+          rest=(); seen=; p2=
+          for a in "$@"; do [ -n "$seen" ] && rest+=("$a"); [ "$p2" = -C ] && [ "$a" = /v ] && seen=1; p2=$a; done
+          mkdir -p "$STATE/$vol"; tar xzf - -C "$STATE/$vol" "${rest[@]}" ;;
         *" -i "*) cat > /dev/null ;;
       esac
     fi ;;
@@ -588,6 +592,18 @@ exit 0
     b = make_backup('PM_BACKUP_PASSPHRASE="fixture-q"\n', tok, "fixture-f")
     d, r, calls, n = restore(b, "NOT-A-BACKUP")
     check(r.returncode != 0 and n == 1, "a backup the node cannot read is not retried with other passphrases")
+
+    # Usage insights (usage.sqlite) are never in a backup (docs/guides/usage-insights.md): backup.sh
+    # leaves the file and its journal out, and restore.sh leaves out an older backup's copy
+    bk = (BUNDLE / "backup.sh").read_text()
+    for f in ("usage.sqlite", "usage.sqlite-journal", "usage.sqlite-wal", "usage.sqlite-shm"):
+        check(f"--exclude ./{f} " in bk, f"backup.sh leaves {f} out of the data folder's copy")
+    b = make_backup("", {"node.toml": '[api]\ntoken = "fixture-backup-cfg"\n', "usage.sqlite": "fixture-usage",
+                         "usage.sqlite-journal": "fixture-usage-journal", "covers.txt": "kept"})
+    d, r, calls, n = restore(b, "")
+    vol = d / "state" / "vol-ctr-music"
+    check(r.returncode == 0 and (vol / "covers.txt").exists(), f"restore.sh with usage.sqlite in an older backup ({r.stderr.strip()[-140:]!r})")
+    check(not any(vol.glob("usage.sqlite*")), "restore.sh never brings back usage insights from a backup")
 
     for script in ("backup.sh", "restore.sh"):
         s = (BUNDLE / script).read_text()

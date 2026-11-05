@@ -97,6 +97,10 @@ pub struct ZoneState {
     /// Crossfade between tracks in ms; 0 = off.
     #[serde(default)]
     pub crossfade_ms: u64,
+    /// The output's level as last read back (after a change, and on the zone's poll); `None`
+    /// until a read succeeds, or when the output can't say.
+    #[serde(default)]
+    pub volume: Option<pm_model::ZoneVolume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,6 +156,10 @@ pub struct Zone {
     state: watch::Receiver<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
     crossfade: Arc<AtomicU64>,
+    /// A set and its read-back, or a poll's read, one at a time: a poll that started before a
+    /// set can't publish after it. Holds the level last published, in order (the engine's
+    /// state can lag the commands still queued).
+    volume_lock: Arc<tokio::sync::Mutex<Option<pm_model::ZoneVolume>>>,
 }
 
 impl Zone {
@@ -175,6 +183,7 @@ impl Zone {
             acked: 0,
             sync: output.sync(),
             crossfade_ms: 0,
+            volume: None,
         };
         let (state_tx, state) = watch::channel(initial);
         let crossfade = Arc::new(AtomicU64::new(0));
@@ -198,6 +207,7 @@ impl Zone {
             state,
             events,
             crossfade,
+            volume_lock: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -331,9 +341,55 @@ impl Zone {
         self.send(Command::Seek(ms));
     }
 
-    /// Hardware volume on the output; the audio path is untouched.
+    /// Hardware volume on the output; the audio path is untouched. The level is read back into
+    /// the state afterwards, so every controller shows what the device took. An output that
+    /// can't read its level keeps the last absolute level set (and the mute), so a change still
+    /// shows; up and down leave it as it was. A read that fails keeps the last level read (the
+    /// poll catches up). Controllers always hear the result, also when it equals what they had:
+    /// one that showed the level it asked for learns that the device kept another.
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        self.output.set_volume(v).await
+        let mut last = self.volume_lock.lock().await;
+        self.output.set_volume(v).await?;
+        let next = match self.output.volume().await {
+            Ok(Some(read)) => Some(read),
+            Err(_) => None,
+            Ok(None) => {
+                let was = *last;
+                let level = match v {
+                    Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
+                    Volume::Percent(p) => Some(pm_model::VolumeLevel::Percent(p.min(100))),
+                    _ => was.map(|w| w.level),
+                };
+                let muted = match v {
+                    Volume::Mute(m) => m,
+                    _ => was.is_some_and(|w| w.muted),
+                };
+                level.map(|level| pm_model::ZoneVolume { level, muted })
+            }
+        };
+        if next.is_some() {
+            *last = next;
+        }
+        self.send(Command::Volume(*last));
+        Ok(())
+    }
+
+    /// Read the output's level and publish it in the state (the poll). A read that fails, or an
+    /// output that can't say, leaves the last value.
+    pub async fn refresh_volume(&self) -> Option<pm_model::ZoneVolume> {
+        let mut last = self.volume_lock.lock().await;
+        match self.output.volume().await {
+            Ok(Some(v)) => {
+                // Nothing is sent when it is the level last published
+                if *last != Some(v) {
+                    *last = Some(v);
+                    self.send(Command::Volume(Some(v)));
+                }
+                Some(v)
+            }
+            Ok(None) => *last,
+            Err(_) => None,
+        }
     }
 
     /// Wait until every command sent so far was handled, whatever the
