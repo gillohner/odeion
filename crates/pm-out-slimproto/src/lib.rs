@@ -390,6 +390,29 @@ pub fn serve_with(
     on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync>,
     limits: Limits,
 ) -> io::Result<()> {
+    serve_on(
+        listener,
+        server_port,
+        stream_path,
+        on_player,
+        limits,
+        &|name, work| std::thread::Builder::new().name(name).spawn(work).map(|_| ()),
+    )
+}
+
+/// Starts a connection's thread, named; a test's one may fail.
+type Spawn = dyn Fn(String, Box<dyn FnOnce() + Send>) -> io::Result<()> + Sync;
+
+/// [`serve_with`], connections' threads started by `spawn`. One that can't be started is closed
+/// (its connection and place go with the work it was given) and the server goes on.
+fn serve_on(
+    listener: TcpListener,
+    server_port: u16,
+    stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync>,
+    limits: Limits,
+    spawn: &Spawn,
+) -> io::Result<()> {
     let players: Arc<Players> = Default::default();
     let open: Arc<Mutex<Open>> = Default::default();
     for stream in listener.incoming() {
@@ -413,18 +436,16 @@ pub fn serve_with(
         let on_player = on_player.clone();
         let stream_path = stream_path.clone();
         let players = players.clone();
-        let spawned = std::thread::Builder::new()
-            .name(format!("slimproto {peer}"))
-            .spawn({
-                let peer = peer.clone();
-                move || {
-                    let _slot = slot;
-                    if let Err(e) = session(stream, server_port, stream_path, &players, on_player, &limits) {
-                        tracing::info!(%peer, "slimproto session ended: {e}");
-                    }
+        let work = {
+            let peer = peer.clone();
+            move || {
+                let _slot = slot;
+                if let Err(e) = session(stream, server_port, stream_path, &players, on_player, &limits) {
+                    tracing::info!(%peer, "slimproto session ended: {e}");
                 }
-            });
-        if let Err(e) = spawned {
+            }
+        };
+        if let Err(e) = spawn(format!("slimproto {peer}"), Box::new(work)) {
             tracing::warn!(%peer, "slimproto: no thread for this connection: {e}");
         }
     }
@@ -947,5 +968,51 @@ mod tests {
             2,
             "offered on each try"
         );
+    }
+
+    /// A connection the server gets no thread for is closed, its place is free again, and the
+    /// server keeps taking connections.
+    #[test]
+    fn a_connection_without_a_thread_is_closed_and_the_server_goes_on() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Mutex::new(tx);
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new(move |o| {
+            let _ = tx.lock().unwrap().send(o);
+            true
+        });
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
+        // The first connection gets no thread; the others do
+        let tried = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let limits = Limits {
+            connections: 1,
+            per_address: 1,
+            ..tight()
+        };
+        std::thread::spawn({
+            let tried = tried.clone();
+            move || {
+                let spawn = move |name: String, work: Box<dyn FnOnce() + Send>| {
+                    if tried.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        return Err(io::Error::other("no thread"));
+                    }
+                    std::thread::Builder::new().name(name).spawn(work).map(|_| ())
+                };
+                serve_on(listener, 7788, stream_path, on_player, limits, &spawn).unwrap()
+            }
+        });
+        let mut first = TcpStream::connect(addr).unwrap();
+        first.write_all(&hello(1)).unwrap();
+        assert!(
+            closed_within(&mut first, Duration::from_secs(2)),
+            "closed, not left hanging"
+        );
+        // Its place (the one place there is) is free: the next connection is served
+        let mut second = TcpStream::connect(addr).unwrap();
+        second.write_all(&hello(2)).unwrap();
+        rx.recv_timeout(Duration::from_secs(3))
+            .expect("the second connection is a player");
+        assert_eq!(tried.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }
