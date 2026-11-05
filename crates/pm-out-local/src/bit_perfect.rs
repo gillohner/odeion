@@ -261,16 +261,62 @@ pub fn volume_handover(
 /// re-start after a flush (Android's mixer set again after an idle clear) and same-format next
 /// song asks here; `Err` is why it plays shared instead.
 pub fn entry_gate() -> Result<Option<String>, String> {
+    gate_with(media_now())
+}
+
+/// [`entry_gate`] for every block while it plays: Android's live volume read at most
+/// [`LIVE_FOR`] ago, with the app's last report (the lower of both).
+fn gate_playing() -> Result<Option<String>, String> {
+    gate_with(media_recent())
+}
+
+fn gate_with(media: Option<u8>) -> Result<Option<String>, String> {
     let mode = usb_dac::settings().mode;
     if mode == PreferredMode::Shared {
         return Err("shared, as chosen in Settings".into());
     }
-    volume_handover(mode, media_now(), usb_dac::full_level_consent())
+    volume_handover(mode, media, usb_dac::full_level_consent())
 }
 
-/// Android's media volume now: as the app last reported it (it reports every change), else asked.
+/// The lower of two volume readings (either alone when the other is unknown).
+fn lower(a: Option<u8>, b: Option<u8>) -> Option<u8> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, None) | (None, x) => x,
+    }
+}
+
+/// How long a live read stands in for the per-block check.
+const LIVE_FOR: std::time::Duration = std::time::Duration::from_millis(100);
+
+static LIVE: std::sync::Mutex<Option<(std::time::Instant, Option<u8>)>> = std::sync::Mutex::new(None);
+
+/// Android's media volume read live now (over JNI), kept for [`media_recent`].
+fn media_live() -> Option<u8> {
+    let v = backend().and_then(|b| b.media_volume());
+    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), v));
+    v
+}
+
+/// Android's media volume at an open, a resume or a re-start: read live at this moment, and the
+/// lower of that and the app's last report (a report can be late, ~500 ms after a key press, or
+/// never come: it never authorizes on its own).
 pub fn media_now() -> Option<u8> {
-    usb_dac::reported_media_volume().or_else(|| backend().and_then(|b| b.media_volume()))
+    lower(media_live(), usb_dac::reported_media_volume())
+}
+
+/// [`media_now`] for the per-block check: the live read reused for [`LIVE_FOR`].
+fn media_recent() -> Option<u8> {
+    let cached = LIVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .filter(|(at, _)| at.elapsed() < LIVE_FOR)
+        .map(|(_, v)| v);
+    let live = match cached {
+        Some(v) => v,
+        None => media_live(),
+    };
+    lower(live, usb_dac::reported_media_volume())
 }
 
 /// The rates and sizes the DAC lists together, in stereo: the largest set of sizes every one of
@@ -374,7 +420,7 @@ pub fn view_extras(
     full_level_ok: bool,
     reported: Option<u8>,
 ) -> (Vec<pm_zones::DeviceFormat>, Option<u8>) {
-    let media = reported.or_else(|| backend().and_then(|b| b.media_volume()));
+    let media = lower(reported, backend().and_then(|b| b.media_volume()));
     let f = if plays_bit_perfect(dac, settings, full_level_ok, media) {
         formats(dac)
     } else {
@@ -807,18 +853,23 @@ impl AudioSink for TrackSink {
     /// The settings or the DAC changed since it opened, or full level is no longer allowed (rule
     /// (c): Android's volume went down): the next song opens afresh, planned as it is now.
     fn reopen_at_track(&self) -> bool {
-        usb_dac::generation() != self.generation || entry_gate().is_err()
+        usb_dac::generation() != self.generation || gate_playing().is_err()
     }
 
     /// Paused (by a pause or a flush) with full level no longer allowed: the next write would set
     /// Android's mixer bit-perfect again. The caller opens the output again instead (shared).
     ///
-    /// Playing in Auto, Android's volume turned below full (the app reports every change): at
-    /// once, not at the next song, so the volume keys work again and no song inherits full level.
-    /// Bit-perfect chosen with the listener's agreement plays on. Asked fresh at every write.
+    /// Playing, full level no longer allowed (Android's volume turned below full, in Auto or in
+    /// Bit-perfect without the listener's agreement): at once, not at the next song, so the volume
+    /// keys work again and no song inherits full level. Bit-perfect chosen with the agreement
+    /// plays on (the gate allows it). Asked at every write: paused, with a live read; playing,
+    /// with one at most 100 ms old.
     fn reopen_now(&self) -> bool {
-        let auto = usb_dac::settings().mode == PreferredMode::Auto;
-        (self.paused || auto) && entry_gate().is_err()
+        if self.paused {
+            entry_gate().is_err()
+        } else {
+            gate_playing().is_err()
+        }
     }
 
     /// The zone heard this sink's Gone: the loss need not be kept for the next open.
@@ -2016,6 +2067,8 @@ mod tests {
         /// Each shared open, with the DAC it was for (`None`: the phone's own speaker)
         shared_opens: Mutex<Vec<Option<i32>>>,
         heard: Arc<Mutex<Vec<i32>>>,
+        /// Reports what the phone's output takes now and its DAC, as the app's output does
+        live: bool,
     }
 
     #[async_trait::async_trait]
@@ -2028,7 +2081,25 @@ mod tests {
         }
         fn caps(&self) -> &OutputCaps {
             static CAPS: std::sync::OnceLock<OutputCaps> = std::sync::OnceLock::new();
-            CAPS.get_or_init(OutputCaps::unlimited)
+            CAPS.get_or_init(|| OutputCaps {
+                pcm_rates: vec![48_000],
+                max_pcm_bits: 16,
+                quality_ceiling: QualityCeiling::LosslessUpTo {
+                    rate_hz: 48_000,
+                    bits: 16,
+                },
+                ..OutputCaps::unlimited()
+            })
+        }
+        fn live_caps(&self) -> OutputCaps {
+            if self.live {
+                phone_caps(self.caps())
+            } else {
+                OutputCaps::unlimited()
+            }
+        }
+        fn device(&self) -> Option<pm_zones::OutputDevice> {
+            self.live.then(usb_dac::current).flatten()
         }
         async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
             match open_phone(self.id(), fmt) {
@@ -2060,17 +2131,35 @@ mod tests {
 
     /// The phone's endpoint serving [`PhoneOut`], and the node's output on it.
     fn through_endpoint() -> (Arc<PhoneOut>, pm_endpoint::Serving, pm_out_net::NetOutput) {
-        let phone = Arc::new(PhoneOut::default());
+        let (phone, serving, out, _) = through_endpoint_with(false);
+        (phone, serving, out)
+    }
+
+    /// [`through_endpoint`], the phone's output reporting its live caps and DAC (`live`), with
+    /// the node's key cell (the app registering again is another connect with it).
+    fn through_endpoint_with(
+        live: bool,
+    ) -> (
+        Arc<PhoneOut>,
+        pm_endpoint::Serving,
+        pm_out_net::NetOutput,
+        pm_out_net::KeyCell,
+    ) {
+        let phone = Arc::new(PhoneOut {
+            live,
+            ..PhoneOut::default()
+        });
         let registry = pm_zones::OutputRegistry::new();
         registry.register(phone.clone());
         let key = pm_stream::Key::random();
         let serving = pm_endpoint::Endpoint::new("Pixel 8", registry, key.clone())
             .spawn(std::net::TcpListener::bind("127.0.0.1:0").unwrap())
             .unwrap();
-        let out = pm_out_net::NetOutput::connect(serving.addr(), &pm_out_net::KeyCell::new(key))
+        let cell = pm_out_net::KeyCell::new(key);
+        let out = pm_out_net::NetOutput::connect(serving.addr(), &cell)
             .unwrap()
             .remove(0);
-        (phone, serving, out)
+        (phone, serving, out, cell)
     }
 
     fn net_open(out: &pm_out_net::NetOutput, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
@@ -2143,53 +2232,82 @@ mod tests {
     #[test]
     fn a_volume_drop_after_the_last_ack_goes_on_shared_where_it_was() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let player = with_player();
-        usb_dac::set_settings(DeviceSettings::default());
-        usb_dac::set_dac(None);
-        let report = ka17_report_with(&ka17_mixer());
-        usb_dac::apply_report(&report.replace(r#""sdk":34"#, r#""sdk":34,"media_volume":100"#));
-        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
-        let (phone, _serving, out) = through_endpoint();
-        let fmt = AudioFormat::pcm(96_000, 24, 2);
-        let mut sink = net_open(&out, fmt).unwrap();
-        // Two blocks of 480 frames, sample values counting up
-        let block = |k: i32| AudioBlock::pcm_i32(fmt, (0..960).map(|i| k * 10_000 + i).collect());
-        sink.write(&block(1)).unwrap();
-        sink.write(&block(2)).unwrap();
-        // The DAC played all but the last 300 frames
-        player
-            .played
-            .store(960 - 300, std::sync::atomic::Ordering::SeqCst);
-        assert!(!sink.reopen_at_track(), "the last acknowledgement: go on");
-        // The volume keys: 40 %
-        usb_dac::apply_report(&report.replace(r#""sdk":34"#, r#""sdk":34,"media_volume":40"#));
-        sink.write(&block(3)).unwrap();
-        sink.drain().unwrap();
-        assert_eq!(
-            *phone.shared_opens.lock().unwrap(),
-            [Some(41)],
-            "shared, on the DAC"
-        );
-        let heard = phone.heard.lock().unwrap().clone();
-        let tail: Vec<i32> = pcm(&block(2))[(480 - 300) * 2..].to_vec();
-        assert_eq!(&heard[..600], &tail[..], "the unplayed rest of the song first");
-        assert_eq!(&heard[600..], &pcm(&block(3))[..], "then on");
-        assert_eq!(sink.frames_written(), 3 * 480, "the node's count goes on");
-        let d = usb_dac::current().unwrap();
-        assert_eq!((d.mode, d.confirmed), (DeviceMode::Shared, false));
+        // Auto, and (round 6, both reviews) Bit-perfect chosen without the agreement to full level
+        for mode in [PreferredMode::Auto, PreferredMode::BitPerfect] {
+            let player = with_player();
+            usb_dac::set_settings(DeviceSettings {
+                mode,
+                ..DeviceSettings::default()
+            });
+            usb_dac::set_dac(None);
+            let report = ka17_report_with(&ka17_mixer());
+            usb_dac::apply_report(&report.replace(r#""sdk":34"#, r#""sdk":34,"media_volume":100"#));
+            *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+            let (phone, _serving, out) = through_endpoint();
+            let fmt = AudioFormat::pcm(96_000, 24, 2);
+            let mut sink = net_open(&out, fmt).unwrap();
+            // Two blocks of 480 frames, sample values counting up
+            let block = |k: i32| AudioBlock::pcm_i32(fmt, (0..960).map(|i| k * 10_000 + i).collect());
+            sink.write(&block(1)).unwrap();
+            sink.write(&block(2)).unwrap();
+            // The phone's track has both (the node's writes reach it a moment later): 960 frames
+            // of packed 24-bit stereo
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while player.bytes.lock().unwrap().len() < 960 * 6 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(player.bytes.lock().unwrap().len(), 960 * 6, "{mode:?}");
+            // The DAC played all but the last 300 frames
+            player
+                .played
+                .store(960 - 300, std::sync::atomic::Ordering::SeqCst);
+            assert!(
+                !sink.reopen_at_track(),
+                "{mode:?}: the last acknowledgement: go on"
+            );
+            // The volume keys: 40 % (the next block is the next song's first, in the same format)
+            usb_dac::apply_report(&report.replace(r#""sdk":34"#, r#""sdk":34,"media_volume":40"#));
+            sink.write(&block(3)).unwrap();
+            sink.drain().unwrap();
+            assert_eq!(
+                *phone.shared_opens.lock().unwrap(),
+                [Some(41)],
+                "{mode:?}: shared, on the DAC"
+            );
+            let heard = phone.heard.lock().unwrap().clone();
+            let tail: Vec<i32> = pcm(&block(2))[(480 - 300) * 2..].to_vec();
+            assert_eq!(
+                &heard[..600],
+                &tail[..],
+                "{mode:?}: the unplayed rest of the song first"
+            );
+            assert_eq!(&heard[600..], &pcm(&block(3))[..], "{mode:?}: then on");
+            assert_eq!(
+                sink.frames_written(),
+                3 * 480,
+                "{mode:?}: the node's count goes on"
+            );
+            let d = usb_dac::current().unwrap();
+            assert_eq!((d.mode, d.confirmed), (DeviceMode::Shared, false), "{mode:?}");
+            drop(sink);
+        }
         // Bit-perfect chosen with the agreement plays on at 40 %
+        let player = with_player();
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
         usb_dac::set_settings(DeviceSettings {
             mode: PreferredMode::BitPerfect,
             full_level_ok: true,
             ..DeviceSettings::default()
         });
-        let PhoneOpen::BitPerfect(s) = open_phone(OutputId::new("cpal", "phone"), fmt) else {
+        let PhoneOpen::BitPerfect(s) =
+            open_phone(OutputId::new("cpal", "phone"), AudioFormat::pcm(96_000, 24, 2))
+        else {
             panic!("consented bit-perfect")
         };
         assert!(!s.reopen_now());
         drop(s);
         usb_dac::set_settings(DeviceSettings::default());
-        usb_dac::apply_report(&report);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
     }
 
     /// Codex H2 (round 5), the sink itself: playing in Auto, a volume drop is seen at once (no
@@ -2213,5 +2331,80 @@ mod tests {
         assert!(sink.reopen_now(), "while it plays, at once");
         assert!(sink.reopen_at_track(), "no cached answer");
         usb_dac::apply_report(&report);
+    }
+
+    /// Round 6 (both reviews): the app's last report says 100 %, Android's live volume is 40 %
+    /// (the report comes ~500 ms late, or not at all): an open and a resume read Android live and
+    /// take the lower: a stale report never authorizes full level.
+    #[test]
+    fn a_stale_report_cannot_authorize_full_level() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        let report = ka17_report_with(&ka17_mixer()).replace(r#""sdk":34"#, r#""sdk":34,"media_volume":100"#);
+        usb_dac::apply_report(&report);
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        // The open
+        *player.volume.lock().unwrap() = Some(40);
+        assert!(matches!(
+            open_phone(OutputId::new("cpal", "phone"), fmt),
+            PhoneOpen::Shared { .. }
+        ));
+        // The resume
+        *player.volume.lock().unwrap() = Some(100);
+        let PhoneOpen::BitPerfect(mut sink) = open_phone(OutputId::new("cpal", "phone"), fmt) else {
+            panic!("bit-perfect at 100 %")
+        };
+        sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 960])).unwrap();
+        assert!(sink.pause().unwrap());
+        *player.volume.lock().unwrap() = Some(40);
+        assert!(
+            sink.resume().is_err(),
+            "live 40 %, reported 100 %: not resumed at full level"
+        );
+        // And while it plays, the per-block check reads Android at most 100 ms late
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(sink.reopen_now());
+        drop(sink);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+    }
+
+    /// Codex M (round 6): a report that changes only Android's volume is a change: the node hears
+    /// it (the app registers again) and the output it holds re-reads the caps: Auto at 40 %
+    /// shared, back at 100 % bit-perfect again.
+    #[test]
+    fn a_volume_only_report_refreshes_the_nodes_caps() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        let at = |v: u8| {
+            ka17_report_with(&ka17_mixer()).replace(r#""sdk":34"#, &format!(r#""sdk":34,"media_volume":{v}"#))
+        };
+        usb_dac::apply_report(&at(100));
+        let (_phone, serving, out, cell) = through_endpoint_with(true);
+        use pm_zones::Output;
+        assert_eq!(out.live_caps().quality_ceiling, QualityCeiling::BitPerfect);
+        // The app registers again when apply_report says something changed (pm-desktop)
+        let register_again = || {
+            pm_out_net::NetOutput::connect(serving.addr(), &cell).unwrap();
+        };
+        // 40 %: reported (the live read says so too)
+        *player.volume.lock().unwrap() = Some(40);
+        assert!(usb_dac::apply_report(&at(40)), "a volume-only report is a change");
+        register_again();
+        assert_ne!(out.live_caps().quality_ceiling, QualityCeiling::BitPerfect);
+        assert_eq!(out.device().and_then(|d| d.media_volume), Some(40));
+        // Back at 100 %
+        *player.volume.lock().unwrap() = Some(100);
+        assert!(usb_dac::apply_report(&at(100)), "and back");
+        register_again();
+        assert_eq!(out.live_caps().quality_ceiling, QualityCeiling::BitPerfect);
+        assert_eq!(out.device().and_then(|d| d.media_volume), Some(100));
+        // Unchanged: no change
+        assert!(!usb_dac::apply_report(&at(100)));
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
     }
 }
