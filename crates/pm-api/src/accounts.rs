@@ -1166,7 +1166,6 @@ fn replace_paths(v: &mut serde_json::Value, paths: &[String]) -> bool {
     }
 }
 
-
 /// Whose sign-ins a person plays TIDAL, Qobuz and Spotify with (`GET/PUT /v1/me/sources`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MySources {

@@ -733,7 +733,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/listens/visibility", post(listens::move_all))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/me/services", get(signin::my_services))
-        .route("/me/sources", get(accounts::my_sources).put(accounts::set_my_sources))
+        .route(
+            "/me/sources",
+            get(accounts::my_sources).put(accounts::set_my_sources),
+        )
         .route("/people", get(people::list))
         .route("/devices", get(devices::list))
         .route(
@@ -20155,7 +20158,10 @@ exec sleep 300
                 let r = app.oneshot(req).await.unwrap();
                 let st = r.status();
                 let b = r.into_body().collect().await.unwrap().to_bytes();
-                (st, serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default())
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
             }
         };
         let zid = s.zones.list()[0].id.to_string();
@@ -20200,46 +20206,104 @@ exec sleep 300
         };
         let both_kept = |s: &Arc<NodeState>| {
             let lib = s.library.lock().unwrap();
-            assert!(lib.get_setting("tidal.user").unwrap().unwrap().contains("owner-token"));
-            assert!(lib.get_setting(&anna_key).unwrap().unwrap().contains("anna-token"));
+            assert!(lib
+                .get_setting("tidal.user")
+                .unwrap()
+                .unwrap()
+                .contains("owner-token"));
+            assert!(lib
+                .get_setting(&anna_key)
+                .unwrap()
+                .unwrap()
+                .contains("anna-token"));
         };
 
         // `own`, the default for a node that never chose: as before
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
         assert!(play(ben_tok.clone()).await.unwrap_err().contains("Connect TIDAL"));
         let (st, v) = send("GET", "/v1/node/settings".into(), "s3cret".into(), None).await;
-        assert_eq!((st, v["sources_policy"].as_str()), (StatusCode::OK, Some("own")), "{v}");
+        assert_eq!(
+            (st, v["sources_policy"].as_str()),
+            (StatusCode::OK, Some("own")),
+            "{v}"
+        );
         // Only the owner chooses
-        let (st, _) = send("PUT", "/v1/node/settings".into(), anna_tok.clone(), Some(serde_json::json!({"sources_policy": "node"}))).await;
+        let (st, _) = send(
+            "PUT",
+            "/v1/node/settings".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"sources_policy": "node"})),
+        )
+        .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
-        let (st, _) = send("PUT", "/v1/me/sources".into(), anna_tok.clone(), Some(serde_json::json!({"use": "node"}))).await;
-        assert_eq!(st, StatusCode::CONFLICT, "a listener's choice only under `choice`");
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "node"})),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "a listener's choice only under `choice`"
+        );
 
         // `node`: everyone through the node's sign-in, the stream proxy too
         policy("node").await;
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer owner-token".into()));
         assert_eq!(play(ben_tok.clone()).await, Ok("Bearer owner-token".into()));
-        let (st, _) = send("GET", "/v1/sources/tidal/stream/20115564".into(), ben_tok.clone(), None).await;
+        let (st, _) = send(
+            "GET",
+            "/v1/sources/tidal/stream/20115564".into(),
+            ben_tok.clone(),
+            None,
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(seen.lock().unwrap().last().unwrap(), "Bearer owner-token");
         // A listener can't sign in to their own; what they had stays, and their own status shows
         // their own (Ben: none), never the node's account
-        let (st, v) = send("PUT", "/v1/sources/tidal/signin".into(), ben_tok.clone(), Some(serde_json::json!({"way": "official"}))).await;
+        let (st, v) = send(
+            "PUT",
+            "/v1/sources/tidal/signin".into(),
+            ben_tok.clone(),
+            Some(serde_json::json!({"way": "official"})),
+        )
+        .await;
         assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
         assert!(v["error"].as_str().unwrap().contains("its own sign-ins"), "{v}");
         let (st, v) = send("GET", "/v1/sources/tidal/status".into(), ben_tok.clone(), None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["signed_in"], false, "Ben's own status, not the node's: {v}");
         let (_, v) = send("GET", "/v1/me/sources".into(), ben_tok.clone(), None).await;
-        assert_eq!((v["policy"].as_str(), v["plays_with"].as_str(), v["may_choose"].as_bool()), (Some("node"), Some("node"), Some(false)), "{v}");
+        assert_eq!(
+            (
+                v["policy"].as_str(),
+                v["plays_with"].as_str(),
+                v["may_choose"].as_bool()
+            ),
+            (Some("node"), Some("node"), Some(false)),
+            "{v}"
+        );
         both_kept(&s);
 
         // `choice`: the node's by default; Anna switches to her own, Ben stays on the node's, in
         // the same zone, each item with its own account
         policy("choice").await;
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer owner-token".into()));
-        let (st, v) = send("PUT", "/v1/me/sources".into(), anna_tok.clone(), Some(serde_json::json!({"use": "own"}))).await;
-        assert_eq!((st, v["plays_with"].as_str()), (StatusCode::OK, Some("own")), "{v}");
+        let (st, v) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "own"})),
+        )
+        .await;
+        assert_eq!(
+            (st, v["plays_with"].as_str()),
+            (StatusCode::OK, Some("own")),
+            "{v}"
+        );
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
         assert_eq!(play(ben_tok.clone()).await, Ok("Bearer owner-token".into()));
         // Listeners may sign in again under `choice`, and what they pick lands at their own keys,
@@ -20255,19 +20319,46 @@ exec sleep 300
             .expect("a way open to listeners")
             .to_string();
         let node_way = s.library.lock().unwrap().get_setting("tidal.signin_way").unwrap();
-        let (st, v) = send("PUT", "/v1/sources/tidal/signin".into(), ben_tok.clone(), Some(serde_json::json!({"way": way}))).await;
+        let (st, v) = send(
+            "PUT",
+            "/v1/sources/tidal/signin".into(),
+            ben_tok.clone(),
+            Some(serde_json::json!({"way": way})),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK, "{v}");
         {
             let lib = s.library.lock().unwrap();
-            assert_eq!(lib.get_setting(&format!("person.{ben}.tidal.signin_way")).unwrap().as_deref(), Some(way.as_str()));
-            assert_eq!(lib.get_setting("tidal.signin_way").unwrap(), node_way, "the node's way untouched");
+            assert_eq!(
+                lib.get_setting(&format!("person.{ben}.tidal.signin_way"))
+                    .unwrap()
+                    .as_deref(),
+                Some(way.as_str())
+            );
+            assert_eq!(
+                lib.get_setting("tidal.signin_way").unwrap(),
+                node_way,
+                "the node's way untouched"
+            );
         }
         // Back to the node's
-        let (st, _) = send("PUT", "/v1/me/sources".into(), anna_tok.clone(), Some(serde_json::json!({"use": "node"}))).await;
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "node"})),
+        )
+        .await;
         assert_eq!(st, StatusCode::OK);
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer owner-token".into()));
         // Anna's choice is kept when the policy moves away and back
-        let (_, _) = send("PUT", "/v1/me/sources".into(), anna_tok.clone(), Some(serde_json::json!({"use": "own"}))).await;
+        let (_, _) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "own"})),
+        )
+        .await;
         policy("own").await;
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
         policy("choice").await;
@@ -20285,8 +20376,14 @@ exec sleep 300
     fn a_listener_on_the_nodes_sign_ins_keeps_their_own_settings() {
         let on = accounts::Who::ListenerOnNode("k".into());
         assert_eq!(on.setting("tidal.user").as_deref(), Some("tidal.user"));
-        assert_eq!(on.setting("qobuz.unofficial").as_deref(), Some("qobuz.unofficial"));
-        assert_eq!(on.setting("spotify.signin_way").as_deref(), Some("spotify.signin_way"));
+        assert_eq!(
+            on.setting("qobuz.unofficial").as_deref(),
+            Some("qobuz.unofficial")
+        );
+        assert_eq!(
+            on.setting("spotify.signin_way").as_deref(),
+            Some("spotify.signin_way")
+        );
         assert_eq!(on.setting("sources.use").as_deref(), Some("person.k.sources.use"));
         assert_eq!(on.setting("me.prefs").as_deref(), Some("person.k.me.prefs"));
         assert_eq!(on.by().as_deref(), Some("k"), "who queued it stays the listener");
@@ -20296,11 +20393,19 @@ exec sleep 300
         assert_ne!(on.tag(), on.own().tag());
         assert_ne!(on.tag(), accounts::Who::Owner.tag());
         // The keys the services really use
-        for k in [tidal_unofficial::STATE_KEY, qobuz::STATE_KEY, "tidal.user", "spotify.user"] {
+        for k in [
+            tidal_unofficial::STATE_KEY,
+            qobuz::STATE_KEY,
+            "tidal.user",
+            "spotify.user",
+        ] {
             assert!(accounts::SIGNIN_KEYS.contains(&k), "{k}");
         }
         for src in ["tidal", "qobuz", "spotify"] {
-            assert!(accounts::SIGNIN_KEYS.contains(&signin::way_key(src).as_str()), "{src}");
+            assert!(
+                accounts::SIGNIN_KEYS.contains(&signin::way_key(src).as_str()),
+                "{src}"
+            );
         }
     }
 
@@ -20336,9 +20441,16 @@ exec sleep 300
         let dir = tempfile::tempdir().unwrap();
         let (s, anna, ben) = two_people_node(dir.path(), &tidal_base).await;
         let app = router(s.clone());
-        let (anna_tok, ben_tok) = (accounts::mint(&s, anna).unwrap(), accounts::mint(&s, ben).unwrap());
+        let (anna_tok, ben_tok) = (
+            accounts::mint(&s, anna).unwrap(),
+            accounts::mint(&s, ben).unwrap(),
+        );
         let set_policy = |p: &str| {
-            s.library.lock().unwrap().set_setting(accounts::SOURCE_POLICY_KEY, p).unwrap();
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(accounts::SOURCE_POLICY_KEY, p)
+                .unwrap();
         };
         let asked = |tok: &str, uri: &str| {
             let (app, tok, uri, seen) = (app.clone(), tok.to_string(), uri.to_string(), tidal_seen.clone());
@@ -20354,7 +20466,10 @@ exec sleep 300
 
         // `node`: Ben (no TIDAL of his own) searches and reads an item page with the node's
         set_policy("node");
-        for uri in ["/v1/search?q=lucky&scope=tidal", "/v1/discover/contents?uri=https://tidal.com/album/4242"] {
+        for uri in [
+            "/v1/search?q=lucky&scope=tidal",
+            "/v1/discover/contents?uri=https://tidal.com/album/4242",
+        ] {
             let got = asked(&ben_tok, uri).await;
             assert!(got.iter().all(|b| b == "Bearer owner-token"), "{uri}: {got:?}");
         }
@@ -20362,7 +20477,11 @@ exec sleep 300
         set_policy("own");
         let got = asked(&ben_tok, "/v1/search?q=other&scope=tidal").await;
         assert!(got.iter().all(|b| b != "Bearer owner-token"), "{got:?}");
-        let got = asked(&anna_tok, "/v1/discover/contents?uri=https://tidal.com/album/4343").await;
+        let got = asked(
+            &anna_tok,
+            "/v1/discover/contents?uri=https://tidal.com/album/4343",
+        )
+        .await;
         assert!(got.iter().all(|b| b == "Bearer anna-token"), "{got:?}");
 
         // Spotify Connect: always the caller's own, whatever the policy
@@ -20389,15 +20508,36 @@ exec sleep 300
             let until = pm_library::db::now_unix() + 3600;
             let sess = |t: &str| serde_json::json!({"access_token": t, "expires_at": until}).to_string();
             lib.set_setting("spotify.user", &sess("sp-owner")).unwrap();
-            lib.set_setting(&format!("person.{anna}.spotify.user"), &sess("sp-anna")).unwrap();
+            lib.set_setting(&format!("person.{anna}.spotify.user"), &sess("sp-anna"))
+                .unwrap();
         }
         for p in ["node", "choice"] {
             set_policy(p);
-            let (st, v, _) = send_as(&app, "GET", "/v1/sources/spotify/devices", Some(&anna_tok), &[], None).await;
+            let (st, v, _) = send_as(
+                &app,
+                "GET",
+                "/v1/sources/spotify/devices",
+                Some(&anna_tok),
+                &[],
+                None,
+            )
+            .await;
             assert_eq!(st, StatusCode::OK, "{p}: {v}");
             assert_eq!(v[0]["name"], "Anna's laptop", "{p}: {v}");
-            let (st, v, _) = send_as(&app, "GET", "/v1/sources/spotify/devices", Some(&ben_tok), &[], None).await;
-            assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{p}: Ben has no Spotify of his own: {v}");
+            let (st, v, _) = send_as(
+                &app,
+                "GET",
+                "/v1/sources/spotify/devices",
+                Some(&ben_tok),
+                &[],
+                None,
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::PRECONDITION_FAILED,
+                "{p}: Ben has no Spotify of his own: {v}"
+            );
         }
         assert!(
             sp_seen.lock().unwrap().iter().all(|b| b == "Bearer sp-anna"),
@@ -20406,7 +20546,11 @@ exec sleep 300
         );
 
         // Qobuz plays: the node's under `node`, none under `own` for someone without their own
-        let flac = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../pm-audio/tests/fixtures/60_mono_audio.flac")).unwrap();
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
         let ql = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let qbase = format!("http://127.0.0.1:{}", ql.local_addr().unwrap().port());
         let q_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -20427,7 +20571,11 @@ exec sleep 300
         qobuz::set_api_base(&qbase);
         {
             let lib = s.library.lock().unwrap();
-            lib.set_setting(qobuz::APP_KEY, r#"{"id": "100000000", "secret": "s3cret", "from": "settings"}"#).unwrap();
+            lib.set_setting(
+                qobuz::APP_KEY,
+                r#"{"id": "100000000", "secret": "s3cret", "from": "settings"}"#,
+            )
+            .unwrap();
             lib.set_setting(
                 qobuz::STATE_KEY,
                 &serde_json::json!({"enabled": true, "quality": "max", "session": {"token": "t-owner", "hires": true}}).to_string(),
@@ -20437,10 +20585,15 @@ exec sleep 300
         let open_as_ben = |policy: &'static str| {
             let lib = s.library.clone();
             async move {
-                lib.lock().unwrap().set_setting(accounts::SOURCE_POLICY_KEY, policy).unwrap();
+                lib.lock()
+                    .unwrap()
+                    .set_setting(accounts::SOURCE_POLICY_KEY, policy)
+                    .unwrap();
                 tokio::task::spawn_blocking(move || {
                     let who = accounts::Who::Listener(ben.into()).resolved(&lib.lock().unwrap());
-                    qobuz::open_track_blocking(&lib, "5966783", &who).map(drop).map_err(|e| e.to_string())
+                    qobuz::open_track_blocking(&lib, "5966783", &who)
+                        .map(drop)
+                        .map_err(|e| e.to_string())
                 })
                 .await
                 .unwrap()
