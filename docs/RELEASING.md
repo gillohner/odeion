@@ -33,7 +33,7 @@ A release run that is still building finishes and publishes; newer pushes queue 
 | `pubky-music-node-linux-{x86_64,arm64}.tar.gz` | ubuntu-22.04(-arm) | `odeiond` and `pm-node` (its old name) with ALSA |
 | `pubky-music-node-linux-armv7.tar.gz` | ubuntu-24.04 | cross-built in Debian bookworm (`tools/release/build-armv7.sh`), glibc 2.36: Raspberry Pi OS bookworm |
 | `pubky-music-node-{windows-x86_64.zip,macos-arm64.tar.gz}` | windows-2025, macos-15 | `odeiond` and `pm-node` |
-| `ghcr.io/gillohner/pubky-music-node` | ubuntu-24.04 | amd64 and arm64 (the Dockerfile cross-compiles) |
+| `ghcr.io/gillohner/odeion`, and the same image as `ghcr.io/gillohner/pubky-music-node` (installs from before the rename) | ubuntu-24.04 | amd64 and arm64 (the Dockerfile cross-compiles); version tags the new name lacks are copied over once, by digest |
 
 The app's Android project (`crates/pm-desktop/gen/android`) is generated on every build by
 `tauri android init` and adjusted by `tools/release/android-patch.py` (cleartext HTTP to LAN

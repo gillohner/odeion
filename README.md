@@ -94,7 +94,7 @@ Details: [Backups and updates](docs/guides/backup-and-update.md).
 | Linux arm64 | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-linux-arm64.deb) | [.AppImage](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-arm64.AppImage), [.deb](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-linux-arm64.deb) |
 | Android and Google TV | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/latest/download/pubky-music-android-arm64.apk) | [arm64 .apk](https://github.com/gillohner/pubky-music-node/releases/download/edge/pubky-music-android-arm64.apk) |
 | The node, without Docker | `pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz`, `…-windows-x86_64.zip`, `…-macos-arm64.tar.gz` | same names under edge |
-| Docker image | `ghcr.io/gillohner/pubky-music-node:latest` (amd64, arm64) | `…:edge` |
+| Docker image | `ghcr.io/gillohner/odeion:latest` (amd64, arm64; also under its old name `ghcr.io/gillohner/pubky-music-node`) | `…:edge` |
 
 Every release has a `SHA256SUMS` file to check downloads against.
 

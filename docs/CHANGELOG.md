@@ -6,6 +6,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-05
 
+- **The Docker image is published under both names again.** Since the rename, release images went only to `ghcr.io/gillohner/odeion`, so installs pulling the old name `ghcr.io/gillohner/pubky-music-node` stopped getting updates after 2026-11-04. Every release now pushes the same image under both names, and the older version tags (`0.2.2`, `latest`, …) are copied to the new name. The bundle, the installer's node-only setup, TrueNAS and the Docker guide now default to `ghcr.io/gillohner/odeion`; an `ODEION_IMAGE` / `PM_IMAGE` you set still wins. Installs that pull the old name get updates again from this release on.
+
+### 2026-11-05
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
