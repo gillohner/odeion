@@ -13,11 +13,16 @@ sets it up (that script's helpers are reused), both ways the app can make sound:
      zone is picked and a song tapped in the app; `dumpsys audio` must still list the app's player
      as started 20 s and 60 s after HOME, and the mini player's time must have moved on when the
      app is opened again.
+  C. (diagnostic) B with the player service stopped while away: from Android 12 the frozen app stops;
+  D. back on screen the app starts the service again, and B keeps playing (C must have stopped it);
+  E. the service as the app starts it when it plays the music itself (through the tunnel, offline):
+     it holds its wake lock and B keeps playing; paused and out of sight it ends after 5 min, and
+     starts again when the app is opened.
 
 Along the way: logcat (the app, ActivityManager, Chromium), `dumpsys activity services` (is the
 service in the foreground), `dumpsys activity processes` (is the app frozen), `dumpsys audio`
 (players and their states), screenshots. Everything lands in the out dir; the exit code is non-zero
-when either way stops, and the report says which.
+when a gating part (A, B, D, E) fails, and the report says which.
 
 Usage: android-background-probe.py <apk> <pm-node binary> <out dir>
 """
@@ -43,6 +48,8 @@ results = {}
 # Shown, never gating (part C's outcome depends on the Android version's freezer)
 results_info = {}
 lc_proc = None
+# Whether part C stopped the service: part D's restart means something only then
+c_stopped = None
 
 
 def shot(name):
@@ -349,9 +356,11 @@ def part_c():
     log(f"C foreground: Now playing {mini_time()}, players {players()}")
 
     def stop_service():
+        global c_stopped
         out_ = adb("shell", "am", "stopservice", "-n", f"{PKG}/.PlayerService", check=False)
         time.sleep(2)
-        log(f"C: stopservice while away: {out_.strip()[:100]}; service foreground {service_foreground()}")
+        c_stopped = not service_foreground()
+        log(f"C: stopservice while away: {out_.strip()[:100]}; service stopped {c_stopped}")
 
     moved, wall = away(60, during=stop_service)
     shot("c-back")
@@ -364,6 +373,11 @@ def part_c():
 def part_d():
     """The fix: back on screen, the app starts the service again (Resumed), and the in-app player
     keeps playing in the background. Before the fix nothing started it again after C."""
+    if not c_stopped:
+        # Without a stopped service there is no restart to see: a setup failure, not a pass
+        log(f"D: C did not stop the service (stopped {c_stopped}): nothing to restart, D fails")
+        results["D service back on resume, in-app player keeps playing"] = False
+        return False
     time.sleep(3)
     fg = service_foreground()
     log(f"D: back on screen after C: service foreground {fg}")
@@ -372,6 +386,64 @@ def part_d():
     log(f"D verdict: service back {fg}; kept playing {moved} of {wall:.0f} s")
     results["D service back on resume, in-app player keeps playing"] = ok
     return ok
+
+
+def wake_lock_held():
+    """Whether the player service's partial wake lock ("pubky-music:player") is held."""
+    text = adb("shell", "dumpsys", "power", check=False)
+    (out / f"power-{len(list(out.glob('power-*.txt')))}.txt").write_text(text)
+    return any("pubky-music:player" in line and "PARTIAL_WAKE_LOCK" in line for line in text.splitlines())
+
+
+def app_mode():
+    """Start the service as the app does when it plays the music itself (through the tunnel, the
+    offline app): `zone` false. The probe's app reaches its node directly, so it never picks this
+    mode itself (the unit test the_player_service_runs_for_every_connection covers the choice)."""
+    r = adb("shell", "am", "start-foreground-service", "-n", f"{PKG}/.PlayerService",
+            "--es", "text", "Plays music from the probe", "--ez", "zone", "false", check=False)
+    time.sleep(3)
+    log(f"E: app mode: {r.strip()[:120]}; service foreground {service_foreground()}")
+
+
+def part_e():
+    """The app playing the music itself (the owner's case: through the tunnel, the offline app).
+    E1: the service in app mode holds its wake lock and keeps the in-app player going 60 s away.
+    E2: paused and out of sight, it ends after 5 min with nothing playing (and its lock with it),
+    and starts again when the app comes back."""
+    # E1 (the app is on screen and playing, after D)
+    app_mode()
+    lock1 = wake_lock_held()
+    moved, wall = away(60)
+    ok1 = lock1 and moved is not None and moved >= wall - 8
+    log(f"E1 verdict: app mode holds the wake lock {lock1}; kept playing {moved} of {wall:.0f} s")
+    results["E1 app mode: wake lock, in-app player keeps playing"] = ok1
+    # E2: pause on Now playing, app mode again (coming back above restarted it as a zone), HOME
+    try:
+        tap_text(["Now playing"], "the mini player (Now playing)", timeout=10)
+    except RuntimeError:
+        pass
+    time.sleep(2)
+    tap_text(["Pause"], "Pause", timeout=20)
+    time.sleep(3)
+    app_mode()
+    adb("shell", "input", "keyevent", "3")
+    t0 = time.time()
+    ended = None
+    while time.time() - t0 < 9 * 60:
+        time.sleep(30)
+        if not service_foreground():
+            ended = time.time() - t0
+            break
+    lock2 = wake_lock_held()
+    log(f"E2: idle and out of sight: service ended after {ended if ended is None else round(ended)} s; wake lock held {lock2}")
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    time.sleep(4)
+    back = service_foreground()
+    # The watch ticks every 60 s and stops at 5 min idle: between 5 and 7 min
+    ok2 = ended is not None and ended >= 4.5 * 60 and not lock2 and back
+    log(f"E2 verdict: ended when idle {ended is not None} ({ended if ended is None else round(ended)} s), lock released {not lock2}, back on resume {back}")
+    results["E2 app mode: ends when idle out of sight, back on resume"] = ok2
+    return ok1 and ok2
 
 
 def main():
@@ -408,6 +480,12 @@ def main():
         except Exception as e:  # noqa: BLE001
             log(f"D failed: {e}")
             results["D service back on resume, in-app player keeps playing"] = False
+        try:
+            part_e()
+        except Exception as e:  # noqa: BLE001
+            log(f"E failed: {e}")
+            results.setdefault("E1 app mode: wake lock, in-app player keeps playing", False)
+            results.setdefault("E2 app mode: ends when idle out of sight, back on resume", False)
         dump("services-final", "activity", "services", PKG)
         dump("processes-final", "activity", "processes", PKG)
         dump("audio-final", "audio")

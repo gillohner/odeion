@@ -4,7 +4,7 @@
 // Keeps the app's built-in player alive while the app is in the background:
 // without a foreground service Android freezes the process within seconds of
 // leaving the app, and the node's stream to this phone stops. Started by the
-// Rust side (src/android.rs) once the player is registered with a node; it
+// Rust side (src/android.rs) once the app reaches a node or opens its offline page; it
 // must start while the app is on screen (Android 12+ refuses otherwise).
 package to.synonym.pubkymusic
 
@@ -28,24 +28,30 @@ import android.os.PowerManager
 class PlayerService : Service() {
     private var wake: PowerManager.WakeLock? = null
     private var wifi: WifiManager.WifiLock? = null
-    // The app playing the music itself (through the tunnel, the offline app): no locks, and the
-    // service ends after a while with nothing playing while the app is out of sight (it starts
-    // again when the app comes back). The phone as a zone of the node keeps both as before: the
-    // node may start music on it at any time.
+    // Both modes keep the CPU and Wi-Fi awake: with the screen off, the next song's first bytes
+    // (through the tunnel too) must arrive after the last one ends. The phone as a zone of the
+    // node runs while connected: the node may start music on it at any time. The app playing the
+    // music itself (through the tunnel, the offline app) ends the service, and its locks, after a
+    // while with nothing playing while the app is out of sight; it starts again when the app
+    // comes back. (isMusicActive counts any app's music: another app playing keeps it running.)
     private var zone = true
     private var idleMs = 0L
+    private var lastStart = 0
     private val tick = Handler(Looper.getMainLooper())
     private val watch = object : Runnable {
         override fun run() {
             if (zone) return
             val am = getSystemService(android.media.AudioManager::class.java)
-            idleMs = if (am.isMusicActive) 0L else idleMs + WATCH_MS
             val me = android.app.ActivityManager.RunningAppProcessInfo()
             android.app.ActivityManager.getMyMemoryState(me)
             val seen = me.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
-            if (idleMs >= IDLE_MS && !seen) {
+            // Counted only while out of sight: time on screen with nothing playing (browsing,
+            // paused) must not end the service just after the music starts and the app is left
+            idleMs = if (am.isMusicActive || seen) 0L else idleMs + WATCH_MS
+            if (idleMs >= IDLE_MS) {
                 android.util.Log.i("pubky-music", "player service: nothing played for ${IDLE_MS / 60000} min, stopping")
-                stopSelf()
+                // Only if no start came since: a start still on its way keeps the service
+                stopSelfResult(lastStart)
                 return
             }
             tick.postDelayed(this, WATCH_MS)
@@ -55,10 +61,11 @@ class PlayerService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStart = startId
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL, "Player", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Shown while this phone is a zone of your node"
+                description = "Shown while the app plays, or while this phone is a zone of your node"
             }
         )
         val launch = packageManager.getLaunchIntentForPackage(packageName)
@@ -92,14 +99,10 @@ class PlayerService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (zone) {
-            hold()
-        } else {
-            release()
-            idleMs = 0L
-            tick.removeCallbacks(watch)
-            tick.postDelayed(watch, WATCH_MS)
-        }
+        hold()
+        idleMs = 0L
+        tick.removeCallbacks(watch)
+        if (!zone) tick.postDelayed(watch, WATCH_MS)
         return START_NOT_STICKY
     }
 
@@ -155,8 +158,9 @@ class PlayerService : Service() {
             Build.VERSION.SDK_INT >= 31 && e.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
         private const val NOTIFY = "android.permission.POST_NOTIFICATIONS"
 
+        /// Whether Android took the start (false: refused, for example from the background).
         @JvmStatic
-        fun start(activity: Activity, text: String, zone: Boolean) {
+        fun start(activity: Activity, text: String, zone: Boolean): Boolean {
             // Android 13+: without this the service still runs, but its notification is hidden.
             // Asked once: someone who said no is not asked again on every launch.
             val prefs = activity.getSharedPreferences("pubky-music", Context.MODE_PRIVATE)
@@ -168,8 +172,9 @@ class PlayerService : Service() {
                 activity.requestPermissions(arrayOf(NOTIFY), 7)
             }
             val i = Intent(activity, PlayerService::class.java).putExtra(EXTRA_TEXT, text).putExtra(EXTRA_ZONE, zone)
-            try {
+            return try {
                 activity.startForegroundService(i)
+                true
             } catch (e: Exception) {
                 // From the background (Android 12+): not a crash; the app starts it again when it is back
                 if (backgroundRefusal(e)) {
@@ -177,6 +182,7 @@ class PlayerService : Service() {
                 } else {
                     CrashReport.write(activity, "The player service was refused", android.util.Log.getStackTraceString(e))
                 }
+                false
             }
         }
 

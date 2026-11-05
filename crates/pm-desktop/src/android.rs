@@ -173,55 +173,61 @@ fn take_lock(
     env.new_global_ref(lock)
 }
 
-/// Start the player's foreground service (`PlayerService.kt`, added to the
-/// generated project by tools/release/android-patch.py): it keeps the phone's
-/// zone playing while the app is in the background. Must run while the app
-/// is on screen; starting it again only updates its notification.
-/// What the player service was last started with (its text and whether the phone is a zone of
-/// the node), so it can be started again when the app comes back: a start from the background is
-/// refused from Android 12, and the app's own-player mode ends itself when nothing plays.
-static LAST: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+/// What the player service should be: started with its text and whether the phone is a zone of
+/// the node, or stopped (`None`). Kept so the service can be started again when the app comes
+/// back (a start from the background is refused from Android 12, and the app's own-player mode
+/// ends itself when nothing plays), and read when each scheduled call runs on the activity's
+/// thread: calls run in order there and each applies the newest wish, so an older start or a
+/// resume never undoes a later change (a forget, a reconnect in the other mode).
+static WANTED: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
 
-/// Start the player service. `zone`: the node reaches this phone's player (the service keeps the
-/// CPU and Wi-Fi awake for its stream, as long as the app is connected); otherwise the app plays the
-/// music itself (through the tunnel, the offline app): no locks, and it ends after a while with
-/// nothing playing out of sight.
-pub fn start_player_service(app: &tauri::AppHandle, text: String, zone: bool) {
-    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((text.clone(), zone));
-    run_service(app, Some((text, zone)));
+fn wanted() -> std::sync::MutexGuard<'static, Option<(String, bool)>> {
+    WANTED.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The app is back on screen: start the service again as it was (a no-op when it still runs).
+/// Start the player's foreground service (`PlayerService.kt`, added to the generated project by
+/// tools/release/android-patch.py), which keeps the app playing while it is in the background.
+/// `zone`: the node reaches this phone's player, and the service runs as long as the app is
+/// connected; otherwise the app plays the music itself (through the tunnel, the offline app) and
+/// the service ends after a while with nothing playing out of sight. Both keep the CPU and Wi-Fi
+/// awake. Must run while the app is on screen; starting it again only updates its notification.
+pub fn start_player_service(app: &tauri::AppHandle, text: String, zone: bool) {
+    *wanted() = Some((text, zone));
+    run_service(app);
+}
+
+/// The app is back on screen: start the service again as wanted (a no-op when it still runs).
 pub fn resume_player_service(app: &tauri::AppHandle) {
-    let last = LAST.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if let Some(l) = last {
-        run_service(app, Some(l));
+    if wanted().is_some() {
+        run_service(app);
     }
 }
 
 /// No node any more (forgotten): the service ends, and is not started again on resume.
 pub fn stop_player_service(app: &tauri::AppHandle) {
-    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    run_service(app, None);
+    *wanted() = None;
+    run_service(app);
 }
 
-/// Start (`Some`) or stop (`None`) the service on the activity's thread.
-fn run_service(app: &tauri::AppHandle, how: Option<(String, bool)>) {
+/// Bring the service to what is wanted when this runs, on the activity's thread.
+fn run_service(app: &tauri::AppHandle) {
     use tauri::Manager;
     let Some(window) = app.get_webview_window(crate::MAIN) else {
         return;
     };
     let scheduled = window.with_webview(move |wv| {
         wv.jni_handle().exec(move |env, activity, _webview| {
+            let how = wanted().clone();
             let starting = how.is_some();
             let done = crate::crash::guarded("the player service", || match &how {
                 Some((text, zone)) => start_service(env, activity, text, *zone),
-                None => stop_service(env, activity),
+                None => stop_service(env, activity).map(|()| true),
             })
             .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
             match done {
-                Ok(()) if starting => tracing::info!("player service started"),
-                Ok(()) => tracing::info!("player service stopped"),
+                Ok(true) if starting => tracing::info!("player service started"),
+                Ok(false) => tracing::info!("player service: start refused; again when the app is back"),
+                Ok(_) => tracing::info!("player service stopped"),
                 Err(e) => {
                     // A Java exception stays pending until cleared.
                     if env.exception_check().unwrap_or(false) {
@@ -240,12 +246,13 @@ fn run_service(app: &tauri::AppHandle, how: Option<(String, bool)>) {
     }
 }
 
+/// `PlayerService.start(activity, text, zone)`: whether Android took the start.
 fn start_service(
     env: &mut jni021::JNIEnv,
     activity: &jni021::objects::JObject,
     text: &str,
     zone: bool,
-) -> jni021::errors::Result<()> {
+) -> jni021::errors::Result<bool> {
     use jni021::objects::{JClass, JValue};
     // The service sits next to MainActivity, in its package. Loaded through
     // the app's class loader: JNI's FindClass may only see system classes.
@@ -277,14 +284,14 @@ fn start_service(
     env.call_static_method(
         &cls,
         "start",
-        "(Landroid/app/Activity;Ljava/lang/String;Z)V",
+        "(Landroid/app/Activity;Ljava/lang/String;Z)Z",
         &[
             JValue::Object(activity),
             JValue::Object(&jtext),
             JValue::Bool(u8::from(zone)),
         ],
-    )?;
-    Ok(())
+    )?
+    .z()
 }
 
 /// `PlayerService.stop(context)`, loaded like `start`.

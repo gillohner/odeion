@@ -175,20 +175,21 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
     w.navigate(u).map_err(|e| e.to_string())
 }
 
-/// What the player service's notification says. The phone is a zone of the node when the node
-/// reaches its player directly; otherwise (through the tunnel, or without a player) the app plays
-/// the music itself.
+/// How the player service runs for a connection: its notification's text, and whether the phone
+/// is a zone of the node (the node reaches its player directly: the service runs while connected)
+/// or the app plays the music itself (through the tunnel, or without a player: the service ends
+/// after a while with nothing playing out of sight). Started either way.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn player_service_text(node_name: &str, direct: bool, native_player: bool) -> String {
+fn player_service(node_name: &str, direct: bool, native_player: bool) -> (String, bool) {
     let node = if node_name.is_empty() {
         "your node"
     } else {
         node_name
     };
     if direct && native_player {
-        format!("This phone is a zone of {node}")
+        (format!("This phone is a zone of {node}"), true)
     } else {
-        format!("Plays music from {node}")
+        (format!("Plays music from {node}"), false)
     }
 }
 
@@ -216,12 +217,8 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     // seconds after leaving the app (TASK-android-background-playback-1105).
     #[cfg(target_os = "android")]
     {
-        let zone = s.via.is_empty() && state.player.is_some();
-        android::start_player_service(
-            app,
-            player_service_text(&info.name, s.via.is_empty(), state.player.is_some()),
-            zone,
-        );
+        let (text, zone) = player_service(&info.name, s.via.is_empty(), state.player.is_some());
+        android::start_player_service(app, text, zone);
     }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
@@ -1036,18 +1033,25 @@ mod tests {
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
     }
 
-    /// The player service's notification says what the phone does: a zone of the node when the
-    /// node reaches its player directly, else the app playing itself (this tests the text; the
-    /// starts are checked on the emulator, tools/android-background-probe.py).
+    /// The player service runs for every connection: as a zone of the node when the node reaches
+    /// the phone's player directly, else for the app playing the music itself, through the tunnel
+    /// too (the owner's case: TASK-android-background-playback-1105). Both modes are run on the
+    /// emulator by tools/android-background-probe.py.
     #[test]
-    fn the_player_service_says_what_the_phone_does() {
+    fn the_player_service_runs_for_every_connection() {
         assert_eq!(
-            player_service_text("NUC", true, true),
-            "This phone is a zone of NUC"
+            player_service("NUC", true, true),
+            ("This phone is a zone of NUC".to_string(), true)
         );
         // Through the tunnel the node can't reach the phone's player: the app plays itself
-        assert_eq!(player_service_text("NUC", false, true), "Plays music from NUC");
-        assert_eq!(player_service_text("", true, false), "Plays music from your node");
+        assert_eq!(
+            player_service("NUC", false, true),
+            ("Plays music from NUC".to_string(), false)
+        );
+        assert_eq!(
+            player_service("", true, false),
+            ("Plays music from your node".to_string(), false)
+        );
     }
 
     /// The node found on the network is taken at 127.0.0.1 only when the node there has its id;
