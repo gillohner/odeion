@@ -200,7 +200,7 @@ impl Output for CpalOutput {
         #[cfg(target_os = "android")]
         let (any_rate, opened_for) = match crate::bit_perfect::open_phone(self.id(), fmt) {
             crate::bit_perfect::PhoneOpen::BitPerfect(s) => return Ok(Box::new(s)),
-            crate::bit_perfect::PhoneOpen::Exclusive(s) => return Ok(Box::new(s)),
+            crate::bit_perfect::PhoneOpen::Exclusive(s) => return Ok(s),
             crate::bit_perfect::PhoneOpen::Gone(why) => return Err(SinkError::Gone(self.id(), why)),
             crate::bit_perfect::PhoneOpen::Unsupported(why) => {
                 tracing::info!(format = %fmt, "Exclusive USB: {why}");

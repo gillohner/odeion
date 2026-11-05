@@ -56,6 +56,16 @@ fn the_fiio_ka17() {
             (3, 4, 32, false, true, 2)
         ]
     );
+    // The playback path: USB streaming terminal 2 → feature unit 0x0a → output terminal 0x14,
+    // clocked by source 0x29 through the single-input selector 0x28
+    assert_eq!(d.streams[0].terminal_link, 2);
+    assert_eq!(d.playback_path(2), Some(vec![0x14, 0x0a, 0x02]));
+    assert_eq!(
+        d.playback_unit(2).map(|u| (u.unit_id, u.mute)),
+        Some((0x0a, true))
+    );
+    assert_eq!(d.playback_clock(2), Some(0x29));
+    assert!(d.clock_settable(0x29));
     // The audio function: control on 0, playback on 1 (what the exclusive driver claims)
     assert_eq!(d.control_interface, Some(0));
     assert_eq!(d.audio_interfaces.first(), Some(&0));
@@ -173,8 +183,10 @@ fn a_uac1_dongle() {
     assert_eq!(d.streams[0].endpoint.as_ref().unwrap().sync, Sync::Adaptive);
     assert_eq!(
         d.summary("USB-C dongle", &[]).line(),
-        "USB-C dongle · PCM up to 48 kHz / 24 bit · hardware volume"
+        "USB-C dongle · PCM up to 48 kHz / 24 bit",
+        "its UAC1 unit is not one the app's driver drives: not called its own volume"
     );
+    assert_eq!(d.exclusive_unit(), None);
 }
 
 #[test]
@@ -205,4 +217,85 @@ fn hostile_descriptors_never_panic() {
         let _ = parse(&v);
         let _ = parse_rate_ranges(&v);
     }
+}
+
+/// A UAC2 headset whose microphone path comes first in the descriptors: its own clock (0x10) and
+/// feature unit (0x02); playback is terminal 4 → unit 5 → headphones, clocked by 0x11.
+fn uac2_headset() -> Vec<u8> {
+    let mut b = vec![
+        18, 1, 0x00, 0x02, 0xef, 2, 1, 64, 0x34, 0x12, 0x78, 0x56, 0x00, 0x01, 1, 2, 3, 1,
+    ];
+    let fu =
+        |id: u8, src: u8| -> Vec<u8> { vec![18, 0x24, 6, id, src, 0x0f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] };
+    let mut ac_body: Vec<u8> = Vec::new();
+    ac_body.extend([8, 0x24, 0x0a, 0x10, 0x03, 0x07, 0, 0]); // mic clock
+    ac_body.extend([8, 0x24, 0x0a, 0x11, 0x03, 0x07, 0, 0]); // playback clock
+    ac_body.extend([17, 0x24, 2, 0x01, 0x01, 0x02, 0, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0]); // IT microphone
+    ac_body.extend(fu(0x02, 0x01)); // the mic's unit, listed first
+    ac_body.extend([12, 0x24, 3, 0x03, 0x01, 0x01, 0, 0x02, 0x10, 0, 0, 0]); // OT USB streaming
+    ac_body.extend([17, 0x24, 2, 0x04, 0x01, 0x01, 0, 0x11, 2, 0, 0, 0, 0, 0, 0, 0, 0]); // IT USB streaming
+    ac_body.extend(fu(0x05, 0x04)); // the playback unit
+    ac_body.extend([12, 0x24, 3, 0x06, 0x02, 0x03, 0, 0x05, 0x11, 0, 0, 0]); // OT headphones
+    let ac_len = (9 + ac_body.len()) as u16;
+    let mut cfg: Vec<u8> = vec![9, 4, 0, 0, 0, 1, 1, 0x20, 0];
+    cfg.extend([9, 0x24, 1, 0x00, 0x02, 4]);
+    cfg.extend(ac_len.to_le_bytes());
+    cfg.push(0);
+    cfg.extend(ac_body);
+    // Playback streaming interface 1: alt 0, alt 1 (16 bit stereo, async OUT 256 bytes)
+    cfg.extend([9, 4, 1, 0, 0, 1, 2, 0x20, 0]);
+    cfg.extend([9, 4, 1, 1, 1, 1, 2, 0x20, 0]);
+    cfg.extend([16, 0x24, 1, 0x04, 0, 1, 1, 0, 0, 0, 2, 3, 0, 0, 0, 0]);
+    cfg.extend([6, 0x24, 2, 1, 2, 16]);
+    cfg.extend([7, 5, 0x01, 0x05, 0x00, 0x01, 1]);
+    cfg.extend([8, 0x25, 1, 0, 0, 0, 0, 0]);
+    let total = (9 + cfg.len()) as u16;
+    let mut head = vec![9, 2];
+    head.extend(total.to_le_bytes());
+    head.extend([2, 1, 0, 0x80, 50]);
+    head.extend(cfg);
+    b.extend(head);
+    b
+}
+
+/// Codex H4 / Claude H2 (round 1 of #306): the unit and clock are the playback path's, not the
+/// first in the descriptors (the microphone's); a clock that can't be told for sure is none.
+#[test]
+fn the_playback_paths_unit_and_clock_not_the_microphones() {
+    let d = parse(&uac2_headset());
+    assert_eq!(d.uac, Some(Uac::V2));
+    assert_eq!(
+        d.hardware_volume.as_ref().map(|v| v.unit_id),
+        Some(0x02),
+        "the first listed: the mic's"
+    );
+    assert_eq!(d.streams.len(), 1);
+    assert_eq!(d.streams[0].terminal_link, 0x04);
+    assert_eq!(d.playback_path(0x04), Some(vec![0x06, 0x05, 0x04]));
+    assert_eq!(d.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+    assert_eq!(d.exclusive_unit().map(|u| u.unit_id), Some(0x05));
+    assert_eq!(d.playback_clock(0x04), Some(0x11));
+    // Not a USB streaming input terminal: no path
+    assert_eq!(d.playback_path(0x01), None);
+    // A selector with two inputs in front of it: the clock can't be told, so none (never
+    // confirmed)
+    let mut amb = d.clone();
+    amb.entities.push(Entity::ClockSelector {
+        id: 0x20,
+        sources: vec![0x10, 0x11],
+    });
+    for e in amb.entities.iter_mut() {
+        if let Entity::InputTerminal { id: 0x04, clock, .. } = e {
+            *clock = Some(0x20);
+        }
+    }
+    assert_eq!(amb.playback_clock(0x04), None);
+    // Two outputs from one terminal: ambiguous, no unit assumed
+    let mut two = d.clone();
+    two.entities.push(Entity::OutputTerminal {
+        id: 0x07,
+        terminal_type: 0x0301,
+        source: 0x04,
+    });
+    assert_eq!(two.playback_unit(0x04), None);
 }

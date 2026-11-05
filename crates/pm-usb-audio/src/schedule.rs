@@ -28,14 +28,24 @@ pub fn period(interval: u8) -> u32 {
     1 << interval.clamp(1, 16).saturating_sub(1)
 }
 
-/// Packets per second.
+/// Whether an isochronous audio endpoint's `bInterval` is one the driver plays: every frame at
+/// full speed (UAC requires it), one to eight microframes at high speed.
+pub fn supported(speed: Speed, interval: u8) -> bool {
+    match speed {
+        Speed::Full => interval == 1,
+        Speed::High => (1..=4).contains(&interval),
+    }
+}
+
+/// Packets per second, rounded down (exact for every [`supported`] interval).
 pub fn packets_per_second(speed: Speed, interval: u8) -> u32 {
     frames_per_second(speed) / period(interval)
 }
 
-/// Frames per packet at `rate`, in 16.16 fixed point.
+/// Frames per packet at `rate`, in 16.16 fixed point: `rate × period / (micro)frames per second`,
+/// exact, whatever the interval.
 pub fn nominal_q16(rate: u32, speed: Speed, interval: u8) -> u64 {
-    (u64::from(rate) << 16) / u64::from(packets_per_second(speed, interval))
+    ((u64::from(rate) * u64::from(period(interval))) << 16) / u64::from(frames_per_second(speed))
 }
 
 /// The packet sizes, in frames, one after another: frames per packet as an exact fraction
@@ -54,9 +64,10 @@ pub struct Schedule {
 
 impl Schedule {
     pub fn new(rate: u32, speed: Speed, interval: u8) -> Self {
+        // Frames per packet as `rate × period / (micro)frames per second`: exact for any interval
         Self {
-            num: u64::from(rate),
-            den: u64::from(packets_per_second(speed, interval).max(1)),
+            num: u64::from(rate) * u64::from(period(interval)),
+            den: u64::from(frames_per_second(speed)),
             nominal: nominal_q16(rate, speed, interval),
             acc: 0,
             period: period(interval),
@@ -155,6 +166,21 @@ mod tests {
             .all(|f| *f == 48));
         assert_eq!(packets_per_second(Speed::Full, 1), 1000);
         assert_eq!(Schedule::new(96_000, Speed::High, 1).max_packet_frames(), 13);
+        // Codex M (round 1 of #306): a full-speed interval of 5 would be 62.5 packets a second,
+        // not 62; high speed 16 would be none: neither is played, nothing divides by zero, and
+        // an interval the driver plays sends exactly the rate
+        assert!(!supported(Speed::Full, 5) && !supported(Speed::High, 16) && !supported(Speed::High, 5));
+        assert!(supported(Speed::Full, 1) && supported(Speed::High, 4));
+        let mut odd = Schedule::new(44_100, Speed::High, 16);
+        let _ = odd.packets(4);
+        let mut fs5 = Schedule::new(44_100, Speed::Full, 5);
+        assert_eq!(
+            sum(&mut fs5, 125),
+            44_100 * 2,
+            "16 ms a packet: 705.6 frames, exactly"
+        );
+        let mut hs3 = Schedule::new(44_100, Speed::High, 3);
+        assert_eq!(sum(&mut hs3, 2000), 44_100, "every 4 microframes: 22.05 frames");
     }
 
     #[test]

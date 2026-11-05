@@ -497,7 +497,7 @@ pub enum PhoneOpen {
     /// The bit-perfect player.
     BitPerfect(TrackSink),
     /// The app's own USB driver (Exclusive USB).
-    Exclusive(crate::exclusive::ExclusiveSink),
+    Exclusive(Box<crate::exclusive::ExclusiveSink>),
     /// The DAC can't take this format unchanged in Exclusive USB: the zone plans another.
     Unsupported(String),
     /// Exclusive USB holds the DAC but would not start: nothing plays (never another device).
@@ -519,10 +519,11 @@ fn open_exclusive(
     dac: &Dac,
     fmt: AudioFormat,
     warning: Option<String>,
+    media: Option<u8>,
 ) -> Result<PhoneOpen, String> {
     use crate::exclusive::ExclusiveError as E;
-    match crate::exclusive::open(id, dac, fmt, warning) {
-        Ok(s) => Ok(PhoneOpen::Exclusive(s)),
+    match crate::exclusive::open(id, dac, fmt, warning, media) {
+        Ok(s) => Ok(PhoneOpen::Exclusive(Box::new(s))),
         Err(E::Gone(why)) => {
             usb_dac::gone_seen();
             Ok(PhoneOpen::Gone(why))
@@ -540,25 +541,6 @@ fn open_exclusive(
             Ok(PhoneOpen::Failed(why))
         }
         Err(E::Refused(why)) => Err(why),
-    }
-}
-
-/// How long a DAC the app gave back may take to reappear in Android's list.
-const GIVE_BACK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// The DAC Android plays again, after the app gave it back: `None` while it doesn't (yet).
-fn dac_back_from_exclusive() -> Option<Dac> {
-    let until = std::time::Instant::now() + GIVE_BACK_WAIT;
-    loop {
-        match usb_dac::current_dac() {
-            // Still the app's, or given back and not listed by Android again yet
-            Some(d) if d.held => {}
-            other => return other,
-        }
-        if std::time::Instant::now() >= until {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -582,7 +564,7 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
         // Exclusive USB when chosen; when chosen but not possible, why (Android plays it)
         why_not =
             match crate::exclusive::decide(&dac, usb_dac::settings(), usb_dac::full_level_consent(), media) {
-                Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning) {
+                Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning, media) {
                     Ok(o) => return o,
                     Err(why) => {
                         tracing::warn!(format = %fmt, "no Exclusive USB: {why}");
@@ -592,18 +574,20 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                 Some(Err(why)) => Some((dac.clone(), why)),
                 None => None,
             };
-        // Android's paths, once Android has the DAC back (never while the app holds it); Android
-        // lists it under a new id then: the DAC this open is for is fixed again
+        // Android's paths only once Android has the DAC back: never while the app holds it, and
+        // after the app gave it back (or touched it in a failed attempt) only once Android lists
+        // it again, under a new id: the DAC this open is for is fixed again then
         crate::exclusive::release();
-        if dac.held || usb_dac::current_dac().is_some_and(|d| d.held) {
-            if dac_back_from_exclusive().is_none() {
-                return gone(format!(
-                    "{} is going back to Android: press Play again in a moment",
-                    dac.device.name
-                ));
-            }
-            at_open = usb_dac::opened_for_now();
+        if crate::exclusive::holding() {
+            return gone(format!(
+                "{} is going back to Android: press Play again in a moment",
+                dac.device.name
+            ));
         }
+        if let Err(why) = crate::exclusive::wait_android_back() {
+            return gone(why);
+        }
+        at_open = usb_dac::opened_for_now();
     }
     let shared = |any_rate| PhoneOpen::Shared {
         any_rate,
@@ -635,9 +619,19 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                 if usb_dac::settings().mode == PreferredMode::Auto {
                     let media = backend().and_then(|b| b.media_volume());
                     if let Some(warning) = crate::exclusive::auto_fallback(&dac, media) {
-                        if let Ok(o) = open_exclusive(id, &dac, fmt, warning) {
+                        if let Ok(o) = open_exclusive(id, &dac, fmt, warning, media) {
                             return o;
                         }
+                        // The attempt may have taken the DAC from Android: shared only once
+                        // Android lists it again, for the DAC as Android lists it then
+                        if let Err(why) = crate::exclusive::wait_android_back() {
+                            return gone(why);
+                        }
+                        record_shared(&dac, fmt, why);
+                        return PhoneOpen::Shared {
+                            any_rate: true,
+                            opened_for: usb_dac::opened_for_now(),
+                        };
                     }
                 }
                 record_shared(&dac, fmt, why);

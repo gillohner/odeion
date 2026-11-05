@@ -451,6 +451,31 @@ pub fn gone_reason() -> String {
     })
 }
 
+/// Reports in which Android listed a USB DAC (an audio device): Exclusive USB waits for the next
+/// one after it gave a DAC back.
+static LISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many reports so far listed a DAC Android plays.
+pub fn listed_seq() -> u64 {
+    LISTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The exclusive open on `dac_id` in `format` is no longer confirmed (its packets stopped
+/// arriving): still Exclusive USB, not confirmed, with why; the node learns it.
+pub fn unconfirm_exclusive(dac_id: i32, format: pm_model::AudioFormat, why: String) {
+    let changed = with_phone(|p| match p.last.as_mut() {
+        Some(l) if l.dac_id == dac_id && l.format == format && l.confirmed => {
+            l.confirmed = false;
+            l.note = Some(why);
+            true
+        }
+        _ => false,
+    });
+    if changed {
+        notify_change();
+    }
+}
+
 /// An unplug this soon after the last sink for the DAC closed counts as one the zone hasn't seen
 /// (it lands between one song's sink closing and the next one opening).
 const UNSEEN_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
@@ -655,7 +680,10 @@ pub fn set_settings(s: DeviceSettings) -> bool {
     });
     if changed {
         GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        // Exclusive USB chosen: Android's permission is asked now; another mode gives the DAC back
+    }
+    // Exclusive USB chosen (again: Android's permission is asked again when it isn't given);
+    // another mode gives the DAC back
+    if changed || s.mode == pm_zones::PreferredMode::Exclusive {
         crate::exclusive::settings_changed(s.mode);
     }
     if let (true, Some(f)) = (changed, file) {
@@ -815,7 +843,11 @@ pub fn apply_report(json: &str) -> bool {
             if r.release_exclusive {
                 crate::exclusive::release();
             }
-            let dac = dac(&r).or_else(|| kept_while_held(&r));
+            let listed = dac(&r);
+            if listed.is_some() {
+                LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let dac = listed.or_else(|| kept_while_held(&r));
             // The DAC still attached, but media goes elsewhere (Bluetooth, the speaker)
             let old = current_dac();
             let why = old

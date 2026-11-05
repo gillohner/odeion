@@ -2,26 +2,91 @@
 //! driver takes the DAC over from Android.
 //!
 //! While Android plays the DAC (shared mode) the listener's level is Android's media volume, which
-//! Android applies to the samples. The exclusive driver sends the samples untouched, so the level
-//! moves to the DAC's feature unit: before the first sample, the driver sets it to what Android's
-//! media volume amounted to ([`handover_db`]), never more, so switching never gets louder.
+//! Android applies to the samples, through the unit at whatever level (and mute) it had. The
+//! exclusive driver sends the samples untouched, so the level moves to the DAC's feature unit:
+//! before the first sample, the driver sets it to what both together amounted to ([`handover`]),
+//! never more; when that is below what the unit can do, or unknown, it mutes. Giving the DAC back,
+//! the unit is never left louder than it was ([`giveback`]).
 
-/// A feature unit's volume range, in 1/256 dB.
+/// One sub-range of a feature unit's volume (`RANGE` reply), in 1/256 dB: `min`, `min + res`, …
+/// up to `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VolumeRange {
+pub struct SubRange {
     pub min: i16,
     pub max: i16,
     pub res: u16,
 }
 
-/// `db` as the feature unit's `CUR` value: within the range, on its resolution, rounded toward
-/// quieter (never louder than asked).
-pub fn db_to_cur(db: f32, range: VolumeRange) -> i16 {
-    let want = (f64::from(db) * 256.0).floor();
-    let clamped = want.clamp(f64::from(range.min), f64::from(range.max)) as i32;
-    let res = i32::from(range.res.max(1));
-    let steps = (clamped - i32::from(range.min)).div_euclid(res);
-    (i32::from(range.min) + steps * res) as i16
+/// A feature unit's volume range: the sub-ranges it advertises, nothing in between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeRange {
+    pub subranges: Vec<SubRange>,
+}
+
+impl VolumeRange {
+    /// One sub-range.
+    pub fn single(min: i16, max: i16, res: u16) -> Self {
+        VolumeRange {
+            subranges: vec![SubRange { min, max, res }],
+        }
+    }
+
+    /// The quietest value it takes.
+    pub fn min(&self) -> i16 {
+        self.subranges.iter().map(|r| r.min).min().unwrap_or(0)
+    }
+
+    /// The loudest value it takes.
+    pub fn max(&self) -> i16 {
+        self.subranges.iter().map(|r| r.max).max().unwrap_or(0)
+    }
+
+    /// The finest step, in dB (for a UI's slider).
+    pub fn step_db(&self) -> f32 {
+        let res = self
+            .subranges
+            .iter()
+            .filter(|r| r.max > r.min)
+            .map(|r| r.res)
+            .min()
+            .unwrap_or(256);
+        f32::from(res.max(1)) / 256.0
+    }
+
+    /// The loudest value it takes at or below `cur` (1/256 dB); `None` when `cur` is below its
+    /// minimum.
+    pub fn at_or_below(&self, cur: i32) -> Option<i16> {
+        self.subranges
+            .iter()
+            .filter_map(|r| {
+                let (min, max) = (i32::from(r.min), i32::from(r.max));
+                if cur < min {
+                    return None;
+                }
+                if min == max {
+                    return Some(r.min);
+                }
+                // On its grid: min, min + res, ... (max itself only when on the grid)
+                let res = i32::from(r.res.max(1));
+                let top = cur.min(max);
+                Some((min + (top - min).div_euclid(res) * res) as i16)
+            })
+            .max()
+    }
+}
+
+/// A feature unit's level: `CUR` (1/256 dB) and mute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Level {
+    pub cur: i16,
+    pub mute: bool,
+}
+
+/// `db` as a `CUR` value the unit takes, at or below it; the minimum when it is below that (the
+/// listener's own choice of level, not a hand-over).
+pub fn db_to_cur(db: f32, range: &VolumeRange) -> i16 {
+    let want = (f64::from(db) * 256.0).floor() as i32;
+    range.at_or_below(want).unwrap_or_else(|| range.min())
 }
 
 /// A `CUR` value in dB.
@@ -57,44 +122,98 @@ pub fn handover_db(percent: u8) -> Option<f32> {
     Some(db - HANDOVER_MARGIN_DB)
 }
 
-/// The feature unit's starting `CUR` when the driver takes the DAC over: Android played at media
-/// volume `percent` through the unit at `before` (its `CUR` then), so the level was both together;
-/// never louder than that. Either unknown: the range's minimum.
-pub fn handover_cur(percent: Option<u8>, before: Option<i16>, range: VolumeRange) -> i16 {
-    match (percent.and_then(handover_db), before) {
-        (Some(db), Some(b)) => db_to_cur(db + cur_to_db(b), range),
-        _ => range.min,
+/// The unit's level when the driver takes the DAC over: Android played at media volume `percent`
+/// (read while Android still played the DAC) through the unit at `before`; never louder than
+/// both together. Muted when that was muted, silent (0 %), below the unit's minimum, or unknown.
+pub fn handover(percent: Option<u8>, before: Option<Level>, range: &VolumeRange) -> Level {
+    let quiet = Level {
+        cur: range.min(),
+        mute: true,
+    };
+    let (Some(db), Some(b)) = (percent.and_then(handover_db), before) else {
+        return quiet;
+    };
+    let target = ((db + cur_to_db(b.cur)) * 256.0).floor() as i32;
+    match range.at_or_below(target) {
+        Some(cur) => Level { cur, mute: b.mute },
+        None => quiet,
     }
 }
 
-/// The unit's `CUR` when the driver gives the DAC back to Android: what it was before, or the
-/// level the listener set since if that is quieter (Android's volume applies again on top).
-pub fn giveback_cur(before: Option<i16>, now: i16) -> i16 {
-    before.map_or(now, |b| b.min(now))
+/// The unit's level when the driver gives the DAC back to Android (whose volume applies again on
+/// top): never louder than before, and muted if it was then or is now. Before unknown: as now.
+pub fn giveback(before: Option<Level>, now: Level) -> Level {
+    match before {
+        Some(b) => Level {
+            cur: b.cur.min(now.cur),
+            mute: b.mute || now.mute,
+        },
+        None => now,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const KA17: VolumeRange = VolumeRange {
-        min: -127 * 256,
-        max: 0,
-        res: 128,
-    };
+    fn ka17() -> VolumeRange {
+        VolumeRange::single(-127 * 256, 0, 128)
+    }
+
+    fn at(cur: i16) -> Option<Level> {
+        Some(Level { cur, mute: false })
+    }
 
     #[test]
     fn decibels_on_the_units_steps_never_louder() {
-        assert_eq!(db_to_cur(0.0, KA17), 0);
-        assert_eq!(db_to_cur(-10.0, KA17), -10 * 256);
+        let r = ka17();
+        assert_eq!(db_to_cur(0.0, &r), 0);
+        assert_eq!(db_to_cur(-10.0, &r), -10 * 256);
         // -10.3 dB on 0.5 dB steps: -10.5, the quieter step
-        assert_eq!(db_to_cur(-10.3, KA17), -10 * 256 - 128);
-        assert_eq!(db_to_cur(6.0, KA17), 0, "never above the unit's maximum");
-        assert_eq!(db_to_cur(-500.0, KA17), KA17.min);
+        assert_eq!(db_to_cur(-10.3, &r), -10 * 256 - 128);
+        assert_eq!(db_to_cur(6.0, &r), 0, "never above the unit's maximum");
+        assert_eq!(db_to_cur(-500.0, &r), r.min());
         assert_eq!(cur_to_db(-10 * 256 - 128), -10.5);
+        assert_eq!(r.step_db(), 0.5);
     }
 
-    /// The hand-over is never louder than what Android played at that media volume.
+    /// Codex M (round 1 of #306): several sub-ranges are kept apart; nothing between them, or off
+    /// their steps, is ever chosen; a zero resolution is a single value.
+    #[test]
+    fn only_values_the_unit_advertises() {
+        let r = VolumeRange {
+            subranges: vec![
+                SubRange {
+                    min: -60 * 256,
+                    max: -40 * 256,
+                    res: 512,
+                },
+                SubRange {
+                    min: -20 * 256,
+                    max: 0,
+                    res: 256,
+                },
+                SubRange {
+                    min: -30 * 256,
+                    max: -30 * 256,
+                    res: 0,
+                },
+            ],
+        };
+        assert_eq!(
+            r.at_or_below(-25 * 256),
+            Some(-30 * 256),
+            "the gap: the value below it"
+        );
+        assert_eq!(r.at_or_below(-35 * 256), Some(-40 * 256));
+        assert_eq!(r.at_or_below(-41 * 256), Some(-42 * 256), "2 dB steps from -60");
+        assert_eq!(r.at_or_below(-10 * 256 - 3), Some(-11 * 256));
+        assert_eq!(r.at_or_below(-61 * 256), None, "below the minimum");
+        assert_eq!((r.min(), r.max()), (-60 * 256, 0));
+    }
+
+    /// The hand-over is never louder than what Android played at that media volume through the
+    /// unit's level then.
     #[test]
     fn the_hand_over_is_never_louder() {
         assert_eq!(handover_db(100), Some(-3.0));
@@ -102,33 +221,20 @@ mod tests {
         assert_eq!(handover_db(20), Some(-43.0));
         assert_eq!(handover_db(1), Some(-61.0));
         assert_eq!(handover_db(0), None);
-        // Between points: on the line, less the margin
         assert_eq!(handover_db(40), Some(-31.5));
-        // Every percent: the unit's step is at or below the hand-over level
+        let r = ka17();
         for p in 1..=100u8 {
-            let mine = handover_db(p).unwrap();
-            assert!(
-                cur_to_db(handover_cur(Some(p), Some(0), KA17)) <= mine,
-                "{p}%: the unit's step is not above it"
-            );
+            let l = handover(Some(p), at(0), &r);
+            assert!(!l.mute && cur_to_db(l.cur) <= handover_db(p).unwrap(), "{p}%");
         }
         // The unit was already turned down: the hand-over is that much lower
-        assert_eq!(cur_to_db(handover_cur(Some(100), Some(-10 * 256), KA17)), -13.0);
         assert_eq!(
-            handover_cur(None, Some(0), KA17),
-            KA17.min,
-            "unknown: the quietest"
+            handover(Some(100), at(-10 * 256), &r),
+            Level {
+                cur: -13 * 256,
+                mute: false
+            }
         );
-        assert_eq!(
-            handover_cur(Some(50), None, KA17),
-            KA17.min,
-            "unknown: the quietest"
-        );
-        assert_eq!(handover_cur(Some(0), Some(0), KA17), KA17.min);
-        // Back to Android: never above what it was before
-        assert_eq!(giveback_cur(Some(-20 * 256), 0), -20 * 256);
-        assert_eq!(giveback_cur(Some(-20 * 256), -30 * 256), -30 * 256);
-        assert_eq!(giveback_cur(None, -5 * 256), -5 * 256);
         // A curve that only rises
         let mut last = f32::MIN;
         for p in 1..=100u8 {
@@ -136,5 +242,73 @@ mod tests {
             assert!(d >= last, "{p}%");
             last = d;
         }
+    }
+
+    /// Codex H2 / Claude M3 (round 1 of #306): silence, a level below what the unit can do, a mute
+    /// before and anything unknown are muted, never the unit's minimum played aloud; giving back
+    /// keeps a mute.
+    #[test]
+    fn what_the_unit_cant_do_quietly_is_muted() {
+        let shallow = VolumeRange::single(-20 * 256, 0, 256);
+        let quiet = Level {
+            cur: -20 * 256,
+            mute: true,
+        };
+        assert_eq!(handover(Some(0), at(0), &shallow), quiet, "Android at 0 %");
+        assert_eq!(
+            handover(Some(20), at(0), &shallow),
+            quiet,
+            "-43 dB is below -20 dB: muted"
+        );
+        assert_eq!(handover(None, at(0), &shallow), quiet, "volume unknown");
+        assert_eq!(
+            handover(Some(100), None, &shallow),
+            quiet,
+            "the unit's level unknown"
+        );
+        assert_eq!(
+            handover(
+                Some(100),
+                Some(Level {
+                    cur: -6 * 256,
+                    mute: true
+                }),
+                &shallow
+            ),
+            Level {
+                cur: -9 * 256,
+                mute: true
+            },
+            "muted before: muted"
+        );
+        // Back to Android: never above before, a mute kept
+        let before = Some(Level {
+            cur: -20 * 256,
+            mute: false,
+        });
+        assert_eq!(
+            giveback(before, Level { cur: 0, mute: false }),
+            Level {
+                cur: -20 * 256,
+                mute: false
+            }
+        );
+        assert_eq!(
+            giveback(
+                before,
+                Level {
+                    cur: -30 * 256,
+                    mute: true
+                }
+            ),
+            Level {
+                cur: -30 * 256,
+                mute: true
+            }
+        );
+        assert_eq!(
+            giveback(Some(Level { cur: 0, mute: true }), Level { cur: 0, mute: false }),
+            Level { cur: 0, mute: true }
+        );
     }
 }

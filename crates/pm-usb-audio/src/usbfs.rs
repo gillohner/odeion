@@ -4,8 +4,9 @@
 //! transfers are submitted with `USBDEVFS_SUBMITURB` and collected with `USBDEVFS_REAPURBNDELAY`
 //! once `poll` says one finished.
 //!
-//! The descriptor stays the app's (Kotlin keeps the connection open and closes it): this never
-//! closes it. Device-unverified: the layouts follow `linux/usbdevice_fs.h` and are checked here
+//! It works on its own duplicate of the app's descriptor (`dup`), closed when it is dropped: the
+//! app closing its connection (an unplug, a release) never pulls the descriptor from under a
+//! transfer, and a descriptor number the app reuses is never this one. Device-unverified: the layouts follow `linux/usbdevice_fs.h` and are checked here
 //! against its sizes, but only a phone with a DAC proves the transfers.
 
 #![allow(unsafe_code)]
@@ -115,18 +116,22 @@ struct InFlight {
     data: Vec<u8>,
 }
 
-/// usbfs on a file descriptor the app owns.
+/// usbfs on its own duplicate of the app's file descriptor.
 pub struct Usbfs {
+    /// Ours (a `dup` of the app's), closed on drop; -1 when it could not be duplicated (every
+    /// call then fails as gone).
     fd: c_int,
     /// Submitted URBs, by the address the kernel hands back.
     in_flight: Mutex<HashMap<usize, InFlight>>,
 }
 
 impl Usbfs {
-    /// usbfs on `fd` (an open `UsbDeviceConnection`'s): it is borrowed, never closed here.
+    /// usbfs on a duplicate of `fd` (an open `UsbDeviceConnection`'s); `fd` stays the app's.
     pub fn new(fd: c_int) -> Self {
+        // SAFETY: dup on any integer is safe; a bad one fails with -1 (then every call is Gone)
+        let own = if fd >= 0 { unsafe { libc::dup(fd) } } else { -1 };
         Usbfs {
-            fd,
+            fd: own,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -163,7 +168,8 @@ impl Usbfs {
 
 fn usb_error(e: std::io::Error) -> UsbError {
     match e.raw_os_error() {
-        Some(libc::ENODEV) | Some(libc::ESHUTDOWN) => UsbError::Gone,
+        // Unplugged, or the descriptor is no longer one (closed): gone either way
+        Some(libc::ENODEV) | Some(libc::ESHUTDOWN) | Some(libc::EBADF) => UsbError::Gone,
         _ => UsbError::Other(e.to_string()),
     }
 }
@@ -286,7 +292,9 @@ impl Transport for Usbfs {
             }
             return Err(usb_error(e));
         }
-        if p.revents & (libc::POLLERR | libc::POLLHUP) != 0 && p.revents & libc::POLLOUT == 0 {
+        if p.revents & libc::POLLNVAL != 0
+            || p.revents & (libc::POLLERR | libc::POLLHUP) != 0 && p.revents & libc::POLLOUT == 0
+        {
             return Err(UsbError::Gone);
         }
         let mut got: *mut c_void = std::ptr::null_mut();
@@ -307,6 +315,8 @@ impl Transport for Usbfs {
             endpoint: f.urb.urb.endpoint,
             status: f.urb.urb.status,
             actual: f.urb.iso[..n].iter().map(|d| d.actual_length).collect(),
+            // The kernel keeps a packet's (negative) errno in an unsigned field
+            packet_status: f.urb.iso[..n].iter().map(|d| d.status as i32).collect(),
             data: f.data,
         }))
     }
@@ -343,6 +353,10 @@ impl Drop for Usbfs {
         for (_, f) in self.in_flight().drain() {
             std::mem::forget(f);
         }
+        if self.fd >= 0 {
+            // SAFETY: our own duplicate, closed once
+            unsafe { libc::close(self.fd) };
+        }
     }
 }
 
@@ -373,6 +387,39 @@ mod tests {
         assert_eq!(USBDEVFS_IOCTL, 0xc010_5512);
         assert_eq!(USBDEVFS_CONNECT, 0x0000_5517);
         assert_eq!(USBDEVFS_GET_SPEED, 0x0000_551f);
+    }
+
+    /// The layouts and request numbers on 32-bit ARM (Claude L, round 1 of #306).
+    #[test]
+    #[cfg(target_pointer_width = "32")]
+    fn the_kernels_layouts_32() {
+        assert_eq!(std::mem::size_of::<CtrlTransfer>(), 16);
+        assert_eq!(std::mem::size_of::<RawUrb>(), 44);
+        assert_eq!(std::mem::offset_of!(UrbBox, iso), 44);
+        assert_eq!(USBDEVFS_CONTROL, 0xc010_5500);
+        assert_eq!(USBDEVFS_SUBMITURB, 0x802c_550a);
+        assert_eq!(USBDEVFS_REAPURBNDELAY, 0x4004_550d);
+        assert_eq!(USBDEVFS_IOCTL, 0xc00c_5512);
+    }
+
+    /// Codex M / Claude M6 (round 1 of #306): its own duplicate. The app closing its descriptor
+    /// leaves this one working (no reuse of the number), and a closed one is Gone, not an error.
+    #[test]
+    fn it_works_on_its_own_descriptor() {
+        use std::os::fd::IntoRawFd;
+        let app = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        let u = Usbfs::new(app);
+        assert_ne!(u.fd, app);
+        // SAFETY: the test's own descriptor, closed once
+        unsafe { libc::close(app) };
+        // Ours is still open (/dev/null answers ENOTTY, not EBADF)
+        assert!(matches!(u.claim(0), Err(UsbError::Other(_))));
+        let closed = Usbfs::new(-1);
+        assert_eq!(closed.claim(0), Err(UsbError::Gone));
+        assert!(matches!(
+            closed.reap(Duration::from_millis(1)),
+            Err(UsbError::Gone) | Ok(None)
+        ));
     }
 
     /// Not a USB device: every call fails cleanly, nothing is leaked or freed under the kernel.

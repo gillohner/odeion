@@ -47,7 +47,13 @@ pub struct Reaped {
     pub status: i32,
     pub data: Vec<u8>,
     pub actual: Vec<u32>,
+    /// Each packet's own status (0, or a negative errno): an isochronous transfer can finish with
+    /// some packets failed.
+    pub packet_status: Vec<i32>,
 }
+
+/// Transfers in a row with failed packets before the driver gives up (100 ms of audio).
+const BAD_URBS_STOP: u32 = 25;
 
 /// `-ENODEV`, `-ESHUTDOWN`: a transfer on a device that went.
 pub const STATUS_GONE: [i32; 2] = [-19, -108];
@@ -143,6 +149,10 @@ pub struct Driver {
     played: u64,
     claimed: Vec<u8>,
     open: bool,
+    /// Transfers in a row with failed packets.
+    bad_urbs: u32,
+    /// Transfers are being discarded (their errors are ours).
+    discarding: bool,
 }
 
 impl Driver {
@@ -163,6 +173,8 @@ impl Driver {
             played: 0,
             claimed: Vec::new(),
             open: true,
+            bad_urbs: 0,
+            discarding: false,
         };
         for i in [d.plan.control_interface, d.plan.setting.interface] {
             if !d.claimed.contains(&i) {
@@ -187,11 +199,17 @@ impl Driver {
         let rate = self.plan.rate;
         self.readback = None;
         if self.plan.uac == Uac::V2 {
+            // The clock of this setting's terminal (`None`: not known for sure, never confirmed)
             if let Some(clock) = s.clock {
                 let ac = self.plan.control_interface;
-                self.t.control(&requests::uac2_set_rate(clock, ac, rate))?;
+                // A clock whose rate the host may not write is only read: it must already run at
+                // the rate asked
+                if s.rate_settable {
+                    self.t.control(&requests::uac2_set_rate(clock, ac, rate))?;
+                }
                 self.readback = self.read_rate(&requests::uac2_get_rate(clock, ac))?;
-                if self.readback != Some(rate) && !self.plan.quirks.late_rate_readback {
+                let late = s.rate_settable && self.plan.quirks.late_rate_readback;
+                if self.readback != Some(rate) && !late {
                     return Err(DriverError::Rate {
                         asked: rate,
                         got: self.readback,
@@ -200,12 +218,22 @@ impl Driver {
             }
             self.t.set_alt(s.interface, s.alt)?;
         } else {
-            // UAC1: the rate belongs to the endpoint of the chosen setting
+            // UAC1: the rate belongs to the endpoint of the chosen setting, when it has a
+            // sampling frequency control (a fixed-rate endpoint has none: nothing is written)
             self.t.set_alt(s.interface, s.alt)?;
-            let ep = s.endpoint.address;
-            self.t.control(&requests::uac1_set_rate(ep, rate))?;
-            // Some UAC1 DACs don't answer GET_CUR: then nothing is confirmed
-            self.readback = self.read_rate(&requests::uac1_get_rate(ep))?;
+            if s.rate_settable {
+                let ep = s.endpoint.address;
+                self.t.control(&requests::uac1_set_rate(ep, rate))?;
+                // Some UAC1 DACs don't answer GET_CUR: then nothing is confirmed; another rate
+                // read back is refused, as for UAC2
+                self.readback = self.read_rate(&requests::uac1_get_rate(ep))?;
+                if self.readback.is_some_and(|r| r != rate) {
+                    return Err(DriverError::Rate {
+                        asked: rate,
+                        got: self.readback,
+                    });
+                }
+            }
         }
         self.schedule = schedule_for(&self.plan);
         self.running = false;
@@ -280,7 +308,7 @@ impl Driver {
 
     /// Packets per transfer.
     fn urb_packets(&self) -> usize {
-        let pps = packets_per_second(self.plan.speed, self.plan.setting.endpoint.interval);
+        let pps = packets_per_second(self.plan.speed, self.plan.setting.endpoint.interval).max(1);
         ((pps * URB_MS / 1000).max(1) as usize).min(128)
     }
 
@@ -291,7 +319,9 @@ impl Driver {
         if fb == 0 || self.pending.len() < fb {
             return Ok(false);
         }
-        let max_frames = (usize::from(self.plan.setting.endpoint.max_packet) / fb).max(1) as u32;
+        let ep = &self.plan.setting.endpoint;
+        let room = usize::from(ep.max_packet) * usize::from(ep.transactions.max(1));
+        let max_frames = (room / fb).max(1) as u32;
         let mut sched = self.schedule.clone();
         let mut packets = Vec::with_capacity(self.urb_packets());
         let mut bytes = 0usize;
@@ -355,8 +385,18 @@ impl Driver {
         } else if let Some(pos) = self.in_flight.iter().position(|(t, _)| *t == r.tag) {
             let (_, frames) = self.in_flight.remove(pos).expect("found");
             self.played += frames;
-            if r.status == 0 {
+            // Running only while its packets arrive: a transfer with failed packets (silence,
+            // dropouts) withdraws it, and a run of them stops the stream
+            let clean = r.status == 0 && r.packet_status.iter().all(|p| *p == 0);
+            if clean {
                 self.running = true;
+                self.bad_urbs = 0;
+            } else if !self.discarding {
+                self.running = false;
+                self.bad_urbs += 1;
+                if self.bad_urbs >= BAD_URBS_STOP {
+                    return Err(DriverError::Usb("the DAC does not take the audio".into()));
+                }
             }
         }
         Ok(true)
@@ -412,6 +452,13 @@ impl Driver {
     /// Discard what is queued and in flight.
     pub fn flush(&mut self) -> Result<(), DriverError> {
         self.pending.clear();
+        self.discarding = true;
+        let r = self.flush_inner();
+        self.discarding = false;
+        r
+    }
+
+    fn flush_inner(&mut self) -> Result<(), DriverError> {
         for (tag, _) in self.in_flight.clone() {
             self.t.discard(tag);
         }
@@ -525,16 +572,66 @@ pub fn get_volume(t: &dyn Transport, unit: u8, ac: u8) -> Result<Option<i16>, Us
     }
 }
 
-/// Set the feature unit's master volume (1/256 dB) and unmute it.
+/// The feature unit's master mute now (`None`: it won't say).
+pub fn get_mute(t: &dyn Transport, unit: u8, ac: u8) -> Result<Option<bool>, UsbError> {
+    match t.control(&requests::uac2_get_mute(unit, ac, 0)) {
+        Ok(b) if !b.is_empty() => Ok(Some(b[0] != 0)),
+        Ok(_) | Err(UsbError::Other(_)) => Ok(None),
+        Err(UsbError::Gone) => Err(UsbError::Gone),
+    }
+}
+
+/// Set the feature unit's master volume (1/256 dB); its mute is left as it is.
 pub fn set_volume(t: &dyn Transport, unit: u8, ac: u8, cur: i16) -> Result<(), UsbError> {
-    t.control(&requests::uac2_set_volume(unit, ac, 0, cur))?;
-    t.control(&requests::uac2_set_mute(unit, ac, 0, false))
+    t.control(&requests::uac2_set_volume(unit, ac, 0, cur))
         .map(|_| ())
 }
 
 /// Mute or unmute the feature unit.
 pub fn set_mute(t: &dyn Transport, unit: u8, ac: u8, mute: bool) -> Result<(), UsbError> {
     t.control(&requests::uac2_set_mute(unit, ac, 0, mute)).map(|_| ())
+}
+
+/// Put the unit at `level` and make sure it is there before anything plays: the volume read back
+/// at or below it, the mute read back as set. A unit without a mute control can't be muted: a
+/// level that needs it is refused. `Err(Other)`: why it isn't (nothing may play), `Err(Gone)`.
+pub fn apply_level(
+    t: &dyn Transport,
+    unit: u8,
+    ac: u8,
+    level: crate::volume::Level,
+    can_mute: bool,
+) -> Result<(), UsbError> {
+    if level.mute && !can_mute {
+        return Err(UsbError::Other(
+            "the DAC can't go as quietly as Android played it, and it can't be muted".into(),
+        ));
+    }
+    // Quieter first: mute before the level when muting, the level before unmuting
+    if level.mute {
+        set_mute(t, unit, ac, true)?;
+    }
+    set_volume(t, unit, ac, level.cur)?;
+    match get_volume(t, unit, ac)? {
+        Some(v) if v <= level.cur => {}
+        Some(v) => {
+            return Err(UsbError::Other(format!(
+                "the DAC's volume stayed at {:.1} dB, above {:.1} dB",
+                crate::volume::cur_to_db(v),
+                crate::volume::cur_to_db(level.cur)
+            )))
+        }
+        None => return Err(UsbError::Other("the DAC did not say its volume".into())),
+    }
+    if can_mute {
+        if !level.mute {
+            set_mute(t, unit, ac, false)?;
+        }
+        if get_mute(t, unit, ac)? != Some(level.mute) {
+            return Err(UsbError::Other("the DAC did not take its mute".into()));
+        }
+    }
+    Ok(())
 }
 
 /// The clock's rates (`RANGE`), as a list of the common ones.
@@ -579,6 +676,12 @@ pub mod fake {
         pub discarded: Vec<u64>,
         /// OUT transfers finish with this status (e.g. -19, ENODEV: unplugged mid-transfer).
         pub out_status: i32,
+        /// Each OUT packet finishes with this status (e.g. -71, EPROTO: the DAC took nothing).
+        pub packet_status: i32,
+        /// Volume writes fail (a stall).
+        pub refuse_volume: bool,
+        /// The volume reads back as this whatever was written (a DAC that ignores it).
+        pub volume_stuck: Option<i16>,
     }
 
     #[derive(Default, Clone)]
@@ -640,6 +743,12 @@ pub mod fake {
                     s.log.push(line);
                     Ok(Vec::new())
                 }
+                (0xa1, 0x01, 0x01) if req.length == 1 => {
+                    s.log.push("get mute".into());
+                    s.muted
+                        .map(|m| vec![u8::from(m)])
+                        .ok_or(UsbError::Other("stall".into()))
+                }
                 (0xa1 | 0xa2, 0x01 | 0x81, 0x01) => {
                     s.log.push("get rate".into());
                     let r = s.readback.unwrap_or(s.clock);
@@ -651,6 +760,9 @@ pub mod fake {
                 }
                 // Feature unit
                 (0x21, 0x01, 0x02) => {
+                    if s.refuse_volume {
+                        return Err(UsbError::Other("stall".into()));
+                    }
                     let v = i16::from_le_bytes([req.data[0], req.data[1]]);
                     s.volume = Some(v);
                     s.log.push(format!("volume {v}"));
@@ -664,7 +776,8 @@ pub mod fake {
                 }
                 (0xa1, 0x01, 0x02) => {
                     s.log.push("get volume".into());
-                    s.volume
+                    s.volume_stuck
+                        .or(s.volume)
                         .map(|v| v.to_le_bytes().to_vec())
                         .ok_or(UsbError::Other("stall".into()))
                 }
@@ -711,6 +824,7 @@ pub mod fake {
                     status: if s.feedback.is_some() && !discarded { 0 } else { -2 },
                     data,
                     actual: vec![n as u32],
+                    packet_status: vec![0],
                 }));
             }
             Ok(Some(Reaped {
@@ -719,6 +833,7 @@ pub mod fake {
                 status,
                 actual: u.packets.clone(),
                 data: Vec::new(),
+                packet_status: vec![if discarded { -2 } else { s.packet_status }; u.packets.len()],
             }))
         }
 
@@ -745,10 +860,13 @@ mod tests {
                 address: 0x01,
                 sync: Sync::Async,
                 max_packet: 0x308,
+                transactions: 1,
+                freq_control: true,
                 interval: 1,
                 feedback: Some(0x81),
             },
             clock: Some(0x29),
+            rate_settable: true,
         }
     }
 
@@ -944,6 +1062,138 @@ mod tests {
         assert_eq!(f.state().log.len(), 3);
     }
 
+    /// Codex H1 (round 1 of #306): a level is in place only when read back at or below it, and
+    /// its mute as set; a DAC that refuses or ignores it, or can't be muted when it must be, is
+    /// an error (nothing may play).
+    #[test]
+    fn a_level_counts_only_when_the_dac_took_it() {
+        use crate::volume::Level;
+        let f = FakeDac::high_speed();
+        {
+            let mut s = f.state();
+            s.volume = Some(0);
+            s.muted = Some(false);
+        }
+        let quiet = Level {
+            cur: -30 * 256,
+            mute: false,
+        };
+        apply_level(&f, 0x0a, 0, quiet, true).unwrap();
+        let st = f.state();
+        assert_eq!((st.volume, st.muted), (Some(-30 * 256), Some(false)));
+        drop(st);
+        apply_level(
+            &f,
+            0x0a,
+            0,
+            Level {
+                cur: -40 * 256,
+                mute: true,
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(f.state().muted, Some(true));
+        // Ignored: it stays at 0 dB
+        f.state().volume_stuck = Some(0);
+        assert!(apply_level(&f, 0x0a, 0, quiet, true).is_err());
+        f.state().volume_stuck = None;
+        // Refused
+        f.state().refuse_volume = true;
+        assert!(apply_level(&f, 0x0a, 0, quiet, true).is_err());
+        f.state().refuse_volume = false;
+        // Must be muted, can't be
+        let e = apply_level(
+            &f,
+            0x0a,
+            0,
+            Level {
+                cur: -127 * 256,
+                mute: true,
+            },
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e, UsbError::Other(ref w) if w.contains("can't be muted")),
+            "{e:?}"
+        );
+        // Gone
+        f.state().gone = true;
+        assert_eq!(apply_level(&f, 0x0a, 0, quiet, true), Err(UsbError::Gone));
+    }
+
+    /// Codex M (round 1 of #306): failed packets never count as a running stream; a run of them
+    /// stops it.
+    #[test]
+    fn failed_packets_are_not_a_running_stream() {
+        let f = FakeDac::high_speed();
+        f.state().packet_status = -71;
+        let mut d = open(&f, 96_000).unwrap();
+        d.write(&vec![0u8; 32 * 12 * 8]).unwrap();
+        assert!(!d.confirmed(), "read back, but nothing arrives");
+        let e = d.write(&vec![0u8; 96_000 * 8]).unwrap_err();
+        assert_eq!(e, DriverError::Usb("the DAC does not take the audio".into()));
+        // Packets arrive again: running
+        let g = FakeDac::high_speed();
+        let mut d = open(&g, 96_000).unwrap();
+        d.write(&vec![0u8; 32 * 12 * 8]).unwrap();
+        assert!(d.confirmed());
+    }
+
+    /// Codex M (round 1 of #306): a clock the host may not set is only read, and plays only at the
+    /// rate it runs; a fixed-rate UAC1 endpoint gets no rate request at all; a UAC1 read-back of
+    /// another rate is refused (Claude L9).
+    #[test]
+    fn optional_rate_controls_are_optional() {
+        let f = FakeDac::high_speed();
+        f.state().clock = 48_000;
+        let mut p = plan(48_000);
+        p.setting.rate_settable = false;
+        let d = Driver::open(Arc::new(f.clone()), p.clone()).unwrap();
+        assert!(
+            !f.state().log.iter().any(|l| l.starts_with("set rate")),
+            "{:?}",
+            f.state().log
+        );
+        assert_eq!(d.readback(), Some(48_000));
+        drop(d);
+        p.rate = 96_000;
+        assert_eq!(
+            Driver::open(Arc::new(f.clone()), p).err(),
+            Some(DriverError::Rate {
+                asked: 96_000,
+                got: Some(48_000)
+            })
+        );
+        // UAC1, no sampling frequency control
+        let g = FakeDac::default();
+        let mut u = plan(48_000);
+        u.uac = Uac::V1;
+        u.speed = Speed::Full;
+        u.setting.clock = None;
+        u.setting.rate_settable = false;
+        let d = Driver::open(Arc::new(g.clone()), u.clone()).unwrap();
+        assert!(
+            !g.state().log.iter().any(|l| l.contains("rate")),
+            "{:?}",
+            g.state().log
+        );
+        assert_eq!(d.readback(), None, "nothing confirmed");
+        drop(d);
+        // UAC1 reading back another rate
+        let h = FakeDac::default();
+        h.state().readback = Some(44_100);
+        u.setting.rate_settable = true;
+        assert_eq!(
+            Driver::open(Arc::new(h), u).err(),
+            Some(DriverError::Rate {
+                asked: 48_000,
+                got: Some(44_100)
+            })
+        );
+    }
+
     #[test]
     fn uac1_sets_the_rate_on_the_endpoint_after_the_setting() {
         let f = FakeDac::default();
@@ -975,21 +1225,16 @@ mod tests {
         range.extend(128u16.to_le_bytes());
         f.state().volume_range = Some(range);
         let r = volume_range(&f, 0x0a, 0).unwrap().unwrap();
-        assert_eq!(
-            r,
-            VolumeRange {
-                min: -127 * 256,
-                max: 0,
-                res: 128
-            }
-        );
+        assert_eq!(r, VolumeRange::single(-127 * 256, 0, 128));
+        // The level alone: the mute is left as it is (Claude M3: never unmuted by a level)
+        f.state().muted = Some(true);
         set_volume(&f, 0x0a, 0, -20 * 256).unwrap();
         {
             let st = f.state();
-            assert_eq!((st.volume, st.muted), (Some(-20 * 256), Some(false)));
+            assert_eq!((st.volume, st.muted), (Some(-20 * 256), Some(true)));
         }
-        set_mute(&f, 0x0a, 0, true).unwrap();
-        assert_eq!(f.state().muted, Some(true));
+        set_mute(&f, 0x0a, 0, false).unwrap();
+        assert_eq!(f.state().muted, Some(false));
         // No range: no hardware volume (not an error)
         let g = FakeDac::high_speed();
         assert_eq!(volume_range(&g, 0x0a, 0).unwrap(), None);

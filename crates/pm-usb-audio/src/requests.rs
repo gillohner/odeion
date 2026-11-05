@@ -163,34 +163,36 @@ pub fn parse_rate(reply: &[u8]) -> Option<u32> {
     .filter(|r| *r > 0)
 }
 
-/// A feature unit's volume range (`RANGE` reply): the lowest minimum, the highest maximum and the
-/// first resolution, in 1/256 dB.
+/// A feature unit's volume range (`RANGE` reply): every sub-range as advertised, in 1/256 dB. A
+/// sub-range with its minimum above its maximum, or a zero resolution over more than one value,
+/// is not one (skipped); none left: `None`.
 pub fn parse_volume_range(reply: &[u8]) -> Option<crate::volume::VolumeRange> {
     let n = u16::from_le_bytes([*reply.first()?, *reply.get(1)?]) as usize;
-    let mut out: Option<crate::volume::VolumeRange> = None;
-    for i in 0..n {
+    let mut subranges = Vec::new();
+    for i in 0..n.min(64) {
         let at = 2 + i * 6;
         let Some(b) = reply.get(at..at + 6) else { break };
         let min = i16::from_le_bytes([b[0], b[1]]);
         let max = i16::from_le_bytes([b[2], b[3]]);
         let res = u16::from_le_bytes([b[4], b[5]]);
-        if min > max {
+        if min > max || (res == 0 && min != max) {
             continue;
         }
-        out = Some(match out {
-            None => crate::volume::VolumeRange {
-                min,
-                max,
-                res: res.max(1),
-            },
-            Some(r) => crate::volume::VolumeRange {
-                min: r.min.min(min),
-                max: r.max.max(max),
-                res: r.res,
-            },
-        });
+        subranges.push(crate::volume::SubRange { min, max, res });
     }
-    out
+    (!subranges.is_empty()).then_some(crate::volume::VolumeRange { subranges })
+}
+
+/// UAC2: the feature unit's current mute on `channel` (1 byte).
+pub fn uac2_get_mute(unit: u8, ac: u8, channel: u8) -> ControlRequest {
+    ControlRequest {
+        request_type: FROM_INTERFACE,
+        request: CUR,
+        value: (FU_MUTE_CONTROL << 8) | u16::from(channel),
+        index: entity(unit, ac),
+        data: Vec::new(),
+        length: 1,
+    }
 }
 
 #[cfg(test)]
@@ -250,12 +252,21 @@ mod tests {
         b.extend(256u16.to_le_bytes());
         assert_eq!(
             parse_volume_range(&b),
-            Some(crate::volume::VolumeRange {
-                min: -127 * 256,
-                max: 0,
-                res: 256
-            })
+            Some(crate::volume::VolumeRange::single(-127 * 256, 0, 256))
         );
+        // Two sub-ranges kept apart; one upside down and one with no resolution are not ranges
+        let mut two = 4u16.to_le_bytes().to_vec();
+        for (min, max, res) in [
+            (-60i16, -40i16, 512u16),
+            (-20, 0, 256),
+            (0, -10, 1),
+            (-30, -10, 0),
+        ] {
+            two.extend((min * 256).to_le_bytes());
+            two.extend((max * 256).to_le_bytes());
+            two.extend(res.to_le_bytes());
+        }
+        assert_eq!(parse_volume_range(&two).unwrap().subranges.len(), 2);
         assert_eq!(parse_volume_range(&[]), None);
         assert_eq!(parse_volume_range(&[1, 0, 1]), None, "cut short");
     }

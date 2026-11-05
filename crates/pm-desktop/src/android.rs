@@ -550,10 +550,16 @@ pub fn watch_usb_audio(app: &tauri::AppHandle, changed: impl Fn() + Send + 'stat
             .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")))
             {
                 Ok(c) => match env.get_java_vm() {
-                    Ok(vm3) => pm_out_local::exclusive::set_backend(std::sync::Arc::new(JniUsbExclusive {
-                        vm: std::sync::Arc::new(vm3),
-                        class: c,
-                    })),
+                    Ok(vm3) => {
+                        pm_out_local::exclusive::set_backend(std::sync::Arc::new(JniUsbExclusive {
+                            vm: std::sync::Arc::new(vm3),
+                            class: c,
+                        }));
+                        // A DAC a killed app left without Android's driver goes back to it
+                        let _ = std::thread::Builder::new()
+                            .name("usb-recover".into())
+                            .spawn(pm_out_local::exclusive::recover);
+                    }
                     Err(e) => tracing::warn!("no exclusive USB driver: {e}"),
                 },
                 Err(e) => {
@@ -766,17 +772,39 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
     fn open(
         &self,
         usb: pm_out_local::exclusive::UsbIds,
-    ) -> Result<(std::sync::Arc<dyn pm_out_local::exclusive::Transport>, Vec<u8>), String> {
+    ) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
         use jni021::objects::JClass;
+        use pm_out_local::exclusive::{parse_open_answer, usbfs, OpenRefused};
         let answer = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
             let s = env
                 .call_static_method(class, "open", "(II)Ljava/lang/String;", &Self::ids(usb))?
                 .l()?;
             Ok(String::from(env.get_string(&s.into())?))
-        })?;
-        let (fd, raw) = pm_out_local::exclusive::parse_open_answer(&answer)?;
-        Ok((pm_out_local::exclusive::usbfs(fd), raw))
+        })
+        .map_err(|why| OpenRefused { why, partial: None })?;
+        match parse_open_answer(&answer) {
+            Ok((fd, raw)) => Ok((usbfs(fd), raw)),
+            Err((why, opened)) => Err(OpenRefused {
+                why,
+                partial: opened.map(|(fd, raw)| (usbfs(fd), raw)),
+            }),
+        }
+    }
+
+    fn detached(&self) -> Vec<pm_out_local::exclusive::UsbIds> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "detached", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .map(|a| pm_out_local::exclusive::parse_detached(&a))
+            .unwrap_or_default()
     }
 
     fn release(&self) {

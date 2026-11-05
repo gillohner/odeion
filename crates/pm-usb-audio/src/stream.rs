@@ -1,7 +1,8 @@
 //! Which playback setting (interface and alternate setting) plays a PCM format exactly, and how
 //! samples go into its subslots.
 
-use crate::{Endpoint, Rates, Stream, UsbAudioDevice, COMMON_RATES};
+use crate::schedule::{nominal_q16, supported, Speed};
+use crate::{Endpoint, Rates, Stream, Uac, UsbAudioDevice, COMMON_RATES};
 
 /// What the exclusive driver plays a format with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,8 +15,12 @@ pub struct Setting {
     /// The setting's bit resolution.
     pub bits: u8,
     pub endpoint: Endpoint,
-    /// UAC2: the clock source whose rate is set.
+    /// UAC2: the clock source driving this setting's terminal (through a single-input selector);
+    /// `None` when that can't be told for sure (then nothing is ever confirmed).
     pub clock: Option<u8>,
+    /// The rate may be written: UAC2 the clock's frequency control, UAC1 the endpoint's. When not,
+    /// the driver only reads it, and plays only when it already is the rate asked.
+    pub rate_settable: bool,
 }
 
 impl Setting {
@@ -52,24 +57,45 @@ fn pcm(dev: &UsbAudioDevice) -> impl Iterator<Item = &Stream> {
     })
 }
 
-/// The setting that plays PCM `rate` / `bits` / `channels` with every sample unchanged: the same
-/// channels, the rate listed, at least `bits` bits; the smallest such (16 bit in a 16-bit setting,
-/// 24 bit in a 24- or 32-bit one, left-justified). `Err` says why none does.
+/// Whether the setting's endpoint carries `rate` at `speed`: an interval the driver plays, and room
+/// in each packet for the most frames one carries (the rate per packet rounded up, one more for
+/// the DAC's feedback), across all its transactions.
+pub fn carries(s: &Stream, rate: u32, speed: Speed) -> bool {
+    let Some(ep) = s.endpoint.as_ref() else {
+        return false;
+    };
+    if !supported(speed, ep.interval) {
+        return false;
+    }
+    let per_packet = nominal_q16(rate, speed, ep.interval).div_ceil(1 << 16) + 1;
+    let frame = u64::from(s.channels) * u64::from(s.subslot_bytes);
+    per_packet * frame <= u64::from(ep.max_packet) * u64::from(ep.transactions.max(1))
+}
+
+/// The setting that plays PCM `rate` / `bits` / `channels` with every sample unchanged at `speed`:
+/// the same channels, the rate listed and carried by its endpoint, at least `bits` bits; the
+/// smallest such (16 bit in a 16-bit setting, 24 bit in a 24- or 32-bit one, left-justified).
+/// `Err` says why none does.
 pub fn choose(
     dev: &UsbAudioDevice,
     clock_rates: &[u32],
     rate: u32,
     bits: u8,
     channels: u8,
+    speed: Speed,
 ) -> Result<Setting, String> {
     let fits = |s: &&Stream| s.channels == channels && s.bits >= bits;
+    let listed = |s: &&Stream| rates_of(s, clock_rates).contains(&rate);
     let best = pcm(dev)
         .filter(fits)
-        .filter(|s| rates_of(s, clock_rates).contains(&rate))
+        .filter(listed)
+        .filter(|s| carries(s, rate, speed))
         .min_by_key(|s| (s.subslot_bytes, s.bits));
     let Some(s) = best else {
         let why = if pcm(dev).any(|s| s.channels == channels) {
-            if pcm(dev)
+            if pcm(dev).filter(fits).any(|s| listed(&s)) {
+                format!("the DAC's USB endpoint can't carry {rate} Hz at this bus speed")
+            } else if pcm(dev)
                 .filter(|s| s.channels == channels)
                 .any(|s| s.bits >= bits)
             {
@@ -82,9 +108,12 @@ pub fn choose(
         };
         return Err(why);
     };
-    let clock = match s.rates {
-        Rates::FromClock(id) => Some(id),
-        _ => None,
+    let (clock, rate_settable) = match dev.uac {
+        Some(Uac::V2) => {
+            let c = dev.playback_clock(s.terminal_link);
+            (c, c.is_some_and(|c| dev.clock_settable(c)))
+        }
+        _ => (None, s.endpoint.as_ref().is_some_and(|e| e.freq_control)),
     };
     Ok(Setting {
         interface: s.interface,
@@ -94,15 +123,19 @@ pub fn choose(
         bits: s.bits,
         endpoint: s.endpoint.clone().expect("filtered on an endpoint"),
         clock,
+        rate_settable,
     })
 }
 
-/// Every format (rate, bits, channels) it plays unchanged: each setting's rates with 16, 24 and
-/// 32 bit up to its resolution.
-pub fn formats(dev: &UsbAudioDevice, clock_rates: &[u32]) -> Vec<(u32, u8, u8)> {
+/// Every format (rate, bits, channels) it plays unchanged at `speed`: each setting's rates its
+/// endpoint carries, with 16, 24 and 32 bit up to its resolution.
+pub fn formats(dev: &UsbAudioDevice, clock_rates: &[u32], speed: Speed) -> Vec<(u32, u8, u8)> {
     let mut v: Vec<(u32, u8, u8)> = Vec::new();
     for s in pcm(dev) {
-        for rate in rates_of(s, clock_rates) {
+        for rate in rates_of(s, clock_rates)
+            .into_iter()
+            .filter(|r| carries(s, *r, speed))
+        {
             for bits in [16u8, 24, 32] {
                 if bits <= s.bits && !v.contains(&(rate, bits, s.channels)) {
                     v.push((rate, bits, s.channels));
@@ -142,11 +175,14 @@ mod tests {
             pcm: true,
             float: false,
             dsd_raw: false,
+            terminal_link: 2,
             rates,
             endpoint: Some(Endpoint {
                 address: 0x01,
                 sync: Sync::Async,
                 max_packet: 0x308,
+                transactions: 1,
+                freq_control: true,
                 interval: 1,
                 feedback: Some(0x81),
             }),
@@ -163,7 +199,12 @@ mod tests {
             streams,
             clocks: Vec::new(),
             hardware_volume: None,
+            entities: Vec::new(),
         }
+    }
+
+    fn choose_fs(d: &UsbAudioDevice, rate: u32, bits: u8, ch: u8) -> Result<Setting, String> {
+        choose(d, &[], rate, bits, ch, Speed::Full)
     }
 
     #[test]
@@ -181,28 +222,58 @@ mod tests {
                 },
             ),
         ]);
-        assert_eq!(choose(&d, &[], 44_100, 16, 2).unwrap().alt, 2);
-        assert_eq!(choose(&d, &[], 44_100, 24, 2).unwrap().alt, 3, "3 bytes before 4");
+        assert_eq!(choose_fs(&d, 44_100, 16, 2).unwrap().alt, 2);
+        assert_eq!(choose_fs(&d, 44_100, 24, 2).unwrap().alt, 3, "3 bytes before 4");
         assert_eq!(
-            choose(&d, &[], 96_000, 16, 2).unwrap().alt,
+            choose_fs(&d, 96_000, 16, 2).unwrap().alt,
             1,
             "only alt 1 takes 96 kHz"
         );
-        assert_eq!(choose(&d, &[], 48_000, 24, 2).unwrap().alt, 3);
+        assert_eq!(choose_fs(&d, 48_000, 24, 2).unwrap().alt, 3);
         assert_eq!(
-            choose(&d, &[], 96_000, 32, 2).unwrap_err(),
+            choose_fs(&d, 96_000, 32, 2).unwrap_err(),
             "the DAC takes fewer than 32 bits"
         );
         assert_eq!(
-            choose(&d, &[], 192_000, 16, 2).unwrap_err(),
+            choose_fs(&d, 192_000, 16, 2).unwrap_err(),
             "the DAC does not take 192000 Hz"
         );
         assert_eq!(
-            choose(&d, &[], 44_100, 16, 6).unwrap_err(),
+            choose_fs(&d, 44_100, 16, 6).unwrap_err(),
             "the DAC has no 6-channel PCM setting"
         );
-        assert!(formats(&d, &[]).contains(&(48_000, 24, 2)));
-        assert!(!formats(&d, &[]).contains(&(96_000, 32, 2)));
+        assert!(formats(&d, &[], Speed::Full).contains(&(48_000, 24, 2)));
+        assert!(!formats(&d, &[], Speed::Full).contains(&(96_000, 32, 2)));
+    }
+
+    /// Codex M (round 1 of #306): a setting whose endpoint can't carry the rate is not chosen,
+    /// instead of sending fewer frames than the rate; one that can, is.
+    #[test]
+    fn a_setting_is_chosen_only_where_its_endpoint_carries_the_rate() {
+        let mut small = st(1, 4, 32, Rates::Discrete(vec![48_000, 192_000]));
+        small.endpoint.as_mut().unwrap().max_packet = 192; // 24 frames of 8 bytes a packet
+        let mut big = st(2, 4, 32, Rates::Discrete(vec![192_000]));
+        big.endpoint.as_mut().unwrap().max_packet = 1024;
+        let d = dev(vec![small.clone()]);
+        // 48 kHz at high speed: 6 (+1) frames a microframe, fits; 192 kHz: 24 (+1), doesn't
+        assert_eq!(choose(&d, &[], 48_000, 24, 2, Speed::High).unwrap().alt, 1);
+        assert_eq!(
+            choose(&d, &[], 192_000, 24, 2, Speed::High).unwrap_err(),
+            "the DAC's USB endpoint can't carry 192000 Hz at this bus speed"
+        );
+        assert!(!formats(&d, &[], Speed::High).contains(&(192_000, 24, 2)));
+        let d2 = dev(vec![small, big]);
+        assert_eq!(choose(&d2, &[], 192_000, 24, 2, Speed::High).unwrap().alt, 2);
+        // Three transactions a microframe carry three times as much
+        let mut hb = st(3, 4, 32, Rates::Discrete(vec![768_000]));
+        hb.endpoint.as_mut().unwrap().max_packet = 300;
+        hb.endpoint.as_mut().unwrap().transactions = 3;
+        assert_eq!(
+            choose(&dev(vec![hb]), &[], 768_000, 24, 2, Speed::High)
+                .unwrap()
+                .alt,
+            3
+        );
     }
 
     #[test]

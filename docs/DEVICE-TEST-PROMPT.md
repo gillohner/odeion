@@ -278,6 +278,11 @@ Android played it. Meanwhile other apps' sounds go to the phone's speaker.
    step 1 or lower (never higher), and whether a notification sound plays from the DAC again.
 6. Exclusive USB again, then close the app (swipe it away) while paused: within a few seconds
    Android plays notification sounds from the DAC again. Report if it needs a replug.
+   Then force-stop the app while it plays (Settings › Apps › Odeion › Force stop): Android has no
+   sound from the DAC until the app starts again (it gives the DAC back at its next start) or the
+   DAC is replugged. Report which of the two brought it back.
+   Also: with Android's volume at its lowest step, choose Exclusive USB and play: the DAC starts
+   muted and the panel says so; raise the zone's volume to hear it.
 7. If an Android 13 (or older) phone is at hand: steps 1 to 5 there. Auto plays Exclusive USB on
    it once access was allowed.
 8. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB".

@@ -59,6 +59,10 @@ pub struct Endpoint {
     pub address: u8,
     pub sync: Sync,
     pub max_packet: u16,
+    /// Transactions per (micro)frame (high-bandwidth high-speed endpoints: up to 3).
+    pub transactions: u8,
+    /// UAC1: the endpoint has a sampling frequency control (UAC2: always true, see the clock).
+    pub freq_control: bool,
     pub interval: u8,
     /// The feedback endpoint's address (asynchronous devices).
     pub feedback: Option<u8>,
@@ -91,6 +95,9 @@ pub struct Stream {
     pub dsd_raw: bool,
     pub rates: Rates,
     pub endpoint: Option<Endpoint>,
+    /// The terminal the setting streams into (AS_GENERAL `bTerminalLink`): an Input Terminal of
+    /// type USB streaming, where the playback path starts.
+    pub terminal_link: u8,
 }
 
 /// A UAC2 clock source.
@@ -102,6 +109,51 @@ pub struct ClockSource {
     /// Its frequency control can be written (not only read).
     pub settable: bool,
 }
+
+/// One entity of the audio function (a terminal, unit or clock), with what it is connected to:
+/// the playback path and its clock are found by following these, not by descriptor order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Entity {
+    InputTerminal {
+        id: u8,
+        terminal_type: u16,
+        clock: Option<u8>,
+    },
+    OutputTerminal {
+        id: u8,
+        terminal_type: u16,
+        source: u8,
+    },
+    /// A mixer, selector, processing, effect or extension unit.
+    Unit {
+        id: u8,
+        sources: Vec<u8>,
+    },
+    /// A feature unit: its master channel's volume and mute (`*_settable`: the host may write).
+    Feature {
+        id: u8,
+        source: u8,
+        volume: bool,
+        mute: bool,
+        volume_settable: bool,
+        mute_settable: bool,
+    },
+    ClockSource {
+        id: u8,
+        settable: bool,
+    },
+    ClockSelector {
+        id: u8,
+        sources: Vec<u8>,
+    },
+    ClockMultiplier {
+        id: u8,
+        source: u8,
+    },
+}
+
+/// `wTerminalType` USB streaming: where a playback path starts.
+pub const TERMINAL_USB_STREAMING: u16 = 0x0101;
 
 /// A volume (and mute) the device does in hardware: its feature unit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -126,6 +178,8 @@ pub struct UsbAudioDevice {
     pub streams: Vec<Stream>,
     pub clocks: Vec<ClockSource>,
     pub hardware_volume: Option<HardwareVolume>,
+    /// Every terminal, unit and clock of the audio function.
+    pub entities: Vec<Entity>,
 }
 
 /// A UAC2 clock source's rate range (`RANGE` reply sub-range), in Hz.
@@ -207,6 +261,7 @@ pub fn parse(raw: &[u8]) -> UsbAudioDevice {
         streams: Vec::new(),
         clocks: Vec::new(),
         hardware_volume: None,
+        entities: Vec::new(),
     };
     // Where we are: the current interface (number, alt, class, subclass, protocol)
     let mut iface: Option<(u8, u8, u8, u8, u8)> = None;
@@ -256,6 +311,16 @@ pub fn parse(raw: &[u8]) -> UsbAudioDevice {
                     }
                 }
             }
+            // CS_ENDPOINT EP_GENERAL (UAC1): whether the endpoint has a sampling frequency control
+            0x25 if n >= 4 && d[2] == 0x01 => {
+                if let Some((num, alt, 1, 2, _)) = iface {
+                    if dev.uac != Some(Uac::V2) && alt != 0 {
+                        if let Some(e) = stream_mut(&mut dev, num, alt).endpoint.as_mut() {
+                            e.freq_control = d[3] & 0x01 != 0;
+                        }
+                    }
+                }
+            }
             5 if n >= 7 => {
                 if let Some((num, alt, 1, 2, _)) = iface {
                     endpoint(&mut dev, d, num, alt);
@@ -270,9 +335,93 @@ pub fn parse(raw: &[u8]) -> UsbAudioDevice {
     dev
 }
 
+/// The entity a class-specific AudioControl descriptor describes, when it is one the topology
+/// needs.
+fn entity(v2: bool, d: &[u8]) -> Option<Entity> {
+    let id = *d.get(3)?;
+    let sources = |nr_at: usize| -> Option<Vec<u8>> {
+        let n = *d.get(nr_at)? as usize;
+        d.get(nr_at + 1..nr_at + 1 + n).map(<[u8]>::to_vec)
+    };
+    Some(match (*d.get(2)?, v2) {
+        (0x02, _) => Entity::InputTerminal {
+            id,
+            terminal_type: u16le(d, 4)?,
+            clock: if v2 { Some(*d.get(7)?) } else { None },
+        },
+        (0x03, _) => Entity::OutputTerminal {
+            id,
+            terminal_type: u16le(d, 4)?,
+            source: *d.get(7)?,
+        },
+        // MIXER_UNIT, SELECTOR_UNIT: bNrInPins, then the sources
+        (0x04 | 0x05, _) => Entity::Unit {
+            id,
+            sources: sources(4)?,
+        },
+        (0x06, true) => {
+            // bSourceID, bmaControls(0): mute bits 0-1, volume 2-3 (11: the host may write)
+            let c = u32le(d, 5)?;
+            Entity::Feature {
+                id,
+                source: *d.get(4)?,
+                volume: c & 0x0c != 0,
+                mute: c & 0x03 != 0,
+                volume_settable: c & 0x0c == 0x0c,
+                mute_settable: c & 0x03 == 0x03,
+            }
+        }
+        (0x06, false) => {
+            // bSourceID, bControlSize, bmaControls(0): bit 0 mute, bit 1 volume (writable)
+            let size = *d.get(5)?;
+            let c = match size {
+                1 => u32::from(*d.get(6)?),
+                2.. => u32::from(u16le(d, 6)?),
+                0 => return None,
+            };
+            Entity::Feature {
+                id,
+                source: *d.get(4)?,
+                volume: c & 0x02 != 0,
+                mute: c & 0x01 != 0,
+                volume_settable: c & 0x02 != 0,
+                mute_settable: c & 0x01 != 0,
+            }
+        }
+        // UAC2 EFFECT_UNIT: wEffectType, bSourceID
+        (0x07, true) => Entity::Unit {
+            id,
+            sources: vec![*d.get(6)?],
+        },
+        // PROCESSING / EXTENSION units: wType, bNrInPins, then the sources
+        (0x08 | 0x09, true) | (0x07 | 0x08, false) => Entity::Unit {
+            id,
+            sources: sources(6)?,
+        },
+        (0x0a, true) => Entity::ClockSource {
+            id,
+            settable: *d.get(5)? & 0x03 == 0x03,
+        },
+        (0x0b, true) => Entity::ClockSelector {
+            id,
+            sources: sources(4)?,
+        },
+        (0x0c, true) => Entity::ClockMultiplier {
+            id,
+            source: *d.get(4)?,
+        },
+        _ => return None,
+    })
+}
+
 /// A class-specific AudioControl descriptor.
 fn control(dev: &mut UsbAudioDevice, d: &[u8]) {
     let v2 = dev.uac == Some(Uac::V2);
+    if let Some(e) = entity(v2, d) {
+        if dev.entities.len() < 256 {
+            dev.entities.push(e);
+        }
+    }
     match d.get(2) {
         // UAC2 CLOCK_SOURCE: bClockID, bmAttributes, bmControls
         Some(0x0a) if v2 && d.len() >= 8 => dev.clocks.push(ClockSource {
@@ -332,6 +481,7 @@ fn stream_mut(dev: &mut UsbAudioDevice, num: u8, alt: u8) -> &mut Stream {
         dsd_raw: false,
         rates,
         endpoint: None,
+        terminal_link: 0,
     });
     dev.streams.last_mut().expect("just pushed")
 }
@@ -346,6 +496,7 @@ fn streaming(dev: &mut UsbAudioDevice, d: &[u8], num: u8, alt: u8) {
         // AS_GENERAL
         Some(0x01) => {
             let s = stream_mut(dev, num, alt);
+            s.terminal_link = d.get(3).copied().unwrap_or(0);
             if v2 {
                 // bTerminalLink, bmControls, bFormatType, bmFormats(4), bNrChannels
                 let formats = u32le(d, 6).unwrap_or(0);
@@ -398,6 +549,7 @@ fn endpoint(dev: &mut UsbAudioDevice, d: &[u8], num: u8, alt: u8) {
         return; // not isochronous
     }
     let usage = (attrs >> 4) & 0x03;
+    let v2 = dev.uac == Some(Uac::V2);
     let s = stream_mut(dev, num, alt);
     if usage == 1 {
         // A feedback endpoint (device to host)
@@ -419,8 +571,11 @@ fn endpoint(dev: &mut UsbAudioDevice, d: &[u8], num: u8, alt: u8) {
         address,
         sync,
         max_packet: u16le(d, 4).unwrap_or(0) & 0x07ff,
+        transactions: ((u16le(d, 4).unwrap_or(0) >> 11) & 0x03) as u8 + 1,
         interval: d[6],
         feedback: None,
+        // UAC2 has it on the clock; UAC1 says so in its CS endpoint descriptor (just after)
+        freq_control: v2,
     });
 }
 
@@ -438,6 +593,120 @@ pub struct Summary {
 }
 
 impl UsbAudioDevice {
+    fn entity(&self, id: u8) -> Option<&Entity> {
+        self.entities.iter().find(|e| {
+            matches!(e,
+                Entity::InputTerminal { id: i, .. } | Entity::OutputTerminal { id: i, .. }
+                | Entity::Unit { id: i, .. } | Entity::Feature { id: i, .. }
+                | Entity::ClockSource { id: i, .. } | Entity::ClockSelector { id: i, .. }
+                | Entity::ClockMultiplier { id: i, .. } if *i == id)
+        })
+    }
+
+    /// The playback path of a setting streaming into terminal `link`: the entities from the
+    /// output terminal back to `link` (output terminal first). `None` when `link` is not a USB
+    /// streaming input terminal, or no output or more than one output is reached from it
+    /// (ambiguous: nothing is assumed).
+    pub fn playback_path(&self, link: u8) -> Option<Vec<u8>> {
+        match self.entity(link)? {
+            Entity::InputTerminal { terminal_type, .. } if *terminal_type == TERMINAL_USB_STREAMING => {}
+            _ => return None,
+        }
+        let mut found: Vec<Vec<u8>> = Vec::new();
+        for e in &self.entities {
+            let Entity::OutputTerminal { id, source, .. } = e else {
+                continue;
+            };
+            let mut path = vec![*id];
+            if self.walk_back(*source, link, &mut path, 0) {
+                found.push(path);
+            }
+        }
+        (found.len() == 1).then(|| found.remove(0))
+    }
+
+    /// Follow sources back from `at` to `link`, appending the entities passed.
+    fn walk_back(&self, at: u8, link: u8, path: &mut Vec<u8>, depth: usize) -> bool {
+        if depth > 32 || path.contains(&at) {
+            return false;
+        }
+        path.push(at);
+        if at == link {
+            return true;
+        }
+        let sources: Vec<u8> = match self.entity(at) {
+            Some(Entity::Feature { source, .. }) => vec![*source],
+            Some(Entity::Unit { sources, .. }) => sources.clone(),
+            _ => Vec::new(),
+        };
+        for s in sources {
+            let keep = path.len();
+            if self.walk_back(s, link, path, depth + 1) {
+                return true;
+            }
+            path.truncate(keep);
+        }
+        path.pop();
+        false
+    }
+
+    /// The feature unit on the playback path from terminal `link` whose volume the host may set
+    /// (the one nearest the output); `None` when the path is unknown or has none. A unit on
+    /// another path (a microphone's) is never it.
+    pub fn playback_unit(&self, link: u8) -> Option<HardwareVolume> {
+        self.playback_path(link)?
+            .into_iter()
+            .find_map(|id| match self.entity(id) {
+                Some(Entity::Feature {
+                    id,
+                    volume_settable: true,
+                    mute_settable,
+                    ..
+                }) => Some(HardwareVolume {
+                    unit_id: *id,
+                    volume: true,
+                    mute: *mute_settable,
+                }),
+                _ => None,
+            })
+    }
+
+    /// The clock source driving terminal `link` (UAC2): its `bCSourceID`, through a clock
+    /// selector with a single input. `None` when it can't be told for sure (a selector with
+    /// several inputs, a multiplier, nothing named): then a rate is never confirmed.
+    pub fn playback_clock(&self, link: u8) -> Option<u8> {
+        let Some(Entity::InputTerminal {
+            clock: Some(mut at), ..
+        }) = self.entity(link)
+        else {
+            return None;
+        };
+        for _ in 0..8 {
+            match self.entity(at)? {
+                Entity::ClockSource { id, .. } => return Some(*id),
+                Entity::ClockSelector { sources, .. } if sources.len() == 1 => at = sources[0],
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// Whether the clock `id` takes a rate written by the host.
+    pub fn clock_settable(&self, id: u8) -> bool {
+        matches!(self.entity(id), Some(Entity::ClockSource { settable: true, .. }))
+    }
+
+    /// The feature unit Exclusive USB would drive for this device's playback (UAC2: the
+    /// playback path of its first PCM setting); `None` for UAC1 (its volume requests are not
+    /// spoken) and when the path doesn't say. What a UI calls "its own volume".
+    pub fn exclusive_unit(&self) -> Option<HardwareVolume> {
+        if self.uac != Some(Uac::V2) {
+            return None;
+        }
+        let link = self.streams.iter().find(|s| s.pcm)?.terminal_link;
+        self.playback_unit(link)
+    }
+
     /// Its summary under `name`, with the UAC2 clock's ranges when they were read.
     pub fn summary(&self, name: &str, clock_ranges: &[RateRange]) -> Summary {
         let mut rates: Vec<u32> = Vec::new();
@@ -464,7 +733,9 @@ impl UsbAudioDevice {
                 .max()
                 .unwrap_or(0),
             dsd: self.streams.iter().any(|s| s.dsd_raw),
-            hardware_volume: self.hardware_volume.as_ref().is_some_and(|v| v.volume),
+            // Its own volume: the unit on the playback path the app's driver uses (not the first
+            // unit in the descriptors, which may be a microphone's)
+            hardware_volume: self.exclusive_unit().is_some(),
         }
     }
 }

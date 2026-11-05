@@ -26,6 +26,9 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.SystemClock
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
+import org.json.JSONArray
 import org.json.JSONObject
 
 class UsbExclusive private constructor() {
@@ -53,6 +56,8 @@ class UsbExclusive private constructor() {
                 override fun onReceive(ctx: Context, intent: Intent) {
                     when (intent.action) {
                         // Unplugged while held: nothing to give back, the connection is dead
+                        // Unplugged: the connection closes; the Rust side works on its own duplicate
+                        // of the descriptor, and its next call finds the device gone
                         UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                             val gone = deviceOf(intent)
                             synchronized(lock) {
@@ -151,12 +156,12 @@ class UsbExclusive private constructor() {
                     if (intf.interfaceClass != UsbConstants.USB_CLASS_AUDIO) continue
                     if (claimed.any { it.id == intf.id }) continue
                     if (!c.claimInterface(intf, true)) {
-                        runCatching { c.close() }
-                        conn = null
-                        device = null
-                        claimed.clear()
-                        UsbAudio.refreshNow()
-                        return refused("another app holds the DAC")
+                        // Some interfaces are taken from Android's driver already: the connection
+                        // stays open, and the Rust side gives them back to Android's driver, then
+                        // calls release() (closing alone would leave them without a driver)
+                        return JSONObject().put("ok", false).put("why", "another app holds the DAC")
+                            .put("fd", c.fileDescriptor).put("descriptors", hex(c.rawDescriptors ?: ByteArray(0)))
+                            .toString()
                     }
                     claimed.add(intf)
                 }
@@ -180,6 +185,32 @@ class UsbExclusive private constructor() {
             UsbAudio.refreshNow()
             // Android lists it again by then, or it counts as gone
             BitPerfect.handler().postDelayed({ UsbAudio.refreshNow() }, RETURN_MS + 100)
+        }
+
+        /// Attached audio devices the app may open that Android lists no USB audio output for: left
+        /// without Android's driver by an app killed while it held them. JSON: [{vendor_id,
+        /// product_id}]. Called once at start; the Rust side gives them back (the connection is
+        /// opened for that and released).
+        @JvmStatic
+        fun detached(): String {
+            val out = JSONArray()
+            val c = context ?: return out.toString()
+            val um = usb() ?: return out.toString()
+            val am = c.getSystemService(AudioManager::class.java) ?: return out.toString()
+            val listed = runCatching {
+                am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter {
+                    it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
+                }.map { it.productName?.toString()?.trim()?.lowercase().orEmpty() }
+            }.getOrDefault(emptyList())
+            val held = synchronized(lock) { device?.deviceName }
+            for (d in runCatching { um.deviceList.values.toList() }.getOrDefault(emptyList())) {
+                if (!isAudio(d) || d.deviceName == held) continue
+                if (!runCatching { um.hasPermission(d) }.getOrDefault(false)) continue
+                val name = runCatching { d.productName }.getOrNull()?.trim()?.lowercase().orEmpty()
+                val known = listed.any { it.isNotEmpty() && name.isNotEmpty() && (it.contains(name) || name.contains(it)) }
+                if (!known) out.put(JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId))
+            }
+            return out.toString()
         }
 
         /// The app holds a DAC now.
