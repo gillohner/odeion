@@ -135,17 +135,15 @@ class UsbExclusive private constructor() {
             return openDevice(um, d)
         }
 
-        /// The device this app claimed and never released (named by detached()), opened exactly:
-        /// by its device name (its path), never another one with the same ids. Answers as open().
+        /// The device the Rust side chose to give back (pm-out-local's recovery_target, from
+        /// detached()'s facts), opened exactly by its device name (its path): a lookup by name,
+        /// nothing else is ever selected here. Answers as open().
         @JvmStatic
-        fun openDetached(name: String, vendor: Int, product: Int): String {
+        fun openDetached(name: String): String {
             val um = usb() ?: return refused("no USB here")
             if (recorded() != name) return refused("$name is not the device this app claimed")
             val d = runCatching { um.deviceList[name] }.getOrNull()
                 ?: return refused("$name is not attached")
-            if (d.vendorId != vendor || d.productId != product || !isAudio(d)) {
-                return refused("$name is another device now")
-            }
             return openDevice(um, d)
         }
 
@@ -232,34 +230,46 @@ class UsbExclusive private constructor() {
         /// The recorded claim's device name, when there is one.
         private fun recorded(): String? = prefs()?.getString(CLAIMED, null)?.substringBefore('|')
 
-        /// The device this app itself claimed and never released (it was killed holding it): still
-        /// attached under the same device name, not held now. JSON: [{vendor_id, product_id,
-        /// device_name}], at most one. Nothing else is ever named: a DAC Android is using is never
-        /// touched. Called once at start; the Rust side opens exactly it (openDetached, by its
-        /// name: never an identical DAC), gives its interfaces back to Android's driver and
-        /// releases it (which forgets the record).
+        /// Facts for the Rust side's recovery after the app was killed holding a DAC (Android's
+        /// driver never got it back): the claim recorded then, whether a DAC is held now, and every
+        /// attached USB device by name. JSON: {"recorded":{device_name, vendor_id, product_id},
+        /// "held":bool, "attached":[{device_name, vendor_id, product_id, audio}]}. The Rust side
+        /// decides (only the recorded device, under the same name: never an identical DAC), then
+        /// opens it with openDetached, gives its interfaces back and releases it (which forgets
+        /// the record), or calls forgetClaim. Called once at start.
         @JvmStatic
         fun detached(): String {
-            val out = JSONArray()
+            val out = JSONObject()
             val um = usb() ?: return out.toString()
-            val rec = prefs()?.getString(CLAIMED, null) ?: return out.toString()
-            val parts = rec.split('|')
-            if (parts.size != 3) {
-                forget()
-                return out.toString()
+            prefs()?.getString(CLAIMED, null)?.let { rec ->
+                val parts = rec.split('|')
+                val vendor = parts.getOrNull(1)?.toIntOrNull()
+                val product = parts.getOrNull(2)?.toIntOrNull()
+                if (parts.size == 3 && vendor != null && product != null) {
+                    val claim = JSONObject().put("device_name", parts[0]).put("vendor_id", vendor)
+                        .put("product_id", product)
+                    out.put("recorded", claim)
+                } else {
+                    forget()
+                }
             }
-            if (synchronized(lock) { conn != null }) return out.toString()
-            val d = runCatching { um.deviceList[parts[0]] }.getOrNull()
-            // Unplugged since (a replug gives Android a fresh device), or another device now
-            if (d == null || d.vendorId.toString() != parts[1] || d.productId.toString() != parts[2]) {
-                forget()
-                return out.toString()
+            out.put("held", synchronized(lock) { conn != null })
+            val attached = JSONArray()
+            val devices = runCatching { um.deviceList.values.toList() }.getOrDefault(emptyList())
+            for (d in devices) {
+                attached.put(
+                    JSONObject().put("device_name", d.deviceName).put("vendor_id", d.vendorId)
+                        .put("product_id", d.productId).put("audio", isAudio(d))
+                )
             }
-            out.put(
-                JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId)
-                    .put("device_name", d.deviceName)
-            )
+            out.put("attached", attached)
             return out.toString()
+        }
+
+        /// The recorded claim is over (its device unplugged since, or another one now).
+        @JvmStatic
+        fun forgetClaim() {
+            forget()
         }
 
         /// The app holds a DAC now.

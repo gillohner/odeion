@@ -813,23 +813,19 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
 
     fn open_detached(
         &self,
-        dac: &pm_out_local::exclusive::DetachedDac,
+        device_name: &str,
     ) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
         use jni021::objects::{JClass, JValue};
         use pm_out_local::exclusive::OpenRefused;
         let answer = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
-            let name = env.new_string(&dac.device_name)?;
+            let name = env.new_string(device_name)?;
             let s = env
                 .call_static_method(
                     class,
                     "openDetached",
-                    "(Ljava/lang/String;II)Ljava/lang/String;",
-                    &[
-                        JValue::Object(&name),
-                        JValue::Int(i32::from(dac.vendor_id)),
-                        JValue::Int(i32::from(dac.product_id)),
-                    ],
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&name)],
                 )?
                 .l()?;
             Ok(String::from(env.get_string(&s.into())?))
@@ -838,7 +834,19 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         Self::opened(&answer)
     }
 
-    fn detached(&self) -> Vec<pm_out_local::exclusive::DetachedDac> {
+    fn forget_claim(&self) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "forgetClaim", "()V", &[])?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: forget the claim: {e}");
+        }
+    }
+
+    fn claims(&self) -> pm_out_local::exclusive::Claims {
         use jni021::objects::JClass;
         let answer = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
@@ -849,7 +857,7 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         });
         answer
             .ok()
-            .map(|a| pm_out_local::exclusive::parse_detached(&a))
+            .map(|a| pm_out_local::exclusive::parse_claims(&a))
             .unwrap_or_default()
     }
 

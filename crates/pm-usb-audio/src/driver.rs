@@ -699,6 +699,18 @@ pub mod fake {
         pub volume_stuck: Option<i16>,
         /// Every volume write: (feature unit, value)
         pub unit_writes: Vec<(u8, i16)>,
+        /// Feature units with a level, mute and range of their own (others use the fields above)
+        pub units: std::collections::HashMap<u8, UnitFake>,
+        /// Setting an alternate setting fails (not unplugged: a stall)
+        pub refuse_alt: bool,
+    }
+
+    /// A feature unit's own level, mute and volume `RANGE` reply.
+    #[derive(Default, Clone, Debug)]
+    pub struct UnitFake {
+        pub volume: i16,
+        pub muted: bool,
+        pub range: Vec<u8>,
     }
 
     #[derive(Default, Clone)]
@@ -742,12 +754,51 @@ pub mod fake {
         fn set_alt(&self, interface: u8, alt: u8) -> Result<(), UsbError> {
             let mut s = self.check()?;
             s.log.push(format!("alt {interface} {alt}"));
+            if s.refuse_alt {
+                return Err(UsbError::Other("stall".into()));
+            }
             Ok(())
         }
 
         fn control(&self, req: &ControlRequest) -> Result<Vec<u8>, UsbError> {
             let mut s = self.check()?;
             let target = req.value >> 8;
+            let unit = (req.index >> 8) as u8;
+            // A unit of its own: its level, mute and range
+            if req.request_type & 0x60 == 0x20
+                && req.request_type & 0x1f == 0x01
+                && s.units.contains_key(&unit)
+            {
+                let get = req.request_type & 0x80 != 0;
+                match (get, req.request, target) {
+                    (false, 0x01, 0x02) => {
+                        let v = i16::from_le_bytes([req.data[0], req.data[1]]);
+                        s.unit_writes.push((unit, v));
+                        s.log.push(format!("volume {v}"));
+                        s.units.get_mut(&unit).expect("checked").volume = v;
+                        return Ok(Vec::new());
+                    }
+                    (false, 0x01, 0x01) => {
+                        let m = req.data.first() == Some(&1);
+                        s.log.push(format!("mute {m}"));
+                        s.units.get_mut(&unit).expect("checked").muted = m;
+                        return Ok(Vec::new());
+                    }
+                    (true, 0x01, 0x02) => {
+                        s.log.push("get volume".into());
+                        return Ok(s.units[&unit].volume.to_le_bytes().to_vec());
+                    }
+                    (true, 0x01, 0x01) => {
+                        s.log.push("get mute".into());
+                        return Ok(vec![u8::from(s.units[&unit].muted)]);
+                    }
+                    (true, 0x02, 0x02) => {
+                        s.log.push("get volume range".into());
+                        return Ok(s.units[&unit].range.clone());
+                    }
+                    _ => {}
+                }
+            }
             match (req.request_type, req.request, target) {
                 // UAC2 clock (or UAC1 endpoint) rate
                 (0x21 | 0x22, 0x01, 0x01)
