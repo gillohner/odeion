@@ -24,11 +24,9 @@ fi
 
 echo "== booting the installed system"
 CONSOLE=$(dirname "$DISK")/console.sock
-# e1000, not virtio-net: with QEMU's user network, replies Docker forwards from a container (the
-# homeserver's published 6287) never completed a handshake through virtio-net (#270, first runs)
 "${VM[@]}" -boot c \
   -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:17788-:7788,hostfwd=tcp:127.0.0.1:16287-:6287" \
-  -device e1000,netdev=n0 \
+  -device virtio-net-pci,netdev=n0 \
   -chardev "socket,id=s0,path=$CONSOLE,server=on,wait=off,logfile=$LOGS/boot-$MODE.log" -serial chardev:s0 &
 QEMU=$!
 trap 'kill $QEMU 2>/dev/null || true' EXIT
@@ -58,6 +56,8 @@ node_up() {
 }
 # The homeserver: TLS bytes back on :6287 (Pubky TLS uses raw public keys, so the handshake itself
 # may end in an alert; through QEMU's port forward nothing comes back when nothing listens)
+# The output is read whole first: `openssl … | grep -q` under pipefail failed whenever grep stopped
+# reading early, so a homeserver that answered looked down (#270's first runs).
 tls_up() {
   local out
   out=$(echo | timeout 10 openssl s_client -connect 127.0.0.1:16287 2>&1 || true)
