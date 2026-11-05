@@ -110,18 +110,21 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
   const srcText = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
   const lines = srcText.split('\n');
   const HELPER = /const (hereName|hereIn|hereOnly|playedBy|decodedBy|decodeNote|wordHere) =/;
-  const PHRASES = [/\b(this|the|in a) browser\b/gi, /['"`]Browser\b/g];
+  const PHRASES = [/\b(this|the|in a)(\s|&nbsp;|\u00a0)browser\b/gi, /['"`>\s·]Browser\b/g];
   const bad = [];
   let inBlock = false; // the file's head comment runs over several lines without a leading *
   lines.forEach((l, i) => {
-    const was = inBlock; if (/\/\*/.test(l) && !/\*\//.test(l)) inBlock = true; if (/\*\//.test(l)) inBlock = false;
+    const was = inBlock; if (/^\s*\/\*/.test(l) && !/\*\//.test(l)) inBlock = true; if (/\*\//.test(l)) inBlock = false;
     if (was || HELPER.test(l) || /^\s*(\/\/|\*|\/\*)/.test(l)) return;
-    const code = l.replace(/\s\/\/.*$/, ''); // a trailing comment (a URL's // has no space before it)
+    // A trailing comment: ` // ` with an even number of quotes before it (so not inside a literal)
+    const cm = l.match(/\s\/\/ /); const code = cm && ((l.slice(0, cm.index).match(/['"`]/g) || []).length % 2 === 0) ? l.slice(0, cm.index) : l;
     for (const m of PHRASES.flatMap((re) => [...code.matchAll(re)])) {
       const before = code.slice(0, m.index);
       // The else branch: `appPlatform() ? '…' : '<here>` on this line, the phrase inside that literal
+      // (a simple one: nothing negates or joins the condition, and no nested `?` before the ` : `)
       const q = before.lastIndexOf('appPlatform() ?');
-      const elseBranch = q >= 0 && /\s:\s['"`][^'"`]{0,80}$/.test(before.slice(q));
+      const simple = q >= 0 && /(^|[(\[{,=:?]\s*|\$\{\s*|\breturn\s+|=>\s*)$/.test(before.slice(0, q)) && !/\?/.test(before.slice(q + 15).replace(/\s:\s['"`][^'"`]{0,80}$/, ''));
+      const elseBranch = simple && /\s:\s['"`][^'"`]{0,80}$/.test(before.slice(q));
       if (!elseBranch) bad.push(`${i + 1}: …${code.slice(Math.max(0, m.index - 30), m.index + 24).trim()}…`);
     }
   });
