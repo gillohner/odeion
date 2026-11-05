@@ -1,11 +1,12 @@
 // An item page's Similar › "Tagged alike on Pubky" tiles open and play what they show
 // (TASK-similar-tiles-click-1105; owner, 2026-11-05: the tiles did nothing on click). Real candidate
 // assets on the fixture origin (tools/ui-fixture.js), the page's extras listing a song, an album, an
-// artist and a podcast tagged alike, between a coin, a paper and a place:
+// artist, a podcast and a playlist tagged alike, between a coin, a paper, a place and a game:
 //   * only the music shows, in order (by the item's own kind, not its tags);
 //   * each tile opens its own item (the song's page for a track, a podcast's or playlist's site), and
 //     ▶ on each plays its own;
-//   * the page's own "In your library" tiles still open theirs;
+//   * the page's own "In your library" tiles still open theirs; a Home section's playlist opens its
+//     site too (the node has no item page for it);
 // on an album, an artist and a song page, at 390 (phone) and 1280 px.
 //   node tools/ui-similar-tiles.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -44,6 +45,8 @@ for (const k of ['album', 'artist', 'song']) {
   fixtures[`/item/${k}/lib-7/extras`] = { body: { collections: [], related, concerts: [], similar: mine } };
 }
 fixtures['/library/artists/11/similar'] = { body: { artists: [] } };
+// A Home section with an album and a playlist (Home's tiles open playlists the same way)
+fixtures['/home/following'] = { body: { section: 'following', items: [music[1], music[4]], tags: [] } };
 const open = async (browser, w, kind) => {
   const run = await fx.create(browser, w, { fixtures, touch: w < 600 });
   await run.page.setViewportSize({ width: w, height: 900 });
@@ -93,6 +96,20 @@ const where = (p) => p.evaluate(() => (window.__opened.length ? `web:${window.__
       await done(run);
       check(errors.length === 0, `${at}: no page errors in any of its loads${errors.length ? ': ' + errors.join(' | ') : ''}`);
       errors = [];
+    }
+  }
+  // Home: a section's album opens its page, its playlist its site
+  for (const w of [390, 1280]) {
+    const want = [`/album/mb-${U.album}`, 'web:https://example.org/playlist/9'];
+    for (let k = 0; k < 2; k++) {
+      const run = await fx.create(browser, w, { fixtures, touch: w < 600 });
+      await run.page.addInitScript(() => { window.__opened = []; window.open = (u) => { window.__opened.push(String(u)); return null; }; });
+      await fx.go(run.page, '/home/following'); await run.page.waitForSelector('[data-hgrid] [data-tile]', { timeout: 15000 }).catch(() => {});
+      await run.page.locator(`[data-hgrid] [data-tile="${k}"]`).click({ position: { x: 10, y: 10 } }); await sleep(500);
+      const got = await where(run.page);
+      check(got === want[k], `Home section at ${w}: tile ${k} opens ${want[k]} (${got})`);
+      check(!run.state.errors.length, `Home section at ${w}: no page errors${run.state.errors.length ? ': ' + run.state.errors.join(' | ') : ''}`);
+      await run.context.close();
     }
   }
   await browser.close();
