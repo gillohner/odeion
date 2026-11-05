@@ -1,0 +1,25 @@
+# Odeion only (the ISO's second choice): the Odeion node, signing in with a Pubky homeserver you
+# already have (set in the web setup). Same project name and data volume as the bundle
+# (deploy/bundle/docker-compose.yml), so its backups and restores fit. Settings in .env, written on
+# the first boot (odeion-firstboot): PM_TAG, PM_TOKEN, PM_PUBLIC_URL, MUSIC_DIR.
+name: pubky-music
+
+services:
+  music:
+    image: ${ODEION_IMAGE:-${PM_IMAGE:-ghcr.io/gillohner/pubky-music-node}}:${ODEION_TAG:-${PM_TAG:-edge}}
+    restart: unless-stopped
+    # The host network, so the node finds speakers (UPnP, Cast, AirPlay, Squeezebox)
+    network_mode: host
+    environment:
+      PM_LISTEN: "0.0.0.0:7788"
+      PM_PUBLIC_URL: ${ODEION_PUBLIC_URL-${PM_PUBLIC_URL:-}}
+      PM_TOKEN: ${ODEION_TOKEN:-${PM_TOKEN:-}}
+      PM_NAME: ${ODEION_NAME-${PM_NAME:-Odeion}}
+      PM_FOLDERS: "/music"
+      RUST_LOG: "info"
+    volumes:
+      - music-node:/data
+      - ${MUSIC_DIR:-/srv/music}:/music:ro
+
+volumes:
+  music-node:
