@@ -1,0 +1,18 @@
+[Unit]
+Description=Odeion: first start (settings, images)
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+ConditionPathExists=!/var/lib/odeion/firstboot-done
+# Until it works: no network yet, a registry that doesn't answer
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/odeion-firstboot
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

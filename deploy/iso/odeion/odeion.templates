@@ -1,0 +1,12 @@
+Template: odeion/mode
+Type: select
+Choices-C: bundle, node
+Choices: Odeion with its own homeserver (recommended), Odeion only
+Default: bundle
+Description: What should this machine run?
+ Odeion with its own homeserver: the Odeion node and a Pubky homeserver for your
+ sign-in and your music's backups, all on this machine. Choose this if you are
+ not sure.
+ .
+ Odeion only: just the Odeion node. You sign in with a Pubky homeserver you
+ already have, in the web setup after the install.

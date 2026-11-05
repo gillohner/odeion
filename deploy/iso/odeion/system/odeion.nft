@@ -1,0 +1,27 @@
+# Odeion's firewall (deploy/iso): what reaches this machine. Only our own table, input only:
+# Docker's rules (published ports, container traffic) stay as Docker makes them.
+table inet odeion {}
+delete table inet odeion
+table inet odeion {
+  chain input {
+    type filter hook input priority filter; policy drop;
+    iif lo accept
+    ct state established,related accept
+    ct state invalid drop
+    meta l4proto { icmp, ipv6-icmp } accept
+    iifname "docker0" accept
+    iifname "br-*" accept
+    # odeion.local
+    udp dport 5353 accept
+    # The Odeion node
+    tcp dport 7788 accept
+    # The homeserver's Pubky TLS port (Odeion with its own homeserver)
+    @HOMESERVER_PORT@
+    # The home network (private addresses): everything the node uses with speakers, on ports that
+    # aren't fixed: SSDP/UPnP and AirPlay replies, Squeezebox players (3483), Snapcast's server
+    # connecting back. Nothing else listens on this box (no SSH; Docker's other ports are on
+    # 127.0.0.1).
+    ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept
+    ip6 saddr { fe80::/10, fc00::/7 } accept
+  }
+}
