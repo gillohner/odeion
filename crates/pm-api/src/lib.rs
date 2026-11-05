@@ -110,6 +110,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod usage;
 pub mod vault;
 pub mod vault_cache;
 pub mod watch;
@@ -224,6 +225,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/node/apps/{id}", put(apps::put))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/token", post(access_token::replace))
+        // Usage insights, the owner's side (usage.rs; listeners are refused under /node too)
+        .route("/node/usage", get(usage::status).put(usage::set_gate))
+        .route("/node/usage/clear", post(usage::clear_all))
+        .route("/node/usage/summary", get(usage::summary))
+        .route("/node/usage/export", get(usage::export))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
         .route("/outputs", get(outputs))
@@ -723,6 +729,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        // Usage insights, each person's own side (usage.rs: owner and listeners, never guests or
+        // a node without a token; the handlers read bodies themselves, within their own limits)
+        .route("/usage/me", get(usage::me).put(usage::choose))
+        .route("/usage/me/notice", post(usage::notice))
+        .route("/usage/me/clear", post(usage::clear_mine))
+        .route("/usage/sessions", post(usage::open))
+        .route("/usage/sessions/close", post(usage::close))
+        .route("/usage/events", post(usage::ingest))
         .route("/auth/pubky/renewal", post(login_renewal))
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))
@@ -733,6 +747,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/listens/visibility", post(listens::move_all))
         .route("/people/zones", get(accounts::get_zones).put(accounts::set_zones))
         .route("/me/services", get(signin::my_services))
+        .route(
+            "/me/sources",
+            get(accounts::my_sources).put(accounts::set_my_sources),
+        )
         .route("/people", get(people::list))
         .route("/devices", get(devices::list))
         .route(
@@ -1013,7 +1031,11 @@ async fn auth(
     let not_owner = caller.role != accounts::Role::Owner;
     // Who listens where (presence.rs): whoever plays on a zone
     let played = presence::zone_written(req.method(), req.uri().path()).map(|z| (z, caller.clone()));
-    let asking = accounts::Who::of(&caller);
+    // Under the node's source policy, a listener's catalogue reads may use the node's sign-ins
+    let asking = match accounts::Who::of(&caller) {
+        w @ accounts::Who::Listener(_) => w.resolved(&state.library.lock().expect("library poisoned")),
+        w => w,
+    };
     req.extensions_mut().insert(caller);
     // Catalogue reads (search, item pages) use the asking person's sign-in, or the app's
     let resp = accounts::ASKING.scope(asking, next.run(req)).await;
@@ -1178,6 +1200,7 @@ async fn party_page() -> Response {
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
             (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
+            (header::X_FRAME_OPTIONS, "DENY"),
         ],
         include_str!("../static/party.html"),
     )
@@ -1190,6 +1213,7 @@ async fn web_ui() -> Response {
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
             (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
+            (header::X_FRAME_OPTIONS, "DENY"),
         ],
         include_str!("../static/index.html"),
     )
@@ -2604,20 +2628,7 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))?;
-    let mime = match bytes.get(..4) {
-        Some([0x89, b'P', b'N', b'G']) => "image/png",
-        Some([b'R', b'I', b'F', b'F']) => "image/webp",
-        Some([b'G', b'I', b'F', _]) => "image/gif",
-        _ => "image/jpeg",
-    };
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    art::picture(bytes, "private, max-age=86400")
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
@@ -2747,7 +2758,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
     let copy_rate = files::copy_rate(s);
     // One lock, taken and released here: a guard in a struct literal lives until the end of the
     // whole expression, so a second `lock()` in another field would wait for ever
-    let (jukebox_zone, dev_setting, genre_tags, prefer_full, first_steps_hidden) = {
+    let (jukebox_zone, dev_setting, genre_tags, prefer_full, first_steps_hidden, sources_policy) = {
         let lib = s.library.lock().expect("library poisoned");
         let on = |k: &str| lib.get_setting(k).ok().flatten().is_some_and(|v| v == "1");
         (
@@ -2759,6 +2770,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
             tags::genre_tags_on(&lib),
             on(item::PREFER_FULL_KEY),
             on(first_steps::HIDDEN_KEY),
+            accounts::source_policy(&lib),
         )
     };
     NodeSettingsView {
@@ -2772,6 +2784,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         first_steps_hidden,
         config_folders: config_folders(s),
         token_replaceable: s.token_file().is_some(),
+        sources_policy,
     }
 }
 
@@ -2845,6 +2858,12 @@ async fn update_node_settings(
             let n = tags::publish_genres(&lib)?;
             tracing::info!(tags = n, "files' genres published as tags");
         }
+    }
+    if let Some(p) = req.sources_policy {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(accounts::SOURCE_POLICY_KEY, p.as_str())?;
     }
     if let Some(h) = req.first_steps_hidden {
         s.library
@@ -3061,14 +3080,8 @@ async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Re
     let bytes = tokio::fs::read(&art.file)
         .await
         .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, art.mime),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    // Its type by its bytes, also for covers stored before the scan checked them
+    art::picture(bytes, "private, max-age=86400")
 }
 
 // ---- pubky ----
@@ -3267,17 +3280,17 @@ async fn controller_login_start(
     let body = axum::body::to_bytes(req.into_body(), 1024)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let renew_asked = if body.iter().all(u8::is_ascii_whitespace) {
-        false
+    let asked = if body.iter().all(u8::is_ascii_whitespace) {
+        ControllerLoginStart::default()
     } else {
         serde_json::from_slice::<ControllerLoginStart>(&body)
             .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
-            .renewal
-            .is_some_and(|code| renewal_good(&s, &code))
     };
+    let renew_asked = asked.renewal.is_some_and(|code| renewal_good(&s, &code));
+    let device = asked.device;
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -3298,7 +3311,7 @@ async fn controller_login_start(
     loop {
         let waiting: Vec<(String, std::time::Instant, String)> = logins
             .iter()
-            .map(|(id, (_, at, o))| (id.clone(), *at, o.clone()))
+            .map(|(id, (_, at, o, _))| (id.clone(), *at, o.clone()))
             .collect();
         match make_room(&waiting, &origin) {
             Some(old) => {
@@ -3307,7 +3320,7 @@ async fn controller_login_start(
             None => break,
         }
     }
-    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
+    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin, device));
     drop(logins);
     let qr_svg = qr_svg(&url);
     let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
@@ -3331,9 +3344,10 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at, _)) = logins.get(&id) else {
+    let Some((flow, at, _, device)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus::of("expired")));
     };
+    let device = *device;
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
         return Ok(Json(ControllerLoginStatus::of("expired")));
@@ -3388,8 +3402,12 @@ async fn controller_login_poll(
                 // Renewed: the codes for it are used up
                 s.renewals.lock().expect("renewals lock").clear();
             }
-            let token = accounts::mint_owner(&s, &who)?;
-            tracing::info!(%who, renew, "controller signed in with Pubky Ring");
+            let token = if device {
+                accounts::mint_device(&s, &who)?
+            } else {
+                accounts::mint_owner(&s, &who)?
+            };
+            tracing::info!(%who, renew, device, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
                 token: Some(token),
                 user: Some(who),
@@ -4737,7 +4755,7 @@ mod tests {
                 "/Items/{id}/Images/Primary",
                 get(|h: axum::http::HeaderMap, q: Q| async move {
                     assert!(authed(&h, &q));
-                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG\r\n\x1a\n".to_vec())
                 }),
             )
             .route("/Sessions/Logout", post(|| async { StatusCode::NO_CONTENT }));
@@ -4804,7 +4822,10 @@ mod tests {
         // Browsers and covers go through the node
         for (path, magic) in [
             (format!("/v1/sources/jellyfin/stream/{SONG}"), &b"fLaC"[..]),
-            (format!("/v1/sources/jellyfin/cover/{ALBUM}"), &b"\x89PNG"[..]),
+            (
+                format!("/v1/sources/jellyfin/cover/{ALBUM}"),
+                &b"\x89PNG\r\n\x1a\n"[..],
+            ),
         ] {
             let resp = app
                 .clone()
@@ -4816,7 +4837,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
-            assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..4], magic);
+            assert_eq!(
+                &resp.into_body().collect().await.unwrap().to_bytes()[..magic.len()],
+                magic
+            );
         }
         // Playlists import by MusicBrainz recording
         let (_, pls) = call(&app, "GET", "/v1/sources/jellyfin/playlists", None).await;
@@ -4962,7 +4986,7 @@ mod tests {
                 "/library/metadata/{id}/thumb/{ver}",
                 get(|h: axum::http::HeaderMap, q: Q| async move {
                     assert!(authed(&h, &q));
-                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG\r\n\x1a\n".to_vec())
                 }),
             )
             .route(
@@ -5089,7 +5113,7 @@ mod tests {
         // Browsers and covers go through the node
         for (path, magic) in [
             ("/v1/sources/plex/stream/1201", &b"fLaC"[..]),
-            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG"[..]),
+            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG\r\n\x1a\n"[..]),
         ] {
             let resp = app
                 .clone()
@@ -5101,7 +5125,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{path}");
-            assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..4], magic);
+            assert_eq!(
+                &resp.into_body().collect().await.unwrap().to_bytes()[..magic.len()],
+                magic
+            );
         }
         let (_, v) = call(&app, "DELETE", "/v1/sources/plex/server", None).await;
         assert_eq!(v["connected"], false);
@@ -5693,7 +5720,13 @@ mod tests {
         profiles::cache_view(BOB, Some(view(BOB, "Bob")));
         let people = s.art_dir.join("people");
         std::fs::create_dir_all(&people).unwrap();
-        let png = |n: usize| [&[0x89, b'P', b'N', b'G'][..], &vec![0u8; n]].concat();
+        let png = |n: usize| {
+            [
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..],
+                &vec![0u8; n],
+            ]
+            .concat()
+        };
         std::fs::write(people.join(ALICE), png(100)).unwrap();
         std::fs::write(people.join(BOB), png(300 * 1024)).unwrap();
         // Someone who approved: name and a small picture inline (the screen has no token)
@@ -7852,7 +7885,7 @@ mod tests {
                 }),
             )
             .route("/nexus/v0/user/{id}", get(move |Path(id): Path<String>| async move { Json(user(&id)) }))
-            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 1, 2, 3]) }))
+            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]) }))
             .route(
                 "/nexus/v0/resource/by-uri",
                 get(|| async { Json(serde_json::json!({"resource": {"id": "r1", "uri": "https://musicbrainz.org/isrc/USAAA1111111"}, "tags": [{"label": "chill", "taggers": [A, B], "taggers_count": 2}]})) }),
@@ -8597,7 +8630,8 @@ mod tests {
     #[tokio::test]
     async fn the_tidal_redirect_follows_the_request_host() {
         let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
+        // A node reached by another name than localhost has a token
+        let s = state(dir.path(), Some("s3cret")).await;
         // The node's own app, with its secret: the sign-in comes straight back
         s.tidal.write().unwrap().creds = tidal::TidalCredentials {
             client_id: "cid".into(),
@@ -8609,6 +8643,7 @@ mod tests {
             .uri("/v1/sources/tidal/status")
             .header("host", "music.example")
             .header("x-forwarded-proto", "https")
+            .header("authorization", "Bearer s3cret")
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -11047,7 +11082,7 @@ exec sleep 300
         let mbid = "056e4f3e-d505-4dad-8ec1-d04f521cbb56";
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0, 1, 2, 3];
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
         let b2 = base.clone();
         let mock = Router::new()
             .route(&format!("/ws/2/artist/{mbid}"), get(|| async { Json(serde_json::json!({"id": "x", "relations": []})) }))
@@ -13711,9 +13746,12 @@ exec sleep 300
     }
 
     async fn tidal_redirect(s: Arc<NodeState>, host: &str) -> String {
+        // A node reached by another name than localhost has a token
+        *s.token.write().unwrap() = Some("s3cret".into());
         let req = Request::builder()
             .uri("/v1/sources/tidal/status")
             .header("host", host)
+            .header("authorization", "Bearer s3cret")
             .body(Body::empty())
             .unwrap();
         let resp = router(s).oneshot(req).await.unwrap();
@@ -20073,5 +20111,1298 @@ exec sleep 300
         }
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+    }
+
+    /// A node without a token answers only requests addressed to it by a loopback name from its
+    /// own pages, the event stream included. A node with a token answers by any name, behind a
+    /// proxy too. No other site frames the pages.
+    #[tokio::test]
+    async fn a_tokenless_node_refuses_other_sites_and_pages_cant_be_framed() {
+        let send = |app: Router, uri: &'static str, headers: Vec<(&'static str, &'static str)>| async move {
+            let mut b = Request::builder().method("GET").uri(uri);
+            for (k, v) in headers {
+                b = b.header(k, v);
+            }
+            let r = app.oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+            (r.status(), r.headers().clone())
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let open = router(state(dir.path(), None).await);
+        // Its own name, with or without its own Origin
+        for h in [
+            vec![("host", "127.0.0.1:7788")],
+            vec![("host", "localhost:7788"), ("origin", "http://localhost:7788")],
+        ] {
+            let (st, _) = send(open.clone(), "/v1/info", h.clone()).await;
+            assert_eq!(st, StatusCode::OK, "{h:?}");
+        }
+        // A rebound name, another site's page, its event stream
+        let (st, _) = send(open.clone(), "/v1/info", vec![("host", "other.example:7788")]).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = send(open.clone(), "/", vec![("host", "other.example:7788")]).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "the page too");
+        let (st, _) = send(
+            open.clone(),
+            "/v1/info",
+            vec![("host", "127.0.0.1:7788"), ("origin", "http://other.example")],
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let ws = |origin: &'static str| {
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("origin", origin),
+                ("connection", "upgrade"),
+                ("upgrade", "websocket"),
+                ("sec-websocket-version", "13"),
+                ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ]
+        };
+        let (st, _) = send(open.clone(), "/v1/events", ws("http://other.example")).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "cross-site event stream");
+
+        // Its own pages open the event stream (past the Origin check: 426 here, as a test request
+        // can't be upgraded)
+        let (st, _) = send(open.clone(), "/v1/events", ws("http://127.0.0.1:7788")).await;
+        assert_ne!(st, StatusCode::FORBIDDEN);
+        // Another site's GET without an Origin (an image, a link) is refused, a navigation to a
+        // page isn't
+        let (st, _) = send(
+            open.clone(),
+            "/rest/ping",
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "no-cors"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = send(
+            open.clone(),
+            "/",
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "document"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // In a frame on another site's page: refused before any page runs (a sign-in callback
+        // would have acted before frame-ancestors kept it from showing)
+        let (st, _) = send(
+            open.clone(),
+            "/",
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "iframe"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        // A form another site's page posts (a top-level navigation too): to a zone's UPnP control or
+        // to a page, refused before anything acts on it
+        for uri in ["/upnp/zone/z1/ctl/avt", "/upnp/zone/z1/ctl/rc", "/"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("host", "127.0.0.1:7788")
+                .header("content-type", "text/plain")
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(Body::from("x=1"))
+                .unwrap();
+            let st = open.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}");
+        }
+
+        // With a token: any name (a proxy, a LAN name) with the token
+        let dir2 = tempfile::tempdir().unwrap();
+        let tok = router(state(dir2.path(), Some("s3cret")).await);
+        let (st, _) = send(
+            tok.clone(),
+            "/v1/info",
+            vec![
+                ("host", "music.example"),
+                ("authorization", "Bearer s3cret"),
+                ("x-forwarded-host", "music.example"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Behind a proxy that rewrites Host (nginx's bare proxy_pass), the event stream opens with
+        // the token
+        let mut proxied = ws("https://music.example");
+        proxied.push(("authorization", "Bearer s3cret"));
+        let (st, _) = send(tok.clone(), "/v1/events", proxied).await;
+        assert_ne!(st, StatusCode::FORBIDDEN);
+
+        // The pages can't be framed by another site
+        for page in ["/", "/party/abc"] {
+            let (st, h) = send(open.clone(), page, vec![("host", "127.0.0.1:7788")]).await;
+            assert_eq!(st, StatusCode::OK, "{page}");
+            let csp = h.get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap();
+            assert!(csp.contains("frame-ancestors 'none'"), "{page}: {csp}");
+            assert_eq!(h.get(header::X_FRAME_OPTIONS).unwrap(), "DENY", "{page}");
+        }
+    }
+
+    /// A token the node record once held stops working, once, and the note of it survives until
+    /// it has: a node-made token is replaced and the note goes (a second retirement replaces
+    /// nothing); a token set in the config stays, and Health asks for a change until it changes;
+    /// one already changed before the update needs nothing (ADR 0008).
+    #[tokio::test]
+    async fn a_token_the_node_record_held_is_retired_once() {
+        let fake = |n: &str| ["older", "credential", n].join("-");
+        // Made by the node
+        let dir = tempfile::tempdir().unwrap();
+        let old = fake("made");
+        let s = state(dir.path(), Some(&old)).await;
+        let file = dir.path().join("api-token");
+        std::fs::write(&file, &old).unwrap();
+        s.set_token_file(file.clone());
+        access_token::note_published(&s, &old).unwrap();
+        access_token::retire_published(&s).await;
+        let now = s.token().unwrap();
+        assert_ne!(now, old, "replaced");
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), now);
+        assert!(!access_token::config_token_published(&s));
+        access_token::retire_published(&s).await;
+        assert_eq!(s.token().unwrap(), now, "once only");
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(access_token::PUBLISHED_TOKEN_KEY)
+                .unwrap(),
+            None
+        );
+
+        // Set in the config: kept, and Health says so until it changes
+        let dir2 = tempfile::tempdir().unwrap();
+        let conf = fake("config");
+        let c = state(dir2.path(), Some(&conf)).await;
+        access_token::note_published(&c, &conf).unwrap();
+        access_token::retire_published(&c).await;
+        assert_eq!(c.token().unwrap(), conf);
+        assert!(access_token::config_token_published(&c));
+        let (st, health) = call_auth(&router(c.clone()), "GET", "/v1/health", &conf).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            health
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == "api-token" && p["state"] == "change"),
+            "{health}"
+        );
+        *c.token.write().unwrap() = Some(fake("new-config"));
+        assert!(
+            !access_token::config_token_published(&c),
+            "changed: no more warning"
+        );
+        access_token::retire_published(&c).await;
+        assert_eq!(
+            c.library
+                .lock()
+                .unwrap()
+                .get_setting(access_token::PUBLISHED_TOKEN_KEY)
+                .unwrap(),
+            None,
+            "the note goes once the token no longer works"
+        );
+
+        // Changed in the config before the update: the record held another one, nothing to do
+        let dir3 = tempfile::tempdir().unwrap();
+        let d = state(dir3.path(), Some(&fake("current"))).await;
+        access_token::note_published(&d, &fake("before")).unwrap();
+        assert!(!access_token::config_token_published(&d));
+    }
+
+    async fn call_auth(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        let st = r.status();
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        (st, serde_json::from_slice(&b).unwrap_or_default())
+    }
+
+    /// The app's sign-in is a device's, not a browser session: a browser's Log out leaves it
+    /// (the page in the app forgets it, the app keeps it, as with the API token), and so does the
+    /// browsers' cap; Make a new token and a change of the node's identity end it.
+    #[tokio::test]
+    async fn a_devices_sign_in_outlives_browser_log_outs_but_not_a_new_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        const OWNER: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        const OTHER: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        let hashed = |t: &str| blake3::hash(t.as_bytes()).to_hex().to_string();
+        let set = |setting: &str, entries: &[(&str, &str)]| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    setting,
+                    &serde_json::to_string(
+                        &entries
+                            .iter()
+                            .map(|(key, t)| serde_json::json!({"hash": hashed(t), "key": key, "created_at": 1}))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        let keys = |setting: &str| -> Vec<String> {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(setting)
+                .unwrap()
+                .map(|j| serde_json::from_str::<Vec<serde_json::Value>>(&j).unwrap())
+                .unwrap_or_default()
+                .iter()
+                .map(|t| t["key"].as_str().unwrap().to_string())
+                .collect()
+        };
+        set("accounts.owner_sessions", &[(OWNER, "pmo_browser")]);
+        set(
+            "accounts.device_sessions",
+            &[(OWNER, "pmo_laptop"), (OTHER, "pmo_phone-of-other")],
+        );
+        let send = |method: &'static str, token: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri("/v1/me/token")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+                )
+            }
+        };
+        // Log out with the device's sign-in ends nothing; with the browser's, that session
+        let (st, v) = send("DELETE", "pmo_laptop").await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+        assert_eq!(
+            keys("accounts.device_sessions"),
+            [OWNER, OTHER],
+            "the device is still signed in"
+        );
+        let (st, v) = send("DELETE", "pmo_browser").await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
+        assert!(keys("accounts.owner_sessions").is_empty());
+        // The node takes on an identity: the other identity's device goes, the owner's stays
+        accounts::keep_owner_sessions_of(&s, OWNER).unwrap();
+        assert_eq!(keys("accounts.device_sessions"), [OWNER]);
+        // A new API token ends every device sign-in too
+        accounts::end_owner_sessions(&s).unwrap();
+        assert!(
+            keys("accounts.device_sessions").is_empty(),
+            "Make a new token signs the devices out"
+        );
+    }
+
+    /// A cover is served by what its bytes are, never by a type stored with it: a picture whose
+    /// tag claimed another type is served as the picture it is, bytes that are no picture are not
+    /// served at all, and every picture says it is only that (`nosniff`, a sandboxing policy).
+    #[tokio::test]
+    async fn covers_are_served_by_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let mut album_ids = Vec::new();
+        for (n, bytes, claimed) in [
+            ("a", b"\x89PNG\r\n\x1a\n-picture".to_vec(), "text/html"),
+            ("b", b"<html><body>page</body></html>".to_vec(), "text/html"),
+            (
+                "c",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+                "image/svg+xml",
+            ),
+        ] {
+            let lib = s.library.lock().unwrap();
+            let mut t = untagged_track(dir.path().join(format!("{n}.flac")), n, "Someone");
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: format!("Album {n}"),
+                album_artist: None,
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let id = lib.upsert_track(&t).unwrap();
+            let album = lib.get_track(id).unwrap().unwrap().album.unwrap().id.unwrap();
+            let file = dir.path().join(format!("{n}.cover"));
+            std::fs::write(&file, &bytes).unwrap();
+            lib.set_album_art(&pm_library::db::AlbumArt {
+                album_id: album,
+                file,
+                mime: claimed.into(),
+                source: "embedded".into(),
+            })
+            .unwrap();
+            album_ids.push(album);
+        }
+        let app = router(s.clone());
+        let get = |id: i64| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .uri(format!("/v1/library/albums/{id}/cover"))
+                    .header("authorization", "Bearer s3cret")
+                    .body(Body::empty())
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                (r.status(), r.headers().clone())
+            }
+        };
+        let (st, h) = get(album_ids[0]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(h[header::CONTENT_TYPE], "image/png");
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(h[header::CONTENT_SECURITY_POLICY], "default-src 'none'; sandbox");
+        for id in &album_ids[1..] {
+            let (st, h) = get(*id).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{h:?}");
+        }
+    }
+
+    /// Files relayed from another server keep their type when it is audio, video or a raster
+    /// picture; anything else is relayed as what the node asked for.
+    #[test]
+    fn relayed_files_keep_only_media_types() {
+        assert_eq!(
+            art::safe_media_type(Some("audio/flac"), "audio/mpeg"),
+            "audio/flac"
+        );
+        assert_eq!(
+            art::safe_media_type(Some("image/jpeg; charset=x"), "image/png"),
+            "image/jpeg"
+        );
+        for other in [
+            "text/html",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "",
+            "text/html; image/png",
+        ] {
+            assert_eq!(
+                art::safe_media_type(Some(other), "image/jpeg"),
+                "image/jpeg",
+                "{other}"
+            );
+        }
+        assert_eq!(art::safe_media_type(None, "audio/flac"), "audio/flac");
+    }
+
+    /// A picture another server relays is answered by its bytes, whatever its headers say: an SVG
+    /// or a page sent as a picture is not served; a picture sent as a page is served as a picture.
+    #[tokio::test]
+    async fn relayed_pictures_are_served_by_their_bytes() {
+        let png = b"\x89PNG\r\n\x1a\n-relayed".to_vec();
+        let p2 = png.clone();
+        let mock = Router::new()
+            .route(
+                "/svg",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/png")],
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+                    )
+                }),
+            )
+            .route(
+                "/page",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/jpeg")],
+                        "<html><body>x</body></html>",
+                    )
+                }),
+            )
+            .route(
+                "/png",
+                get(move || {
+                    let b = p2.clone();
+                    async move { ([(header::CONTENT_TYPE, "text/html")], b) }
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, mock).await.unwrap() });
+        let fetch = |path: &str| {
+            let url = format!("{base}{path}");
+            async move { art::relayed_picture(reqwest::get(url).await.unwrap(), "private").await }
+        };
+        for bad in ["/svg", "/page"] {
+            let r = fetch(bad).await;
+            assert_eq!(r.err().map(|e| e.status), Some(StatusCode::NOT_FOUND), "{bad}");
+        }
+        let r = fetch("/png").await.unwrap();
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], &png[..]);
+    }
+
+    /// Outputs found on the network stop being added once the node has `MAX_FOUND_OUTPUTS`, and
+    /// are added again when there is room.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outputs_found_on_the_network_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let max = crate::state::MAX_FOUND_OUTPUTS;
+        let had = s.outputs.len();
+        let found: Vec<Arc<dyn Output>> = (0..max + 10)
+            .map(|i| {
+                Arc::new(pm_zones::outputs::PullOutput::controlled(&format!("found-{i}"))) as Arc<dyn Output>
+            })
+            .collect();
+        s.set_discover(Arc::new(move || found.clone()));
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.rescan_outputs())
+            .await
+            .unwrap();
+        assert_eq!(new.len(), max - had, "added up to the cap");
+        assert_eq!(s.outputs.len(), max);
+        s.outputs.remove(&new[0]);
+        let st = s.clone();
+        let again = tokio::task::spawn_blocking(move || st.rescan_outputs())
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1, "one place freed, one added");
+        assert_eq!(s.outputs.len(), max);
+    }
+
+    /// A device the node turns away for want of room leaves no pull stream behind (rescans with new
+    /// devices can't grow the node past the cap); once there is room it is taken, stream and all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_turned_away_leaves_no_pull_stream() {
+        // A stand-in MPD server: the greeting, then OK to anything
+        let mpd = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = mpd.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for c in mpd.incoming().flatten() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, Write};
+                    let mut w = c.try_clone().unwrap();
+                    let _ = w.write_all(b"OK MPD 0.23.5\n");
+                    for line in std::io::BufReader::new(c).lines() {
+                        if line.is_err() || w.write_all(b"OK\n").is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let max = crate::state::MAX_FOUND_OUTPUTS;
+        let fill: Vec<OutputId> = (s.outputs.len()..max)
+            .map(|i| {
+                let o = Arc::new(pm_zones::outputs::PullOutput::controlled(&format!("filler-{i}")));
+                let id = o.id();
+                s.outputs.register(o);
+                id
+            })
+            .collect();
+        s.set_mpd(&[addr.to_string()]);
+        let pulls_before = s.pulls.lock().unwrap().len();
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.discover_mpd())
+            .await
+            .unwrap();
+        assert!(new.is_empty(), "no room: {new:?}");
+        assert_eq!(s.pulls.lock().unwrap().len(), pulls_before, "nothing left behind");
+        s.outputs.remove(&fill[0]);
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.discover_mpd())
+            .await
+            .unwrap();
+        assert_eq!(new.len(), 1, "room again: taken");
+        assert_eq!(s.pulls.lock().unwrap().len(), pulls_before + 1, "with its stream");
+    }
+
+    /// A stand-in for the bundled homeserver's admin API: `GET /signup_tokens` answers `used`, and
+    /// the first such call waits (after waking `held`) until `release`, so a test picks which
+    /// roster change stores last. `/info` is down.
+    async fn held_admin(
+        used: serde_json::Value,
+    ) -> (
+        bundled::AdminEndpoint,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let held = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tokens = {
+            let (held, release) = (held.clone(), release.clone());
+            move || {
+                let (held, release, calls, used) =
+                    (held.clone(), release.clone(), calls.clone(), used.clone());
+                async move {
+                    if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        held.notify_one();
+                        release.notified().await;
+                    }
+                    Json(used)
+                }
+            }
+        };
+        let app = Router::new()
+            .route("/signup_tokens", get(tokens))
+            .route("/info", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            bundled::AdminEndpoint::new(&url, "test-admin-password").unwrap(),
+            held,
+            release,
+        )
+    }
+
+    async fn as_who(
+        app: &Router,
+        method: &str,
+        uri: String,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(
+                body.map(|b| Body::from(b.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let st = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            st,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    const ROSTER_KEY: &str = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+    const INVITE_TOKEN: &str = "FIXT-URE0-TOKN";
+
+    /// A node behind a token with one listener (music on) and one unused homeserver invite.
+    async fn roster_node(
+        dir: &std::path::Path,
+        used: serde_json::Value,
+    ) -> (
+        Arc<NodeState>,
+        Router,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let s = state(dir, Some("s3cret")).await;
+        let (ep, held, release) = held_admin(used).await;
+        s.set_bundled_homeserver(ep);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({
+                    "people": [{"key": ROSTER_KEY, "access": "homeserver_music", "music_enabled": true, "added_at": 1}],
+                    "invites": [{"id": "i1", "access": "homeserver_music", "token": INVITE_TOKEN, "created_at": 1}],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let app = router(s.clone());
+        (s, app, held, release)
+    }
+
+    /// A rename that read the roster before music was turned off, and stores after, leaves music
+    /// off: the listener's token stays refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slow_roster_change_does_not_undo_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, app, held, release) = roster_node(dir.path(), serde_json::json!({"items": []})).await;
+        let rename = tokio::spawn({
+            let app = app.clone();
+            async move {
+                as_who(
+                    &app,
+                    "PATCH",
+                    format!("/v1/people/{ROSTER_KEY}"),
+                    "s3cret",
+                    Some(serde_json::json!({"name": "Sam"})),
+                )
+                .await
+            }
+        });
+        held.notified().await;
+        let (st, v) = as_who(
+            &app,
+            "PATCH",
+            format!("/v1/people/{ROSTER_KEY}"),
+            "s3cret",
+            Some(serde_json::json!({"music": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        release.notify_one();
+        let (st, v) = rename.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["music_enabled"], false, "{v}");
+        let p = people::load(&s)
+            .people
+            .into_iter()
+            .find(|p| p.key == ROSTER_KEY)
+            .unwrap();
+        assert!(!p.music_enabled, "music stays off");
+        assert_eq!(p.name.as_deref(), Some("Sam"), "and the rename is kept");
+        let tok = accounts::mint(&s, ROSTER_KEY).unwrap();
+        let (st, _) = as_who(&app, "GET", "/v1/library/tracks".into(), &tok, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    /// `GET /v1/people` turning a used invite into a person, slower than a disable made meanwhile,
+    /// adds the person without bringing music back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slow_reconcile_does_not_undo_a_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        const NEW: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let used = serde_json::json!({"items": [{"token": INVITE_TOKEN, "used_by": NEW}]});
+        let (s, app, held, release) = roster_node(dir.path(), used).await;
+        let list = tokio::spawn({
+            let app = app.clone();
+            async move { as_who(&app, "GET", "/v1/people".into(), "s3cret", None).await }
+        });
+        held.notified().await;
+        let (st, v) = as_who(
+            &app,
+            "PATCH",
+            format!("/v1/people/{ROSTER_KEY}"),
+            "s3cret",
+            Some(serde_json::json!({"music": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        release.notify_one();
+        let (st, v) = list.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let r = people::load(&s);
+        let p = r.people.iter().find(|p| p.key == ROSTER_KEY).unwrap();
+        assert!(!p.music_enabled, "the disable stays: {r:?}");
+        assert_eq!(
+            r.people.iter().filter(|p| p.key == NEW).count(),
+            1,
+            "the invitee is in, once"
+        );
+        assert!(r.invites.is_empty());
+        let tok = accounts::mint(&s, ROSTER_KEY).unwrap();
+        let (st, _) = as_who(&app, "GET", "/v1/library/tracks".into(), &tok, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The node admin chooses whose TIDAL listeners play with (owner, 2026-11-03: "can we have both
+    /// and node admin can set if user use node or own sources"): `own` (as before), `node` (everyone
+    /// through the node's sign-in; listeners can't sign in to their own) or `choice` (the node's by
+    /// default, each listener may switch). Every switch keeps both the node's sign-in and each
+    /// listener's own; a listener's own status never shows the node's account.
+    #[tokio::test]
+    async fn the_admin_chooses_node_or_own_sources() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (base, seen) = tidal_mock_recording_tokens(flac).await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        {
+            let mut ep = s.tidal.write().unwrap();
+            ep.api_base = base.clone();
+            ep.auth_base = base.clone();
+            ep.creds = tidal::TidalCredentials {
+                client_id: "cid".into(),
+                client_secret: "sec".into(),
+                scopes: String::new(),
+            };
+        }
+        let session = |token: &str| {
+            serde_json::json!({"access_token": token, "refresh_token": "r", "expires_at": pm_library::db::now_unix() + 3600, "user_id": "1", "scope": "playback"}).to_string()
+        };
+        let (anna, ben) = (
+            "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy",
+            "o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy",
+        );
+        let anna_key = format!("person.{anna}.tidal.user");
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("tidal.user", &session("owner-token")).unwrap();
+            lib.set_setting(&anna_key, &session("anna-token")).unwrap();
+            lib.set_setting(
+                "people",
+                &serde_json::json!({"people": [
+                {"key": anna, "access": "music", "music_enabled": true, "added_at": 1},
+                {"key": ben, "access": "music", "music_enabled": true, "added_at": 1}]})
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let (anna_tok, ben_tok) = (
+            accounts::mint(&s, anna).unwrap(),
+            accounts::mint(&s, ben).unwrap(),
+        );
+        let app = router(s.clone());
+        let send = |method: &'static str, uri: String, token: String, body: Option<serde_json::Value>| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                let st = r.status();
+                let b = r.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let zid = s.zones.list()[0].id.to_string();
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        // Plays one item queued by `token`; the token TIDAL was asked with, or the error
+        let play = |token: String| {
+            let send = &send;
+            let zone = zone.clone();
+            let zid = zid.clone();
+            let seen = seen.clone();
+            async move {
+                let n = seen.lock().unwrap().len();
+                let (st, v) = send(
+                    "POST",
+                    format!("/v1/zones/{zid}/queue"),
+                    token,
+                    Some(serde_json::json!({"items": [{"uri": "tidal:track:20115564"}], "replace": true, "play": true})),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let end = zone.wait_stopped().await;
+                let asked = seen.lock().unwrap().get(n).cloned();
+                match (asked, end.error) {
+                    (Some(a), None) => Ok(a),
+                    (_, e) => Err(e.unwrap_or_default()),
+                }
+            }
+        };
+        let policy = |p: &'static str| {
+            let send = &send;
+            async move {
+                let (st, v) = send(
+                    "PUT",
+                    "/v1/node/settings".into(),
+                    "s3cret".into(),
+                    Some(serde_json::json!({"sources_policy": p})),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                assert_eq!(v["sources_policy"], p, "{v}");
+            }
+        };
+        let both_kept = |s: &Arc<NodeState>| {
+            let lib = s.library.lock().unwrap();
+            assert!(lib
+                .get_setting("tidal.user")
+                .unwrap()
+                .unwrap()
+                .contains("owner-token"));
+            assert!(lib
+                .get_setting(&anna_key)
+                .unwrap()
+                .unwrap()
+                .contains("anna-token"));
+        };
+
+        // `own`, the default for a node that never chose: as before
+        assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
+        assert!(play(ben_tok.clone()).await.unwrap_err().contains("Connect TIDAL"));
+        let (st, v) = send("GET", "/v1/node/settings".into(), "s3cret".into(), None).await;
+        assert_eq!(
+            (st, v["sources_policy"].as_str()),
+            (StatusCode::OK, Some("own")),
+            "{v}"
+        );
+        // Only the owner chooses
+        let (st, _) = send(
+            "PUT",
+            "/v1/node/settings".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"sources_policy": "node"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "node"})),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::CONFLICT,
+            "a listener's choice only under `choice`"
+        );
+
+        // `node`: everyone through the node's sign-in, the stream proxy too
+        policy("node").await;
+        assert_eq!(play(anna_tok.clone()).await, Ok("Bearer owner-token".into()));
+        assert_eq!(play(ben_tok.clone()).await, Ok("Bearer owner-token".into()));
+        let (st, _) = send(
+            "GET",
+            "/v1/sources/tidal/stream/20115564".into(),
+            ben_tok.clone(),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().last().unwrap(), "Bearer owner-token");
+        // A listener can't sign in to their own; what they had stays, and their own status shows
+        // their own (Ben: none), never the node's account
+        let (st, v) = send(
+            "PUT",
+            "/v1/sources/tidal/signin".into(),
+            ben_tok.clone(),
+            Some(serde_json::json!({"way": "official"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("its own sign-ins"), "{v}");
+        let (st, v) = send("GET", "/v1/sources/tidal/status".into(), ben_tok.clone(), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["signed_in"], false, "Ben's own status, not the node's: {v}");
+        let (_, v) = send("GET", "/v1/me/sources".into(), ben_tok.clone(), None).await;
+        assert_eq!(
+            (
+                v["policy"].as_str(),
+                v["plays_with"].as_str(),
+                v["may_choose"].as_bool()
+            ),
+            (Some("node"), Some("node"), Some(false)),
+            "{v}"
+        );
+        both_kept(&s);
+
+        // `choice`: the node's by default; Anna switches to her own, Ben stays on the node's, in
+        // the same zone, each item with its own account
+        policy("choice").await;
+        assert_eq!(play(anna_tok.clone()).await, Ok("Bearer owner-token".into()));
+        let (st, v) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "own"})),
+        )
+        .await;
+        assert_eq!(
+            (st, v["plays_with"].as_str()),
+            (StatusCode::OK, Some("own")),
+            "{v}"
+        );
+        assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
+        assert_eq!(play(ben_tok.clone()).await, Ok("Bearer owner-token".into()));
+        // Listeners may sign in again under `choice`, and what they pick lands at their own keys,
+        // never the node's
+        let (st, si) = send("GET", "/v1/sources/tidal/signin".into(), ben_tok.clone(), None).await;
+        assert_eq!(st, StatusCode::OK, "{si}");
+        let way = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["available"] == true)
+            .and_then(|w| w["id"].as_str())
+            .expect("a way open to listeners")
+            .to_string();
+        let node_way = s.library.lock().unwrap().get_setting("tidal.signin_way").unwrap();
+        let (st, v) = send(
+            "PUT",
+            "/v1/sources/tidal/signin".into(),
+            ben_tok.clone(),
+            Some(serde_json::json!({"way": way})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        {
+            let lib = s.library.lock().unwrap();
+            assert_eq!(
+                lib.get_setting(&format!("person.{ben}.tidal.signin_way"))
+                    .unwrap()
+                    .as_deref(),
+                Some(way.as_str())
+            );
+            assert_eq!(
+                lib.get_setting("tidal.signin_way").unwrap(),
+                node_way,
+                "the node's way untouched"
+            );
+        }
+        // Back to the node's
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "node"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(play(anna_tok.clone()).await, Ok("Bearer owner-token".into()));
+        // Anna's choice is kept when the policy moves away and back
+        let (_, _) = send(
+            "PUT",
+            "/v1/me/sources".into(),
+            anna_tok.clone(),
+            Some(serde_json::json!({"use": "own"})),
+        )
+        .await;
+        policy("own").await;
+        assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
+        policy("choice").await;
+        let (_, v) = send("GET", "/v1/me/sources".into(), anna_tok.clone(), None).await;
+        assert_eq!(v["use"], "own", "{v}");
+        both_kept(&s);
+        // The owner always plays with the node's
+        assert_eq!(play("s3cret".into()).await, Ok("Bearer owner-token".into()));
+    }
+
+    /// Under the node's source policy, a listener's catalogue reads resolve to the node's sign-ins,
+    /// while what is theirs alone (their own sign-in keys when they sign in, their preferences)
+    /// stays at their own keys.
+    #[test]
+    fn a_listener_on_the_nodes_sign_ins_keeps_their_own_settings() {
+        let on = accounts::Who::ListenerOnNode("k".into());
+        assert_eq!(on.setting("tidal.user").as_deref(), Some("tidal.user"));
+        assert_eq!(
+            on.setting("qobuz.unofficial").as_deref(),
+            Some("qobuz.unofficial")
+        );
+        assert_eq!(
+            on.setting("spotify.signin_way").as_deref(),
+            Some("spotify.signin_way")
+        );
+        assert_eq!(on.setting("sources.use").as_deref(), Some("person.k.sources.use"));
+        assert_eq!(on.setting("me.prefs").as_deref(), Some("person.k.me.prefs"));
+        assert_eq!(on.by().as_deref(), Some("k"), "who queued it stays the listener");
+        assert!(!on.is_owner());
+        assert_eq!(on.own(), accounts::Who::Listener("k".into()));
+        // Caches keyed by the tag never share an entry between the node's account and their own
+        assert_ne!(on.tag(), on.own().tag());
+        assert_ne!(on.tag(), accounts::Who::Owner.tag());
+        // The keys the services really use
+        for k in [
+            tidal_unofficial::STATE_KEY,
+            qobuz::STATE_KEY,
+            "tidal.user",
+            "spotify.user",
+        ] {
+            assert!(accounts::SIGNIN_KEYS.contains(&k), "{k}");
+        }
+        for src in ["tidal", "qobuz", "spotify"] {
+            assert!(
+                accounts::SIGNIN_KEYS.contains(&signin::way_key(src).as_str()),
+                "{src}"
+            );
+        }
+    }
+
+    /// The source policy reaches every use of an account, not only TIDAL plays (#277 reviews):
+    /// under `node` a listener's TIDAL search and item pages and their Qobuz plays use the node's
+    /// sign-in; under `own` never the node's; Spotify Connect (devices, play) is always the
+    /// listener's own, so the owner's phone is never listed for them.
+    #[tokio::test]
+    async fn the_source_policy_reaches_search_item_pages_qobuz_and_spotify_connect() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        // TIDAL: tokens for the app, every other call recorded with its bearer
+        let tl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tidal_base = format!("http://127.0.0.1:{}", tl.local_addr().unwrap().port());
+        let tidal_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ts = tidal_seen.clone();
+        let tidal_mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post(|| async {
+                    Json(serde_json::json!({"access_token": "app-token", "refresh_token": "r", "expires_in": 3600}))
+                }),
+            )
+            .fallback(move |headers: HeaderMap| {
+                let seen = ts.clone();
+                async move {
+                    if let Some(b) = headers.get("authorization") {
+                        seen.lock().unwrap().push(b.to_str().unwrap().to_string());
+                    }
+                    Json(serde_json::json!({"data": [], "included": []}))
+                }
+            });
+        tokio::spawn(async move { axum::serve(tl, tidal_mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), &tidal_base).await;
+        let app = router(s.clone());
+        let (anna_tok, ben_tok) = (
+            accounts::mint(&s, anna).unwrap(),
+            accounts::mint(&s, ben).unwrap(),
+        );
+        let set_policy = |p: &str| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(accounts::SOURCE_POLICY_KEY, p)
+                .unwrap();
+        };
+        let asked = |tok: &str, uri: &str| {
+            let (app, tok, uri, seen) = (app.clone(), tok.to_string(), uri.to_string(), tidal_seen.clone());
+            async move {
+                seen.lock().unwrap().clear();
+                let (st, v, _) = send_as(&app, "GET", &uri, Some(&tok), &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{uri}: {v}");
+                let got: Vec<String> = seen.lock().unwrap().drain(..).collect();
+                assert!(!got.is_empty(), "TIDAL was asked for {uri}");
+                got
+            }
+        };
+
+        // `node`: Ben (no TIDAL of his own) searches and reads an item page with the node's
+        set_policy("node");
+        for uri in [
+            "/v1/search?q=lucky&scope=tidal",
+            "/v1/discover/contents?uri=https://tidal.com/album/4242",
+        ] {
+            let got = asked(&ben_tok, uri).await;
+            assert!(got.iter().all(|b| b == "Bearer owner-token"), "{uri}: {got:?}");
+        }
+        // `own`: never the node's, for him or for Anna
+        set_policy("own");
+        let got = asked(&ben_tok, "/v1/search?q=other&scope=tidal").await;
+        assert!(got.iter().all(|b| b != "Bearer owner-token"), "{got:?}");
+        let got = asked(
+            &anna_tok,
+            "/v1/discover/contents?uri=https://tidal.com/album/4343",
+        )
+        .await;
+        assert!(got.iter().all(|b| b == "Bearer anna-token"), "{got:?}");
+
+        // Spotify Connect: always the caller's own, whatever the policy
+        let sl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let spotify_base = format!("http://127.0.0.1:{}", sl.local_addr().unwrap().port());
+        let sp_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sps = sp_seen.clone();
+        let sp_mock = Router::new().route(
+            "/me/player/devices",
+            get(move |headers: HeaderMap| {
+                let seen = sps.clone();
+                async move {
+                    let b = headers.get("authorization").unwrap().to_str().unwrap().to_string();
+                    let name = if b.ends_with("sp-owner") { "Owner's phone" } else { "Anna's laptop" };
+                    seen.lock().unwrap().push(b);
+                    Json(serde_json::json!({"devices": [{"id": "d1", "name": name, "type": "Smartphone", "is_active": false}]}))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(sl, sp_mock).await.unwrap() });
+        s.spotify.write().unwrap().api_base = spotify_base;
+        {
+            let lib = s.library.lock().unwrap();
+            let until = pm_library::db::now_unix() + 3600;
+            let sess = |t: &str| serde_json::json!({"access_token": t, "expires_at": until}).to_string();
+            lib.set_setting("spotify.user", &sess("sp-owner")).unwrap();
+            lib.set_setting(&format!("person.{anna}.spotify.user"), &sess("sp-anna"))
+                .unwrap();
+        }
+        for p in ["node", "choice"] {
+            set_policy(p);
+            let (st, v, _) = send_as(
+                &app,
+                "GET",
+                "/v1/sources/spotify/devices",
+                Some(&anna_tok),
+                &[],
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{p}: {v}");
+            assert_eq!(v[0]["name"], "Anna's laptop", "{p}: {v}");
+            let (st, v, _) = send_as(
+                &app,
+                "GET",
+                "/v1/sources/spotify/devices",
+                Some(&ben_tok),
+                &[],
+                None,
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::PRECONDITION_FAILED,
+                "{p}: Ben has no Spotify of his own: {v}"
+            );
+        }
+        assert!(
+            sp_seen.lock().unwrap().iter().all(|b| b == "Bearer sp-anna"),
+            "the owner's devices never asked for a listener: {:?}",
+            sp_seen.lock().unwrap()
+        );
+
+        // Qobuz plays: the node's under `node`, none under `own` for someone without their own
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let ql = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let qbase = format!("http://127.0.0.1:{}", ql.local_addr().unwrap().port());
+        let q_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (qs, file_base) = (q_seen.clone(), qbase.clone());
+        let q_mock = Router::new()
+            .route(
+                "/track/getFileUrl",
+                get(move |headers: HeaderMap| {
+                    let (seen, base) = (qs.clone(), file_base.clone());
+                    async move {
+                        seen.lock().unwrap().push(headers.get("x-user-auth-token").unwrap().to_str().unwrap().to_string());
+                        Json(serde_json::json!({"url": format!("{base}/file.flac"), "format_id": 27, "mime_type": "audio/flac"}))
+                    }
+                }),
+            )
+            .route("/file.flac", get(move || { let f = flac.clone(); async move { f } }));
+        tokio::spawn(async move { axum::serve(ql, q_mock).await.unwrap() });
+        qobuz::set_api_base(&qbase);
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting(
+                qobuz::APP_KEY,
+                r#"{"id": "100000000", "secret": "s3cret", "from": "settings"}"#,
+            )
+            .unwrap();
+            lib.set_setting(
+                qobuz::STATE_KEY,
+                &serde_json::json!({"enabled": true, "quality": "max", "session": {"token": "t-owner", "hires": true}}).to_string(),
+            )
+            .unwrap();
+        }
+        let open_as_ben = |policy: &'static str| {
+            let lib = s.library.clone();
+            async move {
+                lib.lock()
+                    .unwrap()
+                    .set_setting(accounts::SOURCE_POLICY_KEY, policy)
+                    .unwrap();
+                tokio::task::spawn_blocking(move || {
+                    let who = accounts::Who::Listener(ben.into()).resolved(&lib.lock().unwrap());
+                    qobuz::open_track_blocking(&lib, "5966783", &who)
+                        .map(drop)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap()
+            }
+        };
+        assert!(open_as_ben("node").await.is_ok());
+        assert_eq!(*q_seen.lock().unwrap(), ["t-owner"]);
+        assert!(open_as_ben("own").await.unwrap_err().contains("Connect Qobuz"));
+        assert_eq!(q_seen.lock().unwrap().len(), 1, "never the node's under `own`");
+    }
+
+    /// Under "This node's sign-ins" (SourcePolicy::Node) a listener still reaches their own usage
+    /// insights: their choice, Stop for me and Clear mine; their own sign-ins stay refused.
+    #[tokio::test]
+    async fn a_listener_keeps_their_usage_insights_under_the_nodes_sign_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let key = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": true, "added_at": 1}]}).to_string()).unwrap();
+            lib.set_setting(accounts::SOURCE_POLICY_KEY, "node").unwrap();
+        }
+        // The rule itself, for every usage path and method
+        for (method, path) in [
+            (axum::http::Method::GET, "/v1/usage/me"),
+            (axum::http::Method::PUT, "/v1/usage/me"),
+            (axum::http::Method::POST, "/v1/usage/me/clear"),
+            (axum::http::Method::POST, "/v1/usage/me/notice"),
+            (axum::http::Method::POST, "/v1/usage/sessions"),
+            (axum::http::Method::POST, "/v1/usage/sessions/close"),
+            (axum::http::Method::POST, "/v1/usage/events"),
+        ] {
+            assert_eq!(
+                accounts::listener_refusal(&s, &method, path),
+                None,
+                "{method} {path}"
+            );
+        }
+        assert_eq!(
+            accounts::listener_refusal(&s, &axum::http::Method::POST, "/v1/sources/tidal/login"),
+            Some(accounts::NODE_SOURCES_ONLY),
+            "their own sign-in stays refused under the node's"
+        );
+        // Over HTTP: their choice reads, and Clear mine isn't refused for the policy
+        let tok = accounts::mint(&s, key).unwrap();
+        let send = |method: &'static str, uri: &'static str, body: Option<serde_json::Value>| {
+            let (app, tok) = (app.clone(), tok.clone());
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {tok}"))
+                    .header("content-type", "application/json")
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                (st, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+        let (st, body) = send("GET", "/v1/usage/me", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let (st, body) = send("POST", "/v1/usage/me/clear", None).await;
+        assert!(!body.contains(accounts::NODE_SOURCES_ONLY), "{st} {body}");
+        assert_ne!(st, StatusCode::FORBIDDEN, "{body}");
     }
 }

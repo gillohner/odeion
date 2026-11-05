@@ -5,6 +5,7 @@
 
 mod api_token;
 mod config;
+mod file_modes;
 mod library;
 mod outputs;
 mod play;
@@ -115,6 +116,19 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DiscoverCmd,
     },
+    /// Usage insights, read from this node's data folder (never sent anywhere).
+    Usage {
+        #[command(subcommand)]
+        cmd: UsageCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum UsageCmd {
+    /// Aggregates only: counts per page, control, outcome and friction, as JSON.
+    Summary,
+    /// Raw events with per-export session names and the summary, as JSON.
+    Export,
 }
 
 #[derive(Subcommand)]
@@ -163,6 +177,25 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
     let db_path = cfg.db_path();
+    // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
+    // (and migrated) and before anything reads them
+    let private = file_modes::private_files(
+        &cfg.data_dir,
+        &db_path,
+        config_file.as_deref(),
+        &session_secret_path(cfg),
+    );
+    let modes = file_modes::tighten(&cfg.data_dir, &private);
+    for (path, was, now) in modes.changed {
+        tracing::info!(path = %path.display(), "made the node's own: {was:o} to {now:o}");
+    }
+    for (path, why, should) in modes.left {
+        tracing::warn!(
+            path = %path.display(),
+            "others may be able to read this and the node can't change it ({why}): run `sudo chmod {should:o} {}`",
+            path.display()
+        );
+    }
     let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
     pm_api::tidal_unofficial::set_config_client(
@@ -285,7 +318,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
     // A busy port turns Squeezebox players off; the node runs on
-    if let Err(e) = state.start_slimproto() {
+    if let Err(e) = state.start_slimproto_on(cfg.outputs.slimproto_bind) {
         let port = cfg.outputs.slimproto_port;
         if e.kind() == std::io::ErrorKind::AddrInUse {
             tracing::warn!(
@@ -705,6 +738,20 @@ async fn run(env_compat: pm_model::brand::EnvPlan) -> anyhow::Result<()> {
                     social::discover_friends(&pc, &viewer, limit).await?
                 }
             }
+        }
+        Cmd::Usage { cmd } => {
+            // Read-only: the running node keeps writing; this never changes the file
+            let dir = cfg
+                .db_path()
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let out = match cmd {
+                UsageCmd::Summary => pm_api::usage::summary_of_folder(&dir, node_version()),
+                UsageCmd::Export => pm_api::usage::export_of_folder(&dir, node_version()),
+            }
+            .map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
     }
     Ok(())

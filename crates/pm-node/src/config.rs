@@ -384,6 +384,10 @@ pub struct OutputsConfig {
     pub upnp: bool,
     /// Slimproto port for Squeezebox / squeezelite players; 0 disables.
     pub slimproto_port: u16,
+    /// The address Slimproto listens on; unset = every address. `127.0.0.1` takes only players on
+    /// this machine (and turns the discovery responder off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slimproto_bind: Option<std::net::IpAddr>,
     /// Discover Chromecast / Google Cast devices (mDNS) and offer them as outputs.
     pub cast: bool,
     /// A snapserver (`host` or `host:port` of its JSON-RPC, port 1705 by default): every Snapcast
@@ -410,6 +414,7 @@ impl std::fmt::Debug for OutputsConfig {
             .field("endpoints", &self.endpoints)
             .field("upnp", &self.upnp)
             .field("slimproto_port", &self.slimproto_port)
+            .field("slimproto_bind", &self.slimproto_bind)
             .field("cast", &self.cast)
             .field("snapcast", &self.snapcast)
             .field("airplay", &self.airplay)
@@ -425,6 +430,7 @@ impl Default for OutputsConfig {
             endpoints: Vec::new(),
             upnp: true,
             slimproto_port: 3483,
+            slimproto_bind: None,
             cast: true,
             snapcast: String::new(),
             airplay: true,
@@ -633,5 +639,13 @@ listen = "0.0.0.0:7788"
         assert_eq!(default_public_url("nas.local:7788", lan), "http://nas.local:7788");
         // No route found: unchanged, and the network check in Settings warns
         assert_eq!(default_public_url("0.0.0.0:7788", None), "http://0.0.0.0:7788");
+    }
+
+    #[test]
+    fn slimproto_listens_everywhere_unless_given_an_address() {
+        assert_eq!(NodeConfig::default().outputs.slimproto_bind, None);
+        let cfg: NodeConfig = toml::from_str("[outputs]\nslimproto_bind = \"127.0.0.1\"\n").unwrap();
+        assert_eq!(cfg.outputs.slimproto_bind, Some("127.0.0.1".parse().unwrap()));
+        assert!(toml::from_str::<NodeConfig>("[outputs]\nslimproto_bind = \"lan\"\n").is_err());
     }
 }

@@ -20,6 +20,9 @@
 #                sets one too)
 #   PM_ACOUSTID_KEY   your own AcoustID key instead of the built-in one; optional
 set -eu
+# What the node writes (the config with its token, the library, sign-ins, keys) is its own; files
+# meant for another container get their own permissions (the tunnel's)
+umask 077
 # ODEION_<NAME> onto PM_<NAME>, which the rest of this script and the node read. Only names made of
 # A-Z, 0-9 and _ are ours; values are copied, never run.
 for odeion_name in $(env | sed -n 's/^ODEION_\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p'); do

@@ -8,7 +8,43 @@ Newest first. Dates are when the change landed on `main`.
 
 - **The Docker image is published under both names again.** Since the rename, release images went only to `ghcr.io/gillohner/odeion`, so installs pulling the old name `ghcr.io/gillohner/pubky-music-node` stopped getting updates after 2026-11-04. Every release now pushes the same image under both names, and the older version tags (`0.2.2`, `latest`, …) are copied to the new name. The bundle, the installer's node-only setup, TrueNAS and the Docker guide now default to `ghcr.io/gillohner/odeion`; an `ODEION_IMAGE` / `PM_IMAGE` you set still wins. Installs that pull the old name get updates again from this release on.
 
-### 2026-11-05
+- **The Android app updates itself** (owner's ask). Like the desktop app, it checks once at start on the channel it was built for (edge builds follow edge, releases follow the latest release) and asks "Odeion X is available (this is Y). Install it now?". After Install it downloads the APK for the phone (arm64 on most phones), installs it only when it matches the SHA-256 the release lists, and hands it to Android, which asks you to confirm and installs only an app signed with the same key. The first time, the app explains that Android needs your permission to install apps and opens that setting. A failed check (no network) says nothing. Local builds never check, and the `.aab` has no updater (an app from Google Play updates only through Play). The release feed (`latest.json`) gets an `android` entry; desktop entries stay as they were. Edge builds now show their full version (`0.3.0-412`) on Android too. Checked in CI on Android 15 and 17 emulators: a tampered download is refused, and the right one installs over the app and keeps its data.
+
+- **Tighter request checks for a node without an API token:**
+  - Such a node listens on this computer only, and now answers only at `127.0.0.1`, `localhost` or `[::1]`, from its own pages (opened as pages, not in a frame). To reach it by another name, for example through a proxy, give it an `[api] token`. The desktop and Android app, finding such a node on the network, tries it as the node on this computer first (only when the node there has the same id), and otherwise says that it needs a token.
+  - Its live updates open only from its own pages, and other sites' pages reach it only by opening one of its pages (a GET; a form another site posts is refused, and so are the zones' UPnP routes).
+  - The node's pages can't be shown inside another site.
+
+- **The node's address record on your homeserver no longer holds the node's API token.**
+  - The record keeps the node's name, addresses and version. The desktop and Android app finds the node through it as before, then asks you to approve a sign-in to the node itself in Pubky Ring, so each device has a sign-in of its own. Connecting a new device therefore takes two approvals in Ring, both by you: the app takes the node's sign-in only from the identity whose record named the node, approved as its owner, and refuses a node that says it belongs to someone else. A device's sign-in is kept apart from browser sessions: logging out of the page inside the app, or many browser log-ins, leave it. Make a new token ends it, and the app then signs in again by itself with one approval. A node that refuses the app's sign-in for any other reason gets the same: one approval, not Forget and two.
+  - On its first start after the update, a node that had written its token there replaces that token. Apps and browsers then sign in to the node again, once.
+  - A token you set in the node's config (`[api] token`, `PM_TOKEN`) can't be replaced by the node: Health asks you to change it.
+
+- **Covers, portraits and profile pictures are served by what they are.**
+  - A picture's type now comes from its bytes, so only JPEG, PNG, WebP and GIF are served, whatever type a tag or a server gave it. Anything else isn't shown.
+  - Every picture, and every file the node relays from Jellyfin, Plex, Audiobookshelf or a Subsonic server, is marked to be shown only as what it is.
+- **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, before the library opens, the node makes its library and its journal files, its config, its Pubky session secret, its remote-access key, the app players' keys and a restored config its own if a group or anyone else could read them, and logs that. It changes only regular files in its data folder, never through a link; a config kept elsewhere (`/etc`) is left to its installer. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
+
+- **Backups without a passphrase keep no way in.**
+  - Besides sign-ins, a backup made without a passphrase (and `odeiond backup`'s copy) now also leaves out: the homeserver's signup token, the links of unused invites, parties, the scheduled backup's passphrase and this node's own keys.
+  - Invites come back without their links, so make the link again.
+  - With a passphrase, invite links, the signup token and parties are locked in with the sign-ins and come back on restore.
+  - `odeiond backup` writes its copy readable by you only. It is made and cleaned in a private folder in the node's data folder; only the cleaned copy is written where you asked.
+  - `odeiond restore` keeps this node's own settings (its id, stream key, backup schedule and files jobs), and the sign-ins (yours and listeners'), invite links, signup token and parties a plain copy doesn't carry. Settings › Backup does the same: a backup without a passphrase restored on the node it came from keeps the invite links, signup token and parties the node has.
+  - `odeiond backup --force` over an old database also removes that database's journal files beside it.
+  - Your browser sessions and the apps' sign-ins are never in a backup, and a restore keeps the node's own: a backup from before Make a new token can't bring back a sign-in that ended.
+
+- **Workflows use each action at a fixed commit** (with its version beside it), checkouts keep no credentials, and `ci.yml` and `compat.yml` read the repository only. `tools/workflow-pins-check.py` runs in CI and fails on an action used by tag; Dependabot proposes the updates.
+
+- **Squeezebox connections have limits.** A player has 10 s to send its hello and is disconnected after 60 s without a whole report (a byte now and then doesn't count) (players report every 5 s and reconnect on their own). Up to 128 connections, 16 from one address, and 64 players; a known player always reconnects. A connection the node can't start a thread for is closed and the server keeps listening. Outputs found on the network stop being added at 256 (one turned away leaves nothing behind); a player turned away for that is offered again when it reconnects. New `[outputs] slimproto_bind` sets the listening address (unset: every address; on loopback the discovery responder is off).
+
+- **Changes to People are made one at a time.** A change waits for any other to finish, homeserver calls come first, and the change is made to the list as it is by then: two changes made at once (a rename and turning music off, or opening People while an invite is used) both stay.
+
+- **The node's owner chooses whose TIDAL, Qobuz and Spotify sign-ins people play with** (owner's ask: "can we have both and node admin can set if user use node or own sources"). Settings › This node › Service apps › Sources for everyone:
+  - **This node's:** everyone plays through the sign-ins made on the node; listeners can't sign in to their own.
+  - **Each person's own:** as until now, and still the setting for every node that hasn't chosen.
+  - **Each person chooses:** the node's by default; each listener switches in their Settings.
+  - Switching keeps every sign-in, the node's and each person's. A play still uses one account, and a listener's own sign-in page never shows the node's account.
 
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
@@ -19,6 +55,13 @@ Newest first. Dates are when the change landed on `main`.
   - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
 
 ### 2026-11-04
+
+- **Usage insights, the node's side (off until the owner turns them on).** Which pages and buttons people use, which they are shown and pass by, and where they run into trouble, in fixed categories only, to guide changes to the app. The browser part comes next; nothing records anything yet.
+  - The owner's switch (`PUT /v1/node/usage`) starts off and is kept across restarts. Once on, every signed-in owner and listener browser takes part, and each person can Stop for themselves and Clear what is still linked to them; Stop and Clear are separate, and so are the owner's Off and Clear all.
+  - Nothing that says who someone is is kept: a page load gets a random alias, tied to its person only in the node's memory, for at most 12 hours and a day after for Clear mine. Never typed text, names, titles, addresses, ids of songs or people, error messages, or screens.
+  - Kept in `usage.sqlite` in the data folder (only the node's to read, never in a backup): raw events 14 days, daily counts 90 days, at most 400 000 events and 64 MiB, the oldest day first. What a Clear takes is overwritten in the file.
+  - The owner reads a summary (counts only) or downloads an export; `odeiond usage summary|export` reads the file on the node. The bundle's `backup.sh` and `restore.sh` leave it out too. Nothing is sent anywhere by itself. A button shown and not used is never read as disliked: a use rate needs enough visits from enough browsers.
+  - Party guests are not covered yet; the summary says so.
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
 
