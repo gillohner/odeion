@@ -421,14 +421,30 @@ async fn connect_manual(
     state: State<'_, AppState>,
     node_url: String,
     token: String,
+    expect_id: Option<String>,
 ) -> Result<String, String> {
     if node_url.trim().is_empty() {
         return Err("Enter the node's address".into());
     }
     let s = Settings::new(&node_url, &token);
     let info = node::probe(&s).await?;
+    // The node found on the network, tried at 127.0.0.1: only when the node there is that one
+    if let Some(want) = expect_id.as_deref() {
+        if !same_node(want, &info.id) {
+            return Err(NOT_THAT_NODE.into());
+        }
+    }
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// What `connect_manual` answers when the node at the address isn't the one asked for.
+const NOT_THAT_NODE: &str = "Another node answers on this computer";
+
+/// Whether the node that answered (`got`, its `/v1/info` id) is the one found on the network
+/// (`want`). A node without an id is never taken for another.
+fn same_node(want: &str, got: &str) -> bool {
+    !want.is_empty() && want == got
 }
 
 #[derive(Clone, Serialize)]
@@ -807,5 +823,15 @@ mod tests {
             assert!(is_app_page(&url::Url::parse(u).unwrap()), "{u}");
         }
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
+    }
+
+    /// The node found on the network is taken at 127.0.0.1 only when the node there has its id;
+    /// a node without an id is never taken for another.
+    #[test]
+    fn only_the_found_node_is_taken_at_this_computers_address() {
+        assert!(same_node("node-1", "node-1"));
+        assert!(!same_node("node-1", "node-2"), "another node on this computer");
+        assert!(!same_node("node-1", ""), "a node that names no id");
+        assert!(!same_node("", ""), "nothing to compare");
     }
 }

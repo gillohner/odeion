@@ -256,6 +256,9 @@ works until the Pubky transport exists (ADR 0008):
 - **Cloudflare Tunnel / a reverse proxy with TLS**: terminate TLS in front of port 7788 and keep the
   token. Set `[api] public_url` to the public origin so pull-stream URLs handed to renderers are
   right. Do not put the node on the open internet without TLS and a strong token.
+  A node **without** a token (it listens on 127.0.0.1 only) answers only requests for
+  `127.0.0.1`, `localhost` or `[::1]` from its own pages; requests by any other name get 403. Set
+  `[api] token` before putting anything in front of it.
 - **Pubky**: a signed-in node publishes its address privately on your homeserver; the app's
   "Find my node via Pubky" reads it, so a moved or re-addressed node is found again without typing.
 
