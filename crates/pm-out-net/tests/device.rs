@@ -275,3 +275,64 @@ fn the_node_hears_when_a_device_comes_or_goes() {
     let id = OutputId(format!("net:{}/cpal:Speaker or headphones", serving.addr()));
     assert_eq!(*heard.lock().unwrap(), [id.clone(), id]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_session_holds_up_nothing_else() {
+    // The endpoint takes connection A and never answers it (a phone frozen mid-handshake); B
+    // (the app registering again) and C (a zone opening the output) must not wait for A
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let (a_in, a_said_hello) = std::sync::mpsc::channel();
+    let output = fake::output(serde_json::Value::Null);
+    let server = std::thread::spawn(move || {
+        let (mut a, _) = l.accept().unwrap();
+        fake::hello(&mut a);
+        a_in.send(()).unwrap();
+        let (mut b, _) = l.accept().unwrap();
+        fake::hello(&mut b);
+        fake::welcome(&mut b, output.clone());
+        let (mut c, _) = l.accept().unwrap();
+        fake::hello(&mut c);
+        fake::welcome(&mut c, output);
+        match pm_stream::read_frame(&mut c).unwrap() {
+            pm_stream::Incoming::Control(pm_stream::Frame::Open { .. }) => {}
+            other => panic!("not an Open: {other:?}"),
+        }
+        fake::send(&mut c, serde_json::json!({"Opened": {"buffer_frames": 4800}}));
+        (a, c) // A stays open and silent until the test ends
+    });
+    let cell = KeyCell::new(Key::random());
+    let c2 = cell.clone();
+    let started = std::time::Instant::now();
+    let silent = tokio::task::spawn_blocking(move || NetOutput::connect(addr, &c2).map(|_| ()));
+    a_said_hello.recv().unwrap();
+    let c3 = cell.clone();
+    let b = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(move || NetOutput::connect(addr, &c3)),
+    )
+    .await
+    .expect("registering again waits for no other session")
+    .unwrap()
+    .expect("and works");
+    let out = b.into_iter().next().unwrap();
+    let sink = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        out.open(AudioFormat::pcm(48_000, 24, 2)),
+    )
+    .await
+    .expect("opening waits for no other session")
+    .expect("and works");
+    drop(sink);
+    // A itself gives up within the handshake bound
+    let a = tokio::time::timeout(
+        pm_out_net::HANDSHAKE_TIMEOUT + std::time::Duration::from_secs(3),
+        silent,
+    )
+    .await
+    .expect("a silent endpoint is given up on")
+    .unwrap();
+    assert!(a.is_err(), "no Welcome, no outputs");
+    assert!(started.elapsed() < pm_out_net::HANDSHAKE_TIMEOUT + std::time::Duration::from_secs(3));
+    drop(server.join().unwrap());
+}

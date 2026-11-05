@@ -11,6 +11,7 @@ pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-stream = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

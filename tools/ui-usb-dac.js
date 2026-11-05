@@ -16,7 +16,11 @@
 //     event) updates the pill (without the picker having fetched first), the picker, the open Sound
 //     panel and Settings › This phone, plugged and unplugged;
 //   * "bit-perfect" only for mode bit_perfect with confirmed true: unconfirmed (with a neutral
-//     note in Settings) or unknown modes read as shared.
+//     note in Settings) or unknown modes read as shared;
+//   * answers out of order: an older GET /v1/outputs answer never restores an unplugged DAC, and
+//     Settings, drawn after slow requests, never writes back the outputs it fetched before them;
+//   * a change missed while disconnected: the snapshot on reconnecting fetches the outputs again;
+//   * DSD: native and DoP by name, anything else just "DSD".
 // At 390 and 1280 px. Screenshots go to the shots folder.
 //   node tools/ui-usb-dac.js [repo] [shots]     (ONLY=web: the web UI part alone)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -48,6 +52,17 @@ async function open(browser, w, inApp) {
   // The node's event stream: kept, so a test can send what the node sends (numbered per socket)
   run.sockets = [];
   await run.context.routeWebSocket(/\/v1\/events/, (ws) => { const sock = { ws, seq: 0 }; run.sockets.push(sock); ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+  // GET /v1/outputs answers what the fixture held when asked, after a delay the test may queue
+  run.outQueue = [];
+  await run.context.route('**/v1/outputs', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const body = JSON.stringify(run.state.fixtures['/outputs'].body); run.state.hits.push({ v: '/outputs', m: 'GET', at: Date.now() });
+    const d = run.outQueue.shift() || 0; if (d) await sleep(d);
+    return route.fulfill({ status: 200, contentType: 'application/json', body });
+  });
+  // Settings' other requests, slowed down on demand
+  run.slowSettings = 0;
+  await run.context.route('**/v1/node/settings', async (route) => { if (run.slowSettings) await sleep(run.slowSettings); return route.fallback(); });
   run.nodeEvent = (ev) => { for (const s of run.sockets) { try { s.seq += 1; s.ws.send(JSON.stringify({ ...ev, seq: s.seq })); } catch { /* closed */ } } };
   await run.context.addInitScript(([z, app]) => { localStorage.setItem('pm.zone', z); if (app) window.pmDesktop = { version: '0.2.2', platform: 'android' }; }, [zone.id, inApp]);
   return run;
@@ -144,6 +159,28 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     await nodePlug(run, KA17);
     await page.waitForFunction(() => !!document.querySelector('[data-stab="dac"]')).catch(() => {});
     check(await page.evaluate(() => !!document.querySelector('[data-stab="dac"]')), `${at}: plugged again, This phone is back`);
+    // DSD by name, an unknown way just "DSD"
+    for (const [dsd, words] of [['native', 'DSD (native)'], ['dop', 'DSD (DoP)'], ['unknown', 'DSD']]) {
+      await plug(run, { ...KA17, dsd });
+      await page.waitForFunction(() => /DSD/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
+      const txt = (await dacTab(page)) || '';
+      const shown = (txt.match(/DSD[^·\n]*/) || [''])[0].trim();
+      check(shown === words, `${at}: dsd "${dsd}" reads "${words}" ("${shown}")`);
+    }
+    await plug(run, KA17);
+    if (w === 1280) {
+      // Settings drawn after slow requests: the DAC unplugged meanwhile stays unplugged
+      run.slowSettings = 1500;
+      const n1 = fetches(state);
+      await fx.go(page, '/settings/dac'); await page.evaluate(appScript([OUT]));
+      for (let i = 0; i < 100 && fetches(state) <= n1; i++) await sleep(50); // Settings has its outputs
+      await sleep(300);
+      run.state.fixtures['/outputs'] = { body: [phoneOut(null)] }; run.nodeEvent({ type: 'outputs_changed', output: OUT });
+      await sleep(2500); run.slowSettings = 0;
+      check(await page.evaluate(() => !!document.querySelector('[data-stab="appearance"]') && !document.querySelector('[data-stab="dac"]')), `${at}: unplugged while Settings loaded: no This phone (it did not write back its older outputs)`);
+      check(!/FiiO/.test(await pill(page)), `${at}: nor in the pill ("${await pill(page)}")`);
+      await nodePlug(run, KA17);
+    }
 
     // Unplugged
     await fx.go(page, '/'); await page.evaluate(appScript([OUT])); await page.waitForFunction(() => { const q = document.querySelector('#quality .qtext'); return q && q.textContent !== '—'; }); await sleep(300);
@@ -177,6 +214,19 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     check(/→ FiiO KA17 · shared$/.test(await pill(page)), `web UI: plugged again, the pill ("${await pill(page)}")`);
     const back = await pickerLine(page); await closePicker(page);
     check(back === 'FiiO KA17 · shared', `web UI: and the picker ("${back}")`);
+    // Plugged, then unplugged at once: the first answer is slow and comes last
+    run.outQueue.push(900); run.nodeEvent({ type: 'outputs_changed', output: OUT });
+    await sleep(100);
+    run.state.fixtures['/outputs'] = { body: [phoneOut(null)] }; run.nodeEvent({ type: 'outputs_changed', output: OUT });
+    await sleep(1800);
+    check(!/FiiO/.test(await pill(page)), `web UI: an older answer arriving last does not bring the DAC back ("${await pill(page)}")`);
+    // Missed while disconnected: plugged, the link drops, it is unplugged, the link comes back
+    await nodePlug(run, KA17);
+    check(/FiiO KA17/.test(await pill(page)), 'web UI: plugged again before the link drops');
+    run.state.fixtures['/outputs'] = { body: [phoneOut(null)] };
+    for (const s of run.sockets) { try { s.ws.close(); } catch { /* gone */ } }
+    await page.waitForFunction(() => !/FiiO/.test(document.querySelector('#quality .qtext').textContent), null, { timeout: 8000 }).catch(() => {});
+    check(!/FiiO/.test(await pill(page)), `web UI: reconnected, the change missed meanwhile shows ("${await pill(page)}")`);
     await fx.go(page, '/settings'); await sleep(800);
     check(await page.evaluate(() => !!document.querySelector('[data-stab="appearance"]') && !document.querySelector('[data-stab="dac"]')), 'web UI: no This phone tab');
     check(run.state.errors.length === 0, `web UI: no page errors ${JSON.stringify(run.state.errors)}`);

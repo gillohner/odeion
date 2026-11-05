@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Audio sent and not acknowledged yet, at most (at least one block is always sent).
 pub const IN_FLIGHT: Duration = Duration::from_millis(100);
+/// The endpoint's Welcome comes within this, or the session fails.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// An endpoint that answers nothing for this long is gone.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -44,16 +46,26 @@ fn io_err(e: StreamError) -> SinkError {
 /// It also keeps the [`OutputDevice`] each of the endpoint's outputs reported in its last
 /// `Welcome`: a phone's output describes the USB DAC plugged into it, and the app registers again
 /// when that changes. Every [`NetOutput`] of the endpoint, also those zones already hold, reads it
-/// from here. (Names stay as they were: a zone is named once, from its output's name.) Welcomes
-/// are taken one at a time per endpoint, each read and applied before the next connection says
-/// Hello, so an older snapshot never overwrites a newer one (a DAC unplugged meanwhile).
+/// from here. (Names stay as they were: a zone is named once, from its output's name.)
+///
+/// Sessions never wait for each other: each takes a number before it says Hello, and its Welcome
+/// is applied only when no session that started later has been applied already, so an older
+/// snapshot never overwrites a newer one (a DAC unplugged meanwhile), and a silent endpoint holds
+/// up only its own session, for at most [`HANDSHAKE_TIMEOUT`].
 #[derive(Clone, Default)]
 pub struct KeyCell {
     key: Arc<RwLock<Key>>,
-    devices: Arc<RwLock<HashMap<OutputId, Option<OutputDevice>>>>,
-    /// Held from Hello until the Welcome is applied.
-    welcome: Arc<Mutex<()>>,
+    devices: Arc<RwLock<Devices>>,
+    /// The number the next session takes.
+    next: Arc<std::sync::atomic::AtomicU64>,
     on_change: Arc<RwLock<Option<DeviceChanged>>>,
+}
+
+/// The devices last applied, and the number of the session they came from.
+#[derive(Default)]
+struct Devices {
+    applied: u64,
+    by_output: HashMap<OutputId, Option<OutputDevice>>,
 }
 
 type DeviceChanged = Arc<dyn Fn(&OutputId) + Send + Sync>;
@@ -80,11 +92,18 @@ impl KeyCell {
         *self.on_change.write().expect("endpoint callback") = Some(Arc::new(f));
     }
 
-    /// Remember the devices a `Welcome` reports for the endpoint's outputs.
-    fn report(&self, addr: SocketAddr, outputs: &[OutputInfo]) {
+    /// Remember the devices the `Welcome` of session `seq` reports for the endpoint's outputs,
+    /// unless a session that started later was applied already.
+    fn report(&self, seq: u64, addr: SocketAddr, outputs: &[OutputInfo]) {
         let mut changed = Vec::new();
         {
-            let mut known = self.devices.write().expect("endpoint devices");
+            let mut d = self.devices.write().expect("endpoint devices");
+            if seq < d.applied {
+                tracing::debug!(seq, applied = d.applied, "an older Welcome, not applied");
+                return;
+            }
+            d.applied = seq;
+            let known = &mut d.by_output;
             for o in outputs {
                 let before = known.insert(o.id.clone(), o.device.clone());
                 if before.as_ref() != Some(&o.device) {
@@ -105,15 +124,22 @@ impl KeyCell {
     }
 
     fn device(&self, id: &OutputId) -> Option<Option<OutputDevice>> {
-        self.devices.read().expect("endpoint devices").get(id).cloned()
+        self.devices
+            .read()
+            .expect("endpoint devices")
+            .by_output
+            .get(id)
+            .cloned()
     }
 
-    /// A session with the endpoint, its `Welcome` applied before any later one is taken.
+    /// A session with the endpoint (blocking, at most [`CONNECT_TIMEOUT`] plus
+    /// [`HANDSHAKE_TIMEOUT`] until its Welcome), the Welcome's devices applied in session order.
     fn session(&self, addr: SocketAddr) -> Result<(Conn, Frame), SinkError> {
-        let _one = self.welcome.lock().unwrap_or_else(|e| e.into_inner());
+        // Numbered before Hello: a session that starts later sees a newer endpoint
+        let seq = self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let (c, welcome) = Conn::open(addr, self)?;
         if let Frame::Welcome { outputs, .. } = &welcome {
-            self.report(addr, outputs);
+            self.report(seq, addr, outputs);
         }
         Ok((c, welcome))
     }
@@ -146,7 +172,10 @@ impl Conn {
             },
         )
         .map_err(io_err)?;
+        // An endpoint that took the connection and says nothing: give up, never wait for good
+        c.r.get_ref().set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
         let welcome = expect_control(&mut c.r).map_err(io_err)?;
+        c.r.get_ref().set_read_timeout(None)?;
         Ok((c, welcome))
     }
 }
@@ -235,95 +264,126 @@ impl Output for NetOutput {
         if !self.remote.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
-        // Each session starts with the endpoint's outputs as they are now (a DAC plugged in since)
-        let (mut c, _welcome) = self.key.session(self.addr)?;
-        write_frame(
-            &mut c.w,
-            &Frame::Open {
-                output: self.remote.id.0.clone(),
-                format: fmt,
-            },
-        )
-        .map_err(io_err)?;
-        let capacity = match expect_control(&mut c.r).map_err(io_err)? {
-            Frame::Opened { buffer_frames } => buffer_frames,
-            other => return Err(SinkError::Device(format!("unexpected {other:?} after Open"))),
-        };
-        // The endpoint's answers, read on their own thread so a write need not wait for them
-        let Conn { mut r, w } = c;
-        let stream = w.get_ref().try_clone()?;
-        let shared = Arc::new(Answers {
-            state: Mutex::new(AckState {
-                level: BufferLevel {
-                    queued_frames: 0,
-                    capacity_frames: capacity,
-                },
-                at: None,
-                written: 0,
-                acks: 0,
-                replies: std::collections::VecDeque::new(),
-                closed: None,
-            }),
-            changed: Condvar::new(),
-        });
-        let reader = shared.clone();
-        std::thread::Builder::new()
-            .name("pm-net-acks".into())
-            .spawn(move || loop {
-                // Read to the end even after the sink went: closing with answers unread would
-                // reset the connection and lose the audio the endpoint has not read yet
-                let f = expect_control(&mut r);
-                let mut st = reader.state.lock().expect("answers");
-                match f {
-                    Ok(Frame::Ack {
-                        level,
-                        frames_written,
-                    }) => {
-                        // Stamped as it arrives: the level counts down from then
-                        st.level = level;
-                        st.at = Some(Instant::now());
-                        st.written = frames_written;
-                        st.acks += 1;
-                    }
-                    Ok(other) => st.replies.push_back(other),
-                    Err(e) => {
-                        st.closed = Some(e.to_string());
-                        reader.changed.notify_all();
-                        break;
-                    }
-                }
-                reader.changed.notify_all();
-            })
-            .map_err(|e| SinkError::Device(format!("cannot read the endpoint's answers: {e}")))?;
-        Ok(Box::new(NetSink {
-            id: self.id(),
-            w,
-            stream,
-            answers: shared,
-            parts: 0,
-            sent: std::collections::VecDeque::new(),
-            fmt,
-        }))
+        let (addr, key, remote, id) = (self.addr, self.key.clone(), self.remote.id.0.clone(), self.id());
+        blocking(move || open_session(addr, &key, remote, id, fmt))
+            .await
+            .map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         if self.remote.caps.hw_volume.is_none() {
             return Err(SinkError::NoVolume(self.id()));
         }
-        let (mut c, _) = self.key.session(self.addr)?;
-        write_frame(
-            &mut c.w,
-            &Frame::SetVolume {
-                output: self.remote.id.0.clone(),
-                volume: v,
-            },
-        )
-        .map_err(io_err)?;
-        match expect_control(&mut c.r).map_err(io_err)? {
-            Frame::Done => Ok(()),
-            other => Err(SinkError::Device(format!("unexpected {other:?}"))),
-        }
+        let (addr, key, remote) = (self.addr, self.key.clone(), self.remote.id.0.clone());
+        blocking(move || {
+            let (mut c, _) = key.session(addr)?;
+            write_frame(
+                &mut c.w,
+                &Frame::SetVolume {
+                    output: remote,
+                    volume: v,
+                },
+            )
+            .map_err(io_err)?;
+            match expect_control(&mut c.r).map_err(io_err)? {
+                Frame::Done => Ok(()),
+                other => Err(SinkError::Device(format!("unexpected {other:?}"))),
+            }
+        })
+        .await
     }
+}
+
+/// Run blocking socket work off the async workers when there is a runtime (an API handler); in
+/// place otherwise (a zone's own thread).
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => h
+            .spawn_blocking(f)
+            .await
+            .expect("a blocking endpoint task panicked"),
+        Err(_) => f(),
+    }
+}
+
+/// Open `remote` on the endpoint in `fmt`: the session, `Open`, and the thread that reads the
+/// endpoint's answers. Blocking.
+fn open_session(
+    addr: SocketAddr,
+    key: &KeyCell,
+    remote: String,
+    id: OutputId,
+    fmt: AudioFormat,
+) -> Result<NetSink, SinkError> {
+    // Each session starts with the endpoint's outputs as they are now (a DAC plugged in since)
+    let (mut c, _welcome) = key.session(addr)?;
+    write_frame(
+        &mut c.w,
+        &Frame::Open {
+            output: remote,
+            format: fmt,
+        },
+    )
+    .map_err(io_err)?;
+    let capacity = match expect_control(&mut c.r).map_err(io_err)? {
+        Frame::Opened { buffer_frames } => buffer_frames,
+        other => return Err(SinkError::Device(format!("unexpected {other:?} after Open"))),
+    };
+    // The endpoint's answers, read on their own thread so a write need not wait for them
+    let Conn { mut r, w } = c;
+    let stream = w.get_ref().try_clone()?;
+    let shared = Arc::new(Answers {
+        state: Mutex::new(AckState {
+            level: BufferLevel {
+                queued_frames: 0,
+                capacity_frames: capacity,
+            },
+            at: None,
+            written: 0,
+            acks: 0,
+            replies: std::collections::VecDeque::new(),
+            closed: None,
+        }),
+        changed: Condvar::new(),
+    });
+    let reader = shared.clone();
+    std::thread::Builder::new()
+        .name("pm-net-acks".into())
+        .spawn(move || loop {
+            // Read to the end even after the sink went: closing with answers unread would
+            // reset the connection and lose the audio the endpoint has not read yet
+            let f = expect_control(&mut r);
+            let mut st = reader.state.lock().expect("answers");
+            match f {
+                Ok(Frame::Ack {
+                    level,
+                    frames_written,
+                }) => {
+                    // Stamped as it arrives: the level counts down from then
+                    st.level = level;
+                    st.at = Some(Instant::now());
+                    st.written = frames_written;
+                    st.acks += 1;
+                }
+                Ok(other) => st.replies.push_back(other),
+                Err(e) => {
+                    st.closed = Some(e.to_string());
+                    reader.changed.notify_all();
+                    break;
+                }
+            }
+            reader.changed.notify_all();
+        })
+        .map_err(|e| SinkError::Device(format!("cannot read the endpoint's answers: {e}")))?;
+    Ok(NetSink {
+        id,
+        w,
+        stream,
+        answers: shared,
+        parts: 0,
+        sent: std::collections::VecDeque::new(),
+        fmt,
+    })
 }
 
 /// What the endpoint has answered, kept by the sink's answer thread.

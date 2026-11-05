@@ -1124,12 +1124,16 @@ impl NodeState {
     }
 
     /// A key cell for one endpoint: when one of its outputs reports another device (a phone's
-    /// USB DAC came or went), every owner's controller hears `outputs_changed`.
+    /// USB DAC came or went), every owner's controller hears `outputs_changed`. Only for outputs
+    /// the node lists already: a new one is announced once it is registered
+    /// (`add_endpoint_address`), so a controller that fetches the outputs at once finds it.
     fn endpoint_cell(&self, key: pm_stream::Key) -> pm_out_net::KeyCell {
         let cell = pm_out_net::KeyCell::new(key);
-        let events = self.events.clone();
+        let (events, outputs) = (self.events.clone(), self.outputs.clone());
         cell.on_device_change(move |id| {
-            events.send(ApiEvent::OutputsChanged { output: id.clone() });
+            if outputs.get(id).is_some() {
+                events.send(ApiEvent::OutputsChanged { output: id.clone() });
+            }
         });
         cell
     }
@@ -1222,6 +1226,10 @@ impl NodeState {
                 let name = out.name();
                 self.outputs.register(out.clone());
                 self.create_zone(&name, out.clone());
+                // Its device (a DAC already plugged in) now that GET /v1/outputs lists it
+                if out.device().is_some() {
+                    self.events.send(ApiEvent::OutputsChanged { output: id.clone() });
+                }
             }
             infos.push(out.info());
         }

@@ -2156,7 +2156,7 @@
   const dacShort = (d) => ({ bit_perfect: 'bit-perfect', exclusive: 'exclusive USB', shared: 'shared' })[dacMode(d)];
   const dacUnconfirmed = (d) => (d.mode === 'bit_perfect' && d.confirmed !== true ? 'Android has not confirmed bit-perfect for this format.' : d.mode === 'exclusive' && d.confirmed !== true ? 'Exclusive USB mode is not confirmed for this format.' : '');
   const dacWords = (d) => `${d.name} · ${dacShort(d)}`;
-  const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? `DSD (${d.dsd === 'native' ? 'native' : 'DoP'})` : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
+  const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? ({ native: 'DSD (native)', dop: 'DSD (DoP)' })[d.dsd] || 'DSD' : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
   // This app's own output (the app tells the page after it registers its player), with its device
   const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
   const hereDevice = () => (window.pmDesktop && window.pmDesktop.platform === 'android' ? 'This phone' : 'This computer');
@@ -2165,7 +2165,19 @@
   // the outputs again, then the bar, the Sound panel and the picker; Settings draws again when it
   // shows another device than this app's
   const appDevice = () => JSON.stringify((appOutput() || {}).device || null);
-  const refreshOutputs = () => { if (isOwner()) api('GET', '/outputs').then((o) => { state.outputs = o; renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
+  // One loader for GET /v1/outputs, used by every refresh and Settings: one request at a time,
+  // one more after it when asked meanwhile (the answer in flight may predate the change), and an
+  // answer older than the newest installed is never installed
+  const outputsLoad = { seq: 0, applied: 0, inflight: null, again: false };
+  const loadOutputs = () => {
+    if (outputsLoad.inflight) { outputsLoad.again = true; return outputsLoad.inflight; }
+    const seq = ++outputsLoad.seq;
+    outputsLoad.inflight = api('GET', '/outputs')
+      .then((o) => { if (seq > outputsLoad.applied) { outputsLoad.applied = seq; state.outputs = o; } return state.outputs; })
+      .finally(() => { outputsLoad.inflight = null; if (outputsLoad.again) { outputsLoad.again = false; refreshOutputs(); } });
+    return outputsLoad.inflight;
+  };
+  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
   window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
     if (z.id === BROWSER) return 'Streams the files to this browser';
@@ -2392,7 +2404,7 @@
     renderZonePop();
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
     // The devices' models: the owner's output list, fetched once
-    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); renderBar(); }).catch(() => {});
+    if (isOwner() && !state.outputs) loadOutputs().then(() => { if (!zonePop.hidden) renderZonePop(); renderBar(); }).catch(() => {});
   };
   // The tabs' Library: the library page last open
   const libHome = () => state.lastLib || 'library';
@@ -2889,7 +2901,7 @@
     renderQPanel();
     qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; $(opener).setAttribute('aria-expanded', 'true'); pushTransient();
     loadDsp();
-    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
+    if (isOwner() && !state.outputs) loadOutputs().then(() => syncQPanel()).catch(() => {});
   };
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
@@ -3054,7 +3066,7 @@
     // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
     const nv = $('#npvol', overlay); if (nv) { setFill(nv); nv.oninput = () => setFill(nv); nv.onchange = () => setZoneVol(z, nv.value); }
-    else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
+    else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = loadOutputs().then(() => { if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
@@ -6156,7 +6168,7 @@
           break;
         }
         case 'zones': {
-          const outs = isListener() ? [] : state.outputs || (state.outputs = await api('GET', '/outputs').catch(() => []));
+          const outs = isListener() ? [] : state.outputs || (await loadOutputs().catch(() => []));
           if (state.view !== 'zones') return;
           const capsOf = (z) => (outs.find((o) => o.id === z.output) || {}).caps || null;
           const zs = zoneList();
@@ -6370,7 +6382,7 @@
             break;
           }
           const info = await api('GET', '/info'); state.info = info;
-          const outs = await api('GET', '/outputs');
+          const outs0 = await loadOutputs();
           const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
           // The homeserver bundled with the node (deploy/bundle) and its Cloudflare Tunnel, when there is one
           const bundled = await api('GET', '/homeserver/bundled').catch(() => null);
@@ -6388,7 +6400,8 @@
           const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          state.outputs = outs; const myOut = appOutput(); const dv = myOut && myOut.device; state.dacDrawn = appDevice();
+          // The newest outputs, not the answer fetched before the awaits above (a change since wins)
+          const outs = state.outputs || outs0; const myOut = appOutput(); const dv = myOut && myOut.device; state.dacDrawn = appDevice();
           const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available), dac: dv ? hereDevice() : null }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
@@ -7017,7 +7030,8 @@
         if (ev.id === link.pingId) { link.rtt = Math.max(1, Math.round(performance.now() - link.pingSent)); link.awaiting = false; link.missed = 0; link.pongs = true; setConn('ok', nodeLabel()); }
         return;
       }
-      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); return; }
+      // A snapshot (connected, reconnected, resynced): an outputs_changed may have been missed
+      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); refreshOutputs(); return; }
       // Numbered events: a gap means something was missed, so ask for a fresh snapshot.
       if (typeof ev.seq === 'number' && link.seq != null) {
         if (ev.seq > link.seq + 1) ws.send(JSON.stringify({ type: 'resync' }));
