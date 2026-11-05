@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { chromium } = require('playwright');
+const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const { create, go, cleanCopy } = require('./ui-fixture');
 const OUT = process.argv[3] || '/tmp/ui-source-policy';
 fs.mkdirSync(OUT, { recursive: true });
