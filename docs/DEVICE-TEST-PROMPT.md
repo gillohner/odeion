@@ -290,8 +290,12 @@ Android played it. Meanwhile other apps' sounds go to the phone's speaker.
    The starting level is Android's own level for the DAC (Android 9 and later): note Android's
    volume, choose Exclusive USB, and report whether the first second sounds the same as before
    (never louder). On Android 8, or within a few seconds of switching away from Exclusive USB and
-   back, the DAC starts muted instead. Switching away again, the DAC's own volume (its display) is
-   back where it was before Exclusive USB.
+   back, the DAC starts muted instead; on Android 9 to 12 too, where the phone doesn't tell whether
+   media plays to the DAC (report which happened). With the DAC plugged in but media on Bluetooth
+   or the speaker, choosing Exclusive USB starts it muted. Switching away again, the DAC's own
+   volume (its display) is back where it was before Exclusive USB, or lower if you turned it down.
+   Mute the zone during a 96/24 song, let a 44.1/16 song follow: it stays muted; choose Shared
+   while muted: the DAC goes back muted.
 7. If an Android 13 (or older) phone is at hand: steps 1 to 5 there. Auto plays Exclusive USB on
    it once access was allowed.
 8. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB".

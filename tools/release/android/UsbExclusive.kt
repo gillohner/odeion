@@ -132,6 +132,24 @@ class UsbExclusive private constructor() {
         fun open(vendor: Int, product: Int): String {
             val um = usb() ?: return refused("no USB here")
             val d = find(vendor, product) ?: return refused("the DAC is not attached")
+            return openDevice(um, d)
+        }
+
+        /// The device this app claimed and never released (named by detached()), opened exactly:
+        /// by its device name (its path), never another one with the same ids. Answers as open().
+        @JvmStatic
+        fun openDetached(name: String, vendor: Int, product: Int): String {
+            val um = usb() ?: return refused("no USB here")
+            if (recorded() != name) return refused("$name is not the device this app claimed")
+            val d = runCatching { um.deviceList[name] }.getOrNull()
+                ?: return refused("$name is not attached")
+            if (d.vendorId != vendor || d.productId != product || !isAudio(d)) {
+                return refused("$name is another device now")
+            }
+            return openDevice(um, d)
+        }
+
+        private fun openDevice(um: UsbManager, d: UsbDevice): String {
             if (!runCatching { um.hasPermission(d) }.getOrDefault(false)) {
                 return refused("Android's permission for the DAC was not given")
             }
@@ -215,9 +233,10 @@ class UsbExclusive private constructor() {
         private fun recorded(): String? = prefs()?.getString(CLAIMED, null)?.substringBefore('|')
 
         /// The device this app itself claimed and never released (it was killed holding it): still
-        /// attached under the same device name, not held now. JSON: [{vendor_id, product_id}], at
-        /// most one. Nothing else is ever named: a DAC Android is using is never touched. Called
-        /// once at start; the Rust side opens it, gives its interfaces back to Android's driver and
+        /// attached under the same device name, not held now. JSON: [{vendor_id, product_id,
+        /// device_name}], at most one. Nothing else is ever named: a DAC Android is using is never
+        /// touched. Called once at start; the Rust side opens exactly it (openDetached, by its
+        /// name: never an identical DAC), gives its interfaces back to Android's driver and
         /// releases it (which forgets the record).
         @JvmStatic
         fun detached(): String {
@@ -236,7 +255,10 @@ class UsbExclusive private constructor() {
                 forget()
                 return out.toString()
             }
-            out.put(JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId))
+            out.put(
+                JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId)
+                    .put("device_name", d.deviceName)
+            )
             return out.toString()
         }
 

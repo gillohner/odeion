@@ -750,6 +750,19 @@ struct JniUsbExclusive {
 }
 
 impl JniUsbExclusive {
+    /// `UsbExclusive.open`'s (or `openDetached`'s) answer as the open device, or why not (with the
+    /// device when a descriptor was handed over: it goes back and is closed).
+    fn opened(answer: &str) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
+        use pm_out_local::exclusive::{parse_open_answer, usbfs, OpenRefused};
+        match parse_open_answer(answer) {
+            Ok((fd, raw)) => Ok((usbfs(fd), raw)),
+            Err((why, opened)) => Err(OpenRefused {
+                why,
+                partial: opened.map(|(fd, raw)| (usbfs(fd), raw)),
+            }),
+        }
+    }
+
     fn ids(usb: pm_out_local::exclusive::UsbIds) -> [jni021::objects::JValue<'static, 'static>; 2] {
         [
             jni021::objects::JValue::Int(i32::from(usb.vendor_id)),
@@ -786,7 +799,7 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         usb: pm_out_local::exclusive::UsbIds,
     ) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
         use jni021::objects::JClass;
-        use pm_out_local::exclusive::{parse_open_answer, usbfs, OpenRefused};
+        use pm_out_local::exclusive::OpenRefused;
         let answer = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
             let s = env
@@ -795,16 +808,37 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
             Ok(String::from(env.get_string(&s.into())?))
         })
         .map_err(|why| OpenRefused { why, partial: None })?;
-        match parse_open_answer(&answer) {
-            Ok((fd, raw)) => Ok((usbfs(fd), raw)),
-            Err((why, opened)) => Err(OpenRefused {
-                why,
-                partial: opened.map(|(fd, raw)| (usbfs(fd), raw)),
-            }),
-        }
+        Self::opened(&answer)
     }
 
-    fn detached(&self) -> Vec<pm_out_local::exclusive::UsbIds> {
+    fn open_detached(
+        &self,
+        dac: &pm_out_local::exclusive::DetachedDac,
+    ) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
+        use jni021::objects::{JClass, JValue};
+        use pm_out_local::exclusive::OpenRefused;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let name = env.new_string(&dac.device_name)?;
+            let s = env
+                .call_static_method(
+                    class,
+                    "openDetached",
+                    "(Ljava/lang/String;II)Ljava/lang/String;",
+                    &[
+                        JValue::Object(&name),
+                        JValue::Int(i32::from(dac.vendor_id)),
+                        JValue::Int(i32::from(dac.product_id)),
+                    ],
+                )?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })
+        .map_err(|why| OpenRefused { why, partial: None })?;
+        Self::opened(&answer)
+    }
+
+    fn detached(&self) -> Vec<pm_out_local::exclusive::DetachedDac> {
         use jni021::objects::JClass;
         let answer = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
