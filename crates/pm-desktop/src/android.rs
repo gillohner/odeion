@@ -14,6 +14,13 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TLS_READY: AtomicBool = AtomicBool::new(false);
+/// Whether [`init_tls`] succeeded: without the verifier, a TLS handshake panics.
+static TLS_OK: AtomicBool = AtomicBool::new(false);
+
+/// True once the TLS verifier is set up (after [`tls_ready`]); false if it failed or is late.
+pub fn tls_ok() -> bool {
+    TLS_OK.load(Ordering::Acquire)
+}
 
 #[cfg(feature = "ring-transport-probe")]
 #[path = "ring_probe.rs"]
@@ -42,6 +49,7 @@ pub fn init_tls(window: &tauri::WebviewWindow) {
             // callback, on this thread.
             let ok = crate::crash::guarded("the TLS verifier", || unsafe { init_verifier(raw_env, raw_ctx) });
             if ok == Some(true) {
+                TLS_OK.store(true, Ordering::Release);
                 tracing::info!("TLS platform verifier ready");
             } else {
                 tracing::error!("TLS platform verifier failed to initialise; Pubky Ring sign-in will fail");
@@ -303,6 +311,192 @@ fn call_static(
         &[JValue::Object(activity), JValue::Object(&jtext)],
     )?;
     Ok(())
+}
+
+/// The phone's part of app updates (`AppUpdate`, tools/release/android/AppUpdate.kt): its
+/// methods block, so they are called from a blocking thread attached to the JVM, never from the
+/// UI thread. Builds without that class (the .aab) have no updater.
+pub struct Updater {
+    vm: jni021::JavaVM,
+    activity: jni021::objects::GlobalRef,
+    class: jni021::objects::GlobalRef,
+}
+
+impl Updater {
+    /// The updater, or `None` when this build has none.
+    pub async fn get(app: &tauri::AppHandle) -> Option<std::sync::Arc<Self>> {
+        use tauri::Manager;
+        let window = app.get_webview_window(crate::MAIN)?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        window
+            .with_webview(move |wv| {
+                wv.jni_handle().exec(move |env, activity, _webview| {
+                    let found = crate::crash::guarded("the updater", || updater(env, activity))
+                        .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                    let _ = tx.send(found.ok());
+                });
+            })
+            .ok()?;
+        rx.await.ok().flatten().map(std::sync::Arc::new)
+    }
+
+    fn call<T: Send + 'static>(
+        self: &std::sync::Arc<Self>,
+        f: impl FnOnce(
+                &mut jni021::JNIEnv,
+                &jni021::objects::JClass,
+                &jni021::objects::JObject,
+            ) -> jni021::errors::Result<T>
+            + Send
+            + 'static,
+    ) -> impl std::future::Future<Output = anyhow::Result<T>> {
+        let this = self.clone();
+        async move {
+            tauri::async_runtime::spawn_blocking(move || {
+                let mut env = this.vm.attach_current_thread()?;
+                let class: &jni021::objects::JClass = this.class.as_obj().into();
+                let r = f(&mut *env, class, this.activity.as_obj());
+                if env.exception_check().unwrap_or(false) {
+                    let _ = env.exception_describe();
+                    let _ = env.exception_clear();
+                }
+                r
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
+
+    /// The installed app's versionCode.
+    pub async fn installed_version_code(self: &std::sync::Arc<Self>) -> anyhow::Result<u64> {
+        use jni021::objects::JValue;
+        let code = self
+            .call(|env, class, activity| {
+                env.call_static_method(
+                    class,
+                    "installedVersionCode",
+                    "(Landroid/app/Activity;)J",
+                    &[JValue::Object(activity)],
+                )?
+                .j()
+            })
+            .await?;
+        u64::try_from(code).map_err(|_| anyhow::anyhow!("a negative versionCode"))
+    }
+
+    /// Asks; true for `yes`.
+    pub async fn ask(self: &std::sync::Arc<Self>, title: &str, message: &str, yes: &str, no: &str) -> bool {
+        use jni021::objects::JValue;
+        let texts = [title, message, yes, no].map(str::to_owned);
+        self.call(move |env, class, activity| {
+            let [t, m, y, n] = texts;
+            let (t, m, y, n) = (env.new_string(t)?, env.new_string(m)?, env.new_string(y)?, env.new_string(n)?);
+            env.call_static_method(
+                class,
+                "ask",
+                "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z",
+                &[
+                    JValue::Object(activity),
+                    JValue::Object(&t),
+                    JValue::Object(&m),
+                    JValue::Object(&y),
+                    JValue::Object(&n),
+                ],
+            )?
+            .z()
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("updates: no question ({e})");
+            false
+        })
+    }
+
+    /// A short message at the bottom of the screen.
+    pub async fn tell(self: &std::sync::Arc<Self>, message: &str) {
+        use jni021::objects::JValue;
+        let message = message.to_owned();
+        let r = self
+            .call(move |env, class, activity| {
+                let m = env.new_string(message)?;
+                env.call_static_method(
+                    class,
+                    "tell",
+                    "(Landroid/app/Activity;Ljava/lang/String;)V",
+                    &[JValue::Object(activity), JValue::Object(&m)],
+                )?;
+                Ok(())
+            })
+            .await;
+        if let Err(e) = r {
+            tracing::warn!("updates: no message ({e})");
+        }
+    }
+
+    /// Hands the APK to Android's installer, which checks its SHA-256 once more. `Ok(None)` once
+    /// Android has it (it asks the user to confirm), `Ok(Some(why))` when it was not installed.
+    pub async fn install(
+        self: &std::sync::Arc<Self>,
+        path: &std::path::Path,
+        sha256: &str,
+    ) -> anyhow::Result<Option<String>> {
+        use jni021::objects::JValue;
+        let path = path.to_string_lossy().into_owned();
+        let sha256 = sha256.to_owned();
+        let why = self
+            .call(move |env, class, activity| {
+                let (p, h) = (env.new_string(path)?, env.new_string(sha256)?);
+                let why = env
+                    .call_static_method(
+                        class,
+                        "install",
+                        "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                        &[JValue::Object(activity), JValue::Object(&p), JValue::Object(&h)],
+                    )?
+                    .l()?;
+                let why: String = env.get_string(&why.into())?.into();
+                Ok(why)
+            })
+            .await?;
+        Ok((!why.is_empty()).then_some(why))
+    }
+}
+
+/// The JVM, the activity and the `AppUpdate` class, loaded through the app's class loader.
+fn updater(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -> jni021::errors::Result<Updater> {
+    use jni021::objects::JValue;
+    let cls = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let full = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.AppUpdate"),
+        None => "AppUpdate".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&full)?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    Ok(Updater {
+        vm: env.get_java_vm()?,
+        activity: env.new_global_ref(activity)?,
+        class: env.new_global_ref(class)?,
+    })
 }
 
 /// Tracing output for `adb logcat -s pubky-music` (Android drops stdout).
