@@ -483,11 +483,79 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
-    let mut s = Settings::new(&record.api_url, &record.token);
+    // The record says where the node is, never how to sign in to it: this device signs in to the
+    // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
+    let mut s = Settings::new(&record.api_url, "");
     s.iroh = record.iroh;
-    let (s, info) = reach(&app, &state, s).await?;
+    match node::probe(&s).await {
+        // A node that asks for no token (on this computer)
+        Ok(info) => {
+            state.tunnel.lock().await.take();
+            connected(&app, &state, s, &info)?;
+            return Ok(info.name);
+        }
+        Err(node::ProbeError::NeedsSignIn) => {
+            state.tunnel.lock().await.take();
+        }
+        Err(node::ProbeError::Unreachable(msg)) => s = tunnel_for_sign_in(&state, s, msg).await?,
+        Err(e) => return Err(e.into()),
+    }
+    s.token = sign_in_at_node(&app, &s).await?;
+    let info = node::probe(&s).await?;
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// The node found through the homeserver, reached over iroh when its address doesn't answer from
+/// here, before this device has signed in to it ([`through_tunnel`] for a device that has).
+async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> Result<Settings, String> {
+    if s.iroh.is_empty() {
+        return Err(msg);
+    }
+    let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
+    let tunnel = pm_remote::ClientTunnel::start(id, &pm_remote::Relays::Public)
+        .await
+        .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
+    tunnel
+        .connect()
+        .await
+        .map_err(|e| format!("{msg}, and the node did not answer remotely either: {e}"))?;
+    s.via = format!("http://{}", tunnel.local_addr());
+    match node::probe(&s).await {
+        Ok(_) | Err(node::ProbeError::NeedsSignIn) => {}
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(old) = state.tunnel.lock().await.replace(tunnel) {
+        old.close().await;
+    }
+    Ok(s)
+}
+
+/// Signs this device in to the node with Pubky Ring (the node's own sign-in, as its web page
+/// does): the QR and link go to the page as a `ring-url` event, like the homeserver step's. Waits
+/// until the owner approves, the page's Cancel, or [`ring_wait::DEADLINE`]; polls only while the
+/// app is on screen (Android cuts a backgrounded app's network).
+async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String> {
+    let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
+    let started = node::start_sign_in(s).await?;
+    let _ = app.emit(
+        "ring-url",
+        RingUrl {
+            qr_svg: qr_svg(&started.url),
+            url: started.url.clone(),
+        },
+    );
+    loop {
+        if let Some(why) = stop.reason() {
+            return Err(why.to_string());
+        }
+        if ring_wait::on_screen() {
+            if let Some(token) = node::poll_sign_in(s, &started.id).await? {
+                return Ok(token);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// A Ring sign-in in progress, for [`ring_wait::approval`].

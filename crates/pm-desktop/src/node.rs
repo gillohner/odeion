@@ -31,6 +31,8 @@ pub struct Info {
 pub enum ProbeError {
     /// Nothing answered at that address (maybe the node moved).
     Unreachable(String),
+    /// The node answered and wants this device signed in first (no token yet).
+    NeedsSignIn,
     /// The node answered and said no, or something else went wrong.
     Other(String),
 }
@@ -39,6 +41,7 @@ impl From<ProbeError> for String {
     fn from(e: ProbeError) -> String {
         match e {
             ProbeError::Unreachable(m) | ProbeError::Other(m) => m,
+            ProbeError::NeedsSignIn => "Sign in to the node with Pubky Ring".into(),
         }
     }
 }
@@ -60,8 +63,78 @@ pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
         })?;
     match resp.status().as_u16() {
         200..=299 => Ok(resp.json::<Info>().await.unwrap_or_default()),
+        401 | 403 if s.token.is_empty() => Err(ProbeError::NeedsSignIn),
         401 | 403 => Err(ProbeError::Other("The node refused the token".into())),
         code => Err(ProbeError::Other(format!("The node answered {code}"))),
+    }
+}
+
+/// The node's own Pubky Ring sign-in, as the web page uses it (`/v1/auth/pubky/start`).
+#[derive(Debug, Deserialize)]
+pub struct SignInStarted {
+    pub id: String,
+    /// `pubkyauth://…`, for Ring.
+    pub url: String,
+}
+
+/// `/v1/auth/pubky/poll`'s answer.
+#[derive(Debug, Deserialize)]
+struct SignInStatus {
+    status: String,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Starts a Pubky Ring sign-in at the node: this device gets a credential of its own from the
+/// node (ADR 0008), never one stored on the homeserver.
+pub async fn start_sign_in(s: &Settings) -> Result<SignInStarted, String> {
+    let resp = client()
+        .map_err(|e| e.to_string())?
+        .post(api(s, "auth/pubky/start"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("Can't reach the node: {e}"))?;
+    if !resp.status().is_success() {
+        let code = resp.status().as_u16();
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        return Err(body["error"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("The node answered {code}")));
+    }
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// One look at a sign-in started with [`start_sign_in`]: `Ok(Some(token))` once approved,
+/// `Ok(None)` while it waits (or the node can't be reached for a moment), `Err` when it ended.
+pub async fn poll_sign_in(s: &Settings, id: &str) -> Result<Option<String>, String> {
+    let Ok(resp) = client()
+        .map_err(|e| e.to_string())?
+        .get(api(s, "auth/pubky/poll"))
+        .query(&[("id", id)])
+        .send()
+        .await
+    else {
+        return Ok(None);
+    };
+    let Ok(st) = resp.json::<SignInStatus>().await else {
+        return Ok(None);
+    };
+    match st.status.as_str() {
+        "ok" => st
+            .token
+            .map(Some)
+            .ok_or_else(|| "The node sent no sign-in".to_string()),
+        "pending" => Ok(None),
+        "denied" => Err(match st.reason.as_deref() {
+            Some("no_access") => "That identity has no music access on this node".into(),
+            _ => "That isn't the identity this node belongs to".into(),
+        }),
+        "expired" => Err("The sign-in expired: try again".into()),
+        other => Err(format!("The node answered {other}")),
     }
 }
 

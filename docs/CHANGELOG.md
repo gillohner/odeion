@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **The node's address record on your homeserver no longer holds the node's API token.**
+  - The record keeps the node's name, addresses and version. The desktop and Android app finds the node through it as before, then asks you to approve a sign-in to the node itself in Pubky Ring, so each device has a sign-in of its own. Connecting a new device therefore takes two approvals in Ring.
+  - On its first start after the update, a node that had written its token there replaces that token. Apps and browsers then sign in to the node again, once.
+  - A token you set in the node's config (`[api] token`, `PM_TOKEN`) can't be replaced by the node: Health asks you to change it.
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
