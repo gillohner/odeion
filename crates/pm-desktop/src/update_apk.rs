@@ -13,6 +13,9 @@
 //! only over an app signed with the same key. The steps that need the phone (the question, the
 //! installer) are in `src/android.rs` and `tools/release/android/AppUpdate.kt`.
 
+// Built for Android, and on desktops only for its tests.
+#![cfg_attr(not(target_os = "android"), allow(dead_code))]
+
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
