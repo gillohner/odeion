@@ -342,12 +342,12 @@ const CARRIED: &[&str] = &[
 ];
 
 /// For a restore that replaces the database file (`odeiond restore`), into the `staged` copy
-/// before it goes in: this node's own settings ([`NODE_OWN`]) from `here`, as the web restore
+/// before it goes in: this node's own settings (`NODE_OWN`) from `here`, as the web restore
 /// keeps them; and each sign-in, the people list, the signup token and parties that `staged`
 /// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays.
 /// For a restore that replaces the database file when there is no node to keep anything from
 /// (an empty data folder, or a current database that can't be read): none of a node's own
-/// settings ([`NODE_OWN`]) goes in from the backup. A backup made before they were left out
+/// settings (`NODE_OWN`) goes in from the backup. A backup made before they were left out
 /// still holds them, and the owner's browser sessions and device sign-ins among them would come
 /// back; the node makes its own id, stream key and the rest afresh.
 pub fn forget_node_own(staged: &Library) -> Result<(), pm_library::LibraryError> {
@@ -446,7 +446,7 @@ fn invite_links_back(restored: &str, here: &str) -> Option<String> {
 }
 
 /// Makes a plain copy of the database safe to keep anywhere: no sign-in (the owner's or a
-/// listener's), nothing that belongs to this node only ([`NODE_OWN`]: its stream key, the backup
+/// listener's), nothing that belongs to this node only (`NODE_OWN`: its stream key, the backup
 /// schedule's passphrase, the owner sessions' hash…), nothing of the vault cache, no signup token,
 /// no invite's token and no party (codes are ways in; parties end within hours anyway). Invites
 /// stay, without their link: it is made again. `odeiond backup` and the web backup's snapshot.

@@ -45,7 +45,7 @@ pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
 
 /// A setting: the SHA-256 of an API token an older version wrote into the node record on the
 /// owner's homeserver. Kept from before the record is rewritten until that token no longer works
-/// here, so a failure or a restart in between never forgets it ([`retire_published`]).
+/// here, so a failure or a restart in between never forgets it (`retire_published`).
 pub const PUBLISHED_TOKEN_KEY: &str = "api.published_token";
 
 fn sha256_hex(t: &str) -> String {

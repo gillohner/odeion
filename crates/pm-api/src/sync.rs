@@ -215,7 +215,7 @@ impl PubkySync {
     /// Tell the user's other devices where this node is (ADR 0008), starting remote access first
     /// when it is configured, so the record carries the node's iroh key (ADR 0013). The record holds
     /// no credential. One an older version wrote with the node's API token in it is replaced, and
-    /// that token is then replaced too ([`crate::access_token::retire_published`]).
+    /// that token is then replaced too (`crate::access_token::retire_published`).
     pub async fn publish_node_for(&self, s: &crate::state::NodeState) -> Result<(), SyncError> {
         // One at a time: the record's old token is noted, the record rewritten and the token
         // retired as one step, so two publishes never replace the token twice

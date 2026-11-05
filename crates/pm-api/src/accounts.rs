@@ -466,13 +466,13 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 }
 
 /// A new browser session for the owner (key `key`), from a Pubky Ring sign-in: returned once,
-/// the node keeps its hash. At most [`OWNER_SESSIONS_CAP`]; the oldest goes first.
+/// the node keeps its hash. At most `OWNER_SESSIONS_CAP`; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
     mint_owners(s, key, OWNER_SESSIONS, OWNER_SESSIONS_CAP)
 }
 
 /// A sign-in for one of the owner's devices (the app), from a Pubky Ring sign-in the owner
-/// approved: as [`mint_owner`], in the devices' own list ([`DEVICE_SESSIONS`]).
+/// approved: as [`mint_owner`], in the devices' own list (`DEVICE_SESSIONS`).
 pub fn mint_device(s: &NodeState, key: &str) -> Result<String, ApiError> {
     mint_owners(s, key, DEVICE_SESSIONS, DEVICE_SESSIONS_CAP)
 }

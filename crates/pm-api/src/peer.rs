@@ -158,7 +158,7 @@ const NOT_PAGES: &[&str] = &["/v1/", "/rest/", "/mb/", "/upnp/"];
 /// A request a browser made for a page of another site (`Sec-Fetch-Site: cross-site` or
 /// `same-site`: another port of this machine is the same site). For a node without a token only
 /// a top-level navigation to one of its pages is that: the web app, a sign-in callback. Not its
-/// API, Subsonic, the MusicBrainz proxy or the UPnP routes ([`NOT_PAGES`]), which change things on
+/// API, Subsonic, the MusicBrainz proxy or the UPnP routes (`NOT_PAGES`), which change things on
 /// GET too; only by GET or HEAD (a form another site posts navigates as well); and not a frame (a
 /// hidden one would reach a page with side effects, a sign-in callback, before the page's
 /// `frame-ancestors` keeps it from showing): `Sec-Fetch-Dest` must be `document`. Browsers that
