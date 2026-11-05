@@ -61,6 +61,8 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       // ---- the mocked node ----
       let pages = {}; let own = {}; let pub = {}; let uris = {}; let failPut = null; let pubHold = null; let pubFail = false; let me = null; let ownFail = null; let putHold = null;
       const writes = []; const asked = [];
+      // Every change asked for, counted as it arrives (refused ones and ones held back too)
+      const tries = [];
       await page.route(/\/v1\/item\/(album|song|artist)\/[^/?]+(\?.*)?$/, (r) => { const m = /\/v1\/item\/(\w+)\/([^/?]+)/.exec(r.request().url()); const pg = pages[`${m[1]}/${m[2]}`]; return pg ? r.fulfill({ json: pg }) : r.fallback(); });
       await page.route(/\/v1\/item\/[^?]+\/extras(\?.*)?$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
       await page.route(/\/v1\/comments(\?.*)?$/, (r) => r.fulfill({ json: { comments: [], indexed: true } }));
@@ -70,6 +72,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
         const req = r.request(); const m = req.method(); const q = Object.fromEntries(new URL(req.url()).searchParams);
         if (m === 'GET' && !keyOf(q)) return r.fulfill({ json: { tags: Object.entries(own).flatMap(([u, ts]) => (Array.isArray(ts) ? ts.map((t) => ({ uri: u, ...t })) : [])) } });
         const b = m === 'PUT' ? req.postDataJSON() : q; const k = keyOf(b);
+        if (m !== 'GET') tries.push({ m, k, label: b.label });
         if (m === 'GET' && k === ownFail) return r.fulfill({ status: 500, json: { error: 'database is locked' } });
         if (own[k] === 'needs_match') return m === 'GET' ? r.fulfill({ json: { needs_match: true, tags: [] } }) : r.fulfill({ status: 422, json: { error: 'no canonical identity' } });
         if (m === 'PUT' && putHold) await putHold;
@@ -227,22 +230,28 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       assert.equal(await group('song').locator('.tag-skel').count(), 0);
       assert.equal(await chip('song', 'constructor').count(), 1);
       // An add on its way when Pubky answers: the input stays as it is (no second send), and after a
-      // refusal it is back, enabled, with what was typed
+      // refusal it is back, enabled, with what was typed. The other group's half-typed tag stays too,
+      // whichever input is the one being sent
       let releaseDiscover; pubHold = new Promise((r) => { releaseDiscover = r; });
       let releasePut; putHold = new Promise((r) => { releasePut = r; }); failPut = CANON;
       await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor();
+      await group('link').locator('[data-htag-plus]').click();
+      await group('link').locator('input[data-htag-add]').fill('linkdraft');
       await group('song').locator('[data-htag-plus]').click();
       const held = group('song').locator('input[data-htag-add]');
+      const before = tries.length;
       await held.fill('slowtag'); await held.press('Enter'); await sleep(200);
       assert.ok(await held.isDisabled(), 'sending');
       releaseDiscover(); pubHold = null; await sleep(400);
       assert.ok(await group('song').locator('input[data-htag-add]').isDisabled(), 'still sending after Pubky answered');
-      const sent = writes.length; await group('song').locator('input[data-htag-add]').press('Enter'); await sleep(200);
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'linkdraft', 'the other group keeps what was typed');
+      await group('song').locator('input[data-htag-add]').press('Enter'); await sleep(200);
       releasePut(); putHold = null; await sleep(500);
-      assert.equal(writes.length, sent, 'one send only');
+      assert.deepEqual(tries.slice(before), [{ m: 'PUT', k: CANON, label: 'slowtag' }], 'one send only');
       const back = group('song').locator('input[data-htag-add]');
       assert.ok(!(await back.isDisabled()), 'enabled again after the refusal');
       assert.equal(await back.inputValue(), 'slowtag');
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'linkdraft', 'and the other group’s draft is still there');
       failPut = null;
       pubFail = true;
       await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(400);

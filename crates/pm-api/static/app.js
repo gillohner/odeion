@@ -3625,13 +3625,14 @@
   };
   const drawHeroTags = (ht) => {
     const box = $('#htags'); if (!box || box.dataset.for !== ht.key) return;
-    // A half-typed tag stays when the public tags come in meanwhile; one being sent waits for its answer
-    const typing = $('input[data-htag-add]', box);
-    if (typing && typing.disabled) { ht.later = true; return; }
-    const draft = typing && { scope: typing.dataset.htagAdd, value: typing.value, focus: document.activeElement === typing };
+    // Half-typed tags stay when the public tags come in meanwhile (each group's own); while one is being sent, the
+    // redraw waits for its answer
+    const typing = $$('input[data-htag-add]', box);
+    if (typing.some((t) => t.disabled)) { ht.later = true; return; }
+    const drafts = typing.map((t) => ({ scope: t.dataset.htagAdd, value: t.value, focus: document.activeElement === t }));
     box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
     bindHeroTags(box, ht);
-    if (draft) { const b = $(`[data-htag-plus="${draft.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, draft.focus); $('input[data-htag-add]', box).value = draft.value; } }
+    drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); $(`input[data-htag-add="${d.scope}"]`, box).value = d.value; } });
     foldHeroTags(box);
     if (!box.dataset.fold && window.ResizeObserver) { box.dataset.fold = '1'; let w = box.clientWidth; new ResizeObserver(() => { if (box.clientWidth !== w) { w = box.clientWidth; foldHeroTags(box); } }).observe(box); }
     fillHeroFaces(box, ht);
