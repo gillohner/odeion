@@ -132,6 +132,9 @@ pub struct NodeState {
     /// Optional bearer token; `None` = no auth (bind to localhost only). Read with
     /// [`NodeState::token`]; only [`crate::access_token`] changes it.
     pub(crate) token: std::sync::RwLock<Option<String>>,
+    /// Usage insights (usage.rs): off until the owner turns them on; their file is in the data
+    /// folder, never in a backup. Tasks holding it weakly write and end what has run out.
+    pub(crate) usage: Arc<crate::usage::Usage>,
     /// The file the token came from when the node made it itself (`<data_dir>/api-token`), so the
     /// owner may replace it; `None` when it is set in the config or there is none.
     token_file: std::sync::OnceLock<PathBuf>,
@@ -305,6 +308,13 @@ impl NodeState {
     }
 
     pub fn new(settings: NodeSettings, library: Library, outputs: OutputRegistry) -> Arc<Self> {
+        // Usage insights keep their file next to the library (never in a backup)
+        let usage = crate::usage::Usage::housekept(
+            settings
+                .db_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        );
         // A key entered in Settings wins over the configured one
         let acoustid_key = library
             .get_setting(crate::identify::KEY_SETTING)
@@ -414,6 +424,7 @@ impl NodeState {
             zones: Zones::new(sources.clone()),
             sources,
             token: std::sync::RwLock::new(settings.token),
+            usage,
             token_file: std::sync::OnceLock::new(),
             token_changed: tokio::sync::watch::channel(0).0,
             subsonic_user: settings.subsonic_user,
@@ -1561,7 +1572,13 @@ impl NodeState {
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
         let derived = sync.as_ref().map(|s| profile_url(s.z32()));
         let z32 = sync.as_ref().map(|s| s.z32().to_string());
-        *self.sync.lock().expect("sync lock") = sync;
+        // Usage insights (usage.rs) end and nothing let in before changes anything: whichever
+        // identity, also none, and whatever the cleanup below does. Swapped under their lock; the
+        // old handle is dropped after
+        let old = self
+            .usage
+            .revoke_all_across(|| std::mem::replace(&mut *self.sync.lock().expect("sync lock"), sync));
+        drop(old);
         // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
         // After the swap: a session minted meanwhile was checked against the identity then
         if let Some(z32) = z32 {
