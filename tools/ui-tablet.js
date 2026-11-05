@@ -190,7 +190,11 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     // its group (the group clips what doesn't fit, so overlaps alone don't show it)
     await showJob(page); await page.waitForTimeout(150);
     const jb = await page.evaluate(barReport);
-    const cut = await page.evaluate(() => { const g = document.querySelector('.player-right').getBoundingClientRect(); return [...document.querySelectorAll('.player-right > *')].filter((e) => e.getBoundingClientRect().width > 0).filter((e) => { const b = e.getBoundingClientRect(); return b.right > g.right + 0.5 || b.left < g.left - 0.5; }).map((e) => e.id || e.className); });
+    // (every part inside the group, not only its children: a shrunk button would clip its own icon)
+    const cut = await page.evaluate(() => { const g = document.querySelector('.player-right').getBoundingClientRect(); return [...document.querySelectorAll('.player-right *')].filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && getComputedStyle(e).visibility !== 'hidden'; }).filter((e) => { const b = e.getBoundingClientRect(); return b.right > g.right + 0.5 || b.left < g.left - 0.5; }).map((e) => e.id || e.getAttribute('class') || e.tagName); });
+    // A pill without a quality badge (nothing known of the format) isn't drawn empty beside the chip
+    const bare = await page.evaluate(() => { const b = document.querySelector('#quality .qbadge'); if (!b) return null; const keep = b.outerHTML; b.remove(); const q = document.querySelector('#quality'); const shown = q.getBoundingClientRect().width > 0; q.querySelector('.qshort').insertAdjacentHTML('beforeend', keep); return shown; });
+    check(bare === false, `${w}${touch ? ' touch' : ''} with a files job: a pill without a quality badge isn't drawn empty (${bare})`);
     const job = await visible(page, '#jobchip'); const zone = await visible(page, '#zonebtn');
     check(job && zone && !jb.overlaps.length && !jb.outside.length && !cut.length, `${w}${touch ? ' touch' : ''} with a files job: the chip and the zone button show, nothing overlaps or is cut${jb.overlaps.length || jb.outside.length || cut.length ? ': ' + [...jb.overlaps, ...jb.outside, ...cut.map((c) => `${c} cut`)].slice(0, 4).join('; ') : ''}`);
     await page.screenshot({ path: path.join(SHOTS, `mini-job-${w}${touch ? '-touch' : ''}.png`), clip: { x: 0, y: h - 170, width: w, height: 170 } });
