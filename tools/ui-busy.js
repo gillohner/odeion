@@ -8,8 +8,11 @@
 //   * real controls with every change delayed 500 ms: the heart on a song row and Add to favourites in
 //     its menu, pressed three times, send one request.
 //   * navigation: the bar along the top at once, the page's skeleton before its answer, "Still
-//     loading…" after 2 s, an error with Try again (which retries), and album A → album B pressed in
-//     quick succession ends on B with nothing of A drawn.
+//     loading…" after 2 s, an error with Try again (which retries), and A → B pressed in quick
+//     succession ends on B with nothing of A drawn. Playlists → Genres and an album → Artists pass on
+//     the page's own state.view checks too; tag A → A + B (Back then Forward) is the case only the
+//     navigation generation catches (an album page covers its tiles at once, so album → album can't
+//     be pressed that fast).
 // Screenshots of the loading, error and busy states go to the shots folder.
 //   node tools/ui-busy.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -82,6 +85,13 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     await press('#tinner', 1); await sleep(50); await press('#tinner', 1); await sleep(700);
     const n = await p.evaluate(() => window.__n);
     check(n.inner === 1 && n.row === 1, `one click reaches the control's and its row's handler once each (control ${n.inner}, row ${n.row})`);
+    // The row's handler takes longer than the control's own: the control stays busy until both are done
+    await p.evaluate(() => { const wait = (ms) => new Promise((r) => setTimeout(r, ms)); window.__n.row = 0; window.__n.inner = 0; document.getElementById('tinner').onclick = async () => { window.__n.inner++; await wait(150); }; document.getElementById('trow').onclick = async () => { window.__n.row++; await wait(900); }; });
+    await press('#tinner', 1); await sleep(400);
+    check((await attrs('#tinner')).busy === 'true', "a control stays busy while its row's slower handler for the same click runs");
+    await press('#tinner', 1); await sleep(800);
+    const n2 = await p.evaluate(() => window.__n);
+    check(n2.inner === 1 && n2.row === 1 && (await attrs('#tinner')).busy === null, `a second click meanwhile runs neither, and it is back afterwards (control ${n2.inner}, row ${n2.row})`);
     await p.click('#tfalse'); check(await p.evaluate(() => location.hash) === '', 'a handler returning false still cancels the link');
     await p.evaluate(() => document.getElementById('trow').parentElement.remove());
   }
@@ -109,6 +119,21 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     check(puts() - before === 1, `the same change asked twice while on its way is sent once (${puts() - before})`);
   }
 
+  {
+    // A switch turned off, on and off again while each change is on its way: three changes, each sent
+    // (only the same change asked again while it is the latest one is shared)
+    let found = false;
+    for (const tab of ['nodehome', 'home', 'playback', 'about']) { await fx.go(p, `/settings/${tab}`); if (await p.waitForSelector('#firststeps', { timeout: 2500 }).then(() => true, () => false)) { found = true; break; } }
+    check(found, 'Settings has the First steps switch');
+    if (found) {
+      const n0 = state.hits.length; const shown = await p.isChecked('#firststeps');
+      for (let i = 0; i < 3; i++) { await p.click('#firststeps'); await sleep(80); }
+      await sleep(900);
+      const sent = state.hits.slice(n0).filter((h) => h.m === 'PUT' && h.v === '/node/settings').map((h) => JSON.parse(h.body).first_steps_hidden);
+      // hidden = !checked: from shown, the three presses ask hidden = shown, !shown, shown
+      check(JSON.stringify(sent) === JSON.stringify([shown, !shown, shown]), `three presses on a switch while each change is on its way send all three, in order (${JSON.stringify(sent)})`);
+    }
+  }
   // ---- navigation ----
   const nav = (v) => `.sidebar .nav-item[data-view="${v}"]`;
   {
@@ -119,6 +144,7 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     check(at.on, 'the place pressed is marked at once');
     await sleep(250);
     check(await p.locator('#main .navskel').isVisible(), 'the page shows its skeleton before its answer');
+    check(await p.evaluate(() => { const s = document.querySelector('#navstatus'); return !!s && s.getAttribute('role') === 'status' && s.textContent === 'Loading…' && !document.querySelector('#main').contains(s); }), 'and says "Loading…" in a status region outside the page');
     await p.screenshot({ path: path.join(SHOTS, 'loading.png') });
     await sleep(2000);
     check(await p.locator('#main .slow-note').isVisible(), '"Still loading…" after 2 s');
@@ -179,6 +205,21 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     const n0 = state.hits.filter((h) => h.v === '/playlists').length;
     delete FIXTURES['/playlists']; await p.click('#navretry'); await sleep(600);
     check(state.hits.filter((h) => h.v === '/playlists').length > n0 && !(await p.$('#navretry')), 'Try again asks again and draws the page');
+  }
+  {
+    // Next pressed twice skips twice, on a node zone (each press sends its own request)
+    const zone = { id: 'z1', name: 'Living room', output: 'upnp:fx', transport: 'playing', queue: [{ id: 1, uri: 'track:1', title: 'One' }, { id: 2, uri: 'track:1', title: 'Two' }, { id: 3, uri: 'track:1', title: 'Three' }], queue_index: 0, queue_version: 1, repeat: 'off', radio: false, error: null, sync: 'single', volume: { percent: 20, muted: false }, now_playing: { item: { id: 1, uri: 'track:1', title: 'One', artist: 'Sefa', duration_ms: 200000 }, index: 0, position_ms: 1000, duration_ms: 200000 } };
+    const r2 = await fx.create(browser, 1280, { fixtures: { '/zones': { body: [zone] }, '/zones/z1/transport': { body: zone } }, delay: (v, m) => (m !== 'GET' ? 500 : 0) });
+    await r2.context.addInitScript(() => localStorage.setItem('pm.zone', 'z1'));
+    await r2.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+    await fx.go(r2.page, '/albums'); await r2.page.waitForTimeout(800);
+    const nx = await r2.page.locator('#next').boundingBox(); const n0 = r2.state.hits.length;
+    await r2.page.mouse.click(nx.x + nx.width / 2, nx.y + nx.height / 2); await sleep(80); await r2.page.mouse.click(nx.x + nx.width / 2, nx.y + nx.height / 2);
+    await sleep(900);
+    const sent = r2.state.hits.slice(n0).filter((h) => h.m === 'POST' && h.v === '/zones/z1/transport').map((h) => JSON.parse(h.body).action);
+    check(sent.length === 2 && sent.every((a) => a === 'next'), `Next pressed twice skips twice (${JSON.stringify(sent)})`);
+    check(r2.state.errors.length === 0, `no page errors on the zone${r2.state.errors.length ? ': ' + r2.state.errors.join(' | ') : ''}`);
+    await r2.context.close();
   }
   check(run.state.errors.length === 0, `no page errors${run.state.errors.length ? ': ' + run.state.errors.join(' | ') : ''}`);
   await run.context.close(); await browser.close();

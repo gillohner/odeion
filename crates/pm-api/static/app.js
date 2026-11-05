@@ -166,17 +166,26 @@
   const busy = (el, fn, ev = null) => {
     let out;
     try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; }
-    if (!el || !out || typeof out.then !== 'function' || BUSY.has(el)) return out;
-    const was = [el.getAttribute('aria-busy'), el.getAttribute('aria-disabled')];
-    el.setAttribute('aria-busy', 'true'); if (ev) el.setAttribute('aria-disabled', 'true'); el.classList.add('is-busy');
-    const spin = setTimeout(() => el.classList.add('is-spinning'), 150);
-    const mark = { out, ev }; BUSY.set(el, mark);
+    if (!out || typeof out.then !== 'function') return out;
+    const failed = (e) => { if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); };
+    if (!el) { out.catch(failed); return out; }
+    // Several actions on one control at once (the same click reaching its row's handler, or changes in a
+    // row): it stays busy until the last one has settled
+    let mark = BUSY.get(el);
+    if (!mark) {
+      mark = { ev, n: 0, was: [el.getAttribute('aria-busy'), el.getAttribute('aria-disabled')] };
+      el.setAttribute('aria-busy', 'true'); if (ev) el.setAttribute('aria-disabled', 'true'); el.classList.add('is-busy');
+      mark.spin = setTimeout(() => el.classList.add('is-spinning'), 150);
+      BUSY.set(el, mark);
+    }
+    mark.n++;
     const done = () => {
-      clearTimeout(spin); if (BUSY.get(el) === mark) BUSY.delete(el);
+      if (--mark.n > 0) return;
+      clearTimeout(mark.spin); if (BUSY.get(el) === mark) BUSY.delete(el);
       el.classList.remove('is-busy', 'is-spinning');
-      ['aria-busy', 'aria-disabled'].forEach((a, i) => { if (was[i] == null) el.removeAttribute(a); else el.setAttribute(a, was[i]); });
+      ['aria-busy', 'aria-disabled'].forEach((a, i) => { if (mark.was[i] == null) el.removeAttribute(a); else el.setAttribute(a, mark.was[i]); });
     };
-    out.then(done, (e) => { done(); if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); });
+    out.then(done, (e) => { done(); failed(e); });
     return out;
   };
   // The element that shows the progress: the handler's own control, the control clicked inside a
@@ -239,18 +248,21 @@
     if (/error sending request|connection refused|dns error|could not resolve/i.test(text)) return `Couldn't reach ${who === 'The service' ? 'the service' : who}; check the node's internet connection.`;
     return text;
   };
-  // A change already on its way is not sent twice: an identical request (method, path and body) made
-  // while the first is in flight gets the first one's answer. Reads are left alone.
+  // A change already on its way is not sent twice: the same request again (method, path and body) while
+  // it is the latest one to that address and still in flight gets its answer. Any other change to the
+  // address in between is sent, and so is a repeat after it (A, B, A sends all three). Reads are left alone.
   const inFlight = new Map();
   const api = (method, path, body, opts = {}) => {
-    if (method === 'GET') return apiSend(method, path, body, opts);
-    let key; try { key = `${method} ${path} ${body === undefined ? '' : JSON.stringify(body)}`; } catch { return apiSend(method, path, body, opts); }
-    const was = inFlight.get(key); if (was) return was;
-    const p = apiSend(method, path, body, opts);
-    inFlight.set(key, p);
-    const drop = () => { if (inFlight.get(key) === p) inFlight.delete(key); };
-    p.then(drop, drop);
-    return p;
+    // opts.repeat: each one is meant (Next pressed twice skips two)
+    if (method === 'GET' || opts.repeat) return apiSend(method, path, body, opts);
+    let sent; try { sent = body === undefined ? '' : JSON.stringify(body); } catch { return apiSend(method, path, body, opts); }
+    const key = `${method} ${path}`; const was = inFlight.get(key);
+    if (was && was.sent === sent) return was.p;
+    const entry = { sent, p: apiSend(method, path, body, opts) };
+    inFlight.set(key, entry);
+    const drop = () => { if (inFlight.get(key) === entry) inFlight.delete(key); };
+    entry.p.then(drop, drop);
+    return entry.p;
   };
   const apiSend = async (method, path, body, opts = {}) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
@@ -2014,7 +2026,7 @@
     if (action.action === 'toggle') action = { action: zt.transport === 'playing' ? 'pause' : 'play' };
     if (action.action === 'play' && zt.queue && zt.queue.length) startWait('play', state.zone, zt.now_playing ? zt.now_playing.item.title || '' : '');
     try {
-      const st = await api('POST', `/zones/${state.zone}/transport`, action);
+      const st = await api('POST', `/zones/${state.zone}/transport`, action, { repeat: action.action === 'next' || action.action === 'previous' });
       state.zones[st.id] = st;
       renderBar();
     } catch (e) { if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error'); }
@@ -2097,6 +2109,8 @@
     try { await api('POST', `/zones/${state.zone}/shuffle`); toast('Shuffled what comes next'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
   };
   $('#toggle').onclick = () => transport({ action: 'toggle' });
+  // Next and Previous pressed twice skip twice: they don't wait for the last press (data-repeat)
+  $('#next').dataset.repeat = ''; $('#prev').dataset.repeat = '';
   $('#next').onclick = () => transport({ action: 'next' });
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
@@ -2991,7 +3005,7 @@
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
             <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
           </section>
           <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -3377,7 +3391,9 @@
     navDepth = st.depth || 0;
     if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); await setView('search', st.arg, 'pop'); }
     else await setView(st.v, st.arg, 'pop');
-    if (st.scroll) main.scrollTop = st.scroll;
+    // Back to where the page was scrolled, once all of it is drawn (and only if nothing newer was opened)
+    const gen = navGen; await navRendering;
+    if (st.scroll && gen === navGen) main.scrollTop = st.scroll;
   });
   // The back arrow: one step back when there is in-app history, else the parent page.
   const goBack = (fallback) => { if (navDepth > 0) history.back(); else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
@@ -4671,31 +4687,42 @@
   // ---- Navigation answers at once (owner, 2026-11-04) ----
   // setView() starts a navigation: the place clicked is marked at once (markTabs), a thin bar runs along
   // the top until the page is drawn, and a page that has drawn nothing of its own after 120 ms shows a
-  // skeleton ("Still loading…" after 2 s). A newer navigation supersedes it: the page code's reads
-  // (renderPage's `api`, below) that are on their way are aborted, and they and any it starts before it
-  // is drawn never answer, so the old page stops where it was and draws nothing (A→B ends on B). Once a
-  // page is drawn, its handlers and polls read as usual. Changes (anything but GET) are never held back.
-  let navGen = 0; let navCtl = new AbortController(); let navStop = () => {};
+  // skeleton ("Still loading…" after 2 s). A newer navigation supersedes it: the reads the page's code
+  // (renderPage's `api`, below) started while drawing are aborted and never answer, and so do any it
+  // starts before it is drawn, so the old page stops where it was and draws nothing (A→B ends on B).
+  // Reads started once a page is drawn (its handlers and polls) are never aborted and settle as usual.
+  // Changes (anything but GET) are never held back.
+  let navGen = 0; let navCtl = new AbortController(); let navStop = () => {}; let navRendering = Promise.resolve();
   const NEVER = () => new Promise(() => {}); // a fresh one each time: nothing piles up on a shared one
   const navApiFor = (gen, ctl, drawing) => (method, path, body, opts = {}) => {
     if (method !== 'GET') return api(method, path, body, opts);
     if (gen !== navGen) return drawing.on ? NEVER() : api(method, path, body, opts);
-    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal })
-      .then((r) => (gen === navGen || !drawing.on ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : ctl.signal.aborted || drawing.on ? NEVER() : Promise.reject(e)));
+    const forDrawing = drawing.on;
+    return api(method, path, body, forDrawing ? { ...opts, signal: opts.signal || ctl.signal } : opts)
+      .then((r) => (gen === navGen || !drawing.on ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : (forDrawing && ctl.signal.aborted) || drawing.on ? NEVER() : Promise.reject(e)));
   };
-  const NAV_SKELETON = `<div class="navskel" aria-busy="true"><p class="sr-only" role="status">Loading…</p><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
+  const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
+  // Drawn: something of the page's own that isn't a placeholder (a page's own loading() is one)
+  const pageDrawn = (before) => { const f = main.firstElementChild; return f !== before && !main.querySelector(':scope > .navskel, :scope > .skeleton, :scope > .sk-grid'); };
   const navigate = (fresh) => {
     const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
     navStop(); const superseded = new Promise((res) => { navStop = res; });
     let bar = document.getElementById('navprog');
     if (!bar) { bar = document.createElement('div'); bar.id = 'navprog'; bar.className = 'navprog'; bar.setAttribute('aria-hidden', 'true'); document.body.appendChild(bar); }
+    // One status region outside the page, there before its words change, so "Loading…" is announced
+    let said = document.getElementById('navstatus');
+    if (!said) { said = document.createElement('p'); said.id = 'navstatus'; said.className = 'sr-only'; said.setAttribute('role', 'status'); document.body.appendChild(said); }
     bar.hidden = false;
     const before = main.firstElementChild;
-    const skel = fresh ? setTimeout(() => { if (gen === navGen && main.firstElementChild === before) { main.innerHTML = NAV_SKELETON; slowNote(main, () => gen === navGen && !!main.querySelector(':scope > .navskel')); } }, 120) : 0;
-    const end = () => { clearTimeout(skel); if (gen === navGen) bar.hidden = true; };
-    // Settles when the page is drawn or when a newer navigation takes over (so the control that
-    // started it isn't left busy)
-    return Promise.race([render(), superseded]).finally(end);
+    const skel = fresh ? setTimeout(() => { if (gen === navGen && main.firstElementChild === before) { main.innerHTML = NAV_SKELETON; said.textContent = 'Loading…'; slowNote(main, () => gen === navGen && !!main.querySelector(':scope > .navskel')); } }, 120) : 0;
+    // Settles when the page has drawn its content (not when its slower extras arrive), when its code is
+    // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
+    // (a sidebar place) and the bar never stay busy for good
+    let mo = null; let cap = 0;
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (pageDrawn(before)) res(); }); mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
+    const rendering = render(); navRendering = rendering;
+    return Promise.race([rendering, superseded, drawn]).finally(end);
   };
 
   // ---- render --------------------------------------------------------------
@@ -6081,9 +6108,9 @@
               <div class="zc-head">${icon('zone')}<h3>${named(z)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
               <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
               <div class="zc-controls">
-                <button class="icon-btn" data-zt="previous" title="Previous">${icon('prev')}</button>
+                <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
-                <button class="icon-btn" data-zt="next" title="Next">${icon('next')}</button>
+                <button class="icon-btn" data-zt="next" data-repeat title="Next">${icon('next')}</button>
                 ${hv ? `<input type="range" data-zvol="${esc(z.id)}" min="${hv.min}" max="${hv.max}" step="${hv.step || 1}" value="${z.volume_db != null ? z.volume_db : hv.max}" aria-label="Volume of ${esc(z.name)}">` : z.id === BROWSER ? `<input type="range" data-zvol="${BROWSER}" min="-60" max="0" value="${Math.round(20 * Math.log10(audio.volume || 1))}" aria-label="Browser volume">` : '<span class="muted small">Volume: set on the device</span>'}
                 ${z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}">Play to</button>`}
                 ${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''}
@@ -6092,7 +6119,7 @@
           const zoneTransport = async (zid, action) => {
             if (zid === BROWSER) { const keep = state.zone; state.zone = BROWSER; try { await transport({ action }); } finally { state.zone = keep; } return; }
             if (action === 'toggle') action = (state.zones[zid] || {}).transport === 'playing' ? 'pause' : 'play';
-            try { const zs2 = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action }); state.zones[zs2.id] = zs2; render(); } catch (e) { toast(e.message, 'error'); }
+            try { const zs2 = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action }, { repeat: action === 'next' || action === 'previous' }); state.zones[zs2.id] = zs2; render(); } catch (e) { toast(e.message, 'error'); }
           };
           $$('[data-zcard]', main).forEach((card) => {
             const zid = card.dataset.zcard;
