@@ -4,7 +4,7 @@
 use pm_library::ArtistSummary;
 use pm_model::{Album, Track, Volume};
 use pm_pubky::{ActivitySource, Playlist};
-use pm_zones::{QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
+use pm_zones::{OutputId, QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
 use serde::{Deserialize, Serialize};
 
 pub const API_VERSION: &str = "v1";
@@ -545,6 +545,9 @@ pub struct NodeSettingsView {
     /// with `POST /v1/node/token`; false when the token is set in the config or there is none.
     #[serde(default)]
     pub token_replaceable: bool,
+    /// Whose TIDAL, Qobuz and Spotify sign-ins listeners play with: `node`, `own` or `choice`.
+    #[serde(default)]
+    pub sources_policy: crate::accounts::SourcePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -566,6 +569,10 @@ pub struct NodeSettingsUpdate {
     /// Hide Home's "Get started" card for everyone (false shows it again).
     #[serde(default)]
     pub first_steps_hidden: Option<bool>,
+    /// Whose sign-ins listeners play with (`node`, `own`, `choice`); every person's own sign-ins
+    /// and the node's stay as they are whichever is chosen.
+    #[serde(default)]
+    pub sources_policy: Option<crate::accounts::SourcePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +629,11 @@ pub enum ApiEvent {
     /// The files jobs changed (a state, or ~2 s of progress while one runs): the owner's only.
     Jobs {
         jobs: Box<JobsView>,
+    },
+    /// An output's `device` changed (a USB DAC plugged into or out of a phone): `GET /v1/outputs`
+    /// again. The owner's only, like the outputs.
+    OutputsChanged {
+        output: OutputId,
     },
 }
 
@@ -1850,6 +1862,11 @@ pub struct ControllerLoginStart {
     /// folders too, as the node needs new ones. Good until a renewal succeeds; ignored while the node needs none.
     #[serde(default)]
     pub renewal: Option<String>,
+    /// The desktop or Android app: the owner's approval makes a sign-in for the device, kept apart
+    /// from browser sessions (a browser's Log out and the browsers' cap leave it; Make a new token
+    /// and a change of the node's identity end it).
+    #[serde(default)]
+    pub device: bool,
 }
 
 /// `POST /v1/auth/pubky/renewal`.

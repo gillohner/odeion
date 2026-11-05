@@ -41,6 +41,228 @@ pub struct OutputInfo {
     /// The device as its maker names it (`Klimax DSM`, `HomePod`), when the protocol tells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The hardware behind it, when the output knows: a USB DAC on a phone. Read leniently: a
+    /// device a newer app describes in a way this node does not understand is `None`, never an
+    /// error (it travels in every endpoint `Welcome`, and the output must keep working).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_device"
+    )]
+    pub device: Option<OutputDevice>,
+}
+
+/// The hardware an output plays through, as it describes itself: a USB DAC on a phone. What the
+/// output does with it now is in [`OutputInfo::caps`]; this is what the device itself takes, and
+/// how the app drives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OutputDevice {
+    /// "FiiO KA17".
+    pub name: String,
+    #[serde(default)]
+    pub kind: DeviceKind,
+    /// One line for a picker: "FiiO KA17 · PCM up to 768 kHz / 32 bit · DSD · hardware volume".
+    #[serde(default)]
+    pub summary: String,
+    /// PCM rates the device takes, ascending (empty while unknown).
+    #[serde(default)]
+    pub rates: Vec<u32>,
+    /// Integer PCM sample sizes it takes, ascending (16, 24, 32).
+    #[serde(default)]
+    pub bits: Vec<u8>,
+    /// The highest of `rates` (0 while unknown).
+    #[serde(default)]
+    pub max_rate: u32,
+    /// The highest of `bits` (0 while unknown).
+    #[serde(default)]
+    pub max_bits: u8,
+    /// Most channels it takes (0 while unknown).
+    #[serde(default)]
+    pub channels: u8,
+    /// DSD, when the device says how it takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsd: Option<DsdKind>,
+    /// It has its own volume (a USB feature unit).
+    #[serde(default)]
+    pub hardware_volume: bool,
+    /// How the app drives it now.
+    #[serde(default)]
+    pub mode: DeviceMode,
+    /// The modes this device and phone allow.
+    #[serde(default)]
+    pub modes: Vec<DeviceMode>,
+    /// The system confirmed `mode` for the format playing now (Android read the bit-perfect mixer
+    /// back for that device and format). Never true for [`DeviceMode::Shared`]; a UI says
+    /// "bit-perfect" only when this is true.
+    #[serde(default)]
+    pub confirmed: bool,
+    /// Why it is not bit-perfect, or anything else the listener should know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// USB ids, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb: Option<UsbIds>,
+    /// The format it was last opened in (what `mode` and `confirmed` are about).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<AudioFormat>,
+    /// The listener's choices for it (`PUT /v1/outputs/{id}/device`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<DeviceSettings>,
+    /// The exact formats it takes bit-perfect now, when it plays bit-perfect: the node plans each
+    /// source with these ([`caps_for_source`]), so a listed format reaches it unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formats: Vec<DeviceFormat>,
+    /// The phone's media volume, 0 to 100, when it matters (bit-perfect plays at full level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_volume: Option<u8>,
+}
+
+/// One format a device takes bit-perfect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceFormat {
+    pub rate_hz: u32,
+    pub bits: u8,
+    pub channels: u8,
+}
+
+/// The caps to plan `src` with on an output whose device lists the exact formats it takes: the
+/// source's own format when listed (it reaches the device unchanged), else the closest listed one
+/// (the same rate before another; no fewer bits before fewer; the same rate family; the nearest
+/// rate). `caps` as they are when nothing is listed for the source's channels.
+pub fn caps_for_source(formats: &[DeviceFormat], src: AudioFormat, caps: &OutputCaps) -> OutputCaps {
+    if src.kind != pm_model::SampleKind::Pcm {
+        return caps.clone();
+    }
+    let family = |r: u32| r.is_multiple_of(44_100);
+    let best = formats
+        .iter()
+        .filter(|f| f.channels == src.channels)
+        .min_by_key(|f| {
+            (
+                f.rate_hz != src.rate_hz,
+                f.bits < src.bits,
+                family(f.rate_hz) != family(src.rate_hz),
+                f.rate_hz.abs_diff(src.rate_hz),
+                f.bits.abs_diff(src.bits),
+            )
+        });
+    match best {
+        Some(f) => OutputCaps {
+            pcm_rates: vec![f.rate_hz],
+            pcm_bits: vec![f.bits],
+            max_pcm_bits: f.bits,
+            max_channels: caps.max_channels.max(f.channels),
+            ..caps.clone()
+        },
+        None => caps.clone(),
+    }
+}
+
+/// The listener's choices for an [`OutputDevice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSettings {
+    /// The mode to use: `auto` takes bit-perfect where the phone allows it, else shared.
+    #[serde(default)]
+    pub mode: PreferredMode,
+    /// Reserved: kept so earlier apps' settings still read. The phone's DAC has no zone volume of
+    /// its own (in bit-perfect mode the level is the DAC's).
+    #[serde(default = "yes")]
+    pub dac_volume: bool,
+    /// The listener agreed that Bit-perfect plays at full level below Android's full volume (asked
+    /// when they chose it); for the DAC attached then only.
+    #[serde(default)]
+    pub full_level_ok: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for DeviceSettings {
+    fn default() -> Self {
+        Self {
+            mode: PreferredMode::Auto,
+            dac_volume: true,
+            full_level_ok: false,
+        }
+    }
+}
+
+/// [`DeviceSettings::mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferredMode {
+    #[default]
+    Auto,
+    BitPerfect,
+    Shared,
+    /// A choice this node does not know yet: as `auto`.
+    #[serde(other)]
+    Unknown,
+}
+
+/// What kind of hardware an [`OutputDevice`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    /// A USB DAC (Android's `TYPE_USB_DEVICE`).
+    #[default]
+    UsbDac,
+    /// A USB headset (Android's `TYPE_USB_HEADSET`).
+    UsbHeadset,
+    /// A kind this node does not know yet (from a newer app).
+    #[serde(other)]
+    Unknown,
+}
+
+/// How an app drives an [`OutputDevice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceMode {
+    /// Through the system mixer, which may resample and mix in other sounds.
+    #[default]
+    Shared,
+    /// The system passes the stream to the device unchanged (Android 14's bit-perfect mixer).
+    BitPerfect,
+    /// The app drives the device itself (its own USB audio driver).
+    Exclusive,
+    /// A mode this node does not know yet (from a newer app): shown as shared, never as more.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a device takes DSD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DsdKind {
+    /// As raw DSD (UAC2 `TYPE_I_RAW_DATA`).
+    Native,
+    /// Packed in PCM frames (DoP).
+    Dop,
+    /// A way this node does not know yet (from a newer app).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `OutputInfo.device`, or `None` when it does not read as an [`OutputDevice`].
+fn lenient_device<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<OutputDevice>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Lenient {
+        Device(OutputDevice),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<Lenient>::deserialize(d)? {
+        Some(Lenient::Device(dev)) => Some(dev),
+        _ => None,
+    })
+}
+
+/// A USB device's vendor and product ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsbIds {
+    pub vendor_id: u16,
+    pub product_id: u16,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -62,8 +284,31 @@ pub enum SinkError {
     NoStandby(OutputId),
     #[error("device error: {0}")]
     Device(String),
+    /// The device the output played through went away mid-stream (a USB DAC unplugged from a
+    /// phone): the zone pauses where it was instead of failing, and plays on no other device.
+    /// Its text carries [`GONE`], so it survives an endpoint's error message.
+    #[error("output {0}: device gone: {1}")]
+    Gone(OutputId, String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+/// The words [`SinkError::Gone`] puts in its text, so a node can tell it from an endpoint's
+/// error message.
+pub const GONE: &str = "device gone: ";
+
+impl SinkError {
+    /// [`SinkError::Gone`], or an error whose text says a device went away (an endpoint's).
+    pub fn gone_reason(&self) -> Option<String> {
+        match self {
+            SinkError::Gone(_, why) => Some(why.clone()),
+            other => {
+                let text = other.to_string();
+                text.find(GONE)
+                    .map(|at| text[at + GONE.len()..].trim().to_string())
+            }
+        }
+    }
 }
 
 /// How full the sink's buffer is; the zone paces itself on this.
@@ -150,6 +395,27 @@ pub trait AudioSink: Send {
 
     /// Frames written so far, for position reporting.
     fn frames_written(&self) -> u64;
+
+    /// The output's settings changed since this sink opened (a phone's DAC switched between
+    /// bit-perfect and shared): the zone closes it at the next song and opens afresh, so the change
+    /// applies there even when the format stays the same.
+    fn reopen_at_track(&self) -> bool {
+        false
+    }
+
+    /// The Gone this sink returned reached the zone (it pauses there with the reason). A sink
+    /// that remembers a device's loss for the next open (a phone's DAC: the next open pauses
+    /// instead of opening the speaker) may forget it now; a Gone nobody heard (a stream closed
+    /// with it) is kept.
+    fn gone_reported(&mut self) {}
+
+    /// The sink may not carry on as it is with the next write: a phone's DAC paused in
+    /// bit-perfect mode whose listener turned Android's volume down since (writing would put it
+    /// back at full level without consent). Whoever writes opens the output again in the same
+    /// format first (planned as it is now: shared) and writes there.
+    fn reopen_now(&self) -> bool {
+        false
+    }
 
     /// How many more frames the sink's stream can carry, when it has a fixed size (a renderer's
     /// stream offered as a file of fixed length); `None` when there is no limit. The zone starts
@@ -247,9 +513,36 @@ pub trait Output: Send + Sync {
             id: self.id(),
             name: self.name(),
             protocol: self.id().protocol().to_string(),
-            caps: self.caps().clone(),
+            caps: self.live_caps(),
             model: self.model(),
+            device: self.device(),
         }
+    }
+
+    /// What the output takes now, when that changes while it is registered (a phone's output with
+    /// a USB DAC in bit-perfect mode takes the DAC's rates): the zone plans each track with it.
+    /// [`Output::caps`] stays what it was when the output was found.
+    fn live_caps(&self) -> OutputCaps {
+        self.caps().clone()
+    }
+
+    /// What the output takes now for `src` in particular: [`Output::live_caps`], narrowed to the
+    /// closest exact format when the device lists them (see [`caps_for_source`]).
+    fn live_caps_for(&self, _src: AudioFormat) -> OutputCaps {
+        self.live_caps()
+    }
+
+    /// Apply the listener's choices for the hardware behind the output (see [`DeviceSettings`]).
+    async fn configure_device(&self, _settings: DeviceSettings) -> Result<(), SinkError> {
+        Err(SinkError::Unavailable(
+            self.id(),
+            "it has no device settings".into(),
+        ))
+    }
+
+    /// The hardware behind this output, when it knows (see [`OutputDevice`]).
+    fn device(&self) -> Option<OutputDevice> {
+        None
     }
 
     /// Open the output in exactly `fmt`. Implementations must not convert:
@@ -293,4 +586,114 @@ pub fn check_block(expected: AudioFormat, block: &AudioBlock) -> Result<(), Sink
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An output's info as a Welcome carries it, with `device` as given.
+    fn info_with(device: serde_json::Value) -> serde_json::Value {
+        let mut v = serde_json::to_value(crate::outputs::NullOutput::new().info()).unwrap();
+        v["device"] = device;
+        v
+    }
+
+    #[test]
+    fn a_device_from_a_newer_app_never_breaks_the_output() {
+        // Values this node does not know: read as Unknown (shown as shared), the rest as sent
+        let v = info_with(
+            serde_json::json!({"name": "FiiO KA17", "kind": "usb_c_hub", "mode": "hyper_perfect",
+            "modes": ["shared", "hyper_perfect"], "confirmed": true, "dsd": "dsd_over_usb4", "max_rate": 768000,
+            "future_field": {"anything": [1, 2]}}),
+        );
+        let info: OutputInfo = serde_json::from_value(v).unwrap();
+        let d = info.device.unwrap();
+        assert_eq!(
+            (d.kind, d.mode, d.dsd),
+            (DeviceKind::Unknown, DeviceMode::Unknown, Some(DsdKind::Unknown))
+        );
+        assert_eq!(d.modes, [DeviceMode::Shared, DeviceMode::Unknown]);
+        assert_eq!((d.name.as_str(), d.max_rate), ("FiiO KA17", 768_000));
+        // A device this node can't read at all: no device, and the output itself still reads
+        for odd in [
+            serde_json::json!({"name": "FiiO KA17", "rates": "many"}),
+            serde_json::json!({"mode": 3}),
+            serde_json::json!("a string"),
+            serde_json::json!([1, 2]),
+            serde_json::Value::Null,
+        ] {
+            let info: OutputInfo = serde_json::from_value(info_with(odd.clone())).unwrap();
+            assert_eq!(info.device, None, "{odd}");
+            assert_eq!(info.id, OutputId::new("null", ""));
+        }
+        // Absent: none, as from an older app
+        let mut v = info_with(serde_json::Value::Null);
+        v.as_object_mut().unwrap().remove("device");
+        assert_eq!(serde_json::from_value::<OutputInfo>(v).unwrap().device, None);
+    }
+
+    /// A source the device lists plays as it is; another plays as the closest listed format.
+    #[test]
+    fn each_source_is_planned_with_the_closest_listed_format() {
+        let f = |rate_hz, bits| DeviceFormat {
+            rate_hz,
+            bits,
+            channels: 2,
+        };
+        let caps = OutputCaps::unlimited();
+        let pick = |formats: &[DeviceFormat], src: AudioFormat| {
+            let c = caps_for_source(formats, src, &caps);
+            (c.pcm_rates[0], c.pcm_bits[0])
+        };
+        // KA17-like: 16 bit at 44.1/48 only; 24 (in 32) and 32 up to 768 kHz
+        let mut ka17 = vec![f(44_100, 16), f(48_000, 16)];
+        for r in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000,
+        ] {
+            ka17.extend([f(r, 24), f(r, 32)]);
+        }
+        assert_eq!(
+            pick(&ka17, AudioFormat::pcm(96_000, 24, 2)),
+            (96_000, 24),
+            "96/24 unchanged"
+        );
+        assert_eq!(
+            pick(&ka17, AudioFormat::pcm(192_000, 24, 2)),
+            (192_000, 24),
+            "192/24 unchanged"
+        );
+        assert_eq!(pick(&ka17, AudioFormat::pcm(44_100, 16, 2)), (44_100, 16));
+        assert_eq!(
+            pick(&ka17, AudioFormat::pcm(96_000, 16, 2)),
+            (96_000, 24),
+            "padded, not resampled"
+        );
+        // 16 bit everywhere, 24 only at 96/192: 96/24 and 192/24 still unchanged
+        let mut mixed: Vec<DeviceFormat> = [44_100, 48_000, 96_000, 192_000]
+            .iter()
+            .map(|r| f(*r, 16))
+            .collect();
+        mixed.extend([f(96_000, 24), f(192_000, 24)]);
+        assert_eq!(pick(&mixed, AudioFormat::pcm(96_000, 24, 2)), (96_000, 24));
+        assert_eq!(pick(&mixed, AudioFormat::pcm(192_000, 24, 2)), (192_000, 24));
+        assert_eq!(
+            pick(&mixed, AudioFormat::pcm(44_100, 24, 2)),
+            (44_100, 16),
+            "same rate before more bits"
+        );
+        // A rate it doesn't list: the nearest of its family, no fewer bits
+        let k192: Vec<DeviceFormat> = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000]
+            .iter()
+            .map(|r| f(*r, 24))
+            .collect();
+        assert_eq!(pick(&k192, AudioFormat::pcm(352_800, 24, 2)), (176_400, 24));
+        assert_eq!(pick(&k192, AudioFormat::pcm(384_000, 24, 2)), (192_000, 24));
+        // Nothing for its channels, or nothing listed: the caps as they are
+        assert_eq!(
+            caps_for_source(&k192, AudioFormat::pcm(96_000, 24, 1), &caps),
+            caps
+        );
+        assert_eq!(caps_for_source(&[], AudioFormat::pcm(96_000, 24, 2), &caps), caps);
+    }
 }

@@ -139,7 +139,9 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
    sudo useradd --system --home /var/lib/pubky-music --shell /usr/sbin/nologin --groups audio,pubky-files pubky-music
    sudo install -d -o pubky -g pubky-files -m 710 /var/lib/pubky-homeserver   # put it on the big disk if you like
    sudo install -d -o pubky -g pubky-files -m 2750 /var/lib/pubky-homeserver/data
-   sudo install -d -o pubky-music -g pubky-music -m 755 /var/lib/pubky-music /var/lib/pubky-music/tunnel
+   # The node's folder: its own (others may only pass through to tunnel/, which the homeserver reads)
+   sudo install -d -o pubky-music -g pubky-music -m 711 /var/lib/pubky-music
+   sudo install -d -o pubky-music -g pubky-music -m 755 /var/lib/pubky-music/tunnel
    sudo install -d -m 755 /etc/pubky-music /usr/local/lib/pubky-music
    ```
 
@@ -256,6 +258,9 @@ works until the Pubky transport exists (ADR 0008):
 - **Cloudflare Tunnel / a reverse proxy with TLS**: terminate TLS in front of port 7788 and keep the
   token. Set `[api] public_url` to the public origin so pull-stream URLs handed to renderers are
   right. Do not put the node on the open internet without TLS and a strong token.
+  A node **without** a token (it listens on 127.0.0.1 only) answers only requests for
+  `127.0.0.1`, `localhost` or `[::1]` from its own pages; requests by any other name get 403. Set
+  `[api] token` before putting anything in front of it.
 - **Pubky**: a signed-in node publishes its address privately on your homeserver; the app's
   "Find my node via Pubky" reads it, so a moved or re-addressed node is found again without typing.
 
@@ -353,6 +358,13 @@ address (`squeezelite -s <node-ip> -o hw:0,0`); it appears as an output and zone
 model and MAC, plays the zone's post-DSP PCM as a WAV stream it fetches from `[api] public_url`, and
 takes volume through its own digital gain. Players on the same subnet also find the node through
 the discovery responder.
+
+A player has 10 s to introduce itself after connecting, and one that sends nothing for 60 s is
+disconnected (players report every 5 s, and reconnect on their own). The node takes up to 128
+connections, 16 from one address, and keeps up to 64 players; a player it already knows always
+reconnects. Outputs found on the network (discovery and players together) stop being added at 256.
+To take only players on this machine, set `[outputs] slimproto_bind = "127.0.0.1"` (the discovery
+responder is then off); any other address of the machine works too.
 
 ## Where the music can live
 

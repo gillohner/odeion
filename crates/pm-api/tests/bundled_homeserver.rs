@@ -848,3 +848,62 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
         "{pk}"
     );
 }
+
+/// The app signs in as a device of the owner's: its sign-in outlives a browser's Log out, and
+/// Log out with it ends nothing (the app keeps it, as with the API token); Make a new token ends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_signs_in_once_and_keeps_it_over_browser_log_outs() {
+    let Some(ep) = bundled() else {
+        eprintln!("skipped: set PM_BUNDLED_HS_ADMIN and PM_BUNDLED_HS_PASSWORD");
+        return;
+    };
+    const API: &str = "the-api-token";
+    let dir = tempfile::tempdir().unwrap();
+    let s = node_with(dir.path(), Some(API));
+    // A token the node made itself (`<data_dir>/api-token`): only that one can be replaced with
+    // Make a new token; one set in the config answers 409 ("change it there")
+    let token_file = dir.path().join("api-token");
+    std::fs::write(&token_file, API).unwrap();
+    s.set_token_file(token_file);
+    s.set_bundled_homeserver(ep);
+    let app = router(s.clone());
+    let owner = owner_with_signer(&app, API).await;
+
+    let (st, started) = call_auth(
+        &app,
+        "POST",
+        "/v1/auth/pubky/start",
+        API,
+        Some(serde_json::json!({"device": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{started}");
+    let v = approve_and_poll(&app, &owner, &started).await;
+    assert_eq!(
+        (v["status"].as_str(), v["role"].as_str()),
+        (Some("ok"), Some("owner")),
+        "{v}"
+    );
+    let device = v["token"].as_str().unwrap().to_string();
+    assert!(device.starts_with("pmo_"), "{v}");
+    let (st, me) = call_auth(&app, "GET", "/v1/me", &device, None).await;
+    assert_eq!((st, me["role"].as_str()), (StatusCode::OK, Some("owner")), "{me}");
+
+    // A browser logs in and out: the device's sign-in stays
+    let v = ring_sign_in(&app, &owner).await;
+    let browser = v["token"].as_str().unwrap().to_string();
+    let (_, out) = call_auth(&app, "DELETE", "/v1/me/token", &browser, None).await;
+    assert_eq!(out["ended"], true, "{out}");
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
+    assert_eq!(st, StatusCode::OK, "the device is still signed in");
+    // Log out with the device's sign-in (the page inside the app) ends nothing
+    let (_, out) = call_auth(&app, "DELETE", "/v1/me/token", &device, None).await;
+    assert_eq!(out["ended"], false, "{out}");
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
+    assert_eq!(st, StatusCode::OK);
+    // Make a new token signs every device out
+    let (st, made) = call_auth(&app, "POST", "/v1/node/token", API, None).await;
+    assert_eq!(st, StatusCode::OK, "{made}");
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "the app signs in again from here");
+}

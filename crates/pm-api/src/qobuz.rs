@@ -265,6 +265,7 @@ pub(crate) fn not_connected(who: &Who) -> String {
     match who {
         Who::Owner => "Sign in to Qobuz first (Sources › Qobuz)".into(),
         Who::Listener(_) => "Connect Qobuz (Settings › You › Services) to play this".into(),
+        Who::ListenerOnNode(_) => "This node has no Qobuz sign-in: ask its owner to sign in".into(),
         Who::Nobody => "Qobuz plays with the account of whoever queued it, and this has none".into(),
     }
 }
@@ -1366,8 +1367,8 @@ pub(crate) async fn stream(
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
-    // With the caller's own account
-    let who = Who::of(&caller);
+    // With the account the caller plays with (their own, or the node's under its source policy)
+    let who = Who::of(&caller).resolved(&s.library.lock().expect("library poisoned"));
     // Use one snapshot for the request and its response type, even if quality changes in flight.
     let format = format_id(&load(&s.library.lock().expect("library poisoned"), &who));
     let r = file_url(&s, &who, &id, format).await;

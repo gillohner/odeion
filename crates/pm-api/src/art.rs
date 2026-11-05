@@ -225,6 +225,8 @@ async fn download(
             Ok(b) if !b.is_empty() => b,
             _ => return None,
         };
+        // What it is by its bytes, whatever the server called it
+        let mime = pm_library::image_type(&bytes)?.to_string();
         if tokio::fs::create_dir_all(art_dir).await.is_err() {
             return None;
         }
@@ -238,6 +240,81 @@ async fn download(
             mime,
             source: source.into(),
         })
+    }
+}
+
+/// Every picture and relayed file the node serves says it is only that: the browser never guesses
+/// another type, and nothing in it runs when it is opened on its own (in a tab).
+pub(crate) const PASSIVE_CSP: &str = "default-src 'none'; sandbox";
+
+/// A picture as an answer: its type by its first bytes ([`pm_library::image_type`]: JPEG, PNG,
+/// WebP, GIF), never a type stored or sent with it. Anything else is not served.
+pub(crate) fn picture(bytes: Vec<u8>, cache: &str) -> Result<axum::response::Response, crate::ApiError> {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let mime = pm_library::image_type(&bytes).ok_or_else(|| crate::ApiError::not_found("not a picture"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::CACHE_CONTROL, cache.to_string()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::CONTENT_SECURITY_POLICY, PASSIVE_CSP.to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// The most a relayed picture may be.
+const RELAYED_PICTURE_MAX: usize = 16 << 20;
+
+/// A picture another server sent, answered as [`picture`] does: by its bytes, whatever type the
+/// server gave it, and none at all when it is no picture (or larger than any cover).
+pub(crate) async fn relayed_picture(
+    resp: reqwest::Response,
+    cache: &str,
+) -> Result<axum::response::Response, crate::ApiError> {
+    use futures_util::StreamExt;
+    let too_big = || crate::ApiError::not_found("that picture is too large");
+    if resp
+        .content_length()
+        .is_some_and(|n| n as usize > RELAYED_PICTURE_MAX)
+    {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::new();
+    let mut body = resp.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        let chunk =
+            chunk.map_err(|e| crate::ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+        if bytes.len() + chunk.len() > RELAYED_PICTURE_MAX {
+            return Err(too_big());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    picture(bytes, cache)
+}
+
+/// The type to relay a file from another server as: what it said when that is audio, video or a
+/// raster picture, else `fallback` (what the node asked it for).
+pub(crate) fn safe_media_type(said: Option<&str>, fallback: &str) -> String {
+    let said = said
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let ok = said.starts_with("audio/")
+        || said.starts_with("video/")
+        || matches!(
+            said.as_str(),
+            "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+        );
+    if ok {
+        said
+    } else {
+        fallback.to_string()
     }
 }
 

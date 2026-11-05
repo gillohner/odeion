@@ -22,6 +22,19 @@ pub mod alsa;
 #[cfg(feature = "cpal")]
 pub mod cpal_out;
 
+// USB DACs on an Android phone, as the app reports them (built on every host; see its docs)
+pub mod usb_dac;
+
+// Bit-perfect playback to that DAC on Android 14+ (decisions and the sink; built on every host)
+pub mod bit_perfect;
+
+// The shared sink's waits and stream faults, apart from cpal (built and tested on every host)
+pub mod sink_wait;
+
+/// The tests that touch the phone's DAC (one process-wide value) run one at a time.
+#[cfg(test)]
+pub(crate) static PHONE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Device names this crate will open. `plughw:` and `default` go through
 /// ALSA's conversion plugins, which silently resample and dither; refusing
 /// them keeps constraint 5 (bit-perfect) enforceable.

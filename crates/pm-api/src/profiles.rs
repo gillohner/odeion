@@ -10,8 +10,8 @@ use crate::search::SearchHit;
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::Json;
 use pm_pubky::nexus::{NexusError, UserView};
 use serde::{Deserialize, Serialize};
@@ -386,13 +386,8 @@ async fn avatar_bytes(s: &NodeState, id: &str) -> Option<(Vec<u8>, &'static str)
         }
     }
     let bytes = tokio::fs::read(&path).await.ok()?;
-    let mime = match bytes.get(..4) {
-        Some([0x89, b'P', b'N', b'G']) => "image/png",
-        Some([b'R', b'I', b'F', b'F']) => "image/webp",
-        Some([b'G', b'I', b'F', _]) => "image/gif",
-        Some([b'<', ..]) => "image/svg+xml",
-        _ => "image/jpeg",
-    };
+    // Raster pictures only, by their bytes: an SVG or anything else is no picture here
+    let mime = pm_library::image_type(&bytes)?;
     Some((bytes, mime))
 }
 
@@ -404,17 +399,10 @@ pub(crate) async fn avatar(
     if !valid_id(&id) {
         return Err(ApiError::bad_request("that isn't a Pubky key"));
     }
-    let (bytes, mime) = avatar_bytes(&s, &id)
+    let (bytes, _) = avatar_bytes(&s, &id)
         .await
         .ok_or_else(|| ApiError::not_found("no picture"))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    crate::art::picture(bytes, "private, max-age=86400")
 }
 
 /// Pictures bigger than this stay off the Log in screen (it shows initials instead).
