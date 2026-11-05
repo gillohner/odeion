@@ -460,8 +460,26 @@ def run(node):
             log(f"crash report check skipped: `am crash` is not available here ({crashed.stderr.strip()})")
         else:
             time.sleep(3)
+            # Android may kill the app again right after (Play services restarting on the emulator:
+            # "depends on provider …FontsProvider in dying proc", release run for fd2d80e0, API 33).
+            # The report stays until Continue, so the app is started again and shows it once more.
+            # Kills are counted before the start, so one logged while `am start -W` waits counts too.
+            seen = len(system_kills())
             adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
-            until("the crash report", lambda: any("closed unexpectedly" in n for n in ui_nodes()), timeout=60, every=2)
+            for attempt in (1, 2, 3):
+                def report_or_killed():
+                    if len(system_kills()) > seen:
+                        return "killed"
+                    return "report" if any("closed unexpectedly" in n for n in ui_nodes()) else None
+                got = until("the crash report", report_or_killed, timeout=60, every=2)
+                if got == "report":
+                    break
+                kills = system_kills()
+                seen = len(kills)
+                if attempt == 3:
+                    raise SystemExit(f"FAIL: Android kept killing the app: {kills[-1]}")
+                log(f"Android killed the app, not a crash ({kills[-1]}); starting it again")
+                adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
             shot("5-crash-report")
             # A release build cannot be read with run-as: read the report off the screen
             report = "\n".join(re.findall(r'text="([^"]*)"', "\n".join(ui_nodes())))
@@ -470,7 +488,7 @@ def run(node):
             assert "Java exception" in report or "crashed" in report or "Rust panic" in report, f"the report says: {report[:600]!r}"
             log("the crash report shows on the next launch")
             tap(lambda n: 'text="Continue"' in n, "Continue")
-            until("the node's page after the report", node_page, timeout=90, every=3)
+            wait_page("the node's page after the report", relaunch=True)
             log("Continue reconnects to the node")
         log("PASS: the phone is a zone, plays in real time and in the background, survives a restart, and reports a crash")
     finally:

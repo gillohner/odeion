@@ -15,7 +15,8 @@
 
 use crate::config::Network;
 use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
-use pubky::{Pubky, PubkySession, PublicKey};
+pub use pubky::PubkySession;
+use pubky::{Pubky, PublicKey};
 use serde::Serialize;
 
 /// The homeserver answers 404 for a directory nobody has written to yet.
@@ -55,6 +56,26 @@ pub enum HomeserverError {
     TooLarge { max: usize },
     #[error("the homeserver took too long to answer")]
     Timeout,
+}
+
+impl HomeserverError {
+    /// The server or the network may answer the same request later: a transport failure or a
+    /// 5xx answer.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Transport(_))) => true,
+            _ => self.is_server_error(),
+        }
+    }
+
+    /// The server answered 5xx.
+    pub fn is_server_error(&self) -> bool {
+        matches!(
+            self,
+            HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server { status, .. }))
+                if status.is_server_error()
+        )
+    }
 }
 
 /// Reads in flight at once during a sync.
@@ -681,6 +702,23 @@ impl NodeHomeserver {
         Ok(())
     }
 
+    /// Check authenticated private storage with one bounded listing, not a file inventory.
+    /// A new account's missing directory is healthy; access and transport errors propagate.
+    pub async fn probe_private_storage(&self, session: &PubkySession) -> Result<(), HomeserverError> {
+        let storage = session.storage();
+        match storage
+            .list(PRIVATE_FILES_DIR)?
+            .limit(1)
+            .shallow(true)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Every file under the private files folder, with size when the
     /// homeserver reports it.
     pub async fn list_private_files(
@@ -994,6 +1032,21 @@ impl NodeHomeserver {
         Ok(LoginFlow { flow, url })
     }
 
+    /// The pending sign-in `flow`, listening again on its relay inbox through this homeserver's
+    /// client: Ring's approval waits in the inbox until it is read, so a relay poll that gave up
+    /// (the app lost the network in the background) can pick it up. No grant has been sent then.
+    pub fn resume_login(&self, flow: &LoginFlow) -> Result<LoginFlow, HomeserverError> {
+        let state = flow
+            .flow
+            .save_local()
+            .ok_or_else(|| HomeserverError::Transport("this sign-in cannot be resumed".into()))?;
+        let resumed = pubky::PubkyGrantAuthFlow::restore(state, self.pubky.client().clone())?;
+        Ok(LoginFlow {
+            flow: resumed,
+            url: flow.url.clone(),
+        })
+    }
+
     /// A sign-up on `homeserver` (z32) with `signup_token`: Pubky Ring creates the account there,
     /// then approves the node's [`LOGIN_CAPABILITIES`]; poll it like a sign-in.
     pub fn start_signup(
@@ -1021,7 +1074,9 @@ impl LoginFlow {
         &self.url
     }
 
-    /// One poll: `Ok(None)` while the user has not approved yet.
+    /// One poll: `Ok(None)` while the user has not approved yet. It must not wait for anything
+    /// before pubky's `try_poll_once`: the app tells a relay listener's error (returned at once)
+    /// from the grant exchange's by that (pm-desktop `ring_wait::at_once`).
     pub async fn poll(&self) -> Result<Option<PubkySession>, HomeserverError> {
         Ok(self.flow.try_poll_once().await?)
     }
@@ -1205,5 +1260,27 @@ mod object_tests {
             "read {} bytes of the one that didn't",
             sent[2]
         );
+    }
+}
+
+#[cfg(test)]
+mod transient_tests {
+    use super::HomeserverError;
+
+    fn answered(code: u16) -> HomeserverError {
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: pubky::StatusCode::from_u16(code).unwrap(),
+            message: String::new(),
+        }))
+    }
+
+    #[test]
+    fn only_5xx_answers_and_transport_failures_are_transient() {
+        assert!(answered(502).is_transient() && answered(502).is_server_error());
+        assert!(answered(503).is_server_error());
+        assert!(!answered(404).is_transient() && !answered(404).is_server_error());
+        assert!(!answered(408).is_transient());
+        assert!(!HomeserverError::Timeout.is_transient());
+        assert!(!HomeserverError::Transport("x".into()).is_server_error());
     }
 }

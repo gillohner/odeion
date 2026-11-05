@@ -29,9 +29,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Built-in apps (public ids, repository variables) and the built-in TIDAL device client (secrets,
-  # compiled in masked by crates/pm-api/build.rs); see docs/STREAMING-PROVIDERS.md. The repository
+  # Built-in apps (public ids, repository variables); see docs/STREAMING-PROVIDERS.md. The repository
   # variables keep their PM_ names; the build also reads ODEION_PROJECT_* first (docs/branding-compatibility.md).
+  # TIDAL's two built-in clients (secrets PM_TIDAL_PKCE_CLIENT_* and PM_TIDAL_DEVICE_CLIENT_*, compiled
+  # in masked by crates/pm-api/build.rs) are passed only to the steps that build, never set here.
   PM_PROJECT_TIDAL_CLIENT_ID: ${{ vars.PM_PROJECT_TIDAL_CLIENT_ID }}
   PM_PROJECT_JAMENDO_CLIENT_ID: ${{ vars.PM_PROJECT_JAMENDO_CLIENT_ID }}
   PM_PROJECT_ACOUSTID_KEY: ${{ vars.PM_PROJECT_ACOUSTID_KEY }}
@@ -154,17 +155,25 @@ jobs:
         run: |
           echo '{"version":"${{ needs.meta.outputs.app_version }}","bundle":{"createUpdaterArtifacts":true}}' \
             > crates/pm-desktop/release.conf.json
+      # Apart from the build, so the install scripts never see the build's secrets
+      - name: install app dependencies
+        shell: bash
+        working-directory: crates/pm-desktop
+        run: npm ci --no-audit --no-fund
       - name: build
         shell: bash
         working-directory: crates/pm-desktop
         env:
+          PM_TIDAL_PKCE_CLIENT_ID: ${{ secrets.PM_TIDAL_PKCE_CLIENT_ID }}
+          PM_TIDAL_PKCE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_PKCE_CLIENT_SECRET }}
+          PM_TIDAL_DEVICE_CLIENT_ID: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
+          PM_TIDAL_DEVICE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
           # Updater bundles are signed with the project's update key (~/.secrets/pubky-music-updater
           # on the infra machine; the public key is in tauri.conf.json).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           PM_UPDATE_CHANNEL: ${{ needs.meta.outputs.update_channel }}
         run: |
-          npm ci --no-audit --no-fund
           build() { npx tauri build --ci ${{ matrix.args }} --config release.conf.json; }
           if [ "$RUNNER_OS" = macOS ]; then
             # hdiutil now and then finds the new disk image busy and bundle_dmg.sh fails; the app is
@@ -217,6 +226,11 @@ jobs:
           npx tauri icon ../pm-api/static/icon.svg
           python3 -I ../../tools/release/android-patch.py .
       - name: build
+        env:
+          PM_TIDAL_PKCE_CLIENT_ID: ${{ secrets.PM_TIDAL_PKCE_CLIENT_ID }}
+          PM_TIDAL_PKCE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_PKCE_CLIENT_SECRET }}
+          PM_TIDAL_DEVICE_CLIENT_ID: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
+          PM_TIDAL_DEVICE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
         run: |
           echo '{"version":"${{ needs.meta.outputs.version }}","bundle":{"android":{"versionCode":${{ needs.meta.outputs.android_version_code }}}}}' > release.conf.json
           npx tauri android build --ci --apk --aab \
@@ -342,6 +356,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - name: build
         shell: bash
+        env:
+          PM_TIDAL_PKCE_CLIENT_ID: ${{ secrets.PM_TIDAL_PKCE_CLIENT_ID }}
+          PM_TIDAL_PKCE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_PKCE_CLIENT_SECRET }}
+          PM_TIDAL_DEVICE_CLIENT_ID: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
+          PM_TIDAL_DEVICE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
         run: ${{ matrix.build }}
       - name: collect
         shell: bash
@@ -405,6 +424,15 @@ jobs:
           labels: ${{ steps.tags.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # TIDAL's built-in clients reach the build stage only, as BuildKit secrets (never build
+          # arguments, never in the image). A secret's contents don't invalidate the cache, so the
+          # build stage is always compiled again.
+          no-cache-filters: build
+          secrets: |
+            PM_TIDAL_PKCE_CLIENT_ID=${{ secrets.PM_TIDAL_PKCE_CLIENT_ID }}
+            PM_TIDAL_PKCE_CLIENT_SECRET=${{ secrets.PM_TIDAL_PKCE_CLIENT_SECRET }}
+            PM_TIDAL_DEVICE_CLIENT_ID=${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
+            PM_TIDAL_DEVICE_CLIENT_SECRET=${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
           build-args: |
             PM_NODE_VERSION=${{ needs.meta.outputs.node_version }}
             PM_PROJECT_TIDAL_CLIENT_ID=${{ vars.PM_PROJECT_TIDAL_CLIENT_ID }}
@@ -460,6 +488,7 @@ jobs:
             echo "| \`pubky-music-android-arm64.apk\` (most phones), \`-universal.apk\`, \`.aab\` | the app on Android and Google TV |"
             echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node, \`odeiond\` (also as \`pm-node\`, its old name; armv7: 32-bit Raspberry Pi OS) |"
             echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the Odeion node image (amd64, arm64) |"
+            echo "| \`odeion-$CHANNEL-amd64.iso\` (added a little after the rest, with its \`.sha256\`) | a whole Odeion box on a spare PC: [install guide](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/guides/install-iso.md) |"
             echo
             echo "Check downloads against \`SHA256SUMS\`."
           } > notes.md
@@ -514,6 +543,8 @@ jobs:
           # Files an older build had and this one does not.
           keep=$(cd dist && ls)
           for a in $(gh release view edge --json assets -q '.assets[].name'); do
+            # The installer ISO comes from iso.yml after this run, and stays
+            case $a in odeion-edge-amd64.iso | odeion-edge-amd64.iso.sha256) continue ;; esac
             echo "$keep" | grep -qxF "$a" || gh release delete-asset edge "$a" --yes
           done
       - name: versioned

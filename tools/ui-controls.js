@@ -2,7 +2,7 @@
 // audits"). For each main view, each distinct visible button (rows repeat the same buttons; one
 // of each kind is enough) is clicked on a fresh page load, and the click must change something:
 // the DOM, the URL, a request to the node, a dialog or a new window. A button that changes nothing
-// is a dead control and fails the run.
+// is a dead control and fails the run, and so does one still busy (aria-busy) 10 s after its click.
 // Buttons with lasting effects (delete, sign in or out, scan, sync, import, …) are skipped; run it
 // against a node whose data you can lose (a copy, or CI's fixture node).
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
@@ -49,12 +49,12 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
     });
     return out;
   });
-  const dead = []; let clicked = 0; let skipped = 0;
+  const dead = []; const stuck = []; let stuckBudget = 60000; let clicked = 0; let skipped = 0;
   for (const view of views) {
     await p.goto(BASE + view); await settle();
     const list = await kinds();
     for (const k of list) {
-      if (SKIP.test(k.words) || SKIP.test(k.id)) { skipped++; continue; }
+      if (SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig)) { skipped++; continue; }
       await p.goto(BASE + view); await settle();
       const now = await kinds(); const target = now.find((x) => x.sig === k.sig);
       if (!target) continue;
@@ -70,12 +70,20 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       const did = after.mut > 0 || after.opened > 0 || after.dialog || after.scrolled || p.url() !== before.url || requests > before.req;
       if (!did) dead.push(`${view}  "${k.words}"  (${k.sig})`);
       await p.keyboard.press('Escape').catch(() => {});
+      // A control whose action never settles would stay busy (and ignore presses) for good
+      // (at most 10 s for one control, 60 s of waiting in all, so the run's time stays bounded)
+      // A control is counted only when it was watched for the full 10 s; once the budget is spent the
+      // check is skipped
+      let busyNow = []; let waited = 0;
+      if (stuckBudget > 0) for (;;) { busyNow = await p.evaluate(() => [...document.querySelectorAll('.is-busy')].map((e) => (e.textContent || e.getAttribute('aria-label') || e.title || e.tagName).trim().slice(0, 40))).catch(() => []); if (!busyNow.length || waited >= 10000 || stuckBudget <= 0) break; await sleep(500); waited += 500; stuckBudget -= 500; }
+      if (busyNow.length && waited >= 10000) stuck.push(`${view}  "${k.words}"  (${k.sig}): still busy after 10 s: ${busyNow.join(', ')}`);
     }
   }
   await browser.close();
   console.log(`${views.length} views, ${clicked} controls clicked, ${skipped} skipped (lasting effects)`);
   for (const d of dead) console.log('DEAD ' + d);
+  for (const d of stuck) console.log('STUCK ' + d);
   for (const e of pageErrors) console.log('page error: ' + e);
-  if (dead.length || pageErrors.length) { console.log(`${dead.length} dead controls, ${pageErrors.length} page errors`); process.exit(1); }
+  if (dead.length || stuck.length || pageErrors.length) { console.log(`${dead.length} dead controls, ${stuck.length} controls left busy, ${pageErrors.length} page errors`); process.exit(1); }
   console.log('every control does something');
 })();
