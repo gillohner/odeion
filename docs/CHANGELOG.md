@@ -14,6 +14,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
+
 - **Every press answers at once and acts once** (owner, iPad: "every click shows loader and fires once").
   - **Buttons, chips, switches and forms:** a press on anything whose action takes a moment marks it busy at once, its icon turns into a spinner after 150 ms, and more presses are ignored until it is done, so a double tap sends one request. Then it is back; if it failed, the message shows. Keyboard focus stays where it was. This covers every control in the app, including ones added later, without each needing its own code.
   - **Menus:** the ⋯ that opened a menu shows its action on its way, and still opens its menu.

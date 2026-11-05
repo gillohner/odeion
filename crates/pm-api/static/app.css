@@ -1490,6 +1490,16 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .qp-dsp .btn { margin: 4px 6px 2px; }
 .qp-vol { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
 .qp-vol input[type="range"] { flex: 1; }
+/* A song kept in several copies: a quiet "2 versions" in its row's second line opens the chooser */
+.lnk.vmark { display: inline; padding: 0; line-height: inherit; color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
+.lnk.vmark:hover, .lnk.vmark:focus-visible { color: var(--fg); }
+/* On a touch screen a taller target that doesn't make its row taller */
+@media (pointer: coarse) { .lnk.vmark { padding: 8px 0; margin: -8px 0; } }
+.sub.subv { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+/* The words shrink to an ellipsis; room above and below so a focused link's ring isn't cut */
+.sub.subv > .subtext { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-block: 4px; margin-block: -4px; }
+.srow .sub.subv { overflow: visible; } /* the words clip themselves; the marker's ring shows */
+.sub.subv > :not(.subtext) { flex: none; }
 /* Pressing play answers at once: the pressed control spins, the bar says "Starting on …" */
 /* Any control whose action is on its way (busy() in app.js): pressed once, it ignores more presses; after
    150 ms its icon becomes a spinner (a control without an icon gets one after its words). */
