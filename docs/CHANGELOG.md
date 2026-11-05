@@ -37,6 +37,12 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Changes to People are made one at a time.** A change waits for any other to finish, homeserver calls come first, and the change is made to the list as it is by then: two changes made at once (a rename and turning music off, or opening People while an invite is used) both stay.
 
+- **The node's owner chooses whose TIDAL, Qobuz and Spotify sign-ins people play with** (owner's ask: "can we have both and node admin can set if user use node or own sources"). Settings › This node › Service apps › Sources for everyone:
+  - **This node's:** everyone plays through the sign-ins made on the node; listeners can't sign in to their own.
+  - **Each person's own:** as until now, and still the setting for every node that hasn't chosen.
+  - **Each person chooses:** the node's by default; each listener switches in their Settings.
+  - Switching keeps every sign-in, the node's and each person's. A play still uses one account, and a listener's own sign-in page never shows the node's account.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
