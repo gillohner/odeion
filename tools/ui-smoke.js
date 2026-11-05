@@ -20,7 +20,13 @@ vc.on('error', (...a) => errors.push('console.error: ' + a.join(' ')));
 const dom = new JSDOM(html.replace('<script src="/app.js"></script>', ''), { url: BASE + '/', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc });
 const w = dom.window;
 w.localStorage.setItem('pm.token', TOKEN);
-w.fetch = (path, init) => fetch(path.startsWith('http') ? path : BASE + path, init);
+// jsdom's AbortSignal isn't Node's: hand Node's fetch a signal of its own that follows the page's
+const pageFetch = (path, init = {}) => {
+  const { signal, ...rest } = init; let own;
+  if (signal) { const c = new AbortController(); if (signal.aborted) c.abort(); else signal.addEventListener('abort', () => c.abort()); own = c.signal; }
+  return fetch(path.startsWith('http') ? path : BASE + path, own ? { ...rest, signal: own } : rest);
+};
+w.fetch = pageFetch;
 w.HTMLMediaElement.prototype.play = async function () {};
 w.HTMLMediaElement.prototype.pause = function () {};
 w.HTMLDialogElement = w.HTMLDialogElement || class {};
@@ -184,7 +190,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const dl = new JSDOM(html.replace('<script src="/app.js"></script>', ''), { url: BASE + '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc });
   const w2 = dl.window;
   w2.localStorage.setItem('pm.token', TOKEN);
-  w2.fetch = (path, init) => fetch(path.startsWith('http') ? path : BASE + path, init);
+  w2.fetch = pageFetch;
   w2.HTMLMediaElement.prototype.play = async function () {};
   w2.HTMLMediaElement.prototype.pause = function () {};
   w2.matchMedia = (q) => ({ matches: /max-width: (720|1100)px/.test(q), media: q, addEventListener() {}, removeEventListener() {} });

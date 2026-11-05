@@ -252,21 +252,24 @@
     return text;
   };
   // A change already on its way is not sent twice: the same request again (method, path and body) while
-  // it is the latest one to that address and still in flight gets its answer. Any other change to the
-  // address in between is sent, and so is a repeat after it (A, B, A sends all three, one after another).
+  // it is the latest one to that resource and still in flight gets its answer. Any other change to the
+  // resource in between is sent, and so is a repeat after it (A, B, A sends all three, one after another).
   // Reads are left alone.
   const inFlight = new Map();
   const api = (method, path, body, opts = {}) => {
     if (method === 'GET') return apiSend(method, path, body, opts);
-    let sent; try { sent = body === undefined ? '' : JSON.stringify(body); } catch { return apiSend(method, path, body, opts); }
-    const key = `${method} ${path}`; const was = inFlight.get(key);
+    // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
+    let sent; let snap; try { sent = body === undefined ? '' : JSON.stringify(body); snap = sent ? JSON.parse(sent) : body; } catch { return apiSend(method, path, body, opts); }
+    // One line per resource (its path without the query: PUT /favourites and DELETE /favourites?… too)
+    const line = path.split('?')[0]; const was = inFlight.get(line); const ask = `${method} ${path} ${sent}`;
     // opts.repeat: each one is meant (Next pressed twice skips two), so it is never shared
-    if (!opts.repeat && was && was.sent === sent) return was.p;
-    // After the one before it to the same address, so the node applies them, and their answers land, in
-    // the order they were made (a late answer to the first Next can't undo the second)
-    const entry = { sent: opts.repeat ? null : sent, p: (was ? was.p.catch(() => {}) : Promise.resolve()).then(() => apiSend(method, path, body, opts)) };
-    inFlight.set(key, entry);
-    const drop = () => { if (inFlight.get(key) === entry) inFlight.delete(key); };
+    if (!opts.repeat && was && was.ask === ask) return was.p;
+    // After the one before it on the same line, so the node applies them, and their answers land, in the
+    // order they were made (a late answer to the first Next can't undo the second)
+    const send = () => apiSend(method, path, snap, opts);
+    const entry = { ask: opts.repeat ? null : ask, p: was ? was.p.catch(() => {}).then(send) : send() };
+    inFlight.set(line, entry);
+    const drop = () => { if (inFlight.get(line) === entry) inFlight.delete(line); };
     entry.p.then(drop, drop);
     return entry.p;
   };
@@ -4697,19 +4700,21 @@
   // setView() starts a navigation: the place clicked is marked at once (markTabs), a thin bar runs along
   // the top until the page is drawn, and a page that has drawn nothing of its own after 120 ms shows a
   // skeleton ("Still loading…" after 2 s). A newer navigation supersedes it: the reads the page's code
-  // (renderPage's `api`, below) started while drawing are aborted and never answer, and so do any it
-  // starts before it is drawn, so the old page stops where it was and draws nothing (A→B ends on B).
-  // Reads started once a page is drawn (its handlers and polls) are never aborted and settle as usual.
-  // Changes (anything but GET) are never held back.
+  // (renderPage's `api`, below) started before the page showed its content are aborted and never
+  // answer, so the old page stops where it was and draws nothing (A→B ends on B). Reads started once it
+  // shows its content (handlers, polls, slower extras) are never aborted and settle as usual. Changes
+  // (anything but GET) are never held back.
   let navGen = 0; let navCtl = new AbortController(); let navStop = () => {}; let navRendering = Promise.resolve();
   const NEVER = () => new Promise(() => {}); // a fresh one each time: nothing piles up on a shared one
   const navApiFor = (gen, ctl, drawing) => (method, path, body, opts = {}) => {
     // Changes, and reads a press makes (a handler's GET before its PUT), are never held back
     if (method !== 'GET' || inHandler) return api(method, path, body, opts);
-    if (gen !== navGen) return drawing.on ? NEVER() : api(method, path, body, opts);
-    const forDrawing = drawing.on;
-    return api(method, path, body, forDrawing ? { ...opts, signal: opts.signal || ctl.signal } : opts)
-      .then((r) => (gen === navGen || !drawing.on ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : (forDrawing && ctl.signal.aborted) || drawing.on ? NEVER() : Promise.reject(e)));
+    // Once the page shows its content (or its code is done), its reads are as before: handlers, polls and
+    // slower extras are never held back
+    if (!drawing.on) return api(method, path, body, opts);
+    if (gen !== navGen) return NEVER();
+    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal })
+      .then((r) => (gen === navGen ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : NEVER()));
   };
   const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
   // Drawn: something of the page's own that isn't a placeholder (a page's own loading() is one)
@@ -4728,17 +4733,18 @@
     // Settles when the page has drawn its content (not when its slower extras arrive), when its code is
     // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
     // (a sidebar place) and the bar never stay busy for good
-    let mo = null; let cap = 0;
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (pageDrawn(before)) res(); }); mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    let mo = null; let cap = 0; let drawing = null;
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (pageDrawn(before)) { if (drawing) drawing.on = false; res(); } }); mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
-    const rendering = render(); navRendering = rendering;
+    const rendering = render(); navRendering = rendering; drawing = lastDrawing;
     return Promise.race([rendering, superseded, drawn]).finally(end);
   };
 
   // ---- render --------------------------------------------------------------
   // The page's code reads through its own `api`, tied to the navigation that draws it (navigate above)
+  let lastDrawing = null;
   const render = () => {
-    const drawing = { on: true };
+    const drawing = { on: true }; lastDrawing = drawing;
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }

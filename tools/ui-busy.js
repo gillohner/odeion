@@ -202,13 +202,14 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     // Back to a scrolled page, then another place before it is drawn: the new place starts at the top
     state.tracks = Array.from({ length: 80 }, (_, i) => ({ ...fx.track, id: 1000 + i, title: `Song ${i}` }));
     await p.click(nav('tracks')); await p.waitForSelector('.track:nth-child(60)', { state: 'attached' }); await sleep(300);
-    await p.evaluate(() => { document.querySelector('#main').scrollTop = 1500; }); await sleep(100);
+    await p.evaluate(() => { document.querySelector('#main').scrollTop = 800; }); await sleep(100);
     await p.click(nav('genres')); await sleep(500);
-    slow['/library/tracks'] = 1200; FIXTURES['/library/genres'] = { body: Array.from({ length: 60 }, (_, i) => ({ name: `Genre ${i}`, tracks: 3 })) };
-    await p.evaluate(() => history.back()); await sleep(60); await p.click(nav('favourites'), { force: true });
+    slow['/library/tracks'] = 1200; FIXTURES['/library/genres'] = { body: Array.from({ length: 300 }, (_, i) => ({ name: `Genre ${i}`, tracks: 3 })) };
+    await p.click(nav('playlists')); await sleep(500);
+    await p.evaluate(() => history.back()); await sleep(300); await p.evaluate(() => history.back()); await sleep(60); await p.click(nav('genres'), { force: true });
     await sleep(1800);
-    const top = await p.evaluate(() => ({ s: document.querySelector('#main').scrollTop, path: location.pathname }));
-    check(top.path.includes('favourites') && top.s === 0, `Back then another place at once: it opens at the top (${top.path}, scrolled ${top.s})`);
+    const top = await p.evaluate(() => ({ s: document.querySelector('#main').scrollTop, h: document.querySelector('#main').scrollHeight - document.querySelector('#main').clientHeight, path: location.pathname }));
+    check(top.h > 800 && top.path.includes('genres') && top.s === 0, `Back then another place at once: it opens at the top (${top.path}, scrolled ${top.s} of ${top.h})`);
     delete slow['/library/tracks']; delete FIXTURES['/library/genres']; delete state.tracks;
   }
   {
