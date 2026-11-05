@@ -101,7 +101,8 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
-  // app.js's own text, a guard against the common slip (not a parser): every occurrence of the
+  // app.js's own text, a guard against the common slip (not a parser; a contrived line, such as a
+  // phrase split by a block comment or quotes mixed around a ` // `, can get past it): every occurrence of the
   // phrases "this browser", "the browser", "in a browser", or a quoted word starting "Browser", must be
   // on a helper's line, on a comment line, or be the else branch of an `appPlatform() ?` conditional
   // written on the same line as ` : '…'` (the pattern every guarded sentence uses). Anything else,
@@ -123,7 +124,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       // The else branch: `appPlatform() ? '…' : '<here>` on this line, the phrase inside that literal
       // (a simple one: nothing negates or joins the condition, and no nested `?` before the ` : `)
       const q = before.lastIndexOf('appPlatform() ?');
-      const simple = q >= 0 && /(^|[(\[{,=:?]\s*|\$\{\s*|\breturn\s+|=>\s*)$/.test(before.slice(0, q)) && !/\?/.test(before.slice(q + 15).replace(/\s:\s['"`][^'"`]{0,80}$/, ''));
+      const simple = q >= 0 && /(^|[(\[{,:]\s*|(?:^|[^=!<>])=\s*|(?:^|[^?])\?\s*|\$\{\s*|\breturn\s+|=>\s*)$/.test(before.slice(0, q)) && !/\?/.test(before.slice(q + 15).replace(/\s:\s['"`][^'"`]{0,80}$/, ''));
       const elseBranch = simple && /\s:\s['"`][^'"`]{0,80}$/.test(before.slice(q));
       if (!elseBranch) bad.push(`${i + 1}: …${code.slice(Math.max(0, m.index - 30), m.index + 24).trim()}…`);
     }
