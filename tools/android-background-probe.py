@@ -188,12 +188,40 @@ def part_a(track, address):
 
 
 def mini_time():
-    """The mini player's elapsed time as the screen shows it (m:ss), or None."""
+    """Now playing's elapsed time as the screen shows it (the first m:ss), or None."""
     for n in ui_nodes():
-        m = re.search(r'text="(\d+:\d\d)"', n)
+        m = re.search(r'(?:text|content-desc)="(\d+:\d\d)', n)
         if m:
             return m.group(1)
     return None
+
+
+def secs(t):
+    if not t:
+        return None
+    m, s_ = t.split(":")
+    return int(m) * 60 + int(s_)
+
+
+def away(seconds, screen_off=False):
+    """Leave the app (HOME, and the screen off if asked) for `seconds`, come back, and return how far
+    Now playing's time moved (None when it can't be read)."""
+    t0 = secs(mini_time()); w0 = time.time()
+    adb("shell", "input", "keyevent", "3")
+    if screen_off:
+        screen(False)
+    time.sleep(seconds / 2)
+    log(f"B away {seconds} s{' (screen off)' if screen_off else ''}: halfway players {players()}, frozen {frozen()}")
+    time.sleep(seconds / 2)
+    if screen_off:
+        screen(True)
+        adb("shell", "wm", "dismiss-keyguard", check=False)
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    time.sleep(1)
+    t1 = secs(mini_time()); w1 = time.time()
+    moved = None if t0 is None or t1 is None else t1 - t0
+    log(f"B away {seconds} s{' (screen off)' if screen_off else ''}: Now playing {t0} -> {t1} s over {w1 - w0:.0f} s of wall time (moved {moved})")
+    return moved, w1 - w0
 
 
 def ui_dump(name):
@@ -235,36 +263,25 @@ def part_b():
         tap_text(["Songs"], "Songs")
         time.sleep(2)
         tap_text(["tone"], "the song")
-    time.sleep(6)
-    shot("b-1-playing")
-    t0 = mini_time()
-    p0 = players()
-    log(f"B foreground: mini player {t0}, players {p0}")
-    adb("shell", "input", "keyevent", "3")
-    log("B: HOME")
-    time.sleep(20)
-    p1 = players()
-    log(f"B after 20 s: players {p1}, service foreground {service_foreground()}, frozen {frozen()}")
-    time.sleep(40)
-    p2 = players()
-    log(f"B after 60 s: players {p2}, frozen {frozen()}")
-    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    time.sleep(4)
+    # Now playing shows the elapsed time: open it from the mini player
+    try:
+        tap_text(["~Nothing playing", "~resource-id=\"npart\"", "~text=\"tone"], "the mini player", timeout=20)
+    except RuntimeError:
+        log("B: no mini player to open")
     time.sleep(3)
-    t1 = mini_time()
+    shot("b-1-playing")
+    log(f"B foreground: Now playing {mini_time()}, players {players()}")
+    moved1, wall1 = away(60)
     shot("b-2-back")
-    log(f"B back in the app: mini player {t1} (was {t0})")
-
-    def secs(t):
-        if not t:
-            return None
-        m, s_ = t.split(":")
-        return int(m) * 60 + int(s_)
-
-    moved = secs(t0) is not None and secs(t1) is not None and secs(t1) - secs(t0) >= 50
-    started = any(st == "started" for _, st in p2)
-    log(f"B verdict: time moved on in the background {moved}; a started player after 60 s {started}")
-    results["B in-app player, background 60 s"] = moved and started
-    return moved and started
+    moved2, wall2 = away(30, screen_off=True)
+    shot("b-3-back-screen")
+    ok1 = moved1 is not None and moved1 >= wall1 - 8
+    ok2 = moved2 is not None and moved2 >= wall2 - 8
+    log(f"B verdict: kept playing in the background {ok1} ({moved1} of {wall1:.0f} s); with the screen off {ok2} ({moved2} of {wall2:.0f} s)")
+    results["B in-app player, background 60 s"] = ok1
+    results["B in-app player, screen off 30 s"] = ok2
+    return ok1 and ok2
 
 
 def main():
