@@ -1,0 +1,9 @@
+[Unit]
+Description=Odeion: watch the homeserver's config for a new public address
+
+[Path]
+PathChanged=/var/lib/docker/volumes/pubky-music_homeserver/_data/config.toml
+Unit=odeion-local-redirect.service
+
+[Install]
+WantedBy=paths.target
