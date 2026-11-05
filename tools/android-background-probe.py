@@ -207,9 +207,24 @@ def secs(t):
     return int(m) * 60 + int(s_)
 
 
+def flinger(name):
+    """`dumpsys media.audio_flinger`, kept: each track's server frame count shows whether its audio
+    advanced (the WebView's track has no UI to read the time from)."""
+    text = adb("shell", "dumpsys", "media.audio_flinger", check=False)
+    (out / f"flinger-{name}.txt").write_text(text)
+    return text
+
+
+def track_frames(text):
+    """Server frame counts of the active tracks in a flinger dump (best effort across versions)."""
+    return [int(x) for x in re.findall(r"(?:Server|server)\s*[:=]?\s*(?:0x)?([0-9]{4,})", text)]
+
+
 def away(seconds, screen_off=False):
     """Leave the app (HOME, and the screen off if asked) for `seconds`, come back, and return how far
     Now playing's time moved (None when it can't be read)."""
+    tag = f"{seconds}{'-off' if screen_off else ''}"
+    f0 = track_frames(flinger(f"before-{tag}"))
     t0 = secs(mini_time()); w0 = time.time()
     adb("shell", "input", "keyevent", "3")
     if screen_off:
@@ -217,6 +232,8 @@ def away(seconds, screen_off=False):
     time.sleep(seconds / 2)
     log(f"B away {seconds} s{' (screen off)' if screen_off else ''}: halfway players {players()}, frozen {frozen()}")
     time.sleep(seconds / 2)
+    f1 = track_frames(flinger(f"after-{tag}"))
+    log(f"B away {tag}: track server frames before {f0[:6]} after {f1[:6]}")
     if screen_off:
         screen(True)
         adb("shell", "wm", "dismiss-keyguard", check=False)
@@ -271,7 +288,7 @@ def part_b():
     # Now playing shows the elapsed time: open it from the mini player
     # (the song's title in the mini player: "Tone"; not the sound pill beside it)
     try:
-        tap_text(["~text=\"[Tt]one\""], "the mini player's title", timeout=20)
+        tap_text(["Now playing"], "the mini player (Now playing)", timeout=20)
     except RuntimeError:
         log("B: no mini player title to open Now playing with")
     time.sleep(3)
