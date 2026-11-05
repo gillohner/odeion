@@ -148,9 +148,10 @@ pub(crate) async fn events_ws(
     ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
     use axum::response::IntoResponse;
-    // A page on another site never opens the event stream through a visitor's browser (checked
-    // before anything else about the handshake)
-    if !crate::peer::ws_origin_ok(&headers, &uri, &s.public_url) {
+    // Without a token, only the node's own pages open the event stream (checked before anything
+    // else about the handshake). With one, the stream needs that token: browsers hold it in the
+    // page, never in a cookie, so another site has nothing to open it with.
+    if s.token().is_none() && !crate::peer::ws_origin_ok(&headers, &uri, &s.public_url) {
         return (
             axum::http::StatusCode::FORBIDDEN,
             "the event stream opens only from this node's own pages",

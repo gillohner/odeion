@@ -8,7 +8,7 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Tighter request checks for a node without an API token:**
   - Such a node listens on this computer only, and now answers only at `127.0.0.1`, `localhost` or `[::1]`, from its own pages. To reach it by another name, for example through a proxy, give it an `[api] token`.
-  - The web app's live updates open only from the node's own pages, with or without a token.
+  - Its live updates open only from its own pages, and other sites' pages reach it only by opening one of its pages.
   - The node's pages can't be shown inside another site.
 
 ### 2026-11-04

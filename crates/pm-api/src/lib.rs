@@ -8599,7 +8599,8 @@ mod tests {
     #[tokio::test]
     async fn the_tidal_redirect_follows_the_request_host() {
         let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
+        // A node reached by another name than localhost has a token
+        let s = state(dir.path(), Some("s3cret")).await;
         // The node's own app, with its secret: the sign-in comes straight back
         s.tidal.write().unwrap().creds = tidal::TidalCredentials {
             client_id: "cid".into(),
@@ -8611,6 +8612,7 @@ mod tests {
             .uri("/v1/sources/tidal/status")
             .header("host", "music.example")
             .header("x-forwarded-proto", "https")
+            .header("authorization", "Bearer s3cret")
             .body(Body::empty())
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -13713,9 +13715,12 @@ exec sleep 300
     }
 
     async fn tidal_redirect(s: Arc<NodeState>, host: &str) -> String {
+        // A node reached by another name than localhost has a token
+        *s.token.write().unwrap() = Some("s3cret".into());
         let req = Request::builder()
             .uri("/v1/sources/tidal/status")
             .header("host", host)
+            .header("authorization", "Bearer s3cret")
             .body(Body::empty())
             .unwrap();
         let resp = router(s).oneshot(req).await.unwrap();
@@ -20125,8 +20130,36 @@ exec sleep 300
         let (st, _) = send(open.clone(), "/v1/events", ws("http://other.example")).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "cross-site event stream");
 
-        // With a token: any name (a proxy, a LAN name) with the token; the event stream still
-        // refuses another site's page, token or not
+        // Its own pages open the event stream (past the Origin check: 426 here, as a test request
+        // can't be upgraded)
+        let (st, _) = send(open.clone(), "/v1/events", ws("http://127.0.0.1:7788")).await;
+        assert_ne!(st, StatusCode::FORBIDDEN);
+        // Another site's GET without an Origin (an image, a link) is refused, a navigation to a
+        // page isn't
+        let (st, _) = send(
+            open.clone(),
+            "/rest/ping",
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "no-cors"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = send(
+            open.clone(),
+            "/",
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+
+        // With a token: any name (a proxy, a LAN name) with the token
         let dir2 = tempfile::tempdir().unwrap();
         let tok = router(state(dir2.path(), Some("s3cret")).await);
         let (st, _) = send(
@@ -20140,11 +20173,12 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let mut cross = ws("http://other.example");
-        cross[0] = ("host", "music.example");
-        cross.push(("authorization", "Bearer s3cret"));
-        let (st, _) = send(tok.clone(), "/v1/events", cross).await;
-        assert_eq!(st, StatusCode::FORBIDDEN);
+        // Behind a proxy that rewrites Host (nginx's bare proxy_pass), the event stream opens with
+        // the token
+        let mut proxied = ws("https://music.example");
+        proxied.push(("authorization", "Bearer s3cret"));
+        let (st, _) = send(tok.clone(), "/v1/events", proxied).await;
+        assert_ne!(st, StatusCode::FORBIDDEN);
 
         // The pages can't be framed by another site
         for page in ["/", "/party/abc"] {

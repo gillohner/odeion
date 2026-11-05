@@ -82,7 +82,7 @@ pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request
             )
                 .into_response();
         }
-        if !loopback_addressed(req.headers(), req.uri()) {
+        if !loopback_addressed(req.headers(), req.uri()) || cross_site(req.headers(), req.uri().path()) {
             return (
                 StatusCode::FORBIDDEN,
                 "this node has no API token, so it answers only at 127.0.0.1 or localhost from its own pages; \
@@ -141,12 +141,28 @@ fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Result<Option<Named>, ()>
     }
 }
 
-/// A name that only ever means this machine: `localhost` (and `*.localhost`), 127.0.0.0/8, `::1`.
-/// A website can't make a visitor's browser send one of these for its own pages.
+/// A name that only ever means this machine: `localhost`, 127.0.0.0/8, `::1`. (Not other
+/// `*.localhost` names: those go through a resolver.)
 fn is_loopback_name(name: &str) -> bool {
-    name == "localhost"
-        || name.ends_with(".localhost")
-        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    name == "localhost" || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// A request a browser made for a page of another site (`Sec-Fetch-Site: cross-site` or
+/// `same-site`: another port of this machine is the same site). For a node without a token only
+/// a top-level navigation to one of its pages is that: the web app, a sign-in callback. Not its
+/// API, Subsonic or the MusicBrainz proxy, which change things on GET too. Browsers that send no
+/// `Sec-Fetch-Site` pass on the other checks.
+pub fn cross_site(h: &HeaderMap, path: &str) -> bool {
+    let site = h
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !matches!(site, "cross-site" | "same-site") {
+        return false;
+    }
+    let navigation = h.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate");
+    let page = !["/v1/", "/rest/", "/mb/"].iter().any(|p| path.starts_with(p));
+    !(navigation && page)
 }
 
 /// The `Origin` a browser sent, parsed; `Err` for one that names no site (`null`) or can't be read.
@@ -326,7 +342,6 @@ mod tests {
             vec![("host", "LOCALHOST:7788"), ("origin", "http://localhost:7788")],
             vec![("host", "[::1]:7788"), ("origin", "http://[::1]:7788")],
             vec![("host", "127.0.0.1:7788"), ("origin", "http://127.0.0.1:7788")],
-            vec![("host", "odeion.localhost:7788")],
             // A program that isn't a browser, naming no host at all
             vec![],
         ] {
@@ -337,6 +352,8 @@ mod tests {
             vec![("host", "other.example:7788")],
             vec![("host", "127.0.0.1.other.example:7788")],
             vec![("host", "music.lan:7788")],
+            // Names that go through a resolver
+            vec![("host", "odeion.localhost:7788")],
             // Another site, another local app on another port, a sandboxed page
             vec![("host", "127.0.0.1:7788"), ("origin", "http://other.example")],
             vec![("host", "localhost:7788"), ("origin", "http://localhost:3000")],
@@ -444,5 +461,24 @@ mod tests {
                 "{o}"
             );
         }
+    }
+
+    /// Requests another site's page makes reach a node without a token only as navigations to
+    /// its pages (a sign-in callback); never its API, Subsonic or proxy, GET included.
+    #[test]
+    fn other_sites_reach_only_pages_by_navigation() {
+        let h = |site: &str, mode: &str| heads(&[("sec-fetch-site", site), ("sec-fetch-mode", mode)]);
+        assert!(cross_site(&h("cross-site", "no-cors"), "/rest/deletePlaylist"));
+        assert!(cross_site(&h("cross-site", "navigate"), "/rest/jukeboxControl"));
+        assert!(cross_site(&h("cross-site", "cors"), "/v1/info"));
+        assert!(cross_site(&h("same-site", "no-cors"), "/v1/library/scan"));
+        assert!(!cross_site(&h("cross-site", "navigate"), "/tidal/callback"));
+        assert!(!cross_site(&h("cross-site", "navigate"), "/"));
+        assert!(!cross_site(&h("same-origin", "cors"), "/v1/info"));
+        assert!(
+            !cross_site(&h("none", "navigate"), "/v1/info"),
+            "typed in the address bar"
+        );
+        assert!(!cross_site(&HeaderMap::new(), "/v1/info"), "no Sec-Fetch headers");
     }
 }
