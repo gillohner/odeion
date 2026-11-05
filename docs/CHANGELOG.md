@@ -18,6 +18,11 @@ Newest first. Dates are when the change landed on `main`.
   - On its first start after the update, a node that had written its token there replaces that token. Apps and browsers then sign in to the node again, once.
   - A token you set in the node's config (`[api] token`, `PM_TOKEN`) can't be replaced by the node: Health asks you to change it.
 
+- **Covers, portraits and profile pictures are served by what they are.**
+  - A picture's type now comes from its bytes, so only JPEG, PNG, WebP and GIF are served, whatever type a tag or a server gave it. Anything else isn't shown.
+  - Every picture, and every file the node relays from Jellyfin, Plex, Audiobookshelf or a Subsonic server, is marked to be shown only as what it is.
+- **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, before the library opens, the node makes its library and its journal files, its config, its Pubky session secret, its remote-access key, the app players' keys and a restored config its own if a group or anyone else could read them, and logs that. It changes only regular files in its data folder, never through a link; a config kept elsewhere (`/etc`) is left to its installer. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.

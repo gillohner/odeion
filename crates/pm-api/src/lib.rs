@@ -2606,20 +2606,7 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))?;
-    let mime = match bytes.get(..4) {
-        Some([0x89, b'P', b'N', b'G']) => "image/png",
-        Some([b'R', b'I', b'F', b'F']) => "image/webp",
-        Some([b'G', b'I', b'F', _]) => "image/gif",
-        _ => "image/jpeg",
-    };
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    art::picture(bytes, "private, max-age=86400")
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
@@ -3063,14 +3050,8 @@ async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Re
     let bytes = tokio::fs::read(&art.file)
         .await
         .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, art.mime),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    // Its type by its bytes, also for covers stored before the scan checked them
+    art::picture(bytes, "private, max-age=86400")
 }
 
 // ---- pubky ----
@@ -4744,7 +4725,7 @@ mod tests {
                 "/Items/{id}/Images/Primary",
                 get(|h: axum::http::HeaderMap, q: Q| async move {
                     assert!(authed(&h, &q));
-                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG\r\n\x1a\n".to_vec())
                 }),
             )
             .route("/Sessions/Logout", post(|| async { StatusCode::NO_CONTENT }));
@@ -4811,7 +4792,10 @@ mod tests {
         // Browsers and covers go through the node
         for (path, magic) in [
             (format!("/v1/sources/jellyfin/stream/{SONG}"), &b"fLaC"[..]),
-            (format!("/v1/sources/jellyfin/cover/{ALBUM}"), &b"\x89PNG"[..]),
+            (
+                format!("/v1/sources/jellyfin/cover/{ALBUM}"),
+                &b"\x89PNG\r\n\x1a\n"[..],
+            ),
         ] {
             let resp = app
                 .clone()
@@ -4969,7 +4953,7 @@ mod tests {
                 "/library/metadata/{id}/thumb/{ver}",
                 get(|h: axum::http::HeaderMap, q: Q| async move {
                     assert!(authed(&h, &q));
-                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG\r\n\x1a\n".to_vec())
                 }),
             )
             .route(
@@ -5096,7 +5080,7 @@ mod tests {
         // Browsers and covers go through the node
         for (path, magic) in [
             ("/v1/sources/plex/stream/1201", &b"fLaC"[..]),
-            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG"[..]),
+            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG\r\n\x1a\n"[..]),
         ] {
             let resp = app
                 .clone()
@@ -5700,7 +5684,13 @@ mod tests {
         profiles::cache_view(BOB, Some(view(BOB, "Bob")));
         let people = s.art_dir.join("people");
         std::fs::create_dir_all(&people).unwrap();
-        let png = |n: usize| [&[0x89, b'P', b'N', b'G'][..], &vec![0u8; n]].concat();
+        let png = |n: usize| {
+            [
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..],
+                &vec![0u8; n],
+            ]
+            .concat()
+        };
         std::fs::write(people.join(ALICE), png(100)).unwrap();
         std::fs::write(people.join(BOB), png(300 * 1024)).unwrap();
         // Someone who approved: name and a small picture inline (the screen has no token)
@@ -7859,7 +7849,7 @@ mod tests {
                 }),
             )
             .route("/nexus/v0/user/{id}", get(move |Path(id): Path<String>| async move { Json(user(&id)) }))
-            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 1, 2, 3]) }))
+            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]) }))
             .route(
                 "/nexus/v0/resource/by-uri",
                 get(|| async { Json(serde_json::json!({"resource": {"id": "r1", "uri": "https://musicbrainz.org/isrc/USAAA1111111"}, "tags": [{"label": "chill", "taggers": [A, B], "taggers_count": 2}]})) }),
@@ -11056,7 +11046,7 @@ exec sleep 300
         let mbid = "056e4f3e-d505-4dad-8ec1-d04f521cbb56";
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0, 1, 2, 3];
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
         let b2 = base.clone();
         let mock = Router::new()
             .route(&format!("/ws/2/artist/{mbid}"), get(|| async { Json(serde_json::json!({"id": "x", "relations": []})) }))
@@ -20398,5 +20388,149 @@ exec sleep 300
             keys("accounts.device_sessions").is_empty(),
             "Make a new token signs the devices out"
         );
+    }
+
+    /// A cover is served by what its bytes are, never by a type stored with it: a picture whose
+    /// tag claimed another type is served as the picture it is, bytes that are no picture are not
+    /// served at all, and every picture says it is only that (`nosniff`, a sandboxing policy).
+    #[tokio::test]
+    async fn covers_are_served_by_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let mut album_ids = Vec::new();
+        for (n, bytes, claimed) in [
+            ("a", b"\x89PNG\r\n\x1a\n-picture".to_vec(), "text/html"),
+            ("b", b"<html><body>page</body></html>".to_vec(), "text/html"),
+            (
+                "c",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+                "image/svg+xml",
+            ),
+        ] {
+            let lib = s.library.lock().unwrap();
+            let mut t = untagged_track(dir.path().join(format!("{n}.flac")), n, "Someone");
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: format!("Album {n}"),
+                album_artist: None,
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let id = lib.upsert_track(&t).unwrap();
+            let album = lib.get_track(id).unwrap().unwrap().album.unwrap().id.unwrap();
+            let file = dir.path().join(format!("{n}.cover"));
+            std::fs::write(&file, &bytes).unwrap();
+            lib.set_album_art(&pm_library::db::AlbumArt {
+                album_id: album,
+                file,
+                mime: claimed.into(),
+                source: "embedded".into(),
+            })
+            .unwrap();
+            album_ids.push(album);
+        }
+        let app = router(s.clone());
+        let get = |id: i64| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .uri(format!("/v1/library/albums/{id}/cover"))
+                    .header("authorization", "Bearer s3cret")
+                    .body(Body::empty())
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                (r.status(), r.headers().clone())
+            }
+        };
+        let (st, h) = get(album_ids[0]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(h[header::CONTENT_TYPE], "image/png");
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(h[header::CONTENT_SECURITY_POLICY], "default-src 'none'; sandbox");
+        for id in &album_ids[1..] {
+            let (st, h) = get(*id).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{h:?}");
+        }
+    }
+
+    /// Files relayed from another server keep their type when it is audio, video or a raster
+    /// picture; anything else is relayed as what the node asked for.
+    #[test]
+    fn relayed_files_keep_only_media_types() {
+        assert_eq!(
+            art::safe_media_type(Some("audio/flac"), "audio/mpeg"),
+            "audio/flac"
+        );
+        assert_eq!(
+            art::safe_media_type(Some("image/jpeg; charset=x"), "image/png"),
+            "image/jpeg"
+        );
+        for other in [
+            "text/html",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "",
+            "text/html; image/png",
+        ] {
+            assert_eq!(
+                art::safe_media_type(Some(other), "image/jpeg"),
+                "image/jpeg",
+                "{other}"
+            );
+        }
+        assert_eq!(art::safe_media_type(None, "audio/flac"), "audio/flac");
+    }
+
+    /// A picture another server relays is answered by its bytes, whatever its headers say: an SVG
+    /// or a page sent as a picture is not served; a picture sent as a page is served as a picture.
+    #[tokio::test]
+    async fn relayed_pictures_are_served_by_their_bytes() {
+        let png = b"\x89PNG\r\n\x1a\n-relayed".to_vec();
+        let p2 = png.clone();
+        let mock = Router::new()
+            .route(
+                "/svg",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/png")],
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+                    )
+                }),
+            )
+            .route(
+                "/page",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/jpeg")],
+                        "<html><body>x</body></html>",
+                    )
+                }),
+            )
+            .route(
+                "/png",
+                get(move || {
+                    let b = p2.clone();
+                    async move { ([(header::CONTENT_TYPE, "text/html")], b) }
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, mock).await.unwrap() });
+        let fetch = |path: &str| {
+            let url = format!("{base}{path}");
+            async move { art::relayed_picture(reqwest::get(url).await.unwrap(), "private").await }
+        };
+        for bad in ["/svg", "/page"] {
+            let r = fetch(bad).await;
+            assert_eq!(r.err().map(|e| e.status), Some(StatusCode::NOT_FOUND), "{bad}");
+        }
+        let r = fetch("/png").await.unwrap();
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], &png[..]);
     }
 }
