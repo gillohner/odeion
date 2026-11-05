@@ -294,7 +294,8 @@ Android played it. Meanwhile other apps' sounds go to the phone's speaker.
    media plays to the DAC (report which happened). With the DAC plugged in but media on Bluetooth
    or the speaker, choosing Exclusive USB starts it muted. Switching away again, the DAC's own
    volume (its display) is back where it was before Exclusive USB, or lower if you turned it down.
-   Mute the zone during a 96/24 song, let a 44.1/16 song follow: it stays muted; choose Shared
+   Mute the zone during a 96/24 song, let a 44.1/16 song follow: it stays muted; unmute, and the
+   next 96/24 song plays at your level again; choose Shared
    while muted: the DAC goes back muted. Turn the zone down during a 96/24 song: the next 44.1/16
    song is no louder. With media on Bluetooth at 100% and the DAC plugged in, Auto never plays a
    DAC without a volume of its own at full level (report the panel's reason).

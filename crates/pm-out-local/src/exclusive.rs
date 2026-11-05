@@ -200,8 +200,11 @@ struct UnitState {
     level: Option<Level>,
     /// The driver set (or tried to set) it: given back at the end.
     touched: bool,
-    /// The listener set its level (on this path): its own level from then on, not the hand-over.
-    chosen: bool,
+    /// The level the listener set on this unit (or heard it at when they unmuted it), apart
+    /// from what is applied now (`level`: with the listener's mute and caps): the path's own level
+    /// from then on, instead of the hand-over. Never a mute: the listener's mute is
+    /// `Held::listener_muted`, for every path.
+    chosen: Option<i16>,
 }
 
 /// The DAC while the app holds it.
@@ -851,7 +854,7 @@ fn acquire(dac: &Dac, media_db: Option<f32>) -> Result<(), ExclusiveError> {
                     before: cur.zip(mute).map(|(cur, mute)| Level { cur, mute }),
                     level: None,
                     touched: false,
-                    chosen: false,
+                    chosen: None,
                 });
             }
         }
@@ -970,10 +973,7 @@ pub fn open(
             let u = st.unit.clone();
             // Whichever path plays: its own level (the hand-over, or the listener's on it), no
             // louder than the listener's level chosen on any path, muted with the listener's mute
-            let own = st
-                .level
-                .filter(|_| st.chosen)
-                .unwrap_or_else(|| vol::handover(media_db, st.before, &u.range));
+            let own = own_level(st, media_db);
             let level = path_level(own, listener_db, listener_muted, &u.range);
             st.level = Some(level);
             // Touched before it is set: given back as it was even if this fails half-way
@@ -1069,6 +1069,15 @@ pub fn open(
     })
 }
 
+/// A unit's own level, apart from the listener's mute and caps: the level the listener set on it,
+/// else the hand-over from Android's level (`media_db`) and its level before the take.
+fn own_level(st: &UnitState, media_db: Option<f32>) -> Level {
+    match st.chosen {
+        Some(cur) => Level { cur, mute: false },
+        None => vol::handover(media_db, st.before, &st.unit.range),
+    }
+}
+
 /// A playback path's level before its first sample: its `own` (the hand-over from Android's level
 /// for it, or the level the listener set on it), never louder than the listener's level chosen
 /// on any path (muted when this unit can't go that low), muted whenever the listener muted.
@@ -1125,12 +1134,11 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
             .shown()
             .map(|u| u.unit.id)
             .ok_or("the DAC has no volume of its own")?;
-        let listener_muted = h.listener_muted;
+        let (listener_muted, listener_db, media_db) = (h.listener_muted, h.listener_db, h.media_db_at_take);
         let t = h.t.clone();
         let st = h.state(uid).expect("shown");
         let u = st.unit.clone();
         st.touched = true;
-        st.chosen = true;
         let now = st.level.unwrap_or(Level {
             cur: u.range.min(),
             mute: true,
@@ -1141,13 +1149,17 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
                 if !u.can_mute {
                     return Err("the DAC can't be muted".into());
                 }
-                driver::set_mute(&*t, u.id, u.ac, m).map_err(err)?;
-                st.level = Some(Level { mute: m, ..now });
-                h.listener_muted = m;
-                // Heard at this level now (a hand-over mute ended): every path plays at it
-                if !m && h.listener_db.is_none() {
-                    h.listener_db = Some(vol::cur_to_db(now.cur));
+                // Unmuted: heard at this level from now (a hand-over mute on it ended), unless it
+                // can't go as low as the listener's level (it stays muted then: never louder)
+                if !m && st.chosen.is_none() {
+                    st.chosen = Some(now.cur);
                 }
+                let listener_db = listener_db.or((!m).then(|| vol::cur_to_db(now.cur)));
+                let mute = path_level(own_level(st, media_db), listener_db, m, &u.range).mute;
+                driver::set_mute(&*t, u.id, u.ac, mute).map_err(err)?;
+                st.level = Some(Level { mute, ..now });
+                h.listener_muted = m;
+                h.listener_db = listener_db;
                 return Ok(());
             }
             Volume::Db(db) => vol::db_to_cur(db, &u.range),
@@ -1165,6 +1177,7 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
             driver::set_mute(&*t, u.id, u.ac, false).map_err(err)?;
         }
         st.level = Some(Level { cur, mute });
+        st.chosen = Some(cur);
         // The listener's level, for every path (below this unit's minimum: as asked)
         h.listener_db = Some(match v {
             Volume::Db(db) => db.min(vol::cur_to_db(cur)),
@@ -2335,6 +2348,12 @@ pub(crate) mod tests {
     /// [`two_path_dac`], each playback path with its unit (5 on the 16-bit one, 0x0b on the 32-bit
     /// one) or without one (its terminal straight to the output: full level).
     fn paths_dac(unit16: bool, unit32: bool) -> Vec<u8> {
+        paths_dac_with(unit16, unit32, false)
+    }
+
+    /// [`paths_dac`]; `bypass16`: the 16-bit path's unit 5 feeds a selector (0x0d) whose other
+    /// input is terminal 4 itself, so the selector can carry the stream around the unit.
+    fn paths_dac_with(unit16: bool, unit32: bool, bypass16: bool) -> Vec<u8> {
         let mut b = vec![
             18, 1, 0x00, 0x02, 0xef, 2, 1, 64, 0x72, 0x29, 0x93, 0x00, 0x00, 0x01, 1, 2, 3, 1,
         ];
@@ -2360,7 +2379,12 @@ pub(crate) mod tests {
         if unit16 {
             ac.extend(fu(5, 4));
         }
-        ac.extend(ot(6, 0x0302, if unit16 { 5 } else { 4 }, 0x11));
+        let mut out16 = if unit16 { 5 } else { 4 };
+        if bypass16 {
+            ac.extend([9, 0x24, 5, 0x0d, 2, out16, 4, 0, 0]);
+            out16 = 0x0d;
+        }
+        ac.extend(ot(6, 0x0302, out16, 0x11));
         ac.extend(it(7, 0x0101, 0x12));
         if unit32 {
             ac.extend(fu(0x0b, 7));
@@ -3001,5 +3025,94 @@ pub(crate) mod tests {
         assert!(matches!(sink.pause(), Err(SinkError::Device(_))));
         assert!(!holding(), "given back");
         assert_eq!(*app.released.lock().unwrap(), 1);
+    }
+
+    /// Codex H1 (round 5 of #306): a selector that can carry the 16-bit path around its unit
+    /// leaves that path without a volume it can trust: Android at -40 dB, the unit's attenuation
+    /// could be bypassed, so it plays only as a path at full level would (here: refused, no
+    /// consent), never attenuated on unit 5 and sent.
+    #[test]
+    fn a_unit_a_selector_can_bypass_is_never_trusted() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        for mode in [PreferredMode::Exclusive, PreferredMode::Auto] {
+            let (_p, app) = phone(true, Some(60));
+            *app.raw.lock().unwrap() = Some(paths_dac_with(true, true, true));
+            *app.media_db.lock().unwrap() = Some(-40.0);
+            exclusive(mode);
+            // The 32-bit path's unit is on every route: it plays, attenuated
+            drop(open_ok(AudioFormat::pcm(192_000, 24, 2)));
+            assert_eq!(app.dac.state().unit_writes, [(0x0b, -40 * 256)]);
+            app.dac.state().out.clear();
+            match open_phone(id(), AudioFormat::pcm(48_000, 16, 2)) {
+                PhoneOpen::Failed(why) => assert!(why.contains("full level"), "{mode:?}: {why}"),
+                _ => panic!("{mode:?}: played through a selector that can bypass unit 5"),
+            }
+            assert!(app.dac.state().out.is_empty(), "{mode:?}: not a sample sent");
+            assert!(
+                !app.dac.state().unit_writes.iter().any(|(u, _)| *u == 5),
+                "{mode:?}: unit 5 is not this path's volume"
+            );
+        }
+    }
+
+    /// Codex M2 (round 5 of #306): each path keeps its own level apart from the listener's mute:
+    /// mute on 192/24, 48/16 next (muted), unmute there, back to 192/24: it plays, at the
+    /// listener's level.
+    #[test]
+    fn mute_switch_unmute_and_back_plays_at_the_listeners_level() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (fast, slow) = (AudioFormat::pcm(192_000, 24, 2), AudioFormat::pcm(48_000, 16, 2));
+        // Without a level set: the hand-over's
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(two_path_dac());
+        own_units(&app, &[(0x0b, 0, false, -127), (5, 0, false, -127)]);
+        *app.media_db.lock().unwrap() = Some(-10.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(fast));
+        set_volume(Volume::Mute(true)).unwrap();
+        assert_eq!(unit(&app, 0x0b), (-10 * 256, true));
+        drop(open_ok(slow));
+        assert_eq!(unit(&app, 5), (-10 * 256, true), "muted on the next path");
+        set_volume(Volume::Mute(false)).unwrap();
+        assert_eq!(unit(&app, 5), (-10 * 256, false));
+        drop(open_ok(fast));
+        assert_eq!(unit(&app, 0x0b), (-10 * 256, false), "back: heard");
+        drop(_p);
+
+        // With the listener's level set before the mute: that level
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(two_path_dac());
+        own_units(&app, &[(0x0b, 0, false, -127), (5, 0, false, -127)]);
+        *app.media_db.lock().unwrap() = Some(-10.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(fast));
+        set_volume(Volume::Db(-20.0)).unwrap();
+        set_volume(Volume::Mute(true)).unwrap();
+        drop(open_ok(slow));
+        assert_eq!(unit(&app, 5), (-20 * 256, true));
+        set_volume(Volume::Mute(false)).unwrap();
+        assert_eq!(unit(&app, 5), (-20 * 256, false));
+        drop(open_ok(fast));
+        assert_eq!(
+            unit(&app, 0x0b),
+            (-20 * 256, false),
+            "back: at the listener's -20 dB"
+        );
+        drop(_p);
+
+        // Unmuted on a path that can't go as low as the listener's level: it stays muted
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(two_path_dac());
+        own_units(&app, &[(0x0b, 0, false, -127), (5, 0, false, -20)]);
+        *app.media_db.lock().unwrap() = Some(0.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(fast));
+        set_volume(Volume::Db(-50.0)).unwrap();
+        set_volume(Volume::Mute(true)).unwrap();
+        drop(open_ok(slow));
+        set_volume(Volume::Mute(false)).unwrap();
+        assert_eq!(unit(&app, 5), (-20 * 256, true), "never louder than -50 dB");
+        drop(open_ok(fast));
+        assert_eq!(unit(&app, 0x0b), (-50 * 256, false));
     }
 }

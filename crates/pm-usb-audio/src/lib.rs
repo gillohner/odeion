@@ -651,24 +651,61 @@ impl UsbAudioDevice {
     }
 
     /// The feature unit on the playback path from terminal `link` whose volume the host may set
-    /// (the one nearest the output); `None` when the path is unknown or has none. A unit on
-    /// another path (a microphone's) is never it.
+    /// (the one nearest the output) and that every route from `link` to the output passes
+    /// through: a selector or mixer that could carry the stream around it (a bypass) leaves the
+    /// path without a unit it can trust. `None` when the path is unknown, has none, or its routes
+    /// can't all be told. A unit on another path (a microphone's) is never it.
     pub fn playback_unit(&self, link: u8) -> Option<HardwareVolume> {
-        self.playback_path(link)?
-            .into_iter()
-            .find_map(|id| match self.entity(id) {
-                Some(Entity::Feature {
-                    id,
-                    volume_settable: true,
-                    mute_settable,
-                    ..
-                }) => Some(HardwareVolume {
-                    unit_id: *id,
-                    volume: true,
-                    mute: *mute_settable,
-                }),
-                _ => None,
-            })
+        let path = self.playback_path(link)?;
+        let routes = self.routes(*path.first()?, link)?;
+        path.into_iter().find_map(|id| match self.entity(id) {
+            Some(Entity::Feature {
+                id,
+                volume_settable: true,
+                mute_settable,
+                ..
+            }) if routes.iter().all(|r| r.contains(id)) => Some(HardwareVolume {
+                unit_id: *id,
+                volume: true,
+                mute: *mute_settable,
+            }),
+            _ => None,
+        })
+    }
+
+    /// Every route from output terminal `out` back to `link` (entities passed, output first);
+    /// `None` when there are too many, or too deep, to tell them all.
+    fn routes(&self, out: u8, link: u8) -> Option<Vec<Vec<u8>>> {
+        let Some(Entity::OutputTerminal { source, .. }) = self.entity(out) else {
+            return None;
+        };
+        let mut all = Vec::new();
+        let mut path = vec![out];
+        self.all_back(*source, link, &mut path, &mut all).then_some(all)
+    }
+
+    /// [`Self::routes`] from `at`: `false` when they can't all be told (over 64, or deeper than 32).
+    fn all_back(&self, at: u8, link: u8, path: &mut Vec<u8>, all: &mut Vec<Vec<u8>>) -> bool {
+        if all.len() > 64 || path.len() > 32 {
+            return false;
+        }
+        if path.contains(&at) {
+            return true; // a loop: no route this way
+        }
+        path.push(at);
+        if at == link {
+            all.push(path.clone());
+            path.pop();
+            return true;
+        }
+        let sources: Vec<u8> = match self.entity(at) {
+            Some(Entity::Feature { source, .. }) => vec![*source],
+            Some(Entity::Unit { sources, .. }) => sources.clone(),
+            _ => Vec::new(),
+        };
+        let told = sources.into_iter().all(|s| self.all_back(s, link, path, all));
+        path.pop();
+        told
     }
 
     /// The clock source driving terminal `link` (UAC2): its `bCSourceID`, through a clock

@@ -306,3 +306,53 @@ fn the_playback_paths_unit_and_clock_not_the_microphones() {
     });
     assert_eq!(two.playback_unit(0x04), None);
 }
+
+/// Codex H1 (round 5 of #306): a selector (or mixer) that can carry the stream around the
+/// playback path's feature unit leaves it without a unit to trust (its attenuation could be
+/// bypassed); a unit after the selector, on every route, is still the one.
+#[test]
+fn a_unit_a_selector_can_bypass_is_not_the_playback_unit() {
+    let d = parse(&uac2_headset());
+    assert_eq!(d.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+    let route_to = |d: &mut UsbAudioDevice, to: u8| {
+        for e in d.entities.iter_mut() {
+            if let Entity::OutputTerminal { id: 0x06, source, .. } = e {
+                *source = to;
+            }
+        }
+    };
+    // Terminal 4 → selector 9 (input 1: unit 5, input 2: terminal 4 itself) → headphones
+    let mut bypass = d.clone();
+    bypass.entities.push(Entity::Unit {
+        id: 0x09,
+        sources: vec![0x05, 0x04],
+    });
+    route_to(&mut bypass, 0x09);
+    assert_eq!(bypass.playback_path(0x04), Some(vec![0x06, 0x09, 0x05, 0x04]));
+    assert_eq!(
+        bypass.playback_unit(0x04),
+        None,
+        "the selector can go around unit 5"
+    );
+    assert_eq!(bypass.exclusive_unit(), None);
+    // The same selector followed by a unit every route passes: that unit
+    let mut after = bypass.clone();
+    after.entities.push(Entity::Feature {
+        id: 0x0c,
+        source: 0x09,
+        volume: true,
+        mute: true,
+        volume_settable: true,
+        mute_settable: true,
+    });
+    route_to(&mut after, 0x0c);
+    assert_eq!(after.playback_unit(0x04).map(|u| u.unit_id), Some(0x0c));
+    // Both selector inputs through unit 5 (a selector between two of its outputs): still unit 5
+    let mut both = d.clone();
+    both.entities.push(Entity::Unit {
+        id: 0x09,
+        sources: vec![0x05, 0x05],
+    });
+    route_to(&mut both, 0x09);
+    assert_eq!(both.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+}
