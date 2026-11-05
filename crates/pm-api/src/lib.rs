@@ -20482,4 +20482,53 @@ exec sleep 300
         assert_eq!(st, StatusCode::OK, "{plan}");
         assert_eq!(plan["items"][0]["uri"], stream, "{plan}");
     }
+
+    /// A library album with no MusicBrainz match keeps its Year in About (the release group's
+    /// "Released" stands in for it only when there is one), and the facts say their kind: the
+    /// year is a fact, a file's format a reference.
+    #[tokio::test]
+    async fn album_without_a_match_keeps_its_year_as_a_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let aid = {
+            let lib = s.library.lock().unwrap();
+            let album = pm_model::Album {
+                id: None,
+                title: "Sounds from the Fourth World".into(),
+                album_artist: Some("Calvin Russell".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(1991),
+                upc: None,
+                total_discs: None,
+            };
+            let mut tr = untagged_track(dir.path().join("music/fw/01.flac"), "Song 1", "Calvin Russell");
+            tr.album = Some(album);
+            tr.track_no = Some(1);
+            let id = lib.upsert_track(&tr).unwrap().0;
+            lib.get_track(pm_model::TrackId(id))
+                .unwrap()
+                .unwrap()
+                .album
+                .unwrap()
+                .id
+                .unwrap()
+        };
+        let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        let about = al["about"].as_array().unwrap();
+        let year = about.iter().find(|f| f["label"] == "Year");
+        assert_eq!(
+            year.map(|f| (f["value"].as_str().unwrap(), f["kind"].as_str().unwrap())),
+            Some(("1991", "fact")),
+            "{al}"
+        );
+        assert!(
+            about.iter().all(|f| f["label"] != "Released"),
+            "no release group, no Released: {al}"
+        );
+        let format = about.iter().find(|f| f["label"] == "Format").unwrap();
+        assert_eq!(format["kind"], "ref", "a file's format is a reference: {al}");
+    }
 }
