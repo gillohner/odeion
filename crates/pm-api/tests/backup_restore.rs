@@ -529,3 +529,38 @@ async fn backups_are_readable_by_their_owner_only() {
     let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "{}", file.display());
 }
+
+/// A backup never holds a hash of the API token: the mark of a token an older node record held
+/// (`api.published_token`) stays on the node, and a restore keeps the node's own.
+#[tokio::test]
+async fn a_backup_leaves_out_the_published_token_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let mark = ["fixture", "mark", "of", "a", "token"].join("-");
+    a.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::access_token::PUBLISHED_TOKEN_KEY, &mark)
+        .unwrap();
+    for pass in [None, Some("fixture-passphrase")] {
+        let (bytes, _) = pm_api::backup::make(&a, pass).unwrap();
+        let db = pm_api::backup::parse(&bytes).unwrap().database;
+        assert!(
+            !String::from_utf8_lossy(&db).contains(&mark),
+            "the mark is in the backup's library ({pass:?})"
+        );
+    }
+    // Restored on another node: that node's own mark (none) stays
+    let (plain, _) = pm_api::backup::make(&a, None).unwrap();
+    let b = node(dir.path(), "b", None);
+    let (st, r) = restore(&router(b.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        b.library
+            .lock()
+            .unwrap()
+            .get_setting(pm_api::access_token::PUBLISHED_TOKEN_KEY)
+            .unwrap(),
+        None
+    );
+}

@@ -288,7 +288,13 @@ async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String
             connected(&app, &state, s, &info)?;
             Ok(info.name)
         }
-        Err(e) if e == node::REFUSED => {
+        // The node refused this device's sign-in, or now asks for one it never had: a new one
+        Err(e) if e == node::REFUSED || e == node::NEEDS_SIGN_IN => {
+            if again.owner.is_empty() {
+                // Saved before the app knew whose node it is (or connected by address): find the
+                // node through the owner's record again, so its sign-in is checked against them
+                return ring_connect(app, state).await;
+            }
             let mut s = again;
             s.token.clear();
             s.via.clear();

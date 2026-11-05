@@ -42,12 +42,14 @@ pub enum ProbeError {
 
 /// What [`ProbeError::Refused`] reads as; the connect page's reconnect doesn't wait on it.
 pub const REFUSED: &str = "The node refused the token";
+/// What [`ProbeError::NeedsSignIn`] reads as.
+pub const NEEDS_SIGN_IN: &str = "Sign in to the node with Pubky Ring";
 
 impl From<ProbeError> for String {
     fn from(e: ProbeError) -> String {
         match e {
             ProbeError::Unreachable(m) | ProbeError::Other(m) => m,
-            ProbeError::NeedsSignIn => "Sign in to the node with Pubky Ring".into(),
+            ProbeError::NeedsSignIn => NEEDS_SIGN_IN.into(),
             ProbeError::Refused => REFUSED.into(),
         }
     }
