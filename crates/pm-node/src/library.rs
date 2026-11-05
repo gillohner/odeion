@@ -12,19 +12,39 @@ fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     Library::open(&path).with_context(|| format!("opening library {}", path.display()))
 }
 
+/// The work folders `backup` makes in the data folder: `backup-work-<pid>`.
+const WORK_PREFIX: &str = "backup-work-";
+
+/// Work folders an earlier `backup` left (stopped midway) go; one of a backup still running is
+/// younger than an hour and stays.
+fn clear_old_work(data_dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(3600));
+        if old && e.file_name().to_string_lossy().starts_with(WORK_PREFIX) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Snapshot the library database to `file` (works while the node runs).
 pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> {
     if !force && file.exists() {
         anyhow::bail!("{} exists (--force replaces it)", file.display());
     }
     let lib = open(cfg)?;
-    // Made and cleaned in a private folder beside it, then moved into place: the file is its
-    // maker's alone (0600), and a copy that still holds secrets is never where it is kept
-    let dir = file
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let work = dir.join(format!(".odeion-backup-{}", std::process::id()));
+    // Made and cleaned in a private folder on the node's own disk: a copy that still holds
+    // secrets never reaches the target's disk or stick (which may keep deleted data). Only the
+    // clean copy goes beside the target, as a file of its maker's alone (0600), then into place.
+    let work = cfg.data_dir.join(format!("{WORK_PREFIX}{}", std::process::id()));
+    clear_old_work(&cfg.data_dir);
     let mut b = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -44,24 +64,42 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
             pm_api::backup::scrub_plain_copy(&copy)?;
             copy.vacuum_into_place()?;
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        // Into place only once whole: with --force over the old one in one step (it stays until
-        // then), without it never over a file that appeared meanwhile
-        if force {
-            std::fs::rename(&tmp, file)
-        } else {
-            match std::fs::hard_link(&tmp, file) {
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
-                // A filesystem without links (FAT, exFAT on a stick): moved, if still free
-                Err(_) if !file.exists() => std::fs::rename(&tmp, file),
-                r => r,
+        let dir = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = file
+            .file_name()
+            .with_context(|| format!("{} names no file", file.display()))?;
+        let part = dir.join(format!(".{}.part-{}", name.to_string_lossy(), std::process::id()));
+        let placed = (|| -> std::io::Result<()> {
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
             }
-        }
-        .with_context(|| format!("writing backup {}", file.display()))?;
+            let mut out = o.open(&part)?;
+            std::io::copy(&mut std::fs::File::open(&tmp)?, &mut out)?;
+            out.sync_all()?;
+            drop(out);
+            // Into place only once whole: with --force over the old one in one step (it stays
+            // until then), without it never over a file that appeared meanwhile
+            if force {
+                std::fs::rename(&part, file)
+            } else {
+                match std::fs::hard_link(&part, file) {
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+                    // A filesystem without links (FAT, exFAT on a stick): moved, if still free
+                    Err(_) if !file.exists() => std::fs::rename(&part, file),
+                    r => r,
+                }
+            }
+        })();
+        // Gone after a rename; the second name after a link, or what a failure left
+        let _ = std::fs::remove_file(&part);
+        placed.with_context(|| format!("writing backup {}", file.display()))?;
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&work);
@@ -103,6 +141,12 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     let stats = {
         let lib =
             Library::open(&staged).with_context(|| format!("{} is not a library backup", file.display()))?;
+        // What is this node's own (stream key, id, backup schedule, files jobs) stays, and the
+        // sign-ins, invites and parties a plain copy doesn't carry stay as they are here
+        if db.exists() {
+            let here = Library::open(&db).with_context(|| format!("opening {}", db.display()))?;
+            pm_api::backup::keep_this_nodes(&here, &lib)?;
+        }
         lib.stats()?
     };
     for suffix in ["db-wal", "db-shm"] {
@@ -445,5 +489,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Backup then restore on the same node: its own settings (schedule, id, stream key), its
+    /// sign-ins and its jobs are as they were; the work happens in the data folder, and nothing is
+    /// left there or beside the copy.
+    #[test]
+    fn a_backup_restored_on_the_same_node_keeps_what_is_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        let v = |n: &str| ["fixture", "value", n].join("-");
+        let own = [
+            ("backup.schedule", format!("{{\"passphrase\":\"{}\"}}", v("pass"))),
+            ("node.id", v("id")),
+            ("stream.secret", v("stream")),
+            ("homeserver.owner_signup_token", v("signup")),
+        ];
+        {
+            let lib = open(&cfg).unwrap();
+            for (k, val) in &own {
+                lib.set_setting(k, val).unwrap();
+            }
+        }
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let file = out.join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        let beside: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(beside, vec![std::ffi::OsString::from("copy.sqlite")]);
+        let work_left = std::fs::read_dir(&cfg.data_dir)
+            .unwrap()
+            .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(WORK_PREFIX));
+        assert!(!work_left, "no work folder left in the data folder");
+
+        // Something the node changed after the backup, to see the restore happened
+        open(&cfg).unwrap().set_setting("node.later", "x").unwrap();
+        restore(&cfg, &file).unwrap();
+        let lib = open(&cfg).unwrap();
+        for (k, val) in &own {
+            assert_eq!(lib.get_setting(k).unwrap().as_deref(), Some(val.as_str()), "{k}");
+        }
+        assert_eq!(
+            lib.get_setting("node.later").unwrap(),
+            None,
+            "the backup's library is in"
+        );
     }
 }

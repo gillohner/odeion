@@ -335,6 +335,33 @@ const CARRIED: &[&str] = &[
     crate::party::PARTIES,
 ];
 
+/// For a restore that replaces the database file (`odeiond restore`), into the `staged` copy
+/// before it goes in: this node's own settings ([`NODE_OWN`]) from `here`, as the web restore
+/// keeps them; and each sign-in, the people list, the signup token and parties that `staged`
+/// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays.
+pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_library::LibraryError> {
+    for key in NODE_OWN {
+        match here.get_setting(key)? {
+            Some(v) => staged.set_setting(key, &v)?,
+            None => {
+                staged.delete_setting(key)?;
+            }
+        }
+    }
+    let carried = SECRET_SETTINGS
+        .iter()
+        .map(|(k, _)| *k)
+        .chain(CARRIED.iter().copied());
+    for key in carried {
+        if staged.get_setting(key)?.is_none() {
+            if let Some(v) = here.get_setting(key)? {
+                staged.set_setting(key, &v)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Makes a plain copy of the database safe to keep anywhere: no sign-in (the owner's or a
 /// listener's), nothing that belongs to this node only ([`NODE_OWN`]: its stream key, the backup
 /// schedule's passphrase, the owner sessions' hash…), nothing of the vault cache, no signup token,

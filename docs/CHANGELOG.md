@@ -10,7 +10,8 @@ Newest first. Dates are when the change landed on `main`.
   - Besides sign-ins, a backup made without a passphrase (and `odeiond backup`'s copy) now also leaves out: the homeserver's signup token, the links of unused invites, parties, the scheduled backup's passphrase and this node's own keys.
   - Invites come back without their links, so make the link again.
   - With a passphrase, invite links, the signup token and parties are locked in with the sign-ins and come back on restore.
-  - `odeiond backup` writes its copy readable by you only.
+  - `odeiond backup` writes its copy readable by you only. It is made and cleaned in a private folder in the node's data folder; only the cleaned copy is written where you asked.
+  - `odeiond restore` keeps this node's own settings (its id, stream key, backup schedule and files jobs), and the sign-ins, invites and parties a plain copy doesn't carry, as Settings › Backup does.
 
 ### 2026-11-04
 
