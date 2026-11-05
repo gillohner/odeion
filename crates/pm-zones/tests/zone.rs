@@ -205,6 +205,10 @@ struct Recorder {
     reopen_now: std::sync::atomic::AtomicBool,
     /// The next resume finds the device gone (unplugged during the pause).
     resume_gone: std::sync::atomic::AtomicBool,
+    /// Flushes find the device gone (unplugged while the zone waited)
+    flush_gone: std::sync::atomic::AtomicBool,
+    /// Gones the zone said it heard
+    gone_reported: Mutex<u64>,
 }
 
 struct RecOutput {
@@ -292,7 +296,16 @@ impl AudioSink for RecSink {
     }
     fn flush(&mut self) -> Result<(), SinkError> {
         *self.rec.flushes.lock().unwrap() += 1;
+        if self.rec.flush_gone.load(Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
         Ok(())
+    }
+    fn gone_reported(&mut self) {
+        *self.rec.gone_reported.lock().unwrap() += 1;
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         *self.rec.drains.lock().unwrap() += 1;
@@ -1249,6 +1262,27 @@ async fn a_device_gone_during_a_pause_stays_paused_on_play() {
     drop(drain_events(&mut r.events));
 }
 
+/// Claude L1 (round 5): the listener pauses just after the device went (the sink's flush says so):
+/// the zone pauses with the reason, it doesn't stop, and the sink hears that the zone heard it.
+#[tokio::test]
+async fn a_pause_that_finds_the_device_gone_pauses_with_the_reason() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.rec.flush_gone.store(true, Ordering::SeqCst);
+    r.zone.pause();
+    r.gate.allow(1);
+    wait_for(|| r.zone.state().error.is_some()).await;
+    let st = r.zone.state();
+    assert_eq!(st.transport, Transport::Paused, "{st:?}");
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(*r.rec.gone_reported.lock().unwrap(), 1);
+    drop(drain_events(&mut r.events));
+}
+
 /// A sink that may not go on as it is (a phone's DAC paused in bit-perfect whose volume went
 /// down since): the next write goes to a fresh sink, from where it was, nothing lost.
 #[tokio::test]
@@ -1259,7 +1293,16 @@ async fn a_sink_that_may_not_go_on_is_replaced_before_the_write() {
     r.gate.allow(2);
     wait_for(|| r.rec.samples.lock().unwrap().len() == 200).await;
     r.gate.blocked().await;
+    let drains = *r.rec.drains.lock().unwrap();
     r.rec.reopen_now.store(true, Ordering::SeqCst);
+    r.gate.allow(1);
+    wait_for(|| *r.rec.opens.lock().unwrap() == 2).await;
+    assert_eq!(
+        *r.rec.drains.lock().unwrap(),
+        drains,
+        "what may not play is discarded, not played out"
+    );
+    assert!(*r.rec.flushes.lock().unwrap() >= 1);
     r.gate.allow(100);
     let st = r.zone.wait_stopped().await;
     assert_eq!(st.error, None);

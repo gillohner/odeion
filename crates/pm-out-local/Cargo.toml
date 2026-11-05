@@ -29,4 +29,9 @@ cpal = { version = "=0.18.2", optional = true }
 
 [dev-dependencies]
 pm-audio = { workspace = true }
+# The phone's output through its endpoint, as the node reaches it (pm-endpoint without its
+# pm-out-local feature: no cycle)
+pm-endpoint = { workspace = true }
+pm-out-net = { workspace = true }
+pm-stream = { workspace = true }
 tempfile = "3"
