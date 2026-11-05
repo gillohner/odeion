@@ -1,0 +1,19 @@
+[Unit]
+Description=Odeion (docker compose in /opt/odeion)
+Wants=network-online.target
+After=network-online.target docker.service odeion-firstboot.service
+Requires=docker.service
+# The first boot starts it itself (odeion-firstboot.service)
+ConditionPathExists=/var/lib/odeion/firstboot-done
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/odeion-compose up -d
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

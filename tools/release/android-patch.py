@@ -29,14 +29,20 @@ silently cannot connect.
 9. The launcher label and the activity title say Odeion. Tauri writes them from productName, which
    stays at its pre-Odeion value because it also names the desktop installs (docs/branding-compatibility.md);
    the application id is not touched, so an installed app updates in place.
+10. App updates (tools/release/android/AppUpdate.kt, src/update.rs): the class and
+   REQUEST_INSTALL_PACKAGES. `--without-updater` takes both out again of a patched project, for
+   the .aab: an app from Google Play may update only through Play. Without the class the app
+   never checks for updates.
 
-Usage: android-patch.py <crates/pm-desktop>
+Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """
 import re
 import sys
 from pathlib import Path
 
-root = Path(sys.argv[1] if len(sys.argv) > 1 else "crates/pm-desktop")
+args = [a for a in sys.argv[1:] if a != "--without-updater"]
+without_updater = "--without-updater" in sys.argv[1:]
+root = Path(args[0] if args else "crates/pm-desktop")
 app = root / "gen" / "android" / "app"
 gradle = app / "build.gradle.kts"
 proguard = app / "proguard-rules.pro"
@@ -51,6 +57,22 @@ def die(msg: str) -> None:
 if not gradle.exists():
     die(f"{gradle} missing: run `tauri android init` first")
 text = gradle.read_text()
+INSTALL_PERM = '<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />'
+if without_updater:
+    # 10, undone: for the .aab
+    if MARK not in text:
+        die("not patched yet: run android-patch.py without --without-updater first")
+    manifest = app / "src" / "main" / "AndroidManifest.xml"
+    mtext = manifest.read_text()
+    if mtext.count(INSTALL_PERM) != 1:
+        die(f"expected one `{INSTALL_PERM}` in {manifest}")
+    manifest.write_text(mtext.replace("\n    " + INSTALL_PERM, "").replace(INSTALL_PERM, ""))
+    found = list((app / "src" / "main" / "java").rglob("AppUpdate.kt"))
+    if len(found) != 1:
+        die(f"expected one AppUpdate.kt, found {len(found)}")
+    found[0].unlink()
+    print("android-patch: without the updater (no AppUpdate, no REQUEST_INSTALL_PACKAGES)")
+    sys.exit(0)
 if MARK in text:
     print("android-patch: already patched")
     sys.exit(0)
@@ -87,10 +109,13 @@ if rule not in existing:
     existing = existing.rstrip("\n") + "\n\n# rustls-platform-verifier (called over JNI)\n" + rule + "\n"
 player = "-keep class **.PlayerService { public static void start(...); public static void stop(...); }"
 crash = "-keep class **.CrashReport { public static *; }\n-keep class **.PubkyMusicApp { *; }"
+updater = "-keep class **.AppUpdate { public static *; }"
 if player not in existing:
     existing = existing.rstrip("\n") + "\n\n# The player service's start/stop (called over JNI from src/android.rs)\n" + player + "\n"
 if crash.split("\n")[0] not in existing:
     existing = existing.rstrip("\n") + "\n\n# The crash report (Application class; share() is called over JNI)\n" + crash + "\n"
+if updater not in existing:
+    existing = existing.rstrip("\n") + "\n\n# App updates (called over JNI from src/android.rs)\n" + updater + "\n"
 proguard.write_text(existing)
 
 # 4. multicast permission
@@ -242,7 +267,20 @@ for name in ("app_name", "main_activity_title"):
         die(f"expected one app_name string in {strings}")
 strings.write_text(stext)
 
+# 10. app updates: the class next to MainActivity, and the permission to hand an APK to the installer
+updater_kt = (Path(__file__).parent / "android" / "AppUpdate.kt").read_text()
+updater_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", updater_kt, count=1, flags=re.M)
+if n != 1:
+    die("AppUpdate.kt has no package line")
+(activities[0].parent / "AppUpdate.kt").write_text(updater_kt)
+mtext = manifest.read_text()
+if INSTALL_PERM not in mtext:
+    anchor = '<uses-permission android:name="android.permission.INTERNET" />'
+    if mtext.count(anchor) != 1:
+        die(f"expected one `{anchor}` in {manifest}")
+    manifest.write_text(mtext.replace(anchor, anchor + "\n    " + INSTALL_PERM))
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates"
 )
