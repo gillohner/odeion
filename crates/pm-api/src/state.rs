@@ -515,13 +515,16 @@ impl NodeState {
             while state_rx.changed().await.is_ok() {
                 let state = state_rx.borrow_and_update().clone();
                 if state.queue_version != saved_version {
-                    saved_version = state.queue_version;
+                    // One look at the queue: the items and, while shuffled, their original
+                    // order belong together (a change between two reads would save a wrong one)
+                    let snap = shuffled.queue_snapshot();
+                    saved_version = snap.version;
                     let saved = SavedQueue {
-                        items: state.queue.clone(),
-                        repeat: state.repeat,
-                        radio: state.radio,
-                        shuffle: state.shuffle,
-                        order: shuffled.shuffle_order().unwrap_or_default(),
+                        items: snap.items,
+                        repeat: snap.repeat,
+                        radio: snap.radio,
+                        shuffle: snap.shuffle,
+                        order: snap.order,
                     };
                     if let Ok(json) = serde_json::to_string(&saved) {
                         let lib = library.lock().expect("library poisoned");

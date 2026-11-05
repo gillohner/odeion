@@ -2107,6 +2107,8 @@ async fn transfer(
     }
     let index = st.now_playing.as_ref().map(|n| n.index).or(st.queue_index);
     let position_ms = st.now_playing.as_ref().map(|n| n.position_ms).unwrap_or(0);
+    // The shuffle mode with its original order, read before the source is emptied
+    let shuffle = kept_shuffle(&from);
     from.stop();
     from.clear();
     presence::played(&s, &body.to, &c);
@@ -2117,7 +2119,7 @@ async fn transfer(
         position_ms,
         st.transport,
         st.repeat,
-        st.shuffle,
+        shuffle,
         st.radio,
     )
     .await;
@@ -2125,10 +2127,28 @@ async fn transfer(
     Ok(Json(moved))
 }
 
+/// The shuffle mode a loaded queue gets ([`load_zone`]).
+pub(crate) enum LoadShuffle {
+    Off,
+    /// On, fresh: `index`'s item first, every other item shuffled after it.
+    On,
+    /// As it was on the zone it comes from: the items are already in play order, and this is
+    /// their original order ([`Zone::shuffle_order`]), so shuffle off still puts them back.
+    Kept(Vec<usize>),
+}
+
+/// `zone`'s shuffle mode for a queue moved from it, with its original order.
+pub(crate) fn kept_shuffle(zone: &Zone) -> LoadShuffle {
+    match zone.shuffle_order() {
+        Some(order) => LoadShuffle::Kept(order),
+        None => LoadShuffle::Off,
+    }
+}
+
 /// Fills `to` the way a move leaves it: stopped and emptied, then `queue`, `repeat`, `shuffle`
 /// and `radio`; `index` plays from `position_ms` (paused when the source was paused; nothing
-/// starts when it was stopped). With `shuffle`, `index`'s item comes first and the rest is
-/// shuffled after it. Seeking needs the track open, so it waits for that (bounded) first.
+/// starts when it was stopped). Seeking needs the track open, so it waits for that (bounded)
+/// first.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_zone(
     to: &Zone,
@@ -2137,7 +2157,7 @@ pub(crate) async fn load_zone(
     position_ms: u64,
     transport: pm_zones::Transport,
     repeat: pm_zones::Repeat,
-    shuffle: bool,
+    shuffle: LoadShuffle,
     radio: bool,
 ) -> ZoneState {
     to.stop();
@@ -2150,9 +2170,13 @@ pub(crate) async fn load_zone(
     let len = queue.len();
     to.enqueue(queue, Insert::End);
     let mut index = index.filter(|i| *i < len);
-    if shuffle {
-        to.shuffle_from(index);
-        index = index.map(|_| 0);
+    match shuffle {
+        LoadShuffle::Off => {}
+        LoadShuffle::On => {
+            to.shuffle_from(index);
+            index = index.map(|_| 0);
+        }
+        LoadShuffle::Kept(order) => to.restore_shuffle(&order),
     }
     if let (Some(i), true) = (index, transport != pm_zones::Transport::Stopped) {
         to.play_index(i);
@@ -2219,7 +2243,11 @@ async fn load(
             body.position_ms,
             body.transport,
             body.repeat,
-            body.shuffle,
+            if body.shuffle {
+                LoadShuffle::On
+            } else {
+                LoadShuffle::Off
+            },
             body.radio,
         )
         .await,
@@ -15763,7 +15791,7 @@ exec sleep 300
             0,
             pm_zones::Transport::Playing,
             pm_zones::Repeat::Off,
-            false,
+            LoadShuffle::Off,
             false,
         )
         .await;
@@ -20255,6 +20283,17 @@ exec sleep 300
         assert_eq!(st, StatusCode::OK, "{moved}");
         assert_eq!(moved["shuffle"], true, "{moved}");
         assert_eq!(moved["queue"].as_array().unwrap().len(), 10);
+        // With its original order: off on the new zone puts the items back
+        let (st, z) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{}/shuffle", k["id"].as_str().unwrap()),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(titles(&z), want, "the order the source had");
+        assert_eq!(z["queue_index"], 2);
     }
 
     /// A queue loaded with shuffle on plays the chosen item first and the rest shuffled after it;

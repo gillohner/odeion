@@ -97,6 +97,19 @@ pub enum Repeat {
     One,
 }
 
+/// One consistent look at what a queue keeps across a restart ([`Queue::snapshot`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueSnapshot {
+    /// The play order.
+    pub items: Vec<QueueItem>,
+    pub repeat: Repeat,
+    pub radio: bool,
+    pub shuffle: bool,
+    /// With shuffle on: the original order as indexes into `items` ([`Queue::shuffle_order`]).
+    pub order: Vec<usize>,
+    pub version: u64,
+}
+
 /// Where [`Queue::add`] puts new items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Insert {
@@ -209,15 +222,15 @@ impl Queue {
                 it
             })
             .collect();
-        let at = match at {
+        let pos = match at {
             Insert::End => self.items.len(),
             Insert::Next => self.current.map(|c| c + 1).unwrap_or(0),
         };
-        self.items.splice(at..at, items);
+        self.items.splice(pos..pos, items);
         if self.shuffle {
             // The same place in the original order: "Play next" is next there too; "Add to
             // queue" goes to its end
-            let at = match at {
+            let opos = match at {
                 Insert::End => self.order.len(),
                 Insert::Next => self
                     .current
@@ -226,7 +239,7 @@ impl Queue {
                     .map(|p| p + 1)
                     .unwrap_or(0),
             };
-            self.order.splice(at..at, ids.iter().copied());
+            self.order.splice(opos..opos, ids.iter().copied());
         }
         self.version += 1;
         ids
@@ -371,6 +384,19 @@ impl Queue {
         };
         self.shuffle = true;
         self.version += 1;
+    }
+
+    /// Everything that is saved per zone, from one look at the queue (the items in play order,
+    /// the modes, and the original order as indexes while shuffled), with its version.
+    pub fn snapshot(&self) -> QueueSnapshot {
+        QueueSnapshot {
+            items: self.items.clone(),
+            repeat: self.repeat,
+            radio: self.radio,
+            shuffle: self.shuffle,
+            order: self.shuffle_order().unwrap_or_default(),
+            version: self.version,
+        }
     }
 
     /// Empties the queue; the shuffle and repeat modes stay.
@@ -650,6 +676,11 @@ mod tests {
         let want: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
         assert_eq!(uris, want, "the original order, by content");
         assert_eq!(q(3).shuffle_order(), None);
+        // A snapshot holds the items and the order from the same look
+        let snap = q5.snapshot();
+        assert_eq!((snap.shuffle, snap.version), (true, q5.version()));
+        assert_eq!(snap.order, q5.shuffle_order().unwrap());
+        assert_eq!(snap.items, q5.items());
         let mut bad = q(3);
         bad.restore_shuffle(&[0, 0, 1]);
         assert!(bad.shuffle());

@@ -16,7 +16,7 @@
 //! resuming seeks the source there. Nothing is resampled or faded.
 
 use crate::engine::{self, Command};
-use crate::queue::{Insert, Queue, QueueItem, Repeat};
+use crate::queue::{Insert, Queue, QueueItem, QueueSnapshot, Repeat};
 use crate::sink::{Output, OutputId, SinkError};
 use crate::source::SourceFactory;
 use pm_model::{AudioFormat, SignalPath, Volume};
@@ -315,6 +315,11 @@ impl Zone {
     /// The original order while shuffled, for saving ([`Queue::shuffle_order`]).
     pub fn shuffle_order(&self) -> Option<Vec<usize>> {
         self.queue.lock().expect("queue poisoned").shuffle_order()
+    }
+
+    /// What is saved per zone, from one look at the queue ([`Queue::snapshot`]).
+    pub fn queue_snapshot(&self) -> QueueSnapshot {
+        self.queue.lock().expect("queue poisoned").snapshot()
     }
 
     /// Shuffle on again from a saved queue ([`Queue::restore_shuffle`]).
