@@ -1339,4 +1339,24 @@ mod tests {
             assert_eq!(found(pieces), 0, "a purged report stays in the file");
         }
     }
+
+    /// Claude review of b015b991, Medium: a page the app shows that the inbox doesn't know turns
+    /// every report sent from it with details into a 400 (and reloading lands on the same page).
+    #[test]
+    fn every_page_the_app_shows_is_a_view_a_report_may_name() {
+        let js = include_str!("../static/app.js");
+        let mut pages: Vec<&str> = js
+            .match_indices("setView('")
+            .filter_map(|(i, m)| js[i + m.len()..].split('\'').next())
+            .collect();
+        let nav = js
+            .split_once("const NAV_VIEWS = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("app.js lists its NAV_VIEWS")
+            .0;
+        pages.extend(nav.split(',').map(|v| v.trim().trim_matches('\'')));
+        assert!(pages.len() > 20, "{pages:?}");
+        let unknown: Vec<&&str> = pages.iter().filter(|v| !VIEWS.contains(v)).collect();
+        assert!(unknown.is_empty(), "pages a report can't name: {unknown:?}");
+    }
 }

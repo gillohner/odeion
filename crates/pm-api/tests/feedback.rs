@@ -722,6 +722,36 @@ async fn a_resent_report_never_tells_a_guess_from_the_owners_token() {
 
 // ---- helpers ----
 
+/// Claude review of b015b991, L2: People › Remove takes everything the node keeps for a
+/// listener, their problem reports too; everyone else's stay.
+#[tokio::test]
+async fn removing_a_listener_takes_their_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    for (who, text) in [
+        (&ann, "ann one"),
+        (&ann, "ann two"),
+        (&ben, "ben's"),
+        (&OWNER.to_string(), "owner's"),
+    ] {
+        let (st, r) = call(&app, Some(who), "POST", "/v1/feedback", Some(report(text))).await;
+        assert_eq!(st, StatusCode::CREATED, "{r}");
+    }
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let mut left: Vec<String> = inbox(dir.path())
+        .pending(pm_api::feedback::now())
+        .unwrap()
+        .into_iter()
+        .map(|p| p.text)
+        .collect();
+    left.sort();
+    assert_eq!(left, ["ben's", "owner's"]);
+}
+
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {
     send(&app, req).await
 }
