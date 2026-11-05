@@ -105,7 +105,29 @@ pub async fn start_sign_in(s: &Settings) -> Result<SignInStarted, String> {
             .map(str::to_string)
             .unwrap_or_else(|| format!("The node answered {code}")));
     }
-    resp.json().await.map_err(|e| e.to_string())
+    let started: SignInStarted = resp.json().await.map_err(|e| e.to_string())?;
+    ring_request_is_a_sign_in(&started.url)?;
+    Ok(started)
+}
+
+/// The address the node was reached at isn't tied to its key, so the request it hands back is
+/// checked before Ring shows it: a sign-in asks Ring for exactly
+/// [`pm_pubky::homeserver::CONTROLLER_CAPABILITIES`] (read the public profile, nothing more).
+pub fn ring_request_is_a_sign_in(url: &str) -> Result<(), String> {
+    let refuse = || "The node asked Pubky Ring for more than a sign-in; nothing was sent to Ring".to_string();
+    let parsed = url::Url::parse(url).map_err(|_| refuse())?;
+    if parsed.scheme() != "pubkyauth" {
+        return Err(refuse());
+    }
+    let caps: Vec<String> = parsed
+        .query_pairs()
+        .filter(|(k, _)| k == "caps")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    if caps != [pm_pubky::homeserver::CONTROLLER_CAPABILITIES] {
+        return Err(refuse());
+    }
+    Ok(())
 }
 
 /// One look at a sign-in started with [`start_sign_in`]: `Ok(Some(token))` once approved,
@@ -163,4 +185,37 @@ pub async fn remove_endpoint(s: &Settings, address: &str) -> Result<(), String> 
         .await
         .map_err(|e| e.to_string())?;
     resp.error_for_status().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ring_gets_only_a_sign_in_request() {
+        let caps = pm_pubky::homeserver::CONTROLLER_CAPABILITIES;
+        let with = |c: &str| {
+            let mut u = url::Url::parse("pubkyauth:///").unwrap();
+            u.query_pairs_mut()
+                .append_pair("relay", "https://httprelay.example/link")
+                .append_pair("secret", "AAAA")
+                .append_pair("caps", c);
+            u.to_string()
+        };
+        assert!(ring_request_is_a_sign_in(&with(caps)).is_ok());
+        for bad in [
+            "/:rw",
+            "/pub/pubky.app/:rw",
+            "/pub/pubky.app/:r,/pub/odeion/:rw",
+            "",
+        ] {
+            assert!(ring_request_is_a_sign_in(&with(bad)).is_err(), "{bad}");
+        }
+        let twice = format!("{}&caps=%2F%3Arw", with(caps));
+        assert!(ring_request_is_a_sign_in(&twice).is_err(), "a second caps");
+        let none = with(caps).replace("caps=", "c=");
+        assert!(ring_request_is_a_sign_in(&none).is_err(), "no caps");
+        let other = with(caps).replace("pubkyauth:", "https:");
+        assert!(ring_request_is_a_sign_in(&other).is_err(), "not a Ring request");
+    }
 }
