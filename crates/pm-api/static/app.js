@@ -71,7 +71,7 @@
   const fileFormat = (file) => (!file ? '' : LOSSY[file.container] || fmtFormat(file.format));
   // "1 track", "2 tracks" (n may be a formatted number)
   const countOf = (n, many) => `${n} ${String(n).replace(/[^0-9]/g, '') === '1' ? many.replace(/s$/, '') : many}`;
-  // Which service a page link belongs to ("Open on Audius", not "Open on")
+  // Which service a page link belongs to ("Open in Audius", not "Open in")
   const SERVICE_HOSTS = { 'audius.co': 'audius', 'archive.org': 'archive', 'deezer.com': 'deezer', 'tidal.com': 'tidal', 'listen.tidal.com': 'tidal', 'open.spotify.com': 'spotify', 'jamendo.com': 'jamendo', 'musicbrainz.org': 'musicbrainz' };
   const serviceOfUrl = (u) => { try { return SERVICE_HOSTS[new URL(u).hostname.replace(/^www\./, '')] || ''; } catch { return ''; } };
   // A Pubky key as people read it: no "pubky" prefix, shortened in the middle; the copy button
@@ -620,7 +620,7 @@
   // What someone is typing survives the page's re-renders (an item still being read renders
   // again every few seconds): kept per item, and per comment for a reply
   const commentDrafts = new Map();
-  const commentTyping = () => $$('.comment-form textarea').some((t) => t.value.trim() || t === document.activeElement);
+  const commentTyping = () => $$('.comment-form textarea, #htags input[data-htag-add]').some((t) => t.value.trim() || t === document.activeElement);
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
     const draftKey = (f) => `${uri}|${(f && f.dataset.replyTo) || ''}`;
@@ -2978,7 +2978,7 @@
     if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
     const box = $('#nppubky', overlay); if (!box || !live()) return;
     box.innerHTML = pageRow + (target
-      ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button>${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}</span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
+      ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `${tagChip(x.label, { own: true, attrs: `data-np-tag="${esc(x.label)}"`, title: `Your tag · open ${x.label}` })}${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
       : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>'
         : `<p class="muted">Nothing to tag here: ${it.stream || np2Stream(it) ? 'this is a live stream' : 'this song has no page yet'}.</p>`);
     const pb = $('#nppage', overlay); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
@@ -3176,7 +3176,7 @@
     const previewOnly = (svc) => /^previews\b/i.test(String(((state.sources || []).find((x) => x.id === svc) || {}).status || ''));
     const canPlay = (v) => { const svc = srcSvc(v.source); if (svc === 'youtube' || /^youtube:/.test(switchUri(v) || '') || previewOnly(svc)) return false; return rk ? rk.healthy.has(svc) : svc === 'library'; };
     const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
-    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
+    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open in ${esc(v.label || v.source)} (new tab)" title="Open in ${esc(v.label || v.source)} (new tab)">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
     $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
     $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b, cur.id));
@@ -3719,13 +3719,6 @@
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
   const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
-  const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow" title="Public on Pubky">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"></div>`;
-  const bindTagRow = (ref) => {
-    const add = $('#tagadd'); if (!add) return;
-    add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; try { await api('PUT', '/tags', { ...ref, label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label: b.dataset.tagDel }).toString()); render(); } catch (er) { toast(er.message, 'error'); } });
-    $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
-  };
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
@@ -3734,24 +3727,33 @@
     return [...new Set(ids)].map((x) => profileCache.get(x)).filter(Boolean);
   };
   const face = (c, size = 'sm') => (c.avatar ? `<img class="face ${size}" src="${esc(imgSrc(c.avatar))}" alt="" loading="lazy" data-err="hide">` : `<span class="face ${size} mono" style="background:hsl(${hue(c.id)} 35% 34%)">${esc(initials(c.name))}</span>`);
-  const faceStack = (cards, total) => `<span class="facestack">${cards.slice(0, 3).map((c) => face(c)).join('')}</span>${total > 3 ? `<span class="muted small">+${total - 3}</span>` : ''}`;
-  const peopleMenu = (anchor, title, cards) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), icon: 'artist', run: () => setView('person', c.id) }))]);
-  // The faces beside each tag chip in a box, and on the "N people tagged this" line
-  const fillTagFaces = async (box, faces, counts) => {
-    if (!box || !faces) return;
-    const all = Object.values(faces).flat();
-    if (!all.length) return;
-    await loadProfiles(all);
-    $$('[data-tag-open]', box).forEach((el) => {
-      const label = el.dataset.tagOpen; const ids = faces[label]; if (!ids || !ids.length) return;
-      const chip = el.closest('.chip') || el; if (chip.nextElementSibling && chip.nextElementSibling.dataset.faces === label) return;
-      const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (!cards.length) return;
-      chip.insertAdjacentHTML('afterend', `<button class="faces" data-faces="${esc(label)}" title="Who tagged #${esc(label)}" aria-label="Who tagged #${esc(label)}">${faceStack(cards, counts.get(label) || cards.length)}</button>`);
-      chip.nextElementSibling.onclick = (e) => peopleMenu(e.currentTarget, `#${label}`, cards);
-    });
-    const line = $('[data-taggers]', box.closest('section') || box);
-    if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
+  const peopleMenu = (anchor, title, cards, more = 0) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), icon: 'artist', run: () => setView('person', c.id) })), ...(more > 0 ? [{ title: `and ${more} more on Pubky` }] : [])]);
+  // Tag colours as pubky.app draws them, so a label looks the same there and here: its
+  // generateRandomColor and hexToRgba (pubky/pubky-app @7cb809a, src/libs/utils/utils.ts) ported as
+  // they are, the hash that outgrows 32 bits and the mixed-case hex included (tools/tag-colour-check.js)
+  const TAG_COLOURS = new Map([['bitcoin', '#FF9900'], ['synonym', '#FF6600'], ['bitkit', '#FF4400'], ['pubky', '#C8FF00'], ['blocktank', '#FFAE00'], ['tether', '#26A17B'], ['ai', '#00C8FF']]);
+  const tagColour = (label) => {
+    const s = String(label);
+    if (TAG_COLOURS.has(s.toLowerCase())) return TAG_COLOURS.get(s.toLowerCase());
+    const hash = Math.abs(Array.from(s).reduce((h, ch) => ch.charCodeAt(0) + ((h << 5) - h), 0));
+    const byte = hash & 0xff; const hex = byte.toString(16).padStart(2, '0'); const n = hash % 6;
+    // The two blue patterns turn teal while their changing channel is low
+    if ((n === 3 || n === 4) && byte <= 85) { const cyan = (255 - Math.round(byte * 0.75)).toString(16).padStart(2, '0'); return n === 3 ? `#00${cyan}FF` : `#00FF${cyan}`; }
+    return `#${[`FF00${hex}`, `FF${hex}00`, `${hex}FF00`, `${hex}00FF`, `00${hex}FF`, `00FF${hex}`][n]}`;
   };
+  const tagRgba = (hex, a) => { const [r, g, b] = hex.match(/\w\w/g).map((x) => parseInt(x, 16)); return `rgba(${r}, ${g}, ${b}, ${a})`; };
+  // One tag chip wherever tags show (pubky.app's Tag): the label in its colour, no "#", how many
+  // people used it, your own with a border. `attrs` go on the chip's button; `del` (the remove
+  // button's attributes) only where there is a remove, like the close on pubky.app's post tags.
+  const tagChip = (label, { count, own, attrs = '', title, del, extra = '' } = {}) => {
+    const c = tagColour(label);
+    const style = `--tag-bg:${tagRgba(c, 0.3)};--tag-line:${tagRgba(c, 0.5)}`;
+    const body = `<span class="ptag-l">${esc(label)}</span>${count ? `<span class="ptag-n">${count}</span>` : ''}`;
+    if (!del) return `<button class="ptag ${own ? 'own' : ''}" style="${style}" ${attrs} title="${esc(title || label)}">${body}</button>`;
+    return `<span class="ptag ${own ? 'own' : ''}" style="${style}"><button class="chiplink" ${attrs} title="${esc(title || label)}">${body}</button>${extra}<button class="chipx" ${del} aria-label="Remove ${esc(label)}" title="Remove">×</button></span>`;
+  };
+  // Who used a label (pubky.app's TaggedItem): up to four faces, then "+N" for the rest
+  const tagFaces = (cards, total) => { const shown = cards.slice(0, 4); return `${shown.map((c) => face(c, 'md')).join('')}${total > shown.length ? `<span class="face-more">+${total - shown.length}</span>` : ''}`; };
   // Your library › Node library › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
@@ -3808,24 +3810,108 @@
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     $('#wdurl', d).focus();
   });
-  // An item page's own tags: on the song (every source) or only on this source's link; each
-  // shows its scope and can move to the other one.
-  const scopedTagRow = (songTags, linkTags, linkName, kind, others = []) => {
-    const count = new Map(others.map(([l, c]) => [l, c]));
-    const mine = new Set([...songTags, ...linkTags].map((t) => t.label));
-    const chip = (t, scope) => `<span class="chip tag ${scope === 'link' ? 'tag-link' : ''}" title="${scope === 'link' ? `Only on this ${esc(linkName)} link` : `On the ${kind}, whatever source plays it`}">${scope === 'link' ? svcBadge(String(linkName).toLowerCase()) : ''}<button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}${count.get(t.label) ? ` <span class="muted">${count.get(t.label)}</span>` : ''}</button>${t.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}${linkName ? `<button class="chipx" data-tag-move="${scope}:${esc(t.label)}" title="${scope === 'link' ? `Put it on the ${kind} instead` : `Keep it on this ${esc(linkName)} link only`}" aria-label="Move #${esc(t.label)}">${icon(scope === 'link' ? 'compass' : 'disc')}</button>` : ''}<button class="chipx" data-tag-del="${scope}:${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`;
-    const theirs = others.filter(([l]) => !mine.has(l)).map(([l, c]) => `<button class="chip tag-chip" data-tag-open="${esc(l)}" title="Others' tag · open in Discover">#${esc(l)} <span class="muted">${c}</span></button>`).join('');
-    return `<div class="tagrow">${songTags.map((t) => chip(t, 'song')).join('')}${linkTags.map((t) => chip(t, 'link')).join('')}${theirs}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20">${linkName ? `<select class="input sm" id="tagscope" aria-label="Where the tag goes"><option value="song">on the ${kind}</option><option value="link">on this ${esc(linkName)} link only</option></select>` : ''}</div><p class="muted small tag-hint">Public on your homeserver.${linkName ? ` A tag on the ${kind} shows wherever it plays from; a tag on this ${esc(linkName)} link stays on that link.` : ''}</p>`;
+  // ---- An item page's tags, in its top card (TASK-tags-in-hero-pubky-design) ----
+  // Each identity the page has is a group of its own: the item, whatever source plays it, and this
+  // source's link (STEWARD-UX-INSTANCES 3). A group reads, adds, removes and counts on its own URI
+  // only, and the people beside a label are that URI's for that label, never a page-wide lookup by
+  // label. Others' tags first by how many used them, yours among them with a border; about two rows,
+  // then "+N more" shows the rest in place.
+  //   ht: { key, kind, groups: [{ scope, name, ref, own: [tag] | null, pub: { state, tags, faces } }],
+  //         canEdit, note, match, open: Set of the groups shown whole }
+  const qsOf = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
+  // "On the TIDAL link" inside a sentence: only its first letter goes small
+  const lower1 = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+  const cardOf = (id) => profileCache.get(id) || { id, name: shortKey(id), known: false };
+  const heroTagGroup = (g, ht) => {
+    const pub = g.pub; const counts = new Map(pub.tags || []);
+    const mine = new Map((g.own || []).map((t) => [t.label, t]));
+    const edit = ht.canEdit && !!g.own;
+    const other = ht.groups.find((x) => x !== g);
+    const moves = edit && other && !!other.own;
+    const list = [...new Set([...(pub.tags || []).map(([l]) => l), ...mine.keys()])]
+      .map((label, i) => ({ label, count: Math.max(counts.get(label) || 0, mine.has(label) ? 1 : 0), own: mine.get(label), i }))
+      .sort((a, b) => b.count - a.count || a.i - b.i);
+    const items = list.map((t) => {
+      const ids = (pub.faces || {})[t.label] || [];
+      const move = t.own && moves ? `<button class="chipx" data-htag-move="${g.scope}" data-label="${esc(t.label)}" aria-label="Move ${esc(t.label)} ${esc(lower1(other.name))}" title="${g.scope === 'link' ? `Put it on the ${esc(ht.kind)} instead` : `Keep it on the ${esc(ht.linkName)} link only`}">${icon(g.scope === 'link' ? 'compass' : 'disc')}</button>` : '';
+      const chip = tagChip(t.label, { count: t.count, own: !!t.own, attrs: `data-htag-open="${esc(t.label)}"`, title: `${t.own ? `Your tag${t.own.synced ? '' : ', not pushed yet'}` : `${t.count} ${t.count === 1 ? 'person' : 'people'}`} · open ${t.label}`, del: t.own && edit ? `data-htag-del="${g.scope}" data-label="${esc(t.label)}"` : null, extra: move });
+      const wait = t.own && t.own.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : '';
+      const who = ids.length ? `<button class="faces tagfaces" data-htag-faces="${g.scope}" data-label="${esc(t.label)}" aria-label="Who tagged ${esc(t.label)}" title="Who tagged ${esc(t.label)}">${tagFaces(ids.map(cardOf), t.count)}</button>` : '';
+      return `<span class="tagitem" data-label="${esc(t.label)}">${chip}${wait}${who}</span>`;
+    }).join('');
+    const status = pub.state === 'loading' ? '<span class="ptag tag-skel" aria-hidden="true"></span><span class="ptag tag-skel" aria-hidden="true"></span>'
+      : pub.state === 'error' ? '<span class="muted small">Pubky tags didn\'t load</span>' : list.length ? '' : '<span class="muted small">No tags yet</span>';
+    const mineFailed = ht.canEdit && !g.own ? '<span class="muted small">Your tags didn\'t load</span>' : '';
+    const more = ht.open.has(g.scope) ? '' : `<button class="ptag ptag-more" data-htag-more="${g.scope}" hidden></button>`;
+    const add = edit ? `<button class="ptag ptag-add" data-htag-plus="${g.scope}" aria-label="Add a tag ${esc(lower1(g.name))}" title="Add a tag: public on your homeserver">${icon('plus')}</button>` : '';
+    return `<div class="tgroup" data-tag-scope="${g.scope}" role="group" aria-label="Tags ${esc(lower1(g.name))}"><span class="tgroup-name">${g.scope === 'link' ? svcBadge(String(ht.linkName).toLowerCase()) : ''}${esc(g.name)}</span>${items}${status}${mineFailed}${more}${add}</div>`;
   };
-  const bindScopedTags = (songRef, linkRef) => {
-    const add = $('#tagadd'); if (!add) return;
-    const refOf = (scope) => (scope === 'link' && linkRef ? linkRef : songRef);
-    const del = (ref, label) => api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label }).toString());
-    add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; const sc = $('#tagscope') ? $('#tagscope').value : 'song'; try { await api('PUT', '/tags', { ...refOf(sc), label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { const [sc, ...l] = b.dataset.tagDel.split(':'); try { await del(refOf(sc), l.join(':')); render(); } catch (er) { toast(er.message, 'error'); } });
-    $$('[data-tag-move]', main).forEach((b) => b.onclick = async () => { const [sc, ...l] = b.dataset.tagMove.split(':'); const label = l.join(':'); try { await api('PUT', '/tags', { ...refOf(sc === 'link' ? 'song' : 'link'), label }); await del(refOf(sc), label); toast(sc === 'link' ? `#${label} is on the song now` : `#${label} is on this link only now`); render(); } catch (er) { toast(er.message, 'error'); } });
-    $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+  // About two rows: the chips that would start a third wait behind "+N more" (measured, so it
+  // holds at any width; a row is chips whose tops are within a few pixels)
+  const foldHeroTags = (box) => {
+    const rows = (els) => { const tops = els.map((el) => el.getBoundingClientRect().top).sort((a, b) => a - b); return tops.filter((t, k) => k === 0 || t - tops[k - 1] > 8).length; };
+    $$('.tgroup', box).forEach((gr) => {
+      const more = $('[data-htag-more]', gr); if (!more) return;
+      const items = $$('.tagitem', gr); items.forEach((it) => { it.hidden = false; }); more.hidden = true;
+      const shown = () => [...items.filter((it) => !it.hidden), ...$$('.tgroup-name, [data-htag-more]:not([hidden]), [data-htag-plus]:not([hidden]), input[data-htag-add], .tag-hint, .tgroup > .muted.small', gr)].filter((el) => el.getClientRects().length);
+      for (let k = items.length - 1; k > 0 && rows(shown()) > 2; k--) { items[k].hidden = true; more.hidden = false; more.textContent = `+${items.length - k} more`; }
+    });
   };
+  // Suggestions while adding: the labels on this page, then your own from everywhere (read once)
+  const tagLabels = { mine: null };
+  const openHeroAdd = async (box, ht, b, focus = true) => {
+    const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
+    b.hidden = true;
+    b.insertAdjacentHTML('afterend', `<input class="taginput" data-htag-add="${g.scope}" list="htagsugg" maxlength="20" autocomplete="off" placeholder="Add a tag…" aria-label="Add a tag ${esc(lower1(g.name))}"><span class="muted small tag-hint">Public on your homeserver</span>`);
+    const inp = b.nextElementSibling; const hint = inp.nextElementSibling;
+    const close = () => { inp.remove(); hint.remove(); b.hidden = false; };
+    if (focus) inp.focus();
+    inp.onkeydown = async (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); b.focus(); return; }
+      if (e.key !== 'Enter' || e.isComposing || inp.disabled || !inp.value.trim()) return;
+      const label = inp.value.trim(); inp.disabled = true;
+      try { await api('PUT', '/tags', { ...g.ref, label }); toast(`Tagged ${label.toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); inp.disabled = false; inp.focus(); }
+    };
+    inp.onblur = () => setTimeout(() => { if (inp.isConnected && !inp.value.trim() && !inp.disabled && document.activeElement !== inp) close(); }, 150);
+    const here = ht.groups.flatMap((x) => [...(x.pub.tags || []).map(([l]) => l), ...(x.own || []).map((t) => t.label)]);
+    const fill = () => { const dl = $('#htagsugg', box); if (dl) dl.innerHTML = [...new Set([...here, ...(tagLabels.mine || [])])].slice(0, 200).map((l) => `<option value="${esc(l)}"></option>`).join(''); };
+    fill();
+    if (!tagLabels.mine) { try { tagLabels.mine = [...new Set(((await api('GET', '/tags')).tags || []).map((t) => t.label))]; fill(); } catch { /* this page's labels will do */ } }
+  };
+  const bindHeroTags = (box, ht) => {
+    const groupOf = (scope) => ht.groups.find((g) => g.scope === scope);
+    const del = (ref, label) => api('DELETE', `/tags?${qsOf({ ...ref, label })}`);
+    $$('[data-htag-open]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.htagOpen }));
+    $$('[data-htag-more]', box).forEach((b) => b.onclick = () => { ht.open.add(b.dataset.htagMore); const gr = b.closest('.tgroup'); const next = $('.tagitem[hidden] button', gr); $$('.tagitem', gr).forEach((it) => { it.hidden = false; }); b.remove(); if (next) next.focus(); });
+    $$('[data-htag-faces]', box).forEach((b) => b.onclick = () => { const g = groupOf(b.dataset.htagFaces); const label = b.dataset.label; const ids = (g.pub.faces || {})[label] || []; const cards = ids.map(cardOf); peopleMenu(b, label, cards, (new Map(g.pub.tags || []).get(label) || ids.length) - cards.length); });
+    $$('[data-htag-del]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagDel); if (!g || b.disabled) return; b.disabled = true; try { await del(g.ref, b.dataset.label); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
+    // A move writes the other URI first: when that fails, the tag stays where it was
+    $$('[data-htag-move]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagMove); const to = ht.groups.find((x) => x !== g); const label = b.dataset.label; if (!g || !to || b.disabled) return; b.disabled = true; try { await api('PUT', '/tags', { ...to.ref, label }); await del(g.ref, label); toast(`${label} is ${lower1(to.name)} now`); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
+    $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => openHeroAdd(box, ht, b));
+    const m = $('[data-htag-match]', box); if (m) m.onclick = () => setView('identify', { tracks: ht.match.tracks });
+  };
+  // The faces come with the people's names and pictures once their profiles are read
+  const fillHeroFaces = async (box, ht) => {
+    const ids = ht.groups.flatMap((g) => Object.values(g.pub.faces || {}).flat());
+    if (!ids.length || ids.every((x) => profileCache.has(x))) return;
+    await loadProfiles(ids);
+    if (!box.isConnected || box.dataset.for !== ht.key) return;
+    $$('[data-htag-faces]', box).forEach((b) => { const g = ht.groups.find((x) => x.scope === b.dataset.htagFaces); const fids = (g.pub.faces || {})[b.dataset.label] || []; b.innerHTML = tagFaces(fids.map(cardOf), new Map(g.pub.tags || []).get(b.dataset.label) || fids.length); });
+  };
+  let heroTagsRo = null;
+  const drawHeroTags = (ht) => {
+    const box = $('#htags'); if (!box || box.dataset.for !== ht.key) return;
+    // A half-typed tag stays when the public tags come in meanwhile
+    const drafts = $$('input[data-htag-add]', box).map((t) => ({ scope: t.dataset.htagAdd, value: t.value, focus: document.activeElement === t }));
+    box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
+    bindHeroTags(box, ht);
+    drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); const inp = $(`input[data-htag-add="${d.scope}"]`, box); if (inp) inp.value = d.value; } });
+    foldHeroTags(box);
+    // One observer, on the current box (a redrawn page has a new one)
+    if (!box.dataset.fold && window.ResizeObserver) { box.dataset.fold = '1'; if (heroTagsRo) heroTagsRo.disconnect(); let w = box.clientWidth; heroTagsRo = new ResizeObserver(() => { if (!box.isConnected) { heroTagsRo.disconnect(); return; } if (box.clientWidth !== w) { w = box.clientWidth; foldHeroTags(box); } }); heroTagsRo.observe(box); }
+    fillHeroFaces(box, ht);
+  };
+  let heroTagsGen = 0;
   // Ratings are 1–10: five stars in halves (7 shows three and a half).
   const starsText = (v) => (v ? `${Math.floor(v / 2) || ''}${v % 2 ? '½' : ''}` : '');
   const starFill = (v, n) => (!v ? 0 : v >= 2 * n ? 2 : v === 2 * n - 1 ? 1 : 0);
@@ -4212,7 +4298,16 @@
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
       ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
       ...(o.albumId && !onThis('album', o.albumId) ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
-      ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })()}`, icon: 'external', run: () => openWeb(v.url) })),
+      // Where it opens elsewhere, one row: "Open in…" lists every site in a second menu; one site is a direct row
+      ...(() => {
+        const name = (v) => SERVICE_NAMES[v.source] || (v.label || '').split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })();
+        const outs = (o.openOn || []).filter((v) => webUrl(v.url));
+        if (!outs.length) return [];
+        if (outs.length === 1) return [{ label: `Open in ${name(outs[0])}`, icon: 'external', run: () => openWeb(outs[0].url) }];
+        // (the second menu opens once this one's history entry is popped, so it gets its own Back step)
+        return [{ label: 'Open in…', icon: 'external', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Open in' }, ...outs.map((v) => ({ label: name(v), svc: srcSvc(v.source), run: () => openWeb(v.url) }))]); }, 0); } }];
+      })(),
+      ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
       ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
@@ -4453,7 +4548,7 @@
     // A Top result only when it really matches; a fuzzy hit is not promoted
     const top = [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
     const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
-    const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => `<button class="chip on" data-stag="${esc(t.label)}" title="Your tag">Your #${esc(t.label)} <span class="muted">${countOf(t.count, 'items')}</span></button>`).join('')}${(tg.others || []).map((l) => `<button class="chip" data-stag="${esc(l)}">#${esc(l)}</button>`).join('')}</div></section>`);
+    const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
     if (!top && anyHits && !run.q.includes('#')) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
     if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div></div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     const songCap = run.allSongs ? 50 : 6;
@@ -4510,7 +4605,7 @@
     if (sec.needs === 'pubky') return `<div class="card small">${esc(sec.note)} <button class="btn sm primary" data-home-signin>Sign in with Pubky Ring</button></div>`;
     if (sec.needs === 'location') return `<div class="card small">${esc(sec.note)} <span class="row" style="gap:6px;display:inline-flex"><input class="input" data-city placeholder="Your city" style="width:180px"><button class="btn sm primary" data-city-save>Save</button></span></div>`;
     if (sec.needs === 'contact') return `<p class="muted small">${esc(sec.note)}</p>`;
-    if (name === 'tags') return sec.tags.length ? `<div class="chips">${sec.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : `<p class="muted small">${esc(sec.note || '')}</p>`;
+    if (name === 'tags') return sec.tags.length ? `<div class="chips">${sec.tags.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-open="${esc(l)}"`, title: `${l}: ${c} ${c === 1 ? 'person' : 'people'}` })).join('')}</div>` : `<p class="muted small">${esc(sec.note || '')}</p>`;
     if (!sec.items.length) return `<p class="muted small">${esc(sec.note || 'Nothing yet.')}</p>`;
     const songs = sec.items.filter((it) => it.kind === 'track');
     const tiles = sec.items.filter((it) => it.kind === 'album' || it.kind === 'artist' || it.kind === 'podcast' || it.kind === 'playlist');
@@ -4559,7 +4654,7 @@
     $$('[data-ditem]', main).forEach((row) => row.onclick = (e) => { if (e.target.closest('[data-dplay],[data-dmore]')) return; { const it = items[Number(row.dataset.ditem)]; setView('discover-item', { uri: it.uri, kind: it.kind }); } });
     $$('[data-dplay]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); discoverPlay(items[Number(b.dataset.dplay)], null, b); });
     $$('[data-view="sources"]', main).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('sources'); });
-    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
+    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'in ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
@@ -4960,9 +5055,10 @@
           if (state.view !== 'tag') return;
           sc.items = sc.items || []; sc.tags = sc.tags || [];
           const co = sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24);
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => `<button class="chip tag-chip" data-tag-add="${esc(l)}" title="Narrow to both tags">+ #${esc(l)} <span class="muted">${c}</span></button>`).join('')}${labels.length > 1 ? labels.map((l) => `<button class="chip tag-chip on" data-tag-rm="${esc(l)}" title="Remove this tag">#${esc(l)} ×</button>`).join('') : ''}</div>` : '';
+          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}${labels.length > 1 ? labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('') : ''}</div>` : '';
           $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
           $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
+          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
           const el = $('#tagbody'); el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
           break;
         }
@@ -5141,6 +5237,15 @@
             });
           };
           draw();
+          // From an album page ("Match this album to tag it"): to its folder, when it waits here
+          // (once: a later redraw of the list stays where the owner is)
+          const want = state.viewArg && state.viewArg.tracks;
+          if (want && want.length) {
+            state.viewArg = { ...state.viewArg, tracks: null };
+            const row = want.map((t) => $(`.idrow[data-track="${Number(t)}"]`, main)).find(Boolean); const sec = row && row.closest('.idalbum');
+            if (sec) { sec.scrollIntoView({ block: 'start' }); const h = $('h3', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
+            else toast(next != null ? 'This album isn\'t among the first folders here: Show more at the end lists the rest.' : 'This album has no matches waiting to be confirmed. Identify (Settings) looks for it again.');
+          }
           break;
         }
         case 'genres': {
@@ -5149,7 +5254,7 @@
           const [genres, mine, ns] = await Promise.all([api('GET', '/library/genres'), api('GET', '/tags').then((r) => r.tags || []).catch(() => []), api('GET', '/node/settings').catch(() => ({}))]);
           if (state.view !== 'genres') return;
           const byLabel = new Map(); for (const t of mine) byLabel.set(t.label, (byLabel.get(t.label) || 0) + 1);
-          const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => `<button class="chip tag-chip" data-mytag="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label></section>`;
+          const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => tagChip(l, { own: true, count: n, attrs: `data-mytag="${esc(l)}"`, title: `Your tag · ${countOf(n, 'items')}` })).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label></section>`;
           main.innerHTML = pageHead('Genres', genres.length) + tagsSec + `<section class="section"><div class="section-head"><h3>From your files</h3><span class="muted small">the genres in your files' metadata</span></div>` + (genres.length ? `<div class="cards">${genres.map((g) => `<button class="card genre" data-genre="${g.id}" style="text-align:left;cursor:pointer;background:linear-gradient(135deg, hsl(${hue(g.name)} 32% 22%), var(--surface))"><h3 style="margin-bottom:4px">${esc(g.name)}</h3><div class="muted small">${g.albums} album${g.albums === 1 ? '' : 's'} · ${g.tracks} track${g.tracks === 1 ? '' : 's'}</div></button>`).join('')}</div>` : emptyState('genre', 'No genres yet', 'Genres come from the files\' tags; tag your music and rescan.'));
           main.insertAdjacentHTML('beforeend', '</section>');
           $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
@@ -5922,18 +6027,38 @@
           // What comments are about: the song's own link, else this item's (a web link only)
           const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
-          // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3)
-          const songRef = target.track_id != null || target.album_id != null || target.artist_id != null ? target : pg.song_uri ? { uri: pg.song_uri } : target;
-          const linkRef = pg.link && pg.link !== songRef.uri ? { uri: pg.link } : null;
+          // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3),
+          // each on its own URI: without a MusicBrainz identity there is only the link, never a guess
+          const localRef = target.track_id != null || target.album_id != null || target.artist_id != null;
+          const songRef = localRef ? target : pg.song_uri ? { uri: pg.song_uri } : /^https:\/\/musicbrainz\.org\//.test(target.uri || '') ? target : null;
+          const linkRef = pg.link && pg.link !== (songRef && songRef.uri) ? { uri: pg.link } : !songRef && target.uri ? target : null;
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
-          const [myTags, linkTags, myReview] = isListener() ? [null, [], undefined] : await Promise.all([
-            // An item with no identity yet (needs_match): the "match it first" message, no editor
-            api('GET', `/tags?${refQs(songRef)}`).then((r) => (r.needs_match ? null : r.tags)).catch(() => null),
-            linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
-            api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
+          // An item with no identity yet (needs_match) takes no tags: the hero says so and leads to a match
+          const ownTags = (ref) => (!ref || isListener() ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
+          const [songOwn, linkOwn, myReview] = await Promise.all([
+            ownTags(songRef), ownTags(linkRef),
+            isListener() ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
+          // The hero's tag groups. Public tags and people come from Pubky for each group's own URI: for a
+          // library item the one the node keeps its tags on (GET /tags says; a listener's page asks
+          // Pubky), never the page's guess. The page's on_pubky stands in only when it is that URI.
+          const shownSong = !!songRef && !songOwn.needsMatch;
+          const songUri = localRef ? songOwn.uri : songRef && songRef.uri;
+          const pubFrom = (uri) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : { state: 'loading', tags: [], faces: {} });
+          const linkName = pg.source || 'source';
+          const tagGroups = [
+            ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri) }] : []),
+            ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri) }] : []),
+          ];
+          const htKey = `${kind}:${id}:${++heroTagsGen}`;
+          const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
+          // No identity: say so; the owner's album leads to its folder in the matches to confirm
+          const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.track_id).filter((x) => x != null) } : null; };
+          if (localRef && songOwn.needsMatch) unmatched();
+          else if (!songRef && linkRef) ht.note = `Tags here go on this ${linkName} link only: no MusicBrainz ${kind} is known for it here.`;
+          state.heroTagsOpen = { page: `${kind}:${id}`, set: ht.open };
           const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
           const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Tracks', home: 'Home', playlists: 'Playlists' }[pg.section] || 'Home';
           const pf = pg.plays_from;
@@ -5960,17 +6085,24 @@
           const alsoAll = rankSvc(pg.also_on.map((v, k) => ({ v, k })).filter(({ v }) => !(rk && rk.off.has(alsoSvc(v)))), ({ v }) => alsoSvc(v));
           const alsoFirst = rk ? alsoAll.filter(({ v }) => rk.healthy.has(alsoSvc(v))) : alsoAll;
           const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
-          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${webUrl(v.url) ? `<a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
+          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${webUrl(v.url) ? `<a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open in ${esc(instName(v))} (new tab)" aria-label="Open in ${esc(instName(v))} (new tab)">${icon('external')}</a>` : ''}</span>`;
           // Artists and albums (TASK-pinakes-social-ux F6): "Also on" is a row of service icons next to
           // Play/Shuffle, the working services first. One opens the service's page here when the node
           // plays from it (on and working: Play is there), else the service's site (every link has a
           // page here, so `page` alone says nothing). Songs keep the source line with its play buttons.
           const iconAlso = kind === 'artist' || kind === 'album';
           const playsHereFrom = (v) => !!v.page && (rk ? rk.healthy.has(alsoSvc(v)) : alsoSvc(v) === 'library');
-          const alsoIcon = ({ v, k }) => { const name = instName(v); return playsHereFrom(v) || (v.page && !webUrl(v.url)) ? `<button type="button" class="icon-btn also-ico" data-also="${k}" title="${esc(name)}" aria-label="Open on ${esc(name)}">${svcBadge(alsoSvc(v))}</button>` : webUrl(v.url) ? `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="${esc(name)}" aria-label="Open on ${esc(name)} (opens a new tab)">${svcBadge(alsoSvc(v))}</a>` : ''; };
-          const alsoIcons = iconAlso && alsoAll.length ? `<span class="also-icons" role="group" aria-labelledby="alsolabel"><span class="also-label muted small" id="alsolabel">Also on</span>${alsoAll.map(alsoIcon).join('')}</span>` : '';
+          // Two groups (owner, 2026-11-04): "Also on" switches to that service's page here (the node
+          // plays from it, or only its page exists); "Open in" leaves Odeion for the service's site in
+          // a new tab. A service that does both sits in Also on; its site is in ⋯ › Open in…
+          const switchHere = ({ v }) => playsHereFrom(v) || (!!v.page && !webUrl(v.url));
+          const alsoHere = alsoAll.filter(switchHere); const openOut = alsoAll.filter((x) => !switchHere(x) && webUrl(x.v.url));
+          const alsoIcon = ({ v, k }) => { const name = instName(v); return `<button type="button" class="icon-btn also-ico" data-also="${k}" title="Switch to ${esc(name)}" aria-label="Switch to ${esc(name)}">${svcBadge(alsoSvc(v))}</button>`; };
+          const openIcon = ({ v }) => { const name = instName(v); return `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open in ${esc(name)} (new tab)" aria-label="Open in ${esc(name)} (new tab)">${svcBadge(alsoSvc(v))}</a>`; };
+          const alsoIcons = !iconAlso ? '' : (alsoHere.length ? `<span class="also-icons" role="group" aria-labelledby="alsolabel"><span class="also-label muted small" id="alsolabel">Also on</span>${alsoHere.map(alsoIcon).join('')}</span>` : '')
+            + (openOut.length ? `<span class="also-icons open-in" role="group" aria-labelledby="openinlabel"><span class="also-label muted small" id="openinlabel">Open in ${icon('external')}</span>${openOut.map(openIcon).join('')}</span>` : '');
           const [lineFirst, lineMore] = iconAlso ? [[], []] : [alsoFirst, alsoMore];
-          const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
+          const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open in ${esc(ownName)} (new tab)" aria-label="Open in ${esc(ownName)} (new tab)">${icon('external')}</a>` : ''}</span>`;
           const alsoLine = (isGlobal && !lineFirst.length && !lineMore.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && lineFirst.length ? '<span class="muted">· also</span>' : ''}${lineFirst.map(alsoItem).join('')}${lineMore.length ? `${!isGlobal && !lineFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${lineMore.length} more source${lineMore.length === 1 ? '' : 's'}">${lineFirst.length || !isGlobal ? `${lineMore.length} more` : `${lineMore.length} services`}</button><span class="srcrest" hidden>${lineMore.map(alsoItem).join('')}</span>` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${webUrl(v.url) ? ` <a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
@@ -5995,7 +6127,7 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
+            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
             + (aboutTop ? aboutHtml(pg) : '')
@@ -6004,7 +6136,7 @@
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
-            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip tag-chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + (myReview !== undefined ? `<section class="section" id="ireview">${reviewRow(myReview)}</section>` : '')
             + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? '' : aboutHtml(pg));
@@ -6071,7 +6203,19 @@
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
-          if (myTags) bindScopedTags(songRef, linkRef);
+          drawHeroTags(ht);
+          for (const g of tagGroups) {
+            if (g.pub.state !== 'loading') continue;
+            api('GET', `/discover/uri?${refQs(g.ref)}`).then((r) => ({ state: 'ok', tags: r.tags || [], faces: r.faces || {} }))
+              // No contact for Pubky (412) or no identity (422): nothing to show, not a failure
+              .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {}, unknown: e.status === 422 }))
+              .then((p) => {
+                g.pub = p;
+                // A library item with no identity, seen without own tags (a listener, or GET /tags failed)
+                if (p.unknown && g.scope === 'song' && localRef && !g.own) { ht.groups = ht.groups.filter((x) => x !== g); unmatched(); }
+                drawHeroTags(ht);
+              });
+          }
           if (myReview !== undefined) bindReviewRow(target, myReview);
           $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources'));
           const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
@@ -6089,16 +6233,14 @@
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
-          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri, extra });
+          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
           const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
-          $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
-          if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
           // Not while someone types a comment: the render would take the box away under them
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
           // About from open sources comes in the background: ask for the page again and redraw only

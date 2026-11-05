@@ -611,12 +611,35 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .notes-edit textarea { resize: vertical; font: inherit; }
 
 /* ---- tags ---- */
-.tagrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
-.chip.tag { padding: 0; overflow: hidden; }
-.chip.tag .chiplink { background: none; border: 0; color: var(--fg-2); padding: 5px 4px 5px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-.chip.tag .chiplink:hover { color: var(--accent-strong); }
-.chip.tag .chipx { background: none; border: 0; color: var(--muted); padding: 5px 9px 5px 4px; cursor: pointer; font: inherit; font-size: 13px; line-height: 1; }
-.chip.tag .chipx:hover { color: var(--bad); }
+/* Tags as pubky.app draws them (its Tag and TaggedItem): the label's own colour at 0.3, yours with a
+   border at 0.5, a glow inside on hover; the people who used it beside it. --tag-bg and --tag-line
+   come with each chip (tagChip in app.js). */
+.ptag { display: inline-flex; align-items: center; gap: 6px; height: 32px; max-width: 100%; min-width: 0; padding: 0 12px; border-radius: 6px; border: 1px solid transparent; background: var(--tag-bg, var(--surface-2)); color: var(--fg); font: inherit; font-size: 14px; font-weight: 700; line-height: 1; cursor: pointer; transition: box-shadow 0.2s; }
+.ptag:not(.own):not(.tag-skel):hover { box-shadow: inset 0 0 10px 2px var(--tag-line); }
+.ptag.own { border-color: var(--tag-line); }
+.ptag:focus-visible, .ptag .chiplink:focus-visible, .ptag .chipx:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ptag-l { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ptag-n { flex: none; font-weight: 500; opacity: 0.5; }
+.ptag .chiplink { gap: 6px; height: 100%; min-width: 0; padding: 0; border-radius: 0; color: inherit; font-weight: inherit; }
+.ptag .chiplink:hover { background: none; color: inherit; }
+.ptag .chipx { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 100%; background: none; border: 0; padding: 0; color: inherit; opacity: 0.7; cursor: pointer; font: inherit; font-size: 14px; }
+.ptag .chipx:hover { opacity: 1; }
+.ptag .chipx .ic { width: 13px; height: 13px; }
+.ptag-add { width: 32px; padding: 0; justify-content: center; background: transparent; border: 1px dashed var(--line-strong); color: var(--muted); }
+.ptag-add .ic { width: 16px; height: 16px; }
+.ptag-more { background: var(--surface-2); color: var(--fg-2); font-weight: 500; }
+.tag-skel { width: 72px; cursor: default; background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+.tagitem { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; }
+.tagfaces { gap: 0; padding: 0 2px; }
+.tagfaces .face { width: 28px; height: 28px; }
+.tagfaces .face + .face, .tagfaces .face-more { margin-left: -8px; }
+.face-more { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--muted); background: var(--bg); color: var(--fg); font-size: 11px; font-weight: 500; position: relative; z-index: 1; }
+/* The item page's tags in its top card: one labelled group per identity (the item, the source link) */
+.htags { display: grid; gap: 8px; margin-top: 12px; min-width: 0; }
+.tgroup { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.tgroup-name { display: inline-flex; align-items: center; gap: 6px; flex: none; min-height: 32px; margin-right: 2px; font-size: 12px; color: var(--muted); }
+.tgroup > .muted.small { min-height: 32px; display: inline-flex; align-items: center; }
+.hnote { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0; }
 .taginput { background: var(--surface-2); border: 1px solid var(--line); color: var(--fg); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12px; width: 130px; }
 .taginput:focus { border-color: var(--accent); outline: none; }
 .fmt { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.02em; background: var(--surface-3); color: var(--fg-2); vertical-align: 1px; }
@@ -803,6 +826,9 @@ html[data-shell="phone"] .idbar { max-width: none; }
 /* The icons say what they are (UX sweep 11-01, A11) */
 .also-icons .also-label { margin-right: 2px; }
 .also-icons .src-badge.ico { width: 24px; height: 24px; margin: 0; box-shadow: none; }
+/* "Open in": the group that leaves Odeion, marked by the arrow after its label */
+.also-icons.open-in { margin-left: 10px; }
+.also-icons.open-in .also-label .ic { width: 12px; height: 12px; vertical-align: -1px; margin-left: 2px; }
 .btn.icon-only { padding-left: 10px; padding-right: 10px; }
 .idfile { min-width: 0; }
 .eq-row .eq-kind { text-transform: capitalize; }
@@ -1141,13 +1167,22 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .set-fold[open] > summary::after { transform: rotate(225deg); }
 .set-fold:not([open]) > .set-rows { display: none; }
 /* Tag chips: 40 px to touch on phones and touch screens (UX sweep 2026-11-01 S4) */
-html[data-shell="phone"] :is(.tag-chip, .chip.tag) { min-height: 40px; }
-html[data-shell="phone"] .chip.tag :is(.chiplink, .chipx) { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+html[data-shell="phone"] :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
+html[data-shell="phone"] .ptag-add { width: 40px; }
+/* × and move: a finger-sized target each, the chip a little wider for them */
+html[data-shell="phone"] .ptag .chipx { min-width: 40px; }
+html[data-shell="phone"] span.ptag { padding-right: 0; gap: 0; }
+html[data-shell="phone"] span.ptag .chiplink { padding-right: 4px; }
+html[data-shell="phone"] .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; }
 @media (pointer: coarse) {
-  :is(.tag-chip, .chip.tag) { min-height: 40px; }
-  .chip.tag :is(.chiplink, .chipx) { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+  :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
+  .ptag-add { width: 40px; }
+  .ptag .chipx { min-width: 40px; }
+  span.ptag { padding-right: 0; gap: 0; }
+  span.ptag .chiplink { padding-right: 4px; }
+  .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; }
 }
-.tag-hint { margin: 8px 0 0; }
+.tag-hint { margin: 0; }
 .switch { appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; flex: none; margin: 0 4px; border-radius: 999px; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: background 0.15s; }
 .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg-2); transition: transform 0.15s, background 0.15s; }
 .switch:checked { background: var(--accent); box-shadow: none; }
@@ -1194,9 +1229,6 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .set-warn { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; color: var(--warn); }
 /* Item pages: one instance per page, the same recording elsewhere one click away */
 .opened-as { margin: 6px 0 0; }
-.chip.tag.tag-link { border-style: dashed; padding-left: 6px; }
-.chip.tag .chipx .ic { width: 12px; height: 12px; vertical-align: -1px; }
-.tagrow select.input { width: auto; padding: 4px 8px; font-size: 12px; height: auto; }
 /* Shuffle and repeat beside the transport: quieter than play, the accent when repeat is on */
 .transport .mode-btn { color: var(--muted); width: 40px; height: 40px; }
 .transport .mode-btn:hover { color: var(--fg); }
@@ -1211,11 +1243,8 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 /* People on tags: faces of who tagged, stacked */
 .faces { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; padding: 2px 4px; cursor: pointer; color: var(--muted); font: inherit; border-radius: 999px; }
 .faces:hover { background: var(--surface-2); color: var(--fg); }
-.facestack { display: inline-flex; }
-.facestack .face + .face { margin-left: -7px; }
 .face { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; border: 2px solid var(--bg); flex: none; }
 .face.mono { display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; }
-.faces-line { gap: 8px; }
 .hero.person .blurb { max-width: 60ch; }
 /* The shell in two layouts (docs/ux/responsive.md; owner, 2026-11-04). html[data-shell] comes from
    the window width and Settings › Appearance › Layout: phone under 600 px (tabs, a mini player
@@ -1465,7 +1494,7 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="favourites"], body.listener .nav-item[data-view="playlists"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
 body.listener .bnav[data-bnav="home"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
-body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark, body.listener #itags,
+body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark,
 body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
 /* Library › Add music */
 .addm { padding: 18px 20px; }

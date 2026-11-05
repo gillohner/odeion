@@ -390,6 +390,8 @@ jobs:
           node-version: 22
       - name: design lint (classed buttons, no icon glyphs, every class styled)
         run: node tools/design-lint.js
+      - name: tag colours are pubky.app's (its generateRandomColor, ported)
+        run: node tools/tag-colour-check.js
       - name: installable web app (manifest, real icons, page links, routes, worker promises)
         run: node tools/pwa-check.js
       - run: cargo build -p pm-node
@@ -617,6 +619,9 @@ jobs:
       - name: one volume, one source (the bar's slider or the volume popover, never both; every slider reads the zone's level; 1345 to 390 px)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-volume.js ci-token http://127.0.0.1:7788
+      - name: item pages tell switching from leaving (Also on, Open in, the ⋯ menu's Open in…; 375, 820 and 1440 px)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-also-open.js ci-token http://127.0.0.1:7788
       - name: UX sweep follow-ups (a slow TIDAL collection, 40 px touch targets, hero rows, back or trail, tablet Now playing, file names, short notes; 390 to 1180 px)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-sweep-followups.js ci-token http://127.0.0.1:7788
@@ -629,6 +634,9 @@ jobs:
       - name: People on phones and tablets (invite cards, paste and scan a key, folds, tag chips to touch; 390 and 768)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-people.js ci-token http://127.0.0.1:7788
+      - name: tags in the top card (two scopes, pubky.app chips and taggers, overflow, unmatched; 1280, 820 and 390)
+        timeout-minutes: 8
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-tags-hero.js ci-token http://127.0.0.1:7788
       - name: collections with web links and posts show their cards in order (desktop and phone)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-collection-cards.js ci-token http://127.0.0.1:7788
