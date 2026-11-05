@@ -35,6 +35,8 @@ const block = /\n  const TAG_COLOURS = [\s\S]*?\n  const tagRgba = [^\n]*\n/.exe
 // Without them (before this change) the page checks still run, and fail on the page itself
 const { tagColour, tagRgba } = block ? new Function(`${block[0]}\nreturn { tagColour, tagRgba };`)() : { tagColour: () => null, tagRgba: () => 'no tagColour in app.js' };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A chip's colour as drawn: asked again while a redraw has it detached for a moment (computed styles are empty then)
+const bgOf = async (loc) => { for (let i = 0; i < 30; i++) { const v = await loc.evaluate((e) => (e.isConnected ? getComputedStyle(e).backgroundColor : '')).catch(() => ''); if (v) return v; await sleep(150); } return ''; };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGO4VmEDRwzEcQCKMhih3mIObwAAAABJRU5ErkJggg==', 'base64'); // 4×4, orange
 const MIME = { '.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 
@@ -125,7 +127,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       const fc = chip('song', 'frenchcore').locator('.ptag');
       assert.equal(await fc.locator('.ptag-l').textContent(), 'frenchcore');
       assert.equal(await fc.locator('.ptag-n').textContent(), '7');
-      assert.equal(await fc.evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchcore'), 0.3));
+      assert.equal(await bgOf(fc), tagRgba(tagColour('frenchcore'), 0.3));
       const mine = chip('song', 'shared').locator('.ptag');
       assert.ok(await mine.evaluate((e) => e.classList.contains('own')), 'your tag is marked');
       assert.equal(await mine.evaluate((e) => getComputedStyle(e).borderTopColor), tagRgba(tagColour('shared'), 0.5));
@@ -381,7 +383,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       await page.route(/\/v1\/home\/tag\?/, (r) => r.fulfill({ json: { items: [], tags: [['frenchcore', 9], ['hardcore', 4], ['gabber', 2]] } }));
       await page.goto(BASE + '/tag/frenchcore'); await page.locator('#tagcotags .ptag').first().waitFor();
       const co = page.locator('#tagcotags .ptag').first();
-      assert.equal(await co.evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('hardcore'), 0.3));
+      assert.equal(await bgOf(co), tagRgba(tagColour('hardcore'), 0.3));
       assert.doesNotMatch(await co.innerText(), /#/);
       await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagcotags [data-tag-solo]').first().waitFor();
       assert.equal(await page.locator('#tagcotags [data-tag-rm]').count(), 2, 'each chosen tag has ×');
@@ -390,16 +392,16 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       await page.goto(BASE + '/tag/frenchcore,hardcore'); await page.locator('#tagcotags [data-tag-solo="hardcore"]').click(); await page.waitForURL(/\/tag\/hardcore$/);
       await page.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [{ label: 'frenchcore', count: 3 }], others: ['frenchtek'] } }));
       await page.goto(BASE + '/search?q=frenc'); await page.locator('#stags .ptag').first().waitFor({ timeout: 20000 });
-      assert.equal(await page.locator('#stags .ptag.own').first().evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchcore'), 0.3));
-      assert.equal(await page.locator('#stags .ptag:not(.own)').first().evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchtek'), 0.3));
+      assert.equal(await bgOf(page.locator('#stags .ptag.own').first()), tagRgba(tagColour('frenchcore'), 0.3));
+      assert.equal(await bgOf(page.locator('#stags .ptag:not(.own)').first()), tagRgba(tagColour('frenchtek'), 0.3));
       await page.route(/\/v1\/me\/prefs$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { saved_on: 'node', home_layout: { value: { order: ['tags'], hidden: [] }, applies: 'yours' } } }) : r.fallback()));
       await page.route(/\/v1\/home\/layout$/, (r) => r.fulfill({ json: { order: ['tags'], hidden: [] } }));
       await page.route(/\/v1\/home\/tags(\?.*)?$/, (r) => r.fulfill({ json: { section: 'tags', items: [], tags: [['gabber', 12]] } }));
       await page.goto(BASE + '/'); await page.locator('#main .ptag[data-tag-open="gabber"]').waitFor({ timeout: 20000 });
-      assert.equal(await page.locator('#main .ptag[data-tag-open="gabber"]').evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('gabber'), 0.3));
+      assert.equal(await bgOf(page.locator('#main .ptag[data-tag-open="gabber"]')), tagRgba(tagColour('gabber'), 0.3));
       own = { [CANON]: [{ label: 'frenchcore', synced: true }] };
       await page.goto(BASE + '/genres'); await page.locator('[data-mytag]').first().waitFor();
-      assert.equal(await page.locator('[data-mytag]').first().evaluate((e) => getComputedStyle(e).backgroundColor), tagRgba(tagColour('frenchcore'), 0.3));
+      assert.equal(await bgOf(page.locator('[data-mytag]').first()), tagRgba(tagColour('frenchcore'), 0.3));
       if (width < 1100) assert.ok((await page.locator('[data-mytag]').first().boundingBox()).height >= 40);
 
       assert.deepEqual(errors, []);
