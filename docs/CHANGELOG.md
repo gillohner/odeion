@@ -7,7 +7,7 @@ Newest first. Dates are when the change landed on `main`.
 ### 2026-11-05
 
 - **The node's address record on your homeserver no longer holds the node's API token.**
-  - The record keeps the node's name, addresses and version. The desktop and Android app finds the node through it as before, then asks you to approve a sign-in to the node itself in Pubky Ring, so each device has a sign-in of its own. Connecting a new device therefore takes two approvals in Ring.
+  - The record keeps the node's name, addresses and version. The desktop and Android app finds the node through it as before, then asks you to approve a sign-in to the node itself in Pubky Ring, so each device has a sign-in of its own. Connecting a new device therefore takes two approvals in Ring. A device's sign-in is kept apart from browser sessions: logging out of the page inside the app, or many browser log-ins, leave it. Make a new token ends it, and the app then signs in again by itself with one approval. A node that refuses the app's sign-in for any other reason gets the same: one approval, not Forget and two.
   - On its first start after the update, a node that had written its token there replaces that token. Apps and browsers then sign in to the node again, once.
   - A token you set in the node's config (`[api] token`, `PM_TOKEN`) can't be replaced by the node: Health asks you to change it.
 

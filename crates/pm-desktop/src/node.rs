@@ -33,15 +33,22 @@ pub enum ProbeError {
     Unreachable(String),
     /// The node answered and wants this device signed in first (no token yet).
     NeedsSignIn,
+    /// The node answered and refused the device's sign-in: it ended there (Make a new token, the
+    /// node signed in as someone else). The app signs in again.
+    Refused,
     /// The node answered and said no, or something else went wrong.
     Other(String),
 }
+
+/// What [`ProbeError::Refused`] reads as; the connect page's reconnect doesn't wait on it.
+pub const REFUSED: &str = "The node refused the token";
 
 impl From<ProbeError> for String {
     fn from(e: ProbeError) -> String {
         match e {
             ProbeError::Unreachable(m) | ProbeError::Other(m) => m,
             ProbeError::NeedsSignIn => "Sign in to the node with Pubky Ring".into(),
+            ProbeError::Refused => REFUSED.into(),
         }
     }
 }
@@ -64,7 +71,7 @@ pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
     match resp.status().as_u16() {
         200..=299 => Ok(resp.json::<Info>().await.unwrap_or_default()),
         401 | 403 if s.token.is_empty() => Err(ProbeError::NeedsSignIn),
-        401 | 403 => Err(ProbeError::Other("The node refused the token".into())),
+        401 | 403 => Err(ProbeError::Refused),
         code => Err(ProbeError::Other(format!("The node answered {code}"))),
     }
 }
@@ -88,12 +95,13 @@ struct SignInStatus {
 }
 
 /// Starts a Pubky Ring sign-in at the node: this device gets a credential of its own from the
-/// node (ADR 0008), never one stored on the homeserver.
+/// node (ADR 0008), never one stored on the homeserver. As a device's, it is kept apart from the
+/// browser sessions of the page: the page's Log out and the browsers' cap leave it.
 pub async fn start_sign_in(s: &Settings) -> Result<SignInStarted, String> {
     let resp = client()
         .map_err(|e| e.to_string())?
         .post(api(s, "auth/pubky/start"))
-        .json(&serde_json::json!({}))
+        .json(&serde_json::json!({"device": true}))
         .send()
         .await
         .map_err(|e| format!("Can't reach the node: {e}"))?;

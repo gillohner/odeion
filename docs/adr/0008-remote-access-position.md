@@ -21,6 +21,9 @@ live transport or relay exists today (handoff §11, "relay design; who operates 
     node itself with Pubky Ring (`/v1/auth/pubky/start` and `/poll`, the same sign-in the web page
     uses). The first connect of a new device therefore takes two approvals in Ring: one to read the
     record, one to sign in to the node.
+  - That credential is a device sign-in, kept apart from browser sessions: a browser's Log out and
+    the browsers' cap leave it; Make a new token and a change of the node's identity end it, and the
+    app then signs in again by itself (one approval in Ring).
   - Revised 2026-11-05: earlier versions also wrote the node's API token into the record. A node
     that finds such a record rewrites it without the token and replaces a token it made itself. A
     token set in the config can't be replaced by the node, so Health asks the owner to change it.

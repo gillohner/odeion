@@ -276,13 +276,26 @@ fn saved(state: State<'_, AppState>) -> Option<Saved> {
     state.current().map(|s| Saved { node_url: s.node_url })
 }
 
-/// Reconnect to the remembered node: check it answers, then show it.
+/// Reconnect to the remembered node: check it answers, then show it. A node that refuses this
+/// device's sign-in (it ended there: Make a new token, or the node signed in as someone else) gets
+/// a new one, with one approval in Pubky Ring, instead of a dead end.
 #[tauri::command]
 async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let s = state.current().ok_or("No node yet")?;
-    let (s, info) = reach(&app, &state, s).await?;
-    connected(&app, &state, s, &info)?;
-    Ok(info.name)
+    let again = s.clone();
+    match reach(&app, &state, s).await {
+        Ok((s, info)) => {
+            connected(&app, &state, s, &info)?;
+            Ok(info.name)
+        }
+        Err(e) if e == node::REFUSED => {
+            let mut s = again;
+            s.token.clear();
+            s.via.clear();
+            sign_in_and_connect(&app, &state, s).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Reach the node: at its address; else through the iroh tunnel when its record carries a key
@@ -487,22 +500,28 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
     let mut s = Settings::new(&record.api_url, "");
     s.iroh = record.iroh;
+    sign_in_and_connect(&app, &state, s).await
+}
+
+/// Reach the node at `s` (its address, else through the iroh tunnel) without a token, sign this
+/// device in with Pubky Ring, and show it. A node that asks for no token (on this computer) is
+/// shown at once.
+async fn sign_in_and_connect(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<String, String> {
     match node::probe(&s).await {
-        // A node that asks for no token (on this computer)
         Ok(info) => {
             state.tunnel.lock().await.take();
-            connected(&app, &state, s, &info)?;
+            connected(app, state, s, &info)?;
             return Ok(info.name);
         }
         Err(node::ProbeError::NeedsSignIn) => {
             state.tunnel.lock().await.take();
         }
-        Err(node::ProbeError::Unreachable(msg)) => s = tunnel_for_sign_in(&state, s, msg).await?,
+        Err(node::ProbeError::Unreachable(msg)) => s = tunnel_for_sign_in(state, s, msg).await?,
         Err(e) => return Err(e.into()),
     }
-    s.token = sign_in_at_node(&app, &s).await?;
+    s.token = sign_in_at_node(app, &s).await?;
     let info = node::probe(&s).await?;
-    connected(&app, &state, s, &info)?;
+    connected(app, state, s, &info)?;
     Ok(info.name)
 }
 

@@ -165,9 +165,13 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Target>>,
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
-    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
+    /// a device of the owner's).
     pub controller_logins: tokio::sync::Mutex<
-        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
+        std::collections::HashMap<
+            String,
+            (pm_pubky::homeserver::LoginFlow, std::time::Instant, String, bool),
+        >,
     >,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.

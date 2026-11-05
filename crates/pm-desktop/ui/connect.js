@@ -147,6 +147,9 @@
   $('other').onclick = async () => { attempt++; await invoke('forget'); connectView(); };
 
   listen('ring-url', (ev) => {
+    // Also while reconnecting: a node that refused this device's sign-in asks for a new one
+    show('saved', false);
+    show('connect');
     ringUrl = ev.payload.url;
     $('qr').innerHTML = ev.payload.qr_svg;
     $('ring').textContent = 'Waiting for Pubky Ring…';
