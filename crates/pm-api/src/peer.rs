@@ -70,16 +70,114 @@ pub async fn lan_only(mut req: Request, next: Next) -> Response {
 }
 
 /// Layer for the whole API: a node without an API token answers only requests that reached its
-/// listener directly, never through iroh or a tunnel (it would make whoever is there the owner).
+/// listener directly, never through iroh or a tunnel (it would make whoever is there the owner),
+/// and only when they are addressed to it by a loopback name from its own pages
+/// ([`loopback_addressed`]): another website must not reach it through the visitor's browser.
 pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request, next: Next) -> Response {
-    if s.token().is_none() && !direct(&req) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "this node has no API token, so it answers only directly; set [api] token to reach it remotely",
-        )
-            .into_response();
+    if s.token().is_none() {
+        if !direct(&req) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                "this node has no API token, so it answers only directly; set [api] token to reach it remotely",
+            )
+                .into_response();
+        }
+        if !loopback_addressed(req.headers(), req.uri()) {
+            return (
+                StatusCode::FORBIDDEN,
+                "this node has no API token, so it answers only at 127.0.0.1 or localhost from its own pages; \
+                 set [api] token to reach it by another name",
+            )
+                .into_response();
+        }
     }
     next.run(req).await
+}
+
+/// The host a request names (`Host`, else the URI's authority, as HTTP/2 sends it), lowercased.
+fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Option<String> {
+    h.get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| uri.authority().map(|a| a.as_str().to_string()))
+        .map(|v| v.to_ascii_lowercase())
+}
+
+/// The name part of `host[:port]` (`[::1]:7788` → `::1`).
+fn host_name(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    }
+}
+
+/// A name that only ever means this machine: `localhost` (and `*.localhost`), 127.0.0.0/8, `::1`.
+/// A website can't make a visitor's browser send one of these for its own pages.
+fn is_loopback_name(name: &str) -> bool {
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether a request to a node without a token comes from the node's own pages, or from a
+/// program that isn't a browser (DNS rebinding, security audit 2026-11-05):
+/// - the host it names is a loopback name: a page on another site that rebinds its own name to
+///   127.0.0.1 still sends that name, and is refused;
+/// - an `Origin`, when the browser sends one, is that very host (scheme and port included): a
+///   page elsewhere, another local web app on another port, or a sandboxed `null` page is refused.
+///
+/// A request naming no host at all (not a browser: they always do) passes on the source checks.
+pub fn loopback_addressed(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    let Some(host) = named_host(h, uri) else {
+        return true;
+    };
+    if !is_loopback_name(host_name(&host)) {
+        return false;
+    }
+    same_origin(h, &host)
+}
+
+/// Whether an `Origin`, when there is one, is `http(s)://<host>` for the host the request names.
+/// Browsers send `Origin` on every WebSocket handshake and on cross-site requests.
+pub fn same_origin(h: &HeaderMap, host: &str) -> bool {
+    match h.get(axum::http::header::ORIGIN) {
+        None => true,
+        Some(o) => o.to_str().ok().is_some_and(|o| {
+            let o = o.to_ascii_lowercase();
+            o == format!("http://{host}") || o == format!("https://{host}")
+        }),
+    }
+}
+
+/// A WebSocket handshake from a page on this node, or from a program that isn't a browser (no
+/// `Origin`). Checked in every mode: a page on another site never opens the node's event stream
+/// through a visitor's browser, token or not. "This node" is the host the request names, the one
+/// a reverse proxy says it was asked for (`X-Forwarded-Host`; proxies often rewrite `Host`), and
+/// the node's configured public address.
+pub fn ws_origin_ok(h: &HeaderMap, uri: &axum::http::Uri, public_url: &str) -> bool {
+    let Some(origin) = h.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let origin = origin.to_ascii_lowercase();
+    let forwarded = h
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().to_ascii_lowercase());
+    let public = url::Url::parse(public_url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization().to_ascii_lowercase());
+    named_host(h, uri)
+        .into_iter()
+        .chain(forwarded)
+        .any(|host| origin == format!("http://{host}") || origin == format!("https://{host}"))
+        || public.is_some_and(|p| p == origin)
 }
 
 /// Serve the API for the iroh tunnel on its own loopback listener, every request marked
@@ -155,5 +253,92 @@ mod tests {
         assert!(lan_peer(&req(None, &[], false)).is_none());
         assert!(direct(&req(Some("127.0.0.1:9"), &[], false)));
         assert!(!direct(&req(Some("127.0.0.1:9"), &[], true)));
+    }
+
+    fn heads(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    /// A node without a token answers its own pages at a loopback name, and nothing a page on
+    /// another site sends through a visitor's browser (DNS rebinding; security audit 2026-11-05).
+    #[test]
+    fn a_tokenless_node_answers_only_its_loopback_names_and_own_pages() {
+        let uri: axum::http::Uri = "/v1/status".parse().unwrap();
+        for ok in [
+            vec![("host", "127.0.0.1:7788")],
+            vec![("host", "localhost:7788")],
+            vec![("host", "LOCALHOST:7788"), ("origin", "http://localhost:7788")],
+            vec![("host", "[::1]:7788"), ("origin", "http://[::1]:7788")],
+            vec![("host", "127.0.0.1:7788"), ("origin", "http://127.0.0.1:7788")],
+            vec![("host", "odeion.localhost:7788")],
+            // A program that isn't a browser, naming no host at all
+            vec![],
+        ] {
+            assert!(loopback_addressed(&heads(&ok), &uri), "{ok:?}");
+        }
+        for refused in [
+            // A rebound name: the attacker's own host
+            vec![("host", "evil.example:7788")],
+            vec![("host", "127.0.0.1.evil.example:7788")],
+            vec![("host", "music.lan:7788")],
+            // Another site, another local app on another port, a sandboxed page
+            vec![("host", "127.0.0.1:7788"), ("origin", "http://evil.example")],
+            vec![("host", "localhost:7788"), ("origin", "http://localhost:3000")],
+            vec![("host", "127.0.0.1:7788"), ("origin", "null")],
+        ] {
+            assert!(!loopback_addressed(&heads(&refused), &uri), "{refused:?}");
+        }
+        // HTTP/2 names the host in the URI
+        let abs: axum::http::Uri = "http://evil.example:7788/v1/status".parse().unwrap();
+        assert!(!loopback_addressed(&HeaderMap::new(), &abs));
+    }
+
+    /// The event stream opens from this node's pages, behind a reverse proxy too, and never
+    /// from a page on another site.
+    #[test]
+    fn the_event_stream_opens_only_from_this_nodes_pages() {
+        let uri: axum::http::Uri = "/v1/events".parse().unwrap();
+        let public = "https://music.example";
+        assert!(
+            ws_origin_ok(&heads(&[("host", "127.0.0.1:7788")]), &uri, ""),
+            "no Origin: not a browser"
+        );
+        assert!(ws_origin_ok(
+            &heads(&[("host", "music.lan:7788"), ("origin", "http://music.lan:7788")]),
+            &uri,
+            ""
+        ));
+        // A proxy that rewrote Host: its X-Forwarded-Host, or the node's public address
+        assert!(ws_origin_ok(
+            &heads(&[
+                ("host", "127.0.0.1:7788"),
+                ("x-forwarded-host", "music.example"),
+                ("origin", "https://music.example")
+            ]),
+            &uri,
+            ""
+        ));
+        assert!(ws_origin_ok(
+            &heads(&[("host", "127.0.0.1:7788"), ("origin", "https://music.example")]),
+            &uri,
+            public
+        ));
+        for o in [
+            "http://evil.example",
+            "null",
+            "https://music.example.evil.example",
+        ] {
+            assert!(
+                !ws_origin_ok(&heads(&[("host", "127.0.0.1:7788"), ("origin", o)]), &uri, public),
+                "{o}"
+            );
+        }
     }
 }

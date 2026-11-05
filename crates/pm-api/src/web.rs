@@ -45,7 +45,11 @@ fn policy(pages: &[&str]) -> String {
         let digest = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(script.as_bytes()));
         hashes.push_str(&format!(" 'sha256-{digest}'"));
     }
-    format!("script-src 'self'{hashes} {YOUTUBE_API}; object-src 'none'; base-uri 'self'")
+    // `frame-ancestors 'none'`: no other site shows the node's pages in a frame (clickjacking;
+    // security audit 2026-11-05), with `X-Frame-Options: DENY` for browsers that predate it
+    format!(
+        "script-src 'self'{hashes} {YOUTUBE_API}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    )
 }
 
 /// The YouTube IFrame API (videos play in "This browser" through it): its loader and the player

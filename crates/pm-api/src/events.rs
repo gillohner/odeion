@@ -144,8 +144,23 @@ pub(crate) async fn events_ws(
     Extension(c): Extension<Caller>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-    ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
+    use axum::response::IntoResponse;
+    // A page on another site never opens the event stream through a visitor's browser (checked
+    // before anything else about the handshake)
+    if !crate::peer::ws_origin_ok(&headers, &uri, &s.public_url) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "the event stream opens only from this node's own pages",
+        )
+            .into_response();
+    }
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(e) => return e.into_response(),
+    };
     let token = crate::bearer(&headers, &q);
     ws.on_upgrade(move |socket| event_stream(socket, s, c, token))
 }

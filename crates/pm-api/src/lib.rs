@@ -1178,6 +1178,7 @@ async fn party_page() -> Response {
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
             (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
+            (header::X_FRAME_OPTIONS, "DENY"),
         ],
         include_str!("../static/party.html"),
     )
@@ -1190,6 +1191,7 @@ async fn web_ui() -> Response {
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
             (header::CONTENT_SECURITY_POLICY, web::PAGE_CSP.as_str()),
+            (header::X_FRAME_OPTIONS, "DENY"),
         ],
         include_str!("../static/index.html"),
     )
@@ -20073,5 +20075,86 @@ exec sleep 300
         }
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+    }
+
+    /// Security audit 2026-11-05 (A1): a node without a token is the owner to whoever reaches it,
+    /// so it answers only requests addressed to it by a loopback name from its own pages: a page
+    /// on another site that rebinds its name to 127.0.0.1, or opens the event stream from there,
+    /// is refused. A node with a token answers by any name, behind a proxy too. No other site
+    /// frames the pages.
+    #[tokio::test]
+    async fn a_tokenless_node_refuses_other_sites_and_pages_cant_be_framed() {
+        let send = |app: Router, uri: &'static str, headers: Vec<(&'static str, &'static str)>| async move {
+            let mut b = Request::builder().method("GET").uri(uri);
+            for (k, v) in headers {
+                b = b.header(k, v);
+            }
+            let r = app.oneshot(b.body(Body::empty()).unwrap()).await.unwrap();
+            (r.status(), r.headers().clone())
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let open = router(state(dir.path(), None).await);
+        // Its own name, with or without its own Origin
+        for h in [
+            vec![("host", "127.0.0.1:7788")],
+            vec![("host", "localhost:7788"), ("origin", "http://localhost:7788")],
+        ] {
+            let (st, _) = send(open.clone(), "/v1/info", h.clone()).await;
+            assert_eq!(st, StatusCode::OK, "{h:?}");
+        }
+        // A rebound name, another site's page, its event stream
+        let (st, _) = send(open.clone(), "/v1/info", vec![("host", "evil.example:7788")]).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let (st, _) = send(open.clone(), "/", vec![("host", "evil.example:7788")]).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "the page too");
+        let (st, _) = send(
+            open.clone(),
+            "/v1/info",
+            vec![("host", "127.0.0.1:7788"), ("origin", "http://evil.example")],
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        let ws = |origin: &'static str| {
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("origin", origin),
+                ("connection", "upgrade"),
+                ("upgrade", "websocket"),
+                ("sec-websocket-version", "13"),
+                ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ]
+        };
+        let (st, _) = send(open.clone(), "/v1/events", ws("http://evil.example")).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "cross-site event stream");
+
+        // With a token: any name (a proxy, a LAN name) with the token; the event stream still
+        // refuses another site's page, token or not
+        let dir2 = tempfile::tempdir().unwrap();
+        let tok = router(state(dir2.path(), Some("s3cret")).await);
+        let (st, _) = send(
+            tok.clone(),
+            "/v1/info",
+            vec![
+                ("host", "music.example"),
+                ("authorization", "Bearer s3cret"),
+                ("x-forwarded-host", "music.example"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let mut cross = ws("http://evil.example");
+        cross[0] = ("host", "music.example");
+        cross.push(("authorization", "Bearer s3cret"));
+        let (st, _) = send(tok.clone(), "/v1/events", cross).await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+
+        // The pages can't be framed by another site
+        for page in ["/", "/party/abc"] {
+            let (st, h) = send(open.clone(), page, vec![("host", "127.0.0.1:7788")]).await;
+            assert_eq!(st, StatusCode::OK, "{page}");
+            let csp = h.get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap();
+            assert!(csp.contains("frame-ancestors 'none'"), "{page}: {csp}");
+            assert_eq!(h.get(header::X_FRAME_OPTIONS).unwrap(), "DENY", "{page}");
+        }
     }
 }

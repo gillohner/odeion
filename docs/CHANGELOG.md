@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Other websites can't reach a node through your browser** (security audit).
+  - A node without an API token (it listens on this computer only) answers only at `127.0.0.1`, `localhost` or `[::1]`, from its own pages. A page on another site, or a proxy, gets "forbidden". To reach such a node by another name, give it an `[api] token`.
+  - The live updates of the web app open only from the node's own pages, with or without a token.
+  - No other site can show the node's pages inside its own.
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
