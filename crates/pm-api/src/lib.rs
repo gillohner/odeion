@@ -20154,10 +20154,25 @@ exec sleep 300
                 ("host", "127.0.0.1:7788"),
                 ("sec-fetch-site", "cross-site"),
                 ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "document"),
             ],
         )
         .await;
         assert_eq!(st, StatusCode::OK);
+        // In a frame on another site's page: refused before any page runs (a sign-in callback
+        // would have acted before frame-ancestors kept it from showing)
+        let (st, _) = send(
+            open.clone(),
+            "/",
+            vec![
+                ("host", "127.0.0.1:7788"),
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", "iframe"),
+            ],
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
 
         // With a token: any name (a proxy, a LAN name) with the token
         let dir2 = tempfile::tempdir().unwrap();

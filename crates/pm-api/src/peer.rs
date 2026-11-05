@@ -150,8 +150,10 @@ fn is_loopback_name(name: &str) -> bool {
 /// A request a browser made for a page of another site (`Sec-Fetch-Site: cross-site` or
 /// `same-site`: another port of this machine is the same site). For a node without a token only
 /// a top-level navigation to one of its pages is that: the web app, a sign-in callback. Not its
-/// API, Subsonic or the MusicBrainz proxy, which change things on GET too. Browsers that send no
-/// `Sec-Fetch-Site` pass on the other checks.
+/// API, Subsonic or the MusicBrainz proxy, which change things on GET too; and not a frame (a
+/// hidden one would reach a page with side effects, a sign-in callback, before the page's
+/// `frame-ancestors` keeps it from showing): `Sec-Fetch-Dest` must be `document`. Browsers that
+/// send no `Sec-Fetch-Site` pass on the other checks.
 pub fn cross_site(h: &HeaderMap, path: &str) -> bool {
     let site = h
         .get("sec-fetch-site")
@@ -160,7 +162,8 @@ pub fn cross_site(h: &HeaderMap, path: &str) -> bool {
     if !matches!(site, "cross-site" | "same-site") {
         return false;
     }
-    let navigation = h.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate");
+    let navigation = h.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate")
+        && h.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document");
     let page = !["/v1/", "/rest/", "/mb/"].iter().any(|p| path.starts_with(p));
     !(navigation && page)
 }
@@ -463,11 +466,21 @@ mod tests {
         }
     }
 
-    /// Requests another site's page makes reach a node without a token only as navigations to
-    /// its pages (a sign-in callback); never its API, Subsonic or proxy, GET included.
+    /// Requests another site's page makes reach a node without a token only as top-level
+    /// navigations to its pages (a sign-in callback); never its API, Subsonic or proxy, GET
+    /// included, and never in a frame.
     #[test]
     fn other_sites_reach_only_pages_by_navigation() {
-        let h = |site: &str, mode: &str| heads(&[("sec-fetch-site", site), ("sec-fetch-mode", mode)]);
+        let h = |site: &str, mode: &str| {
+            heads(&[
+                ("sec-fetch-site", site),
+                ("sec-fetch-mode", mode),
+                (
+                    "sec-fetch-dest",
+                    if mode == "navigate" { "document" } else { "empty" },
+                ),
+            ])
+        };
         assert!(cross_site(&h("cross-site", "no-cors"), "/rest/deletePlaylist"));
         assert!(cross_site(&h("cross-site", "navigate"), "/rest/jukeboxControl"));
         assert!(cross_site(&h("cross-site", "cors"), "/v1/info"));
@@ -478,6 +491,21 @@ mod tests {
         assert!(
             !cross_site(&h("none", "navigate"), "/v1/info"),
             "typed in the address bar"
+        );
+        // A frame on another site's page navigates too, but isn't a document
+        for dest in ["iframe", "frame", "embed", "object", "fencedframe"] {
+            let framed = heads(&[
+                ("sec-fetch-site", "cross-site"),
+                ("sec-fetch-mode", "navigate"),
+                ("sec-fetch-dest", dest),
+            ]);
+            assert!(cross_site(&framed, "/lastfm/callback"), "{dest}");
+            assert!(cross_site(&framed, "/"), "{dest}");
+        }
+        let no_dest = heads(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate")]);
+        assert!(
+            cross_site(&no_dest, "/"),
+            "a navigation that doesn't say what it is for"
         );
         assert!(!cross_site(&HeaderMap::new(), "/v1/info"), "no Sec-Fetch headers");
     }

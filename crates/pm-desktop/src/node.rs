@@ -60,6 +60,15 @@ pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
         })?;
     match resp.status().as_u16() {
         200..=299 => Ok(resp.json::<Info>().await.unwrap_or_default()),
+        // A node without a token answers only at 127.0.0.1 or localhost, and says so
+        403 if s.token.is_empty() => {
+            let why = resp.text().await.unwrap_or_default();
+            Err(ProbeError::Other(if why.contains("no API token") {
+                why.chars().take(200).collect()
+            } else {
+                "The node refused the token".into()
+            }))
+        }
         401 | 403 => Err(ProbeError::Other("The node refused the token".into())),
         code => Err(ProbeError::Other(format!("The node answered {code}"))),
     }
