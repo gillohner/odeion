@@ -413,7 +413,11 @@ impl Engine {
         let pos = self.position_ms();
         tracing::warn!(zone = %self.id, "device gone, pausing: {why}");
         self.cancel_crossfade();
-        // Its buffer was for a device that is not there: the next play opens a fresh sink
+        // The zone heard it (the sink may forget the loss); its buffer was for a device that is
+        // not there: the next play opens a fresh sink
+        if let Some(s) = self.sink.as_mut() {
+            s.gone_reported();
+        }
         self.sink = None;
         self.sink_paused = false;
         if let Some(c) = self.current.as_mut() {
@@ -436,6 +440,12 @@ impl Engine {
         if let Some(s) = self.sink.as_mut() {
             match s.pause() {
                 Ok(held) => self.sink_paused = held,
+                // Its device went: paused there with the reason, not stopped
+                Err(e) if e.gone_reason().is_some() => {
+                    let why = e.gone_reason().unwrap_or_default();
+                    self.device_gone(why);
+                    return;
+                }
                 Err(e) => {
                     self.fail(format!("pause: {e}"));
                     return;
@@ -539,13 +549,13 @@ impl Engine {
         // A sink that may not carry on as it is (a phone's DAC that would go back to full level
         // without consent): a fresh one, planned as things are now
         let reopen = self.sink.as_ref().is_some_and(|s| s.reopen_now());
-        !(full || reopen) || self.renew_full_sink(block.format)
+        !(full || reopen) || self.renew_full_sink(block.format, reopen)
     }
 
     /// The sink's fixed-size stream is full: play it out and go on on a fresh one from here. The
     /// current track goes on from what was written (the source is not rewound), not from what
     /// a device still holds. False when that could not open (the zone stopped).
-    fn renew_full_sink(&mut self, fmt: AudioFormat) -> bool {
+    fn renew_full_sink(&mut self, fmt: AudioFormat, discard: bool) -> bool {
         tracing::info!(zone = %self.id, "the output's sink can't go on as it is; going on on a fresh one");
         let written = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
         let at = self
@@ -553,8 +563,11 @@ impl Engine {
             .as_ref()
             .map(|c| c.base_ms + frames_to_ms(c.proc.output_format(), written.saturating_sub(c.start_frame)));
         if let Some(mut s) = self.sink.take() {
-            if let Err(e) = s.drain() {
+            // A sink that may not go on is not played out (its queue is what may not play)
+            let r = if discard { s.flush() } else { s.drain() };
+            if let Err(e) = r {
                 if let Some(why) = e.gone_reason() {
+                    s.gone_reported();
                     self.device_gone(why);
                     return false;
                 }
@@ -682,6 +695,7 @@ impl Engine {
             if let Err(e) = r {
                 // Its device went away meanwhile: nothing opens elsewhere (the phone's speaker)
                 if let Some(why) = e.gone_reason() {
+                    s.gone_reported();
                     self.sink_paused = false;
                     self.pending_gone = Some(why);
                     return false;
@@ -745,6 +759,7 @@ impl Engine {
                     let r = if self.sink_paused { s.flush() } else { s.drain() };
                     if let Err(e) = r {
                         if let Some(why) = e.gone_reason() {
+                            s.gone_reported();
                             self.pending_gone = Some(why);
                         }
                     }

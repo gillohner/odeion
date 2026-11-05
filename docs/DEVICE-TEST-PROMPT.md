@@ -215,9 +215,11 @@ What it does:
    - whether system sounds (a notification) are heard during playback (Android mutes them in
      bit-perfect mode).
    If the panel says "Shared · FiiO KA17 · <why>", report the exact words.
-4. Volume: during bit-perfect playback press the phone's volume buttons down a few steps; report
-   whether the level changes (it should not get louder at any point). Play the next song: on Auto it
-   now plays shared (the panel says why), at Android's volume. Report anything louder than before.
+4. Volume: on Auto, during bit-perfect playback, press the phone's volume button down one step. The
+   song goes on shared within a moment (a short gap, from where it was; the panel says why), and from
+   then on the buttons change the level. It must never get louder at any point; report how long the
+   gap was and anything louder than before. The next song plays shared too. With Bit-perfect chosen
+   in Settings (and agreed to), the buttons change nothing and it stays bit-perfect.
    Then, with Auto at full volume again and bit-perfect playing: pause, turn Android's volume down
    to about half, and press Play (once right away, once after waiting more than a minute). It must
    carry on shared (the panel says "Android's volume is at N%…"), never at full level. Also play two

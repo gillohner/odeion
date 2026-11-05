@@ -267,8 +267,7 @@ pub struct CpalSink {
     /// The phone's USB DAC it was opened for (rule (b), [`crate::usb_dac::may_reach`]): when that
     /// DAC isn't Android's route any more, the sink stops (the zone pauses) instead of playing on
     /// from the phone's speaker.
-    opened_for: Option<crate::usb_dac::OpenedFor>,
-    _in_use: crate::usb_dac::DacUse,
+    gate: crate::usb_dac::DacGate,
     /// The phone's settings-or-DAC generation at open (a change closes it at the next song).
     generation: u64,
 }
@@ -393,8 +392,7 @@ impl CpalSink {
             capacity_frames,
             written: 0,
             thread: Some(thread),
-            _in_use: crate::usb_dac::DacUse::new(opened_for.as_ref()),
-            opened_for,
+            gate: crate::usb_dac::DacGate::new(opened_for),
             generation: crate::usb_dac::generation(),
         })
     }
@@ -407,14 +405,14 @@ impl CpalSink {
     /// Rule (b): the DAC this sink was opened for isn't Android's route any more, or its stream
     /// ended by itself.
     fn gone(&self) -> Option<SinkError> {
-        let f = self.opened_for.as_ref()?;
-        let why = match crate::usb_dac::may_reach(Some(f)) {
-            Err(why) => why,
-            Ok(()) if self.shared.dead.load(Ordering::SeqCst) => format!("{} was unplugged", f.name),
-            Ok(()) => return None,
-        };
-        crate::usb_dac::gone_seen();
-        Some(SinkError::Gone(self.id.clone(), why))
+        let f = self.gate.opened_for()?;
+        if let Some(e) = self.gate.gone(&self.id) {
+            return Some(e);
+        }
+        self.shared
+            .dead
+            .load(Ordering::SeqCst)
+            .then(|| SinkError::Gone(self.id.clone(), format!("{} was unplugged", f.name)))
     }
 
     /// Wait until the queue has room for `frames` more; never past a DAC that went away (its
@@ -504,6 +502,11 @@ impl AudioSink for CpalSink {
     /// A phone's DAC settings or its DAC changed since it opened: the next song opens afresh.
     fn reopen_at_track(&self) -> bool {
         crate::usb_dac::generation() != self.generation
+    }
+
+    /// The zone heard this sink's Gone: the loss need not be kept for the next open.
+    fn gone_reported(&mut self) {
+        self.gate.reported();
     }
 }
 

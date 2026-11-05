@@ -802,8 +802,7 @@ pub fn open(
         dac: dac.device.name.clone(),
         dac_id: dac.id,
         confirmed: false,
-        _in_use: usb_dac::DacUse::new(Some(&opened_for)),
-        opened_for,
+        gate: usb_dac::DacGate::new(Some(opened_for)),
         flushed: false,
         generation,
         written: 0,
@@ -823,7 +822,7 @@ pub fn entry_gate(dac_id: i32) -> Result<Option<String>, String> {
     if unit != Some(false) {
         return Ok(None);
     }
-    let media = crate::bit_perfect::backend().and_then(|b| b.media_volume());
+    let media = crate::bit_perfect::media_now();
     volume_rule(
         usb_dac::settings().mode,
         false,
@@ -885,8 +884,7 @@ pub struct ExclusiveSink {
     dac_id: i32,
     confirmed: bool,
     /// The DAC it was opened for (rule (b), [`usb_dac::may_reach`]).
-    opened_for: usb_dac::OpenedFor,
-    _in_use: usb_dac::DacUse,
+    gate: usb_dac::DacGate,
     /// Flushed (a pause, a seek) and not written since: the next write starts it again.
     flushed: bool,
     generation: u64,
@@ -895,18 +893,16 @@ pub struct ExclusiveSink {
 }
 
 impl ExclusiveSink {
-    /// Rule (b): its DAC still the phone's (held), none gone since; else Gone (the zone knows).
+    /// Rule (b): its DAC still the phone's (held), none gone since; else Gone (kept for the next
+    /// open until the zone heard it).
     fn gone(&self) -> Option<SinkError> {
-        let why = usb_dac::may_reach(Some(&self.opened_for)).err()?;
-        usb_dac::gone_seen();
-        Some(SinkError::Gone(self.id.clone(), why))
+        self.gate.gone(&self.id)
     }
 
     fn map(&self, e: DriverError) -> SinkError {
         match e {
             DriverError::Gone => {
                 dac_changed(None);
-                usb_dac::gone_seen();
                 SinkError::Gone(self.id.clone(), format!("{} was unplugged", self.dac))
             }
             other => SinkError::Device(other.to_string()),
@@ -1055,6 +1051,11 @@ impl AudioSink for ExclusiveSink {
 
     fn frames_written(&self) -> u64 {
         self.written
+    }
+
+    /// The zone heard this sink's Gone: the loss need not be kept for the next open.
+    fn gone_reported(&mut self) {
+        self.gate.reported();
     }
 
     /// The settings or the DAC changed since it opened, or full level is no longer allowed (a

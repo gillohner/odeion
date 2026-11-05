@@ -117,6 +117,16 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             // Registering reports the devices already attached through onAudioDevicesAdded too
             // On a thread of its own, never behind the busy UI thread
             am.registerAudioDeviceCallback(w, BitPerfect.handler())
+            // A change of Android's media volume (the volume keys) reports again at once
+            context.contentResolver.registerContentObserver(
+                android.provider.Settings.System.CONTENT_URI,
+                true,
+                object : android.database.ContentObserver(BitPerfect.handler()) {
+                    override fun onChange(selfChange: Boolean) {
+                        w.refresh()
+                    }
+                },
+            )
             w.refresh()
         }
 
@@ -227,10 +237,13 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
                 if (um != null) usbFor(d, usb)?.let { o.put("usb", usbJson(um, it)) }
                 devices.put(o)
             }
+            // Android's media volume: bit-perfect plays at full level, so the Rust side ends Auto's
+            // bit-perfect the moment it is turned down (reported again at every change)
             val o = JSONObject()
                 .put("v", 1)
                 .put("sdk", Build.VERSION.SDK_INT)
                 .put("devices", devices)
+                .put("media_volume", BitPerfect.mediaVolume())
             UsbExclusive.heldJson()?.let { o.put("held", it) }
             if (UsbExclusive.closingNow()) o.put("release_exclusive", true)
             return o.toString()

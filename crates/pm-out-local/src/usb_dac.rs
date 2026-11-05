@@ -59,6 +59,9 @@ pub struct Report {
     /// The app closes: give the DAC back to Android once nothing plays on it.
     #[serde(default)]
     pub release_exclusive: bool,
+    /// Android's media volume, 0 to 100 (-1: unknown); the app reports again at every change.
+    #[serde(default)]
+    pub media_volume: Option<i32>,
 }
 
 /// One output `AudioDeviceInfo`.
@@ -407,6 +410,8 @@ struct Phone {
     /// A DAC went while a sink was open for it or moments after one closed, and nothing has
     /// reported it yet: the next open pauses instead of opening the default route.
     gone_unseen: Option<(String, std::time::Instant)>,
+    /// Android's media volume as the app last reported it.
+    media: Option<u8>,
 }
 
 /// [`gone_count`] without the lock, for the audio callback.
@@ -571,10 +576,56 @@ impl Drop for DacUse {
         if self.0 {
             with_phone(|p| {
                 p.sinks_open = p.sinks_open.saturating_sub(1);
-                p.last_close = Some(std::time::Instant::now());
+                let now = std::time::Instant::now();
+                p.last_close = Some(now);
+                // A loss nobody heard is the next open's from here (the boundary is now)
+                if let Some((_, at)) = p.gone_unseen.as_mut() {
+                    *at = now;
+                }
             });
         }
     }
+}
+
+/// **The gate a sink holds for the DAC it was opened for** (rule (b)): every sink of the phone's
+/// output (bit-perfect, shared) asks it before anything reaches a device, and holds its
+/// [`DacUse`]. A Gone it says is kept for the next open until the zone heard it
+/// ([`DacGate::reported`]); a Gone nobody heard (a stream closed with it) stays kept, so nothing
+/// opens afterwards except on the DAC.
+#[derive(Debug)]
+pub struct DacGate {
+    opened_for: Option<OpenedFor>,
+    _use: DacUse,
+}
+
+impl DacGate {
+    /// For the DAC `f` (`None`: opened without one; the gate is always open).
+    pub fn new(f: Option<OpenedFor>) -> Self {
+        DacGate {
+            _use: DacUse::new(f.as_ref()),
+            opened_for: f,
+        }
+    }
+
+    pub fn opened_for(&self) -> Option<&OpenedFor> {
+        self.opened_for.as_ref()
+    }
+
+    /// Gone (with why) when its DAC isn't Android's route any more ([`may_reach`]).
+    pub fn gone(&self, id: &pm_zones::OutputId) -> Option<pm_zones::SinkError> {
+        let why = may_reach(self.opened_for.as_ref()).err()?;
+        Some(pm_zones::SinkError::Gone(id.clone(), why))
+    }
+
+    /// The zone heard this sink's Gone: the next open is the listener's.
+    pub fn reported(&self) {
+        gone_seen();
+    }
+}
+
+/// Android's media volume as the app last reported it (`None`: not reported, or unknown).
+pub fn reported_media_volume() -> Option<u8> {
+    with_phone(|p| p.media)
 }
 
 /// What an open of the phone's output got, on which DAC.
@@ -614,7 +665,7 @@ fn view(p: &Phone) -> Option<OutputDevice> {
     }
     dev.settings = Some(p.settings);
     // What bit-perfect would play now, and Android's volume (it plays at full level)
-    let (formats, media) = crate::bit_perfect::view_extras(d, p.settings, consent(p));
+    let (formats, media) = crate::bit_perfect::view_extras(d, p.settings, consent(p), p.media);
     dev.formats = formats;
     dev.media_volume = media;
     match p.last.as_ref().filter(|l| l.dac_id == d.id) {
@@ -835,7 +886,15 @@ fn kept_while_held(r: &Report) -> Option<Dac> {
 /// A report from the app, kept as the phone's DAC: a report that can't be read (too large,
 /// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
 pub fn apply_report(json: &str) -> bool {
-    let (dac, why) = match parse_report(json) {
+    let parsed = parse_report(json);
+    if let Ok(r) = parsed.as_ref() {
+        let v = r
+            .media_volume
+            .and_then(|v| u8::try_from(v).ok())
+            .filter(|v| *v <= 100);
+        with_phone(|p| p.media = v);
+    }
+    let (dac, why) = match parsed {
         // Android is about to move audio off the DAC: gone now, before its removal arrives (not
         // while the app holds it: taking it from Android's driver warns the same way)
         Ok(r) if r.noisy && r.held.is_none() => (None, None),
@@ -1121,6 +1180,7 @@ mod tests {
             "noisy",
             "held",
             "release_exclusive",
+            "media_volume",
         ];
         assert_eq!(
             written,

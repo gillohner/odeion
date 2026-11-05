@@ -405,6 +405,12 @@ pub trait AudioSink: Send {
         false
     }
 
+    /// The Gone this sink returned reached the zone (it pauses there with the reason). A sink
+    /// that remembers a device's loss for the next open (a phone's DAC: the next open pauses
+    /// instead of opening the speaker) may forget it now; a Gone nobody heard (a stream closed
+    /// with it) is kept.
+    fn gone_reported(&mut self) {}
+
     /// The sink may not carry on as it is with the next write: a phone's DAC paused in
     /// bit-perfect mode whose listener turned Android's volume down since (writing would put it
     /// back at full level without consent). Whoever writes opens the output again in the same
