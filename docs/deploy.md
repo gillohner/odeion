@@ -359,6 +359,13 @@ model and MAC, plays the zone's post-DSP PCM as a WAV stream it fetches from `[a
 takes volume through its own digital gain. Players on the same subnet also find the node through
 the discovery responder.
 
+A player has 10 s to introduce itself after connecting, and one that sends nothing for 60 s is
+disconnected (players report every 5 s, and reconnect on their own). The node takes up to 128
+connections, 16 from one address, and keeps up to 64 players; a player it already knows always
+reconnects. Outputs found on the network (discovery and players together) stop being added at 256.
+To take only players on this machine, set `[outputs] slimproto_bind = "127.0.0.1"` (the discovery
+responder is then off); any other address of the machine works too.
+
 ## Where the music can live
 
 The node scans folders; anything the operating system can mount is a folder.

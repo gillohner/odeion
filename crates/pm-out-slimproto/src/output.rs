@@ -526,7 +526,7 @@ mod tests {
     fn idle_players_get_heartbeats() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(|_| {});
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new(|_| true);
         let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
         std::thread::spawn(move || crate::serve(listener, 7788, stream_path, on_player).unwrap());
         let mut player = TcpStream::connect(addr).unwrap();
@@ -553,8 +553,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel::<Arc<SlimOutput>>();
-        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(move |o| {
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new(move |o| {
             let _ = tx.send(o);
+            true
         });
         let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> =
             Arc::new(|name| format!("/v1/outputs/pull/{name}/stream.wav?token=t"));

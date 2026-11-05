@@ -33,6 +33,8 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Workflows use each action at a fixed commit** (with its version beside it), checkouts keep no credentials, and `ci.yml` and `compat.yml` read the repository only. `tools/workflow-pins-check.py` runs in CI and fails on an action used by tag; Dependabot proposes the updates.
 
+- **Squeezebox connections have limits.** A player has 10 s to send its hello and is disconnected after 60 s without a whole report (a byte now and then doesn't count) (players report every 5 s and reconnect on their own). Up to 128 connections, 16 from one address, and 64 players; a known player always reconnects. A connection the node can't start a thread for is closed and the server keeps listening. Outputs found on the network stop being added at 256 (one turned away leaves nothing behind); a player turned away for that is offered again when it reconnects. New `[outputs] slimproto_bind` sets the listening address (unset: every address; on loopback the discovery responder is off).
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.

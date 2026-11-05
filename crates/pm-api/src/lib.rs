@@ -20533,4 +20533,82 @@ exec sleep 300
         let body = r.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], &png[..]);
     }
+
+    /// Outputs found on the network stop being added once the node has `MAX_FOUND_OUTPUTS`, and
+    /// are added again when there is room.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outputs_found_on_the_network_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let max = crate::state::MAX_FOUND_OUTPUTS;
+        let had = s.outputs.len();
+        let found: Vec<Arc<dyn Output>> = (0..max + 10)
+            .map(|i| {
+                Arc::new(pm_zones::outputs::PullOutput::controlled(&format!("found-{i}"))) as Arc<dyn Output>
+            })
+            .collect();
+        s.set_discover(Arc::new(move || found.clone()));
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.rescan_outputs())
+            .await
+            .unwrap();
+        assert_eq!(new.len(), max - had, "added up to the cap");
+        assert_eq!(s.outputs.len(), max);
+        s.outputs.remove(&new[0]);
+        let st = s.clone();
+        let again = tokio::task::spawn_blocking(move || st.rescan_outputs())
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1, "one place freed, one added");
+        assert_eq!(s.outputs.len(), max);
+    }
+
+    /// A device the node turns away for want of room leaves no pull stream behind (rescans with new
+    /// devices can't grow the node past the cap); once there is room it is taken, stream and all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_turned_away_leaves_no_pull_stream() {
+        // A stand-in MPD server: the greeting, then OK to anything
+        let mpd = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = mpd.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for c in mpd.incoming().flatten() {
+                std::thread::spawn(move || {
+                    use std::io::{BufRead, Write};
+                    let mut w = c.try_clone().unwrap();
+                    let _ = w.write_all(b"OK MPD 0.23.5\n");
+                    for line in std::io::BufReader::new(c).lines() {
+                        if line.is_err() || w.write_all(b"OK\n").is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let max = crate::state::MAX_FOUND_OUTPUTS;
+        let fill: Vec<OutputId> = (s.outputs.len()..max)
+            .map(|i| {
+                let o = Arc::new(pm_zones::outputs::PullOutput::controlled(&format!("filler-{i}")));
+                let id = o.id();
+                s.outputs.register(o);
+                id
+            })
+            .collect();
+        s.set_mpd(&[addr.to_string()]);
+        let pulls_before = s.pulls.lock().unwrap().len();
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.discover_mpd())
+            .await
+            .unwrap();
+        assert!(new.is_empty(), "no room: {new:?}");
+        assert_eq!(s.pulls.lock().unwrap().len(), pulls_before, "nothing left behind");
+        s.outputs.remove(&fill[0]);
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.discover_mpd())
+            .await
+            .unwrap();
+        assert_eq!(new.len(), 1, "room again: taken");
+        assert_eq!(s.pulls.lock().unwrap().len(), pulls_before + 1, "with its stream");
+    }
 }
