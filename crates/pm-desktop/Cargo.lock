@@ -4867,6 +4867,7 @@ name = "pm-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "jni 0.21.1",
  "jni 0.22.4",
  "pm-discovery",
@@ -4876,6 +4877,7 @@ dependencies = [
  "pm-pubky",
  "pm-remote",
  "pm-stream",
+ "pubky 0.16.2",
  "qrcode",
  "reqwest",
  "rustls-platform-verifier",
