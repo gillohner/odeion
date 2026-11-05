@@ -209,7 +209,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 
 /* ---- player bar ---- */
 .player {
-  grid-area: player; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 1.3fr) minmax(0, 1fr);
+  grid-area: player; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 1.2fr) minmax(0, 1.2fr);
   align-items: center; gap: 16px; padding: 0 20px; background: var(--surface); border-top: 1px solid var(--line);
 }
 .player-now { display: flex; align-items: center; gap: 12px; min-width: 0; cursor: pointer; border-radius: var(--radius-sm); padding: 6px; margin-left: -6px; }
@@ -242,6 +242,13 @@ input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: 0; bord
 input[type=range]:hover::-webkit-slider-thumb, input[type=range]:focus-visible::-webkit-slider-thumb { opacity: 1; }
 input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz-range-thumb { opacity: 1; }
 .player-right { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
+/* The right group never spills over the transport (a long zone name, a long sound line): its parts
+   keep their size, the sound line is at most 220 px, and only the zone's name shrinks, to an
+   ellipsis; squeezed past that, the zone button clips its contents at its own edge */
+html:not([data-shell="phone"]) .player-right > * { flex: none; }
+html:not([data-shell="phone"]) .player-right > .quality .qtext { max-width: 220px; }
+html:not([data-shell="phone"]) .player-right > .zone-btn { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; }
 .quality { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; color: var(--fg-2); white-space: nowrap; }
 .quality:hover { border-color: var(--line-strong); }
 .qdot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
@@ -344,6 +351,11 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 .section { }
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+/* The count sits beside the title and a button (Select) at the end, all on one baseline (owner, 2026-11-04):
+   a button's baseline is its words', not its icon's */
+.section-head > h3 + .muted { margin: 0 auto 0 12px; }
+.section-head > .btn { align-items: baseline; }
+.section-head > .btn > .ic { align-self: center; }
 .section-head .link { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; padding: 4px 0; }
 .section-head .link:hover { color: var(--fg); }
 /* Similar on item pages: the library's own, Last.fm's, Pubky's, one under the other */
@@ -357,10 +369,16 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .hero .sub { font-size: 16px; color: var(--fg-2); margin-top: 6px; }
 .hero .facts { color: var(--muted); margin-top: 4px; }
 .hero .actions { margin-top: 16px; }
-/* Touch layouts: Play and Shuffle keep their words; Play on… is its icon, so ♡ and ⋯ stay on the row (UX sweep A16) */
-html[data-shell="phone"] .hero-zone .lbl, html[data-shell="tablet"] .hero-zone .lbl { display: none; }
-html[data-shell="phone"] .actions > .btn, html[data-shell="tablet"] .actions > .btn { min-height: 40px; }
-html[data-shell="phone"] .actions > .hero-zone, html[data-shell="tablet"] .actions > .hero-zone, html[data-shell="phone"] .actions > #imore, html[data-shell="tablet"] .actions > #imore, html[data-shell="phone"] .actions > #plmore, html[data-shell="tablet"] .actions > #plmore { min-width: 40px; padding-left: 10px; padding-right: 10px; justify-content: center; }
+/* Phones and narrow windows: Play and Shuffle keep their words; Play on… is its icon, so ♡ and ⋯ stay on the row (UX sweep A16) */
+html[data-shell="phone"] .hero-zone .lbl { display: none; }
+@media (max-width: 900px) { .hero-zone .lbl { display: none; } }
+html[data-shell="phone"] .actions > .btn { min-height: 40px; }
+html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width: 40px; padding-left: 10px; padding-right: 10px; justify-content: center; }
+/* Touch screens in the desktop layout (tablets): the same 40 px targets */
+@media (pointer: coarse) {
+  .actions > .btn { min-height: 40px; }
+  .actions > :is(.hero-zone, #imore, #plmore) { min-width: 40px; padding-left: 10px; padding-right: 10px; justify-content: center; }
+}
 .empty { text-align: center; padding: 56px 20px; border: 1px dashed var(--line-strong); border-radius: 14px; color: var(--muted); }
 .empty .ic { width: 36px; height: 36px; color: var(--muted); margin-bottom: 10px; }
 .empty h3 { color: var(--fg); margin-bottom: 6px; }
@@ -495,17 +513,22 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .brand { justify-content: center; padding-left: 0; padding-right: 0; }
   .nav-item { justify-content: center; padding: 10px 0; }
   .node-status { justify-content: center; }
-  .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
+}
+/* The volume slider needs a wide bar; narrower, it is a button that opens the Sound panel at it */
+@media (max-width: 1279px) {
   .volume { display: none; }
   html[data-shell="desktop"] .volbtn { display: inline-flex; }
 }
-/* ☰ on desktop and tablet: the sidebar collapses to icons, or (when narrow) expands to names. */
+/* Offline there is no volume button (the Sound panel needs the node): the slider stays down to 760 px,
+   where Now playing has it */
+@media (min-width: 760px) and (max-width: 1279px) { html[data-shell="desktop"] body.offline .player-right .volume { display: flex; } }
+/* ☰ in the desktop layout: the sidebar collapses to icons, or (when narrow) expands to names. */
 .shell.collapsed { --sidebar: 72px; }
 .shell.collapsed .brand-name, .shell.collapsed .nav-label, .shell.collapsed .nav-item span, .shell.collapsed .node-text { display: none; }
 .shell.collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
 .shell.collapsed .nav-item { justify-content: center; padding: 10px 0; }
 .shell.collapsed .node-status { justify-content: center; }
-@media (max-width: 1100px) and (min-width: 721px) {
+@media (max-width: 1100px) {
   .shell.expanded { --sidebar: 232px; }
   .shell.expanded .brand-name, .shell.expanded .nav-label, .shell.expanded .nav-item span, .shell.expanded .node-text { display: initial; }
   .shell.expanded .brand { justify-content: flex-start; padding: 2px 10px 18px; }
@@ -1006,7 +1029,7 @@ a.btn { text-decoration: none; }
    a long button label wraps inside it instead of running over the text */
 .set-ctl { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: 60%; min-width: 0; }
 .set-ctl > .btn { white-space: normal; text-align: left; }
-/* A narrow row (a phone, or a tablet's panel): a button or a field goes under the text; a switch,
+/* A narrow row (a phone, or a narrow window's panel): a button or a field goes under the text; a switch,
    a pill or a small icon button stays at the row's end (A3, A22) */
 @container (max-width: 560px) {
   .set-row:has(> .set-ctl .btn:not(.icon-btn), > .set-ctl .input, > .set-ctl select) { flex-direction: column; align-items: stretch; gap: 10px; }
@@ -1083,6 +1106,8 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .way-action .toolbar { flex-wrap: wrap; }
 .way-action .toolbar .input { flex: 1 1 220px; min-width: 0; width: auto; }
 .way-more { color: var(--fg-2); margin-top: 2px; }
+.ways-adv > summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 4px 2px; }
+.ways-adv > .ways { margin-top: 6px; }
 /* People › Invite someone: the key field with Paste and Scan QR; its error under it */
 .invite-fields { margin-top: 12px; }
 .invite-fields .input { flex: 1 1 200px; min-width: 0; width: auto; }
@@ -1101,9 +1126,13 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .set-fold > summary::after { content: ''; width: 8px; height: 8px; margin-right: 6px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform 0.15s; }
 .set-fold[open] > summary::after { transform: rotate(225deg); }
 .set-fold:not([open]) > .set-rows { display: none; }
-/* Tag chips: 40 px to touch on phones and tablets (UX sweep 2026-11-01 S4) */
-html[data-shell="phone"] .tag-chip, html[data-shell="tablet"] .tag-chip, html[data-shell="phone"] .chip.tag, html[data-shell="tablet"] .chip.tag { min-height: 40px; }
-html[data-shell="phone"] .chip.tag .chiplink, html[data-shell="tablet"] .chip.tag .chiplink, html[data-shell="phone"] .chip.tag .chipx, html[data-shell="tablet"] .chip.tag .chipx { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+/* Tag chips: 40 px to touch on phones and touch screens (UX sweep 2026-11-01 S4) */
+html[data-shell="phone"] :is(.tag-chip, .chip.tag) { min-height: 40px; }
+html[data-shell="phone"] .chip.tag :is(.chiplink, .chipx) { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+@media (pointer: coarse) {
+  :is(.tag-chip, .chip.tag) { min-height: 40px; }
+  .chip.tag :is(.chiplink, .chipx) { align-self: stretch; display: inline-flex; align-items: center; min-width: 32px; justify-content: center; }
+}
 .tag-hint { margin: 8px 0 0; }
 .switch { appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; flex: none; margin: 0 4px; border-radius: 999px; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: background 0.15s; }
 .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg-2); transition: transform 0.15s, background 0.15s; }
@@ -1174,32 +1203,38 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .face.mono { display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; }
 .faces-line { gap: 8px; }
 .hero.person .blurb { max-width: 60ch; }
-/* The shell at three sizes (docs/ux/responsive.md). html[data-shell] comes from the window width
-   and Settings › Appearance › Layout: phone (tabs, a mini player above them), tablet (a rail),
-   desktop (the sidebar). The full transport lives in Now playing on phones. */
+/* The shell in two layouts (docs/ux/responsive.md; owner, 2026-11-04). html[data-shell] comes from
+   the window width and Settings › Appearance › Layout: phone under 600 px (tabs, a mini player
+   above them) and desktop from 600 px (the sidebar, the full player bar), tablets included. Touch
+   sizes follow the pointer (pointer: coarse), not the layout. The full transport lives in Now
+   playing on phones. */
 .bottomnav { display: none; }
 .np-transport { display: none; }
-/* Touch layouts: every tap target at least 40 px (UX sweep 11-01, A10); the look stays, the
-   hit area grows (min-height, or a transparent inset for the small icon buttons in rows) */
-html[data-shell="phone"] .chip, html[data-shell="tablet"] .chip { min-height: 40px; }
-html[data-shell="phone"] .track .row-actions .icon-btn, html[data-shell="tablet"] .track .row-actions .icon-btn { width: 40px; height: 40px; }
-/* Touch layouts, 40 px everywhere (UX sweep A10, recheck 11-02): a tablet's song rows keep the heart
-   (when on) and More, like a phone (Play next and Add to queue are in More); a playlist's Move and
-   Remove, small buttons like Select, and the play-from order's grips */
-html[data-shell="tablet"] .track .row-actions .icon-btn { flex: none; }
+/* Touch: every tap target at least 40 px (UX sweep 11-01, A10), on phones and on any touch screen
+   in the desktop layout; the look stays, the hit area grows (min-height, or a transparent inset for
+   the small icon buttons in rows). Song rows keep the heart (when on) and More on a touch screen,
+   like a phone (Play next and Add to queue are in More); a playlist's Move and Remove, small
+   buttons like Select, and the play-from order's grips */
+html[data-shell="phone"] .chip { min-height: 40px; }
+html[data-shell="phone"] .track .row-actions .icon-btn { width: 40px; height: 40px; }
+html[data-shell="phone"] .q-actions .icon-btn { width: 40px; height: 40px; }
+html[data-shell="phone"] .btn.sm { min-height: 40px; }
+html[data-shell="phone"] .porder-grip { padding: 12px; margin: -8px 0; }
+html[data-shell="phone"] :is(.tagrow .input, .taginput) { min-height: 40px; }
+@media (pointer: coarse) {
+  .chip, .btn.sm, .tagrow .input, .taginput { min-height: 40px; }
+  .track .row-actions .icon-btn { width: 40px; height: 40px; flex: none; }
+  .track .row-actions .icon-btn:not([data-act="more"]):not(.heart.on) { display: none; }
+  .q-actions .icon-btn, .srow > .icon-btn, .menu-btn, .volbtn { width: 40px; height: 40px; }
+  .nav-item, .jobchip { min-height: 40px; }
+  .porder-grip { padding: 12px; margin: -8px 0; }
+}
 /* No hover on a touch screen: the row's actions are always shown there, not only on hover */
-html[data-shell="tablet"] .track .row-actions, html[data-shell="tablet"] .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; }
 @media (hover: none) { .track .row-actions, .track .row-actions:has(.heart.on) .icon-btn:not(.heart) { opacity: 1; } }
-html[data-shell="tablet"] .track .row-actions .icon-btn:not([data-act="more"]):not(.heart.on) { display: none; }
-html[data-shell="phone"] .q-actions .icon-btn, html[data-shell="tablet"] .q-actions .icon-btn { width: 40px; height: 40px; }
-html[data-shell="phone"] .btn.sm, html[data-shell="tablet"] .btn.sm { min-height: 40px; }
-html[data-shell="phone"] .porder-grip, html[data-shell="tablet"] .porder-grip { padding: 12px; margin: -8px 0; }
-@media (pointer: coarse) { html[data-shell="desktop"] .btn.sm, html[data-shell="desktop"] .q-actions .icon-btn { min-height: 40px; min-width: 40px; } }
-html[data-shell="phone"] .tagrow .input, html[data-shell="tablet"] .tagrow .input, html[data-shell="phone"] .taginput, html[data-shell="tablet"] .taginput { min-height: 40px; }
 .np-vol { display: none; align-items: center; gap: 10px; max-width: 320px; margin: 10px auto 0; color: var(--muted); }
 .np-vol input { flex: 1; }
 html[data-shell="phone"] .np-vol { display: flex; }
-@media (max-width: 899px) { html[data-shell="tablet"] .np-vol { display: flex; } }
+@media (max-width: 759px) { .np-vol { display: flex; } }
 .me-btn { display: inline-flex; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 .bnav { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; min-width: 44px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; border-radius: 10px; }
 .bnav .ic { width: 22px; height: 22px; }
@@ -1225,7 +1260,6 @@ html[data-shell="phone"] .search { flex: 1 1 auto; }
 html[data-shell="phone"] .topbar-right:empty { display: none; }
 html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none; max-width: 40%; }
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
-html[data-shell="phone"] .bnav.rail-only { display: none; }
 /* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
 html[data-shell="phone"] .player { grid-template-columns: minmax(150px, 1fr) fit-content(48%) auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
 html[data-shell="phone"] .player-right { order: 1; gap: 6px; }
@@ -1254,14 +1288,6 @@ html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56p
 /* Now playing fills the screen down to the tabs */
 html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
 
-/* Tablets: a rail with the sidebar's places (Home, Search, Library, Sources, Queue, Zones,
-   Downloads when offline; Settings at the foot), scrolling when short, and the full player bar */
-html[data-shell="tablet"] .shell { grid-template-columns: 84px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) var(--player); grid-template-areas: "bnav content" "player player"; }
-html[data-shell="tablet"] .sidebar, html[data-shell="tablet"] .menu-btn { display: none; }
-html[data-shell="tablet"] .bottomnav { grid-area: bnav; display: flex; flex-direction: column; gap: 6px; padding: 14px 8px; background: var(--surface); border-right: 1px solid var(--line); overflow: auto; min-height: 0; }
-html[data-shell="tablet"] .bnav { min-height: 58px; flex: none; }
-html[data-shell="tablet"] .bnav.rail-foot { margin-top: auto; }
-html[data-shell="tablet"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 /* Volume: the slider when the bar has room, else a button that opens a small volume popover (one
    slider for the zone in the bar area at any width; the Sound panel has none) */
 html .player.novol .volume, html .player.novol .volbtn { display: none; }
@@ -1273,28 +1299,77 @@ html .player.novol .volume, html .player.novol .volbtn { display: none; }
 input[type="range"].unknown::-webkit-slider-thumb { opacity: 0; }
 input[type="range"].unknown::-moz-range-thumb { opacity: 0; }
 input[type="range"].muted { opacity: 0.5; }
-html[data-shell="tablet"] .volume { display: flex; width: 110px; }
-html[data-shell="tablet"] .volbtn { display: none; }
-@media (max-width: 899px) {
-  html[data-shell="tablet"] .volume { display: none; }
-  html[data-shell="tablet"] .volbtn { display: inline-flex; }
+/* The desktop layout down to 600 px, tablets included (owner, 2026-11-04). The player bar's three
+   groups shrink and never overlap: the seek bar takes the free width, the sound pill is its source
+   mark, dot and quality badge (the zone button names the device), and the zone's name ellipsizes.
+   Under 900 px shuffle and repeat move to Now playing and the zone button drops its chevron; under
+   680 px the seek bar drops its times and the pill its source mark. The volume button stays at
+   every width without the slider (beside a files job's chip under 760 px, Now playing has it): it is
+   the bar's one way to the volume (the Sound panel has none). */
+@media (max-width: 1100px) {
+  html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1fr) minmax(200px, 1.3fr) auto; gap: 12px; padding: 0 16px; }
+  html[data-shell="desktop"] .player-right { gap: 8px; }
+  html[data-shell="desktop"] .player-right > * { flex: none; }
+  html[data-shell="desktop"] .player-right > .zone-btn { flex: 0 1 auto; min-width: 0; }
+  html[data-shell="desktop"] .player-right .zone-btn span { max-width: 130px; }
 }
-html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0; flex: none; }
-html[data-shell="tablet"] .player { grid-template-columns: minmax(170px, 1fr) minmax(200px, 1.2fr) minmax(0, auto); }
-html[data-shell="tablet"] .player-right { min-width: 0; }
-/* Under 900 px (UX sweep 11-01, A2): the sound pill is its dot (the words are in Now playing and
-   the Sound panel), and shuffle and repeat stay in Now playing, so the title keeps its room */
-@media (max-width: 899px) {
-  html[data-shell="tablet"] .player .quality .qtext, html[data-shell="tablet"] .player .quality .qsrc { display: none; }
-  html[data-shell="tablet"] .player .quality { padding: 0; width: 44px; min-width: 44px; justify-content: center; }
-  html[data-shell="tablet"] .player-right .zone-btn span { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The sound pill as its badge (source mark, dot, "16/44.1"; the whole line is in the Sound panel)
+   wherever the bar has no room for the line beside the volume and the zone: under 1800 px, and at
+   any width while a files job shows its chip; the chip is its bar alone under 1367 px, and beside
+   it the volume is its button up to 1599 px */
+@media (max-width: 1799px) {
+  html[data-shell="desktop"] .player .quality { gap: 6px; padding: 5px 9px; }
+  html[data-shell="desktop"] .player .quality :is(.qtext, .qdsp) { display: none; }
+  html[data-shell="desktop"] .player .quality .qshort { display: inline-flex; }
+  html[data-shell="desktop"] .player .quality .qshort .qdev { display: none; }
 }
-/* A narrow tablet: shuffle and repeat stay in Now playing so the transport fits its column */
+html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .quality { gap: 6px; padding: 5px 9px; }
+html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .quality :is(.qtext, .qdsp) { display: none; }
+html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .quality .qshort { display: inline-flex; }
+html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .quality .qshort .qdev { display: none; }
+@media (max-width: 1366px) { html[data-shell="desktop"] .player-right .jobchip .jc-text { display: none; } }
+@media (min-width: 760px) and (max-width: 1599px) {
+  html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .volume { display: none; }
+  html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .volbtn { display: inline-flex; }
+}
 @media (max-width: 899px) {
-  html[data-shell="tablet"] .player-center .transport .mode-btn { display: none; }
-  html[data-shell="tablet"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
-  html[data-shell="tablet"] .np-transport .icon-btn { width: 44px; height: 44px; }
-  html[data-shell="tablet"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
+  html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1fr) minmax(170px, 1.1fr) auto; }
+  html[data-shell="desktop"] .player-center .transport .mode-btn { display: none; }
+  html[data-shell="desktop"] .player-right .zone-btn { gap: 6px; padding: 6px 10px; }
+  html[data-shell="desktop"] .player-right .zone-btn .chev { display: none; }
+  html[data-shell="desktop"] .player-right .zone-btn span { max-width: clamp(84px, 11vw, 120px); }
+  html[data-shell="desktop"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
+  html[data-shell="desktop"] .np-transport .icon-btn { width: 44px; height: 44px; }
+  html[data-shell="desktop"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
+}
+@media (max-width: 759px) {
+  html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1fr) auto; gap: 10px; padding: 0 12px; }
+  html[data-shell="desktop"] .player .np-art { width: 48px; height: 48px; }
+  /* Beside a files job's chip there is no room for the volume button: the volume is in Now playing */
+  html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .volbtn { display: none; }
+}
+/* The narrowest windows: the seek bar without its times (Now playing has them), the pill without the source mark */
+@media (max-width: 679px) {
+  html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1.2fr) minmax(110px, 0.8fr) auto; }
+  html[data-shell="desktop"] .player-center .seek .time, html[data-shell="desktop"] .player .quality .qsrc { display: none; }
+}
+/* A touch screen's transport has 44 px buttons: its column keeps room for them */
+@media (max-width: 679px) and (pointer: coarse) {
+  html[data-shell="desktop"] .player { grid-template-columns: minmax(130px, 1fr) minmax(150px, 0.8fr) auto; }
+}
+/* An item's hero keeps its cover beside the words down to 600 px, so they use the width */
+@media (max-width: 720px) {
+  html[data-shell="desktop"] .hero { grid-template-columns: 140px minmax(0, 1fr); gap: 18px; }
+  html[data-shell="desktop"] .hero .art { width: 140px; }
+}
+/* Installed (the status bar is translucent): the top bar, the sidebar and Now playing start below
+   it. In an iPadOS window (Stage Manager, windowed apps) the window controls sit over the sidebar's
+   top corner, so a touch screen's installed app keeps that corner free. */
+html[data-shell] .topbar { height: calc(var(--topbar) + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
+.sidebar { padding-top: calc(18px + env(safe-area-inset-top, 0px)); }
+.overlay { padding-top: env(safe-area-inset-top, 0px); }
+@media (display-mode: standalone) and (pointer: coarse) {
+  .sidebar { padding-top: calc(18px + max(env(safe-area-inset-top, 0px), 28px)); }
 }
 /* Menus as a bottom sheet on phones; the playlist picker */
 .popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
@@ -1358,8 +1433,8 @@ body.kiosk .main { padding: 0; }
 html[data-shell="phone"] .selbar { bottom: calc(57px + 70px + env(safe-area-inset-bottom)); left: 12px; right: 12px; transform: none; justify-content: center; }
 .selecting .srow:has(.selbox input:checked) { background: var(--accent-soft); }
 @media (max-width: 720px) { .selecting .srow [data-splay], .selecting .srow [data-pup], .selecting .srow [data-pdown], .selecting .srow [data-rm], .selecting .srow [data-psrc], .selecting .srow [data-smore] { display: none; } }
-/* One way back (UX review, sweep A17): phones and tablets have the back link only; the desktop has
-   the trail, and Back only where it goes somewhere the trail doesn't */
+/* One way back (UX review, sweep A17): phones have the back link only; the desktop layout (tablets
+   too) has the trail, and Back only where it goes somewhere the trail doesn't */
 html[data-shell="desktop"] .pagebar > .dupback { display: none; }
 html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .stickyhead { position: sticky; z-index: 15; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-sizing: border-box; height: 52px; margin: -24px -24px -28px; padding: 0 24px; top: -24px; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
@@ -1374,7 +1449,7 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 /* A listener (#46) plays the shared library; the owner's favourites, playlists, tags and settings aren't theirs */
 body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="favourites"], body.listener .nav-item[data-view="playlists"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
-body.listener .bnav[data-bnav="home"], body.listener .bnav[data-bnav="sources"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
+body.listener .bnav[data-bnav="home"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
 body.listener #ifav, body.listener #aheart, body.listener .heart, body.listener [data-act="fav"], body.listener .idmark, body.listener #itags,
 body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
 /* Library › Add music */
@@ -1393,11 +1468,8 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 #impplan:not(:empty) { margin-top: 10px; }
 #impplan .row-btns { margin-top: 8px; }
 
-/* Now playing's quality line and the quality sheet (STEWARD-UX-PLAYER-SOURCES §2) */
+/* Now playing's quality line (STEWARD-UX-PLAYER-SOURCES §2) */
 .npqual { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; font-size: 14px; color: var(--fg-2, var(--fg)); font-variant-numeric: tabular-nums; }
-.qsheet { max-width: 520px; }
-.qsheet .set-rows { border: 1px solid var(--line); border-radius: 12px; margin: 12px 0; }
-.qsheet .chips { display: inline-flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .quality .qtext { font-variant-numeric: tabular-nums; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The pill's parts: the provider's mark, "DSP" when a DSP stage is in the path, and the phone form
    (device and a quality badge; .qtext is hidden there) */
@@ -1431,27 +1503,43 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .qp-dsp .btn { margin: 4px 6px 2px; }
 .qp-vol { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
 .qp-vol input[type="range"] { flex: 1; }
-.qp-foot { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 6px 2px; border-top: 1px solid var(--line); margin-top: 4px; }
+/* A song kept in several copies: a quiet "2 versions" in its row's second line opens the chooser */
+.lnk.vmark { display: inline; padding: 0; line-height: inherit; color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
+.lnk.vmark:hover, .lnk.vmark:focus-visible { color: var(--fg); }
+/* On a touch screen a taller target that doesn't make its row taller */
+@media (pointer: coarse) { .lnk.vmark { padding: 8px 0; margin: -8px 0; } }
+.sub.subv { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+/* The words shrink to an ellipsis; room above and below so a focused link's ring isn't cut */
+.sub.subv > .subtext { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-block: 4px; margin-block: -4px; }
+.srow .sub.subv { overflow: visible; } /* the words clip themselves; the marker's ring shows */
+.sub.subv > :not(.subtext) { flex: none; }
 /* Pressing play answers at once: the pressed control spins, the bar says "Starting on …" */
-.starting .ic { display: none; }
-.starting::after { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+/* Any control whose action is on its way (busy() in app.js): pressed once, it ignores more presses; after
+   150 ms its icon becomes a spinner (a control without an icon gets one after its words). */
+.is-busy { cursor: progress; }
+.starting .ic, .is-spinning > .ic { display: none; }
+.starting::after, .is-spinning::after { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 .np-title.np-wait { display: flex; align-items: center; gap: 6px; }
+/* A navigation on its way (navigate() in app.js): a thin bar along the top, then the page's skeleton */
+.navprog { position: fixed; z-index: 70; top: env(safe-area-inset-top, 0px); left: 0; right: 0; height: 3px; overflow: hidden; pointer-events: none; }
+.navprog[hidden] { display: none; }
+.navprog::before { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; border-radius: 2px; background: var(--accent); animation: navprog 1.1s var(--ease) infinite; }
+@keyframes navprog { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .navprog::before { animation: none; width: 100%; opacity: 0.6; } }
+.navskel .skeleton { margin-bottom: 8px; }
 .npqual .qtext-long { font-weight: 550; }
-.qsheet .qnote { display: block; margin-top: 6px; }
-.qsheet .qjump { display: block; margin-bottom: 8px; font-size: 13px; }
-.set-row.flash, .flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 8px; transition: outline-color 1.2s ease; }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
-.nav-item.nav-offline, .bnav.nav-offline { display: none; }
-body.offline .nav-item.nav-offline, html[data-shell="tablet"] body.offline .bnav.nav-offline { display: flex; }
+.nav-item.nav-offline { display: none; }
+body.offline .nav-item.nav-offline { display: flex; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,
-body.offline .track .lnk[data-act="song"], body.offline .track .lnk[data-act="tartist"] { pointer-events: none; }
+body.offline .track .lnk[data-act="song"], body.offline .track [data-artist-credit] { pointer-events: none; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #volbtn,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark { display: none; }
 .dl-note { margin-top: 4px; }
-body.offline [data-bnav="home"], body.offline [data-bnav="sources"] { display: none; }
+body.offline [data-bnav="home"] { display: none; }
 body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 /* The source line on item pages (STEWARD-UX-PLAYER-SOURCES §1): small, one line, no pills */
 .srcline { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 10px; margin-top: 8px; font-size: 13px; color: var(--muted); min-width: 0; }
@@ -1497,8 +1585,8 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np-sheet[hidden] { display: none; }
 .np-sheet-head { display: flex; align-items: center; gap: 8px; flex: none; padding-bottom: 10px; }
 .np-sheet-tabs { flex: 1; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
-/* A tablet's side panel is narrow: its tabs wrap rather than end in a clipped one (UX sweep A19) */
-html[data-shell="tablet"] .np-page:not(.compact) .np-sheet-tabs { flex-wrap: wrap; overflow: visible; }
+/* A narrow window's side panel is narrow: its tabs wrap rather than end in a clipped one (UX sweep A19) */
+@media (max-width: 1100px) { .np-page:not(.compact) .np-sheet-tabs { flex-wrap: wrap; overflow: visible; } }
 .np-sheet-tabs::-webkit-scrollbar { display: none; }
 .np-sheet-tabs .chip { flex: none; }
 .np-sheet-head .grab, .np-sheet-close, .np-strip { display: none; }
@@ -1517,7 +1605,7 @@ html[data-shell="tablet"] .np-page:not(.compact) .np-sheet-tabs { flex-wrap: wra
 .np2:not(.compact) .np-body { grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 32px; }
 .np2:not(.compact) .np-sheet { border-left: 1px solid var(--line); padding-left: 24px; }
 .np2:not(.compact) .np-player { justify-content: flex-start; padding-top: 8px; }
-/* Compact (phones, narrow tablets): the five sheets in a row under the transport; an open sheet takes the screen below a strip */
+/* Compact (phones, windows up to 720 px): the five sheets in a row under the transport; an open sheet takes the screen below a strip */
 .np2.compact { padding: 6px 16px 8px; }
 .np2.compact .np-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); margin-top: auto; }
 .np2.compact.has-sheet .np-player, .np2.compact.has-sheet .np-top { display: none; }
@@ -1545,12 +1633,12 @@ html[data-shell="tablet"] .np-page:not(.compact) .np-sheet-tabs { flex-wrap: wra
 .swiping[data-swipe-label="Play next"]::before { right: calc(100% + 8px); }
 .swiping[data-swipe-label="Add to playlist"]::before { left: calc(100% + 8px); }
 .swipe-ready::before { color: var(--accent-strong); }
-/* Phones and tablets: the section chips stay at the top while a list scrolls under them */
+/* Phones: the section chips stay at the top while a list scrolls under them */
 html:not([data-shell="desktop"]) .main > .libnav { position: sticky; top: -24px; z-index: 6; margin-top: -8px; padding: 8px 0; background: var(--bg); }
 @media (max-width: 720px) { html:not([data-shell="desktop"]) .main > .libnav { top: -18px; } }
 /* the Sources page's side list sticks below the pinned chips */
 html:not([data-shell="desktop"]) .main:has(> .libnav) .set-nav { top: 46px; }
-/* Dense lists on tablets and desktops: shorter rows, smaller covers */
+/* Dense lists in the desktop layout (tablets too): shorter rows, smaller covers */
 :where(html[data-dense]:not([data-shell="phone"])) .track { height: 42px; }
 :where(html[data-dense]:not([data-shell="phone"])) .list-row { padding-top: 8px; padding-bottom: 8px; }
 :where(html[data-dense]:not([data-shell="phone"])) .grid { grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 14px 12px; }
@@ -1582,8 +1670,8 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 /* Home's Listening now: who, their song's cover, what and where, Listen along */
 .list-row.listening .thumb + .thumb, .list-row.listening .avatar + .thumb { margin-left: -14px; box-shadow: 0 0 0 2px var(--bg); }
 
-/* Log in (signed out): one screen instead of the app. Phones and tablets open Pubky Ring first,
-   desktops show the QR code first. */
+/* Log in (signed out): one screen instead of the app. Touch screens open Pubky Ring first,
+   computers show the QR code first. */
 body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.signedout .overlay, body.signedout .popover, body.signedout .embedpanel, body.signedout .scrim { display: none !important; }
 .loginpage { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 32px 16px; box-sizing: border-box; background: var(--bg); }
 .logincard { width: min(440px, 100%); display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; }

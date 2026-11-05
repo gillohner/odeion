@@ -191,6 +191,35 @@ pub struct SearchQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tracks {
     pub tracks: Vec<Track>,
+    /// Songs with several copies (an album's or an artist's songs): every copy by the shown
+    /// track's id, the default first. Songs with one copy are not in it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub versions: std::collections::BTreeMap<i64, Vec<pm_library::TrackVersion>>,
+}
+
+impl Tracks {
+    /// Plain tracks, no copies to list.
+    pub fn plain(tracks: Vec<Track>) -> Self {
+        Self {
+            tracks,
+            versions: Default::default(),
+        }
+    }
+
+    /// One row per song, with the copies of songs that have several.
+    pub fn songs(songs: Vec<pm_library::Song>) -> Self {
+        let mut versions = std::collections::BTreeMap::new();
+        let tracks = songs
+            .into_iter()
+            .map(|s| {
+                if let (false, Some(id)) = (s.versions.is_empty(), s.track.id) {
+                    versions.insert(id.0, s.versions);
+                }
+                s.track
+            })
+            .collect();
+        Self { tracks, versions }
+    }
 }
 
 /// Everything a query matched: tracks by full text, albums by title,
@@ -1562,6 +1591,10 @@ pub struct ItemTrack {
     pub album: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album_id: Option<String>,
+    /// A library song kept in several copies (homeserver copy, another format): every copy, the
+    /// one `track_id` plays first. Empty, and left out, for a song with one copy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<pm_library::TrackVersion>,
 }
 
 /// An album tile on an artist's item page.

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <script>try { var t = localStorage.getItem('pm.theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) { /* no storage */ }
-(function () { var l = 'auto'; try { l = localStorage.getItem('pm.layout') || 'auto'; } catch (e) { /* no storage */ } var w = window.innerWidth; document.documentElement.dataset.shell = l === 'compact' || w < 600 ? 'phone' : l === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop'; try { if (localStorage.getItem('pm.dense') === '1') document.documentElement.dataset.dense = '1'; } catch (e) { /* no storage */ } })();</script>
+(function () { var l = 'auto'; try { l = localStorage.getItem('pm.layout') || 'auto'; } catch (e) { /* no storage */ } l = { compact: 'phone', comfortable: 'auto' }[l] || l; document.documentElement.dataset.shell = l === 'phone' || window.innerWidth < (l === 'desktop' ? 480 : 600) ? 'phone' : 'desktop'; try { if (localStorage.getItem('pm.dense') === '1') document.documentElement.dataset.dense = '1'; } catch (e) { /* no storage */ } })();</script>
 <title>Odeion</title>
 <meta name="theme-color" content="#0f1014" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f5f5f8" media="(prefers-color-scheme: light)">
@@ -105,11 +105,7 @@
     <button class="bnav" data-bnav="home"><svg class="ic"><use href="#i-home"/></svg><span>Home</span></button>
     <button class="bnav" data-bnav="search"><svg class="ic"><use href="#i-search"/></svg><span>Search</span></button>
     <button class="bnav" data-bnav="library"><svg class="ic"><use href="#i-disc"/></svg><span>Library</span></button>
-    <button class="bnav rail-only" data-bnav="sources"><svg class="ic"><use href="#i-archive"/></svg><span>Sources</span></button>
-    <button class="bnav rail-only" data-bnav="queue"><svg class="ic"><use href="#i-queue"/></svg><span>Queue</span></button>
     <button class="bnav" data-bnav="zones"><svg class="ic"><use href="#i-zone"/></svg><span>Zones</span></button>
-    <button class="bnav rail-only nav-offline" data-bnav="downloads"><svg class="ic"><use href="#i-download"/></svg><span>Downloads</span></button>
-    <button class="bnav rail-only rail-foot" data-bnav="settings"><svg class="ic"><use href="#i-settings"/></svg><span>Settings</span></button>
   </nav>
 </div>
 

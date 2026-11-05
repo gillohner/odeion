@@ -54,6 +54,9 @@ pub struct Prefs {
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home_layout: Option<HomeLayout>,
+    /// Personal source order; absent retains the owner-only legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_order: Option<Vec<String>>,
     /// Source id → quality id (the ids of that source's quality choice).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub quality: BTreeMap<String, String>,
@@ -69,6 +72,7 @@ impl Default for Prefs {
             version: version(),
             updated_at: 0,
             home_layout: None,
+            play_order: None,
             quality: BTreeMap::new(),
             appearance: Appearance::default(),
             extra: Map::new(),
@@ -118,6 +122,7 @@ pub struct PrefsView {
     /// on the homeserver yet).
     pub saved_on: &'static str,
     pub home_layout: Applied<HomeLayout>,
+    pub play_order: Applied<Vec<String>>,
     /// Only the sources the person chose a quality for; the others follow the node's setting.
     pub quality: BTreeMap<String, Applied<String>>,
     pub appearance: AppearanceView,
@@ -135,6 +140,8 @@ pub struct AppearanceView {
 pub struct PrefsUpdate {
     #[serde(default, deserialize_with = "some_or_null")]
     pub home_layout: Option<Option<HomeLayout>>,
+    #[serde(default, deserialize_with = "some_or_null")]
+    pub play_order: Option<Option<Vec<String>>>,
     #[serde(default)]
     pub quality: Option<BTreeMap<String, Option<String>>>,
     #[serde(default)]
@@ -204,8 +211,11 @@ fn node_layout(s: &NodeState) -> HomeLayout {
 }
 
 fn view(s: &NodeState, p: &Prefs, saved_on: &'static str) -> PrefsView {
+    // Drop the library guard before node_layout takes it again below.
+    let play_order = crate::play_from::global_order(&s.library.lock().expect("library poisoned"));
     PrefsView {
         saved_on,
+        play_order: yours(play_order),
         home_layout: match &p.home_layout {
             Some(l) => yours(l.clone()),
             None => node_default(node_layout(s)),
@@ -404,6 +414,12 @@ fn valid_id(x: &str) -> bool {
 
 /// Apply a change to `p` (refused as a whole when any part is invalid).
 fn apply(p: &mut Prefs, u: PrefsUpdate) -> Result<(), ApiError> {
+    if let Some(order) = u.play_order {
+        p.play_order = order
+            .as_deref()
+            .map(crate::play_from::checked_order)
+            .transpose()?;
+    }
     if let Some(l) = u.home_layout {
         if let Some(l) = &l {
             crate::home::check_layout(l)?;

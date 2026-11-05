@@ -920,7 +920,8 @@ mod tests {
         assert_eq!((r.files_added, r.files_updated, r.files_removed), (0, 1, 1));
         assert_eq!(lib.search_tracks("remaster", 5).unwrap().len(), 1);
         let stats = lib.stats().unwrap();
-        assert_eq!(stats.tracks, 2);
+        // The song whose file is gone is not counted (it is in no list either)
+        assert_eq!(stats.tracks, 1);
         assert_eq!(stats.files, 1);
         assert_eq!(stats.missing_files, 1);
         assert!(lib.file_by_path(&b).unwrap().unwrap().missing);
