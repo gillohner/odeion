@@ -7,8 +7,8 @@ Newest first. Dates are when the change landed on `main`.
 ### 2026-11-05
 
 - **Tighter request checks for a node without an API token:**
-  - Such a node listens on this computer only, and now answers only at `127.0.0.1`, `localhost` or `[::1]`, from its own pages (opened as pages, not in a frame). To reach it by another name, for example through a proxy, give it an `[api] token`. The desktop and Android app, finding such a node on the network, tries it as the node on this computer first, and otherwise says that it needs a token.
-  - Its live updates open only from its own pages, and other sites' pages reach it only by opening one of its pages.
+  - Such a node listens on this computer only, and now answers only at `127.0.0.1`, `localhost` or `[::1]`, from its own pages (opened as pages, not in a frame). To reach it by another name, for example through a proxy, give it an `[api] token`. The desktop and Android app, finding such a node on the network, tries it as the node on this computer first (only when the node there has the same id), and otherwise says that it needs a token.
+  - Its live updates open only from its own pages, and other sites' pages reach it only by opening one of its pages (a GET; a form another site posts is refused, and so are the zones' UPnP routes).
   - The node's pages can't be shown inside another site.
 
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:

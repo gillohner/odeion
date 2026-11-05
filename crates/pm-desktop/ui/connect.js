@@ -70,12 +70,15 @@
       // A node without a token answers only at 127.0.0.1: the node on this computer, else it
       // needs a token (its config, [api] token) to be reached from here
       if (/no API token/.test(String(e))) {
-        const here = new URL(n.url);
-        here.hostname = '127.0.0.1';
-        try {
-          await invoke('connect_manual', { nodeUrl: here.toString().replace(/\/$/, ''), token: '' });
-          return;
-        } catch (e2) { /* not on this computer */ }
+        // Only the node that was found: one with another id (or none) at 127.0.0.1 is not taken
+        if (n.id) {
+          const here = new URL(n.url);
+          here.hostname = '127.0.0.1';
+          try {
+            await invoke('connect_manual', { nodeUrl: here.toString().replace(/\/$/, ''), token: '', expectId: n.id });
+            return;
+          } catch (e2) { /* not on this computer, or another node is */ }
+        }
         $('url').value = n.url;
         $('manual-box').open = true;
         show('tok-hint');

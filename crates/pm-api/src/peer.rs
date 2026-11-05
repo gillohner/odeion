@@ -82,7 +82,9 @@ pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request
             )
                 .into_response();
         }
-        if !loopback_addressed(req.headers(), req.uri()) || cross_site(req.headers(), req.uri().path()) {
+        if !loopback_addressed(req.headers(), req.uri())
+            || cross_site(req.headers(), req.method(), req.uri().path())
+        {
             return (
                 StatusCode::FORBIDDEN,
                 "this node has no API token, so it answers only at 127.0.0.1 or localhost from its own pages; \
@@ -147,14 +149,21 @@ fn is_loopback_name(name: &str) -> bool {
     name == "localhost" || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+/// What isn't a page another site may open: the API, Subsonic, the MusicBrainz proxy and the
+/// renderers' UPnP routes (a zone's control takes a POST, its description a GET). Everything else
+/// the node serves outside these is a GET: the web app's pages and files, a party page, the
+/// sign-in callbacks.
+const NOT_PAGES: &[&str] = &["/v1/", "/rest/", "/mb/", "/upnp/"];
+
 /// A request a browser made for a page of another site (`Sec-Fetch-Site: cross-site` or
 /// `same-site`: another port of this machine is the same site). For a node without a token only
 /// a top-level navigation to one of its pages is that: the web app, a sign-in callback. Not its
-/// API, Subsonic or the MusicBrainz proxy, which change things on GET too; and not a frame (a
+/// API, Subsonic, the MusicBrainz proxy or the UPnP routes ([`NOT_PAGES`]), which change things on
+/// GET too; only by GET or HEAD (a form another site posts navigates as well); and not a frame (a
 /// hidden one would reach a page with side effects, a sign-in callback, before the page's
 /// `frame-ancestors` keeps it from showing): `Sec-Fetch-Dest` must be `document`. Browsers that
 /// send no `Sec-Fetch-Site` pass on the other checks.
-pub fn cross_site(h: &HeaderMap, path: &str) -> bool {
+pub fn cross_site(h: &HeaderMap, method: &axum::http::Method, path: &str) -> bool {
     let site = h
         .get("sec-fetch-site")
         .and_then(|v| v.to_str().ok())
@@ -164,8 +173,10 @@ pub fn cross_site(h: &HeaderMap, path: &str) -> bool {
     }
     let navigation = h.get("sec-fetch-mode").and_then(|v| v.to_str().ok()) == Some("navigate")
         && h.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) == Some("document");
-    let page = !["/v1/", "/rest/", "/mb/"].iter().any(|p| path.starts_with(p));
-    !(navigation && page)
+    // Opening a page only: a form another site posts (a top-level navigation too) never counts
+    let opens = matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD);
+    let page = !NOT_PAGES.iter().any(|p| path.starts_with(p));
+    !(navigation && opens && page)
 }
 
 /// The `Origin` a browser sent, parsed; `Err` for one that names no site (`null`) or can't be read.
@@ -266,6 +277,7 @@ pub async fn serve_remote(state: Arc<NodeState>) -> std::io::Result<SocketAddr> 
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::http::Method;
 
     fn req(from: Option<&str>, headers: &[(&str, &str)], remote: bool) -> Request {
         let mut b = axum::http::Request::builder().uri("/upnp/zone/z/desc.xml");
@@ -481,15 +493,31 @@ mod tests {
                 ),
             ])
         };
-        assert!(cross_site(&h("cross-site", "no-cors"), "/rest/deletePlaylist"));
-        assert!(cross_site(&h("cross-site", "navigate"), "/rest/jukeboxControl"));
-        assert!(cross_site(&h("cross-site", "cors"), "/v1/info"));
-        assert!(cross_site(&h("same-site", "no-cors"), "/v1/library/scan"));
-        assert!(!cross_site(&h("cross-site", "navigate"), "/tidal/callback"));
-        assert!(!cross_site(&h("cross-site", "navigate"), "/"));
-        assert!(!cross_site(&h("same-origin", "cors"), "/v1/info"));
+        assert!(cross_site(
+            &h("cross-site", "no-cors"),
+            &Method::GET,
+            "/rest/deletePlaylist"
+        ));
+        assert!(cross_site(
+            &h("cross-site", "navigate"),
+            &Method::GET,
+            "/rest/jukeboxControl"
+        ));
+        assert!(cross_site(&h("cross-site", "cors"), &Method::GET, "/v1/info"));
+        assert!(cross_site(
+            &h("same-site", "no-cors"),
+            &Method::GET,
+            "/v1/library/scan"
+        ));
+        assert!(!cross_site(
+            &h("cross-site", "navigate"),
+            &Method::GET,
+            "/tidal/callback"
+        ));
+        assert!(!cross_site(&h("cross-site", "navigate"), &Method::GET, "/"));
+        assert!(!cross_site(&h("same-origin", "cors"), &Method::GET, "/v1/info"));
         assert!(
-            !cross_site(&h("none", "navigate"), "/v1/info"),
+            !cross_site(&h("none", "navigate"), &Method::GET, "/v1/info"),
             "typed in the address bar"
         );
         // A frame on another site's page navigates too, but isn't a document
@@ -499,14 +527,31 @@ mod tests {
                 ("sec-fetch-mode", "navigate"),
                 ("sec-fetch-dest", dest),
             ]);
-            assert!(cross_site(&framed, "/lastfm/callback"), "{dest}");
-            assert!(cross_site(&framed, "/"), "{dest}");
+            assert!(cross_site(&framed, &Method::GET, "/lastfm/callback"), "{dest}");
+            assert!(cross_site(&framed, &Method::GET, "/"), "{dest}");
         }
+        // A form on another site's page, posted to a page or a zone's UPnP control: a top-level
+        // navigation, but no page is opened
+        let doc = h("cross-site", "navigate");
+        for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert!(cross_site(&doc, &method, "/upnp/zone/z1/ctl/avt"), "{method}");
+            assert!(cross_site(&doc, &method, "/"), "{method}");
+            assert!(cross_site(&doc, &method, "/tidal/callback"), "{method}");
+        }
+        assert!(!cross_site(&doc, &Method::HEAD, "/"));
+        assert!(
+            cross_site(&doc, &Method::GET, "/upnp/zone/z1/desc.xml"),
+            "the UPnP routes aren't pages"
+        );
+        assert!(cross_site(&doc, &Method::GET, "/upnp/node.xml"));
         let no_dest = heads(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate")]);
         assert!(
-            cross_site(&no_dest, "/"),
+            cross_site(&no_dest, &Method::GET, "/"),
             "a navigation that doesn't say what it is for"
         );
-        assert!(!cross_site(&HeaderMap::new(), "/v1/info"), "no Sec-Fetch headers");
+        assert!(
+            !cross_site(&HeaderMap::new(), &Method::GET, "/v1/info"),
+            "no Sec-Fetch headers"
+        );
     }
 }

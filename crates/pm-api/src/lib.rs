@@ -20173,6 +20173,22 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
+        // A form another site's page posts (a top-level navigation too): to a zone's UPnP control or
+        // to a page, refused before anything acts on it
+        for uri in ["/upnp/zone/z1/ctl/avt", "/upnp/zone/z1/ctl/rc", "/"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("host", "127.0.0.1:7788")
+                .header("content-type", "text/plain")
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(Body::from("x=1"))
+                .unwrap();
+            let st = open.clone().oneshot(req).await.unwrap().status();
+            assert_eq!(st, StatusCode::FORBIDDEN, "{uri}");
+        }
 
         // With a token: any name (a proxy, a LAN name) with the token
         let dir2 = tempfile::tempdir().unwrap();
