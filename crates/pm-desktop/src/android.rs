@@ -691,18 +691,14 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         Ok((Box::new(track), report))
     }
 
-    fn set_volume(&self, percent: u8) -> Result<(), String> {
-        use jni021::objects::{JClass, JValue};
-        let ok = with_jvm(&self.vm, |env| {
+    fn media_volume(&self) -> Option<u8> {
+        use jni021::objects::JClass;
+        let p = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "setVolume", "(I)Z", &[JValue::Int(i32::from(percent))])?
-                .z()
-        })?;
-        if ok {
-            Ok(())
-        } else {
-            Err("Android's media volume is not available".into())
-        }
+            env.call_static_method(class, "mediaVolume", "()I", &[])?.i()
+        })
+        .ok()?;
+        u8::try_from(p).ok().filter(|p| *p <= 100)
     }
 }
 
@@ -794,6 +790,27 @@ impl pm_out_local::bit_perfect::Track for JniTrack {
 
     fn stop(&mut self) {
         self.call("stop");
+    }
+
+    fn still_confirmed(&self) -> Result<(), String> {
+        use jni021::objects::{JClass, JValue};
+        let why = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(
+                    class,
+                    "status",
+                    "(J)Ljava/lang/String;",
+                    &[JValue::Long(self.handle)],
+                )?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })?;
+        if why.is_empty() {
+            Ok(())
+        } else {
+            Err(why)
+        }
     }
 }
 

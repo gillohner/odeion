@@ -120,6 +120,9 @@ struct Engine {
     /// The sink's device was paused holding its buffer ([`AudioSink::pause`] returned true): it
     /// resumes before anything plays on it, or closes when that buffer is stale.
     sink_paused: bool,
+    /// The device went away while the old sink played out at a song boundary (a USB DAC
+    /// unplugged): the next song starts paused, on no other device.
+    pending_gone: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -156,6 +159,7 @@ pub(crate) fn spawn(
         runtime: tokio::runtime::Handle::try_current().ok(),
         handling: 0,
         sink_paused: false,
+        pending_gone: None,
     };
     std::thread::Builder::new()
         .name(name)
@@ -658,6 +662,12 @@ impl Engine {
         if let Some(mut s) = self.sink.take() {
             let r = if drain { s.drain() } else { s.flush() };
             if let Err(e) = r {
+                // Its device went away meanwhile: nothing opens elsewhere (the phone's speaker)
+                if let Some(why) = e.gone_reason() {
+                    self.sink_paused = false;
+                    self.pending_gone = Some(why);
+                    return false;
+                }
                 tracing::warn!(zone = %self.id, "closing sink: {e}");
             }
         }
@@ -684,6 +694,29 @@ impl Engine {
         source: Box<dyn FrameSource>,
         proc: Box<dyn Processor>,
     ) -> bool {
+        let mut proc = proc;
+        // The output's settings changed since its sink opened (a phone's DAC: bit-perfect or
+        // shared), or it takes other formats now: this song opens afresh, planned for it now
+        let stale = self.sink.as_ref().is_some_and(|s| s.reopen_at_track());
+        if self.incoming.is_none() && (stale || !self.output.live_caps().accepts(&proc.output_format())) {
+            match self
+                .factory
+                .plan(source.as_ref(), &self.output.live_caps(), &self.output.id())
+            {
+                Ok(p) => proc = p,
+                Err(e) => tracing::warn!(zone = %self.id, "planning again: {e}"),
+            }
+            if stale {
+                if let Some(mut s) = self.sink.take() {
+                    if let Err(e) = s.drain() {
+                        if let Some(why) = e.gone_reason() {
+                            self.pending_gone = Some(why);
+                        }
+                    }
+                }
+                self.sink_paused = false;
+            }
+        }
         let fmt = proc.output_format();
         // A track started while paused (next, a queue item) starts on a fresh sink: the paused
         // device's buffer is the old track's
@@ -705,9 +738,15 @@ impl Engine {
         }
         let gapless = self.sink.as_ref().is_some_and(|s| s.format() == fmt) && self.current.is_some();
         self.output.now_playing(Some(&item));
-        if !self.ensure_sink(fmt, true) {
-            return false;
-        }
+        // A device gone at this boundary: the song starts paused, on no device
+        let gone = match self.pending_gone.take() {
+            Some(why) => Some(why),
+            None if !self.ensure_sink(fmt, true) => match self.pending_gone.take() {
+                Some(why) => Some(why),
+                None => return false,
+            },
+            None => None,
+        };
         let start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
         self.queue
             .lock()
@@ -738,6 +777,9 @@ impl Engine {
         self.error = None;
         self.transport = Transport::Playing;
         self.dirty = true;
+        if let Some(why) = gone {
+            self.device_gone(why);
+        }
         true
     }
 

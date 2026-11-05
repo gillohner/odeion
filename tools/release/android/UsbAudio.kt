@@ -74,7 +74,7 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             // The app closing: the DAC's mixer back to Android's choice (system sounds come back)
             activity.application.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
                 override fun onActivityDestroyed(a: Activity) {
-                    if (a.isFinishing) BitPerfect.clear()
+                    if (a.isFinishing) BitPerfect.clearIfIdle()
                 }
                 override fun onActivityCreated(a: Activity, b: android.os.Bundle?) {}
                 override fun onActivityStarted(a: Activity) {}

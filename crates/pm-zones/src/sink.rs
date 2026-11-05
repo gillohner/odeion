@@ -116,8 +116,8 @@ pub struct DeviceSettings {
     /// The mode to use: `auto` takes bit-perfect where the phone allows it, else shared.
     #[serde(default)]
     pub mode: PreferredMode,
-    /// The zone's volume sets the device's own (Android's media volume, applied by the DAC in
-    /// bit-perfect mode). Off: the node's software volume, which changes the samples.
+    /// Reserved: kept so earlier apps' settings still read. The phone's DAC has no zone volume of
+    /// its own (in bit-perfect mode the level is the DAC's).
     #[serde(default = "yes")]
     pub dac_volume: bool,
 }
@@ -342,6 +342,13 @@ pub trait AudioSink: Send {
 
     /// Frames written so far, for position reporting.
     fn frames_written(&self) -> u64;
+
+    /// The output's settings changed since this sink opened (a phone's DAC switched between
+    /// bit-perfect and shared): the zone closes it at the next song and opens afresh, so the change
+    /// applies there even when the format stays the same.
+    fn reopen_at_track(&self) -> bool {
+        false
+    }
 
     /// How many more frames the sink's stream can carry, when it has a fixed size (a renderer's
     /// stream offered as a file of fixed length); `None` when there is no limit. The zone starts

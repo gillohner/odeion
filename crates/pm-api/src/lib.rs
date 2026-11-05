@@ -20175,6 +20175,23 @@ exec sleep 300
         // What a controller would see when it fetches the outputs the moment the event arrives
         let mut rx = s.events.subscribe();
         let s2 = s.clone();
+        // Each observation is also signalled, so the test changes the phone only once the one
+        // before was observed (the observer reads the registry as it is then)
+        let (observed_tx, observed) = std::sync::mpsc::channel::<()>();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(observed));
+        let wait_observed = || {
+            let o = observed.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    o.lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("an outputs_changed event")
+                })
+                .await
+                .unwrap()
+            }
+        };
         let seen = std::thread::spawn(move || {
             let mut seen = Vec::new();
             while let Ok(ev) = rx.blocking_recv() {
@@ -20182,6 +20199,7 @@ exec sleep 300
                     ApiEvent::OutputsChanged { output } => {
                         let listed = s2.outputs.get(output).map(|o| o.device().map(|d| d.name));
                         seen.push((ev.event.clone(), listed));
+                        let _ = observed_tx.send(());
                     }
                     // The test's own end mark
                     ApiEvent::LibraryChanged => break,
@@ -20204,6 +20222,7 @@ exec sleep 300
         };
         let (st, body) = register().await;
         assert_eq!(st, StatusCode::OK, "{body}");
+        wait_observed().await;
         // The owner's choices reach the phone, and the answer shows them
         let id = body[0]["id"].as_str().unwrap().to_string();
         let enc = id
@@ -20239,6 +20258,7 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "an output without a device");
+        wait_observed().await;
         *phone.dac.lock().unwrap() = None;
         let (st, _) = register().await;
         assert_eq!(st, StatusCode::OK);

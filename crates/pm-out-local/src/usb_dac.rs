@@ -370,8 +370,52 @@ struct Phone {
     last: Option<LastOpen>,
     /// Counts DACs that went away: a sink opened on a DAC stops when it changes.
     gone: u64,
+    /// Why the last one went ("FiiO KA17 was unplugged", or media moved elsewhere).
+    gone_why: String,
     /// Where the settings are kept (the app's data folder), once known.
     settings_file: Option<std::path::PathBuf>,
+}
+
+/// [`gone_count`] without the lock, for the audio callback.
+static GONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Counts changes to the settings or the DAC: a sink opened before one is closed at the next song,
+/// so the change applies from there (`AudioSink::reopen_at_track`).
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Called when what the phone's output reports changed outside a report from the app (a
+/// confirmation withdrawn): the app registers its player again, so the node learns it.
+static ON_CHANGE: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+/// What to call when the output's device changed by itself (the app's re-registration).
+pub fn on_change(f: impl Fn() + Send + 'static) {
+    *ON_CHANGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
+}
+
+fn notify_change() {
+    if let Some(f) = ON_CHANGE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        f();
+    }
+}
+
+/// The settings-or-DAC generation: it changes with the settings or the DAC, and a sink opened
+/// before a change is closed at the next song.
+pub fn generation() -> u64 {
+    GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// [`gone_count`], lock-free.
+pub fn gone_count_now() -> u64 {
+    GONE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Why the last DAC went.
+pub fn gone_reason() -> String {
+    with_phone(|p| {
+        if p.gone_why.is_empty() {
+            "the USB DAC was unplugged".into()
+        } else {
+            p.gone_why.clone()
+        }
+    })
 }
 
 /// What an open of the phone's output got, on which DAC.
@@ -443,6 +487,9 @@ pub fn set_settings(s: DeviceSettings) -> bool {
         p.settings = s;
         (changed, p.settings_file.clone())
     });
+    if changed {
+        GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     if let (true, Some(f)) = (changed, file) {
         if let Err(e) = std::fs::write(&f, serde_json::to_vec(&s).expect("serializes")) {
             tracing::warn!(path = %f.display(), "cannot save the DAC settings: {e}");
@@ -469,6 +516,25 @@ pub fn record_open(last: LastOpen) {
     with_phone(|p| p.last = Some(last));
 }
 
+/// The open on `dac_id` in `format` is no longer what was confirmed (Android's mixer for the DAC
+/// was changed or cleared, the track moved): shared from now on, with why. Tells the app, so the
+/// node learns it. Returns whether that changed anything.
+pub fn withdraw_confirmation(dac_id: i32, format: pm_model::AudioFormat, why: String) -> bool {
+    let changed = with_phone(|p| match p.last.as_mut() {
+        Some(l) if l.dac_id == dac_id && l.format == format && l.confirmed => {
+            l.confirmed = false;
+            l.mode = DeviceMode::Shared;
+            l.note = Some(why);
+            true
+        }
+        _ => false,
+    });
+    if changed {
+        notify_change();
+    }
+    changed
+}
+
 /// How many DACs went away so far: a sink opened on one stops when this changes.
 pub fn gone_count() -> u64 {
     with_phone(|p| p.gone)
@@ -477,6 +543,11 @@ pub fn gone_count() -> u64 {
 /// Keep `dac` as the phone's DAC. Returns whether what the output reports changed (the app then
 /// registers its player again, so the node and the UI learn it).
 pub fn set_dac(dac: Option<Dac>) -> bool {
+    set_dac_because(dac, None)
+}
+
+/// [`set_dac`], with why the DAC went when it goes (`None`: it was unplugged).
+fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
     with_phone(|p| {
         let before = view(p);
         let other =
@@ -484,6 +555,12 @@ pub fn set_dac(dac: Option<Dac>) -> bool {
         if other && p.dac.is_some() {
             // The DAC an open sink plays on went away (or another took its place)
             p.gone += 1;
+            GONE.store(p.gone, std::sync::atomic::Ordering::SeqCst);
+            let name = p.dac.as_ref().map(|d| d.device.name.clone()).unwrap_or_default();
+            p.gone_why = why.unwrap_or_else(|| format!("{name} was unplugged"));
+        }
+        if other {
+            GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         if other {
             p.last = None;
@@ -496,15 +573,23 @@ pub fn set_dac(dac: Option<Dac>) -> bool {
 /// A report from the app, kept as the phone's DAC: a report that can't be read (too large,
 /// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
 pub fn apply_report(json: &str) -> bool {
-    let dac = match parse_report(json) {
-        Ok(r) => dac(&r),
+    let (dac, why) = match parse_report(json) {
+        Ok(r) => {
+            let dac = dac(&r);
+            // The DAC still attached, but media goes elsewhere (Bluetooth, the speaker)
+            let old = current_dac();
+            let why = old
+                .filter(|o| dac.is_none() && r.devices.iter().any(|d| d.id == o.id && is_usb_sink(d)))
+                .map(|o| format!("{} is not where Android plays now", o.device.name));
+            (dac, why)
+        }
         Err(e) => {
             tracing::warn!("USB DAC detection: {e}");
-            None
+            (None, None)
         }
     };
     tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
-    set_dac(dac)
+    set_dac_because(dac, why)
 }
 
 #[cfg(test)]

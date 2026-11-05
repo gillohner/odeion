@@ -195,6 +195,10 @@ struct Recorder {
     room: Mutex<Option<u64>>,
     /// The device goes away once this many frames were written (a USB DAC unplugged).
     gone_after: Mutex<Option<u64>>,
+    /// The device goes away while the sink plays out (at a song boundary).
+    drain_gone: std::sync::atomic::AtomicBool,
+    /// The output's settings changed: sinks open before this ask to be reopened.
+    reopen: std::sync::atomic::AtomicBool,
 }
 
 struct RecOutput {
@@ -270,7 +274,16 @@ impl AudioSink for RecSink {
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         *self.rec.drains.lock().unwrap() += 1;
+        if self.rec.drain_gone.load(Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
         Ok(())
+    }
+    fn reopen_at_track(&self) -> bool {
+        self.rec.reopen.load(Ordering::SeqCst)
     }
     fn pause(&mut self) -> Result<bool, SinkError> {
         if !self.rec.device_pause.load(Ordering::SeqCst) {
@@ -1093,4 +1106,73 @@ async fn a_device_gone_mid_track_pauses_the_zone() {
     let k = kinds(&drain_events(&mut r.events));
     assert!(k.contains(&"pause:30".to_string()), "{k:?}");
     assert!(k.iter().any(|e| e.starts_with("error")), "{k:?}");
+}
+
+/// The device goes away while the old song plays out before a format change: the next song starts
+/// paused, and nothing opens on another device (the phone's speaker); Play opens it on the DAC.
+#[tokio::test]
+async fn a_device_gone_at_a_song_boundary_pauses_the_next_song() {
+    let mut r = rig(&[("a", RATE, 200), ("b", 2 * RATE, 300)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    r.rec.drain_gone.store(true, Ordering::SeqCst);
+    r.gate.allow(3);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    let st = r.zone.state();
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(
+        st.now_playing.as_ref().unwrap().item.uri,
+        "b",
+        "paused at the next song"
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "nothing opened for b");
+    r.rec.drain_gone.store(false, Ordering::SeqCst);
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    r.gate.allow(100);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2, "b on a fresh sink");
+    let mut want = frames(0, 200);
+    want.extend(frames(0, 300));
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        want,
+        "nothing lost, nothing twice"
+    );
+    drop(drain_events(&mut r.events));
+}
+
+/// The output's settings change while it plays (a phone's DAC from shared to bit-perfect): the
+/// next song opens afresh even in the same format, so the change applies there.
+#[tokio::test]
+async fn a_settings_change_applies_at_the_next_song() {
+    let mut r = rig(&[("a", RATE, 200), ("b", RATE, 200), ("c", RATE, 200)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("b"), QueueItem::new("c")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 100).await;
+    r.rec.reopen.store(true, Ordering::SeqCst);
+    r.gate.allow(2);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.rec.reopen.store(false, Ordering::SeqCst);
+    r.gate.allow(100);
+    r.zone.wait_stopped().await;
+    assert_eq!(
+        *r.rec.opens.lock().unwrap(),
+        2,
+        "a, then b afresh; c joins b's sink"
+    );
+    let k = kinds(&drain_events(&mut r.events));
+    assert!(
+        k.contains(&"start:b:false".to_string()),
+        "b is not gapless: {k:?}"
+    );
+    assert!(k.contains(&"start:c:true".to_string()), "c is: {k:?}");
 }

@@ -696,6 +696,16 @@ pub fn run() {
                     let _ = std::fs::create_dir_all(&dir);
                     pm_out_local::usb_dac::keep_settings_in(dir.join("usb-dac.json"));
                 }
+                // A confirmation withdrawn while playing (Android's mixer changed): the node learns it
+                let h2 = app.handle().clone();
+                pm_out_local::usb_dac::on_change(move || {
+                    let app = h2.clone();
+                    if let Some(s) = app.state::<AppState>().current() {
+                        if s.via.is_empty() {
+                            tauri::async_runtime::spawn(register_player(app, s));
+                        }
+                    }
+                });
                 let handle = app.handle().clone();
                 android::watch_usb_audio(app.handle(), move || {
                     let app = handle.clone();

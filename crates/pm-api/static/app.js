@@ -2170,6 +2170,18 @@
       : (dacUnconfirmed(d) || d.note || '').replace(/\.$/, '');
     return { bp: false, d, f, why };
   };
+  // The path as the listener hears it: the node's stages, then what the phone does with its DAC.
+  // Bit-perfect only as dacNow says (confirmed for this format, nothing changed on the way);
+  // otherwise Android's mixer, which may convert and mixes in other sounds: every headline, badge
+  // and label built from this path follows, so none says bit-perfect for a shared DAC
+  const zoneNp = (z, np) => {
+    const n = np && np.signal_path && dacNow(z); if (!n) return np;
+    const of = np.output_format;
+    const stage = n.bp
+      ? { name: 'DAC', in_format: of, out_format: of, quality: 'bit_perfect', note: `Android confirmed bit-perfect to ${n.d.name}` }
+      : { name: 'Android mixer', in_format: of, out_format: of, quality: 'lossless', note: `shared: Android may convert it and mixes in other sounds${n.why ? `; ${n.why}` : ''}` };
+    return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, stage] } };
+  };
   // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
   const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? 'bit-perfect' : 'shared'}` : ''; };
   // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"
@@ -2788,19 +2800,20 @@
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
     // and whether DSP is on; on phones the device and a quality badge (CSS swaps .qtext for .qshort)
-    const h = np.signal_path ? headline(np.signal_path) : null;
+    const zp = zoneNp(z, np);
+    const h = zp.signal_path ? headline(zp.signal_path) : null;
     const dsp = dspOn(np);
     q.className = 'quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : '');
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
     $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
     const dv = deviceOf(z);
-    const words = (np.signal_path || np.format ? pathSummary(np) : 'Played by this browser') + (dv ? ` → ${dacWordsFor(z)}` : '');
+    const words = (np.signal_path || np.format ? pathSummary(zp) : 'Played by this browser') + (dv ? ` → ${dacWordsFor(z)}` : '');
     $('.qtext', q).textContent = words;
     $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
     $('.qshort', q).innerHTML = `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`;
     q.setAttribute('aria-label', `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`);
-    q.title = np.signal_path ? np.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
+    q.title = zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
     syncQPanel();
   };
   // ---- immediate feedback on play (owner, 2026-10-29) ----
@@ -2905,7 +2918,7 @@
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? 'Decoded by this browser' : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
-      ${np && np.signal_path ? pathHtml(np, 'compact') : `<p class="qp-note">${isBrowser() ? 'This browser decodes the file itself; the node makes no signal-path claim.' : 'Nothing playing.'}</p>`}
+      ${np && np.signal_path ? pathHtml(zoneNp(z, np), 'compact') : `<p class="qp-note">${isBrowser() ? 'This browser decodes the file itself; the node makes no signal-path claim.' : 'Nothing playing.'}</p>`}
       <div class="pop-title">DSP · ${esc(z.name)}</div>
       <div class="qp-dsp">${dsp}</div>
       <div class="pop-title">Volume</div>
@@ -3043,7 +3056,7 @@
     const q = (isBrowser() ? state.browserQueue : state.queue) || [];
     const idx = z.queue_index != null && q[z.queue_index] && q[z.queue_index].id === it.id ? z.queue_index : q.findIndex((x) => x.id === it.id);
     const rest = idx >= 0 ? q.slice(idx + 1) : [];
-    const h = np.signal_path ? headline(np.signal_path) : null;
+    const h = np.signal_path ? headline(zoneNp(z, np).signal_path) : null;
     const colour = Q_COLOUR;
     const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
     const sheet = npSheetNow();
@@ -3057,7 +3070,7 @@
       }
       if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
       if (k === 'details') {
-        return pathHtml(np)
+        return pathHtml(zoneNp(z, np))
             + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
       }
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
@@ -6513,14 +6526,12 @@
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
             + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''))
             // The choices, from apps that take them (they report `settings`)
-            + (dv.settings ? group('Settings', row('Preferred mode', 'Auto plays bit-perfect where Android allows it, and shared otherwise. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${v === 'bit_perfect' && !(dv.modes || []).includes('bit_perfect') ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)
-              + row('Use the DAC’s volume', 'On: the zone’s volume is the phone’s media volume, which the DAC applies itself in bit-perfect mode where it can, and the music stays untouched. Off: the node turns the music down itself, which changes the samples (not bit-perfect).', `<label><input type="checkbox" id="dvvol" ${dv.settings.dac_volume !== false ? 'checked' : ''}> On</label>`)) : '');
+            + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${v === 'bit_perfect' && !(dv.modes || []).includes('bit_perfect') ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)) : '');
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           // This phone: the choices go to the node, which passes them to the app's player
           const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
           const dvm = $('#dvmode', main); if (dvm) dvm.onchange = () => putDev({ mode: dvm.value }, 'Mode saved');
-          const dvv = $('#dvvol', main); if (dvv) dvv.onchange = () => putDev({ dac_volume: dvv.checked }, dvv.checked ? 'The DAC’s volume' : 'The node’s volume');
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };

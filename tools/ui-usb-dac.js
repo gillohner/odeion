@@ -140,6 +140,18 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     // Shared with Android's reason
     await setZone(run, bpZone); await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, note: 'Android refused bit-perfect for this format' });
     check(await panelLine(page) === 'Shared · FiiO KA17 · Android refused bit-perfect for this format', `${at}: refused: "${await panelLine(page)}"`);
+    // ... and nothing else claims bit-perfect: the whole pill, its label and the panel's headline
+    {
+      const all = await page.evaluate(() => ({ pill: document.querySelector('#quality .qtext').textContent, aria: document.querySelector('#quality').getAttribute('aria-label'), cls: document.querySelector('#quality').className, head: (document.querySelector('#qpanel .path-head') || {}).textContent || '', rows: [...document.querySelectorAll('#qpanel .path-row .pn')].map((e) => e.textContent) }));
+      check(!/bit.?perfect/i.test(all.pill + all.aria + all.head) && !/q-bit_perfect/.test(all.cls), `${at}: refused: no bit-perfect claim anywhere (pill "${all.pill}", headline "${all.head.trim()}", class "${all.cls}")`);
+      check(all.rows.includes('Android mixer'), `${at}: refused: the path shows Android's mixer (${all.rows.join(', ')})`);
+    }
+    // Confirmed for what plays: the pill and the panel say bit-perfect all the way
+    await nodePlug(run, BP);
+    {
+      const all = await page.evaluate(() => ({ pill: document.querySelector('#quality .qtext').textContent, head: (document.querySelector('#qpanel .path-head') || {}).textContent || '' }));
+      check(all.pill === 'FLAC 24/96 → 24/96 · Bit-perfect → FiiO KA17 · bit-perfect' && /^Bit-perfect/.test(all.head.trim()), `${at}: confirmed: pill "${all.pill}", headline "${all.head.trim()}"`);
+    }
     await setZone(run, zone); await nodePlug(run, KA17);
     await page.keyboard.press('Escape'); await sleep(200);
 
@@ -186,13 +198,14 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     const con = await dacTab(page);
     check(/Playing through it\s+Bit-perfect · FiiO KA17 · 96 kHz \/ 24 bit\./.test(con) && !/not confirmed/.test(con), `${at}: Settings, confirmed for what plays: "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit."`);
     // The choices: Preferred mode and the DAC's volume, sent to the node
-    const ctl = await page.evaluate(() => { const s = document.querySelector('#dvmode'); const c = document.querySelector('#dvvol'); return s && c ? { opts: [...s.options].map((o) => `${o.value}${o.disabled ? '(off)' : ''}`), value: s.value, vol: c.checked } : null; });
-    check(ctl && ctl.opts.join(',') === 'auto,bit_perfect,shared' && ctl.value === 'auto' && ctl.vol === true, `${at}: Settings offers Preferred mode (Auto, Bit-perfect, Shared) and Use the DAC's volume (${JSON.stringify(ctl)})`);
+    const ctl = await page.evaluate(() => { const s = document.querySelector('#dvmode'); return s ? { opts: [...s.options].map((o) => `${o.value}${o.disabled ? '(off)' : ''}`), value: s.value, vol: !!document.querySelector('#dvvol') } : null; });
+    check(ctl && ctl.opts.join(',') === 'auto,bit_perfect,shared' && ctl.value === 'auto' && ctl.vol === false, `${at}: Settings offers Preferred mode (Auto, Bit-perfect, Shared), no volume switch (${JSON.stringify(ctl)})`);
+    const help = await dacTab(page);
+    check(/Bit-perfect plays at full level/.test(help) && /Auto plays bit-perfect only while Android’s volume is at full/.test(help), `${at}: Settings says bit-perfect plays at full level and when Auto uses it`);
     const h0 = state.hits.length;
     await page.selectOption('#dvmode', 'shared'); await sleep(400);
-    await page.click('#dvvol'); await sleep(400);
     const puts = state.hits.slice(h0).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => `${decodeURIComponent(h.v)} ${h.body}`);
-    check(puts.length === 2 && puts[0] === `/outputs/${OUT}/device {"mode":"shared"}` && puts[1] === `/outputs/${OUT}/device {"dac_volume":false}`, `${at}: each choice is a PUT /v1/outputs/{id}/device (${JSON.stringify(puts)})`);
+    check(puts.length === 1 && puts[0] === `/outputs/${OUT}/device {"mode":"shared"}`, `${at}: each choice is a PUT /v1/outputs/{id}/device (${JSON.stringify(puts)})`);
     // An app without bit-perfect here (Android 13): Bit-perfect can't be picked
     await nodePlug(run, { ...KA17, modes: ['shared'], settings: { mode: 'auto', dac_volume: true }, note: 'Android 13: bit-perfect needs Android 14' });
     await page.waitForFunction(() => /Android 13/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});

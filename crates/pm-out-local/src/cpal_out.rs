@@ -160,11 +160,7 @@ impl Output for CpalOutput {
     /// converting to 44.1/48), its volume through Android's media volume.
     fn live_caps(&self) -> OutputCaps {
         #[cfg(target_os = "android")]
-        return crate::bit_perfect::live_caps(
-            crate::usb_dac::current_dac().as_ref(),
-            crate::usb_dac::settings(),
-            &self.caps,
-        );
+        return crate::bit_perfect::phone_caps(&self.caps);
         #[cfg(not(target_os = "android"))]
         self.caps.clone()
     }
@@ -192,8 +188,8 @@ impl Output for CpalOutput {
         // Android's shared path plays it at its own rate then (Android converts, the device says so)
         #[cfg(target_os = "android")]
         let any_rate = match crate::bit_perfect::plan(fmt) {
-            crate::bit_perfect::Plan::BitPerfect(dac, choice) => {
-                match crate::bit_perfect::open(self.id(), &dac, choice, fmt) {
+            crate::bit_perfect::Plan::BitPerfect(dac, choice, warning) => {
+                match crate::bit_perfect::open(self.id(), &dac, choice, warning, fmt) {
                     Ok(s) => return Ok(Box::new(s)),
                     Err(why) => {
                         tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
@@ -202,9 +198,11 @@ impl Output for CpalOutput {
                     }
                 }
             }
+            // Planned for the DAC's caps but played shared (a mono track, Settings changed since):
+            // Android's mixer takes the track's rate, never a stopped zone
             crate::bit_perfect::Plan::Shared(Some((dac, why))) => {
                 crate::bit_perfect::record_shared(&dac, fmt, why);
-                false
+                true
             }
             crate::bit_perfect::Plan::Shared(None) => false,
         };
@@ -220,19 +218,10 @@ impl Output for CpalOutput {
             .map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 
-    /// On Android with the DAC's volume in use: Android's media volume (the DAC applies it in
-    /// bit-perfect mode where it can). Otherwise none, as before.
-    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        if self.live_caps().hw_volume.is_some() {
-            if let Some(b) = crate::bit_perfect::backend() {
-                let percent = match v {
-                    Volume::Percent(p) => p.min(100),
-                    Volume::Mute(true) => 0,
-                    _ => return Err(SinkError::NoVolume(self.id())),
-                };
-                return b.set_volume(percent).map_err(SinkError::Device);
-            }
-        }
+    /// No volume of its own: Android's (the phone's buttons) in shared mode; in bit-perfect mode
+    /// the level is the DAC's. The zone's software volume (DSP) still works, and the signal path
+    /// then says it changes the samples.
+    async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
         Err(SinkError::NoVolume(self.id()))
     }
 }
@@ -243,6 +232,8 @@ struct Shared {
     played: AtomicU64,
     underruns: AtomicU64,
     stop: AtomicBool,
+    /// The stream ended by itself (its device went away: Android disconnects it).
+    dead: AtomicBool,
 }
 
 /// The `cpal::Stream` is not `Send` on every platform, so it lives on its own
@@ -257,6 +248,8 @@ pub struct CpalSink {
     /// Opened with a phone's USB DAC attached: its name and the count of DACs gone then. When it
     /// goes, the sink stops (the zone pauses) instead of playing on from the phone's speaker.
     dac_at_open: Option<(String, u64)>,
+    /// The phone's settings-or-DAC generation at open (a change closes it at the next song).
+    generation: u64,
 }
 
 impl CpalSink {
@@ -271,8 +264,13 @@ impl CpalSink {
             played: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            dead: AtomicBool::new(false),
         });
         let capacity_frames = (fmt.rate_hz as f64 * QUEUE_SECONDS) as u64;
+        // A phone's USB DAC at open: once it goes, the callback plays silence at once
+        let dac_at_open =
+            crate::usb_dac::current_dac().map(|d| (d.device.name, crate::usb_dac::gone_count()));
+        let gone_at = dac_at_open.as_ref().map(|(_, g)| *g);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let name = device_name.to_string();
         let channels = fmt.channels as usize;
@@ -298,6 +296,10 @@ impl CpalSink {
                 let stream = device.build_output_stream(
                     config,
                     move |out: &mut [f32], _| {
+                        if gone_at.is_some_and(|g| crate::usb_dac::gone_count_now() != g) {
+                            out.fill(0.0);
+                            return;
+                        }
                         let mut q = s3.queue.lock().unwrap_or_else(|p| p.into_inner());
                         let have = q.len().min(out.len());
                         for (i, v) in out.iter_mut().enumerate() {
@@ -313,7 +315,13 @@ impl CpalSink {
                         s3.played
                             .fetch_add((have / channels.max(1)) as u64, Ordering::Relaxed);
                     },
-                    |e| tracing::warn!("cpal stream error: {e}"),
+                    {
+                        let s4 = s2.clone();
+                        move |e| {
+                            tracing::warn!("cpal stream error: {e}");
+                            s4.dead.store(true, Ordering::SeqCst);
+                        }
+                    },
                     None,
                 );
                 let stream = match stream {
@@ -346,7 +354,8 @@ impl CpalSink {
             capacity_frames,
             written: 0,
             thread: Some(thread),
-            dac_at_open: crate::usb_dac::current_dac().map(|d| (d.device.name, crate::usb_dac::gone_count())),
+            dac_at_open,
+            generation: crate::usb_dac::generation(),
         })
     }
 
@@ -355,14 +364,35 @@ impl CpalSink {
         (q.len() / self.fmt.channels.max(1) as usize) as u64
     }
 
-    /// Wait until the queue has room for `frames` more.
-    fn wait_for_room(&self, frames: u64) {
+    /// The phone's DAC this sink opened on went away, or its stream ended by itself with a DAC.
+    fn gone(&self) -> Option<SinkError> {
+        let (name, at) = self.dac_at_open.as_ref()?;
+        (crate::usb_dac::gone_count() != *at || self.shared.dead.load(Ordering::SeqCst)).then(|| {
+            let why = crate::usb_dac::gone_reason();
+            SinkError::Gone(
+                self.id.clone(),
+                if why.is_empty() {
+                    format!("{name} was unplugged")
+                } else {
+                    why
+                },
+            )
+        })
+    }
+
+    /// Wait until the queue has room for `frames` more; never past a DAC that went away (its
+    /// stream stops taking audio, and the wait would never end).
+    fn wait_for_room(&self, frames: u64) -> Result<(), SinkError> {
         while self.queued_frames() + frames > self.capacity_frames * 2 {
             if self.shared.stop.load(Ordering::Relaxed) {
-                return;
+                return Ok(());
+            }
+            if let Some(e) = self.gone() {
+                return Err(e);
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        Ok(())
     }
 }
 
@@ -378,11 +408,9 @@ impl AudioSink for CpalSink {
                 found: block.format,
             });
         }
-        if let Some((name, gone)) = self.dac_at_open.clone() {
-            if crate::usb_dac::gone_count() != gone {
-                self.flush()?;
-                return Err(SinkError::Gone(self.id.clone(), format!("{name} was unplugged")));
-            }
+        if let Some(e) = self.gone() {
+            self.flush()?;
+            return Err(e);
         }
         let scale = 1.0 / (1u64 << (self.fmt.bits.saturating_sub(1).min(31))) as f32;
         let samples: Vec<f32> = match &block.samples {
@@ -390,7 +418,10 @@ impl AudioSink for CpalSink {
             Samples::PcmF64(s) => s.iter().map(|&v| v as f32).collect(),
             Samples::Dsd(_) => return Err(SinkError::UnsupportedFormat(self.id.clone(), block.format)),
         };
-        self.wait_for_room(block.frames() as u64);
+        if let Err(e) = self.wait_for_room(block.frames() as u64) {
+            self.flush()?;
+            return Err(e);
+        }
         self.shared
             .queue
             .lock()
@@ -419,6 +450,10 @@ impl AudioSink for CpalSink {
     fn drain(&mut self) -> Result<(), SinkError> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while self.queued_frames() > 0 && std::time::Instant::now() < deadline {
+            if let Some(e) = self.gone() {
+                self.flush()?;
+                return Err(e);
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         // Let the device play out what the OS still buffers.
@@ -428,6 +463,11 @@ impl AudioSink for CpalSink {
 
     fn frames_written(&self) -> u64 {
         self.written
+    }
+
+    /// A phone's DAC settings or its DAC changed since it opened: the next song opens afresh.
+    fn reopen_at_track(&self) -> bool {
+        crate::usb_dac::generation() != self.generation
     }
 }
 

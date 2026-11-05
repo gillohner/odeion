@@ -184,11 +184,13 @@ What it does:
   file reaches the DAC as 96/24. The app says "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit" only when
   Android confirmed it for the format playing now; otherwise it says why not (for example "the DAC
   does not list 352.8 kHz for bit-perfect", or "Android refused bit-perfect for this format").
-- **Volume:** in bit-perfect mode the zone's volume is Android's media volume. The DAC applies it
-  itself where it has its own volume control (the KA17 does). On a DAC without one, the volume
-  buttons change nothing: turn down the amplifier or the headphones. Settings › This phone › Use the
-  DAC's volume off: the node turns the music down itself, which is no longer bit-perfect (the
-  signal path says so).
+- **Volume, never louder:** Android applies no volume of its own in bit-perfect mode: the level is
+  the DAC's (the KA17's buttons) or the amplifier's. So on Auto (the default) the app plays
+  bit-perfect only while Android's media volume is at full, where nothing is lost; turned down, it
+  plays shared and says "Android's volume is at N%, and bit-perfect plays at full level". Preferred
+  mode Bit-perfect plays bit-perfect at any volume, with that warning: turn the DAC down first. The
+  zone's software volume (Output and DSP) still works and the signal path then says it changes the
+  samples.
 - **Below Android 14,** or when Android refuses, it plays shared as before (48 kHz on nearly every
   phone), and says why.
 - **Unplugging mid-song pauses the zone** ("FiiO KA17 was unplugged: paused"); nothing plays on from
@@ -200,10 +202,10 @@ What it does:
 2. Plug in the FiiO KA17 (USB-C, no adapter). The app never asks for USB access. Within a few seconds:
    - The zone picker (the speaker button) shows under the phone's zone "FiiO KA17 · …".
    - Settings › This device › This phone: "FiiO KA17", what it takes, and Preferred mode (Auto,
-     Bit-perfect, Shared) and Use the DAC's volume. On Android 13 or older, Bit-perfect can't be
-     picked and a note says why.
-3. With Preferred mode on Auto, play in turn a 44.1/16, a 96/24 and a 192/24 FLAC file. For each,
-   report:
+     Bit-perfect, Shared). On Android 13 or older, Bit-perfect can't be picked and a note says why.
+3. Turn the KA17's own volume down, then Android's media volume up to full (Auto plays bit-perfect
+   only from full). With Preferred mode on Auto, play in turn a 44.1/16, a 96/24 and a 192/24 FLAC
+   file. For each, report:
    - what the KA17's own display shows (expected on Android 14+: 44.1, 96, 192; below Android 14:
      48 each time);
    - what the app's Sound panel says under "Playing on" (expected: "Bit-perfect · FiiO KA17 ·
@@ -211,10 +213,12 @@ What it does:
    - whether system sounds (a notification) are heard during playback (Android mutes them in
      bit-perfect mode).
    If the panel says "Shared · FiiO KA17 · <why>", report the exact words.
-4. Volume: press the phone's volume buttons and move the app's volume slider during playback; report
-   whether the level changes, and whether the KA17's display shows its own volume changing.
+4. Volume: during bit-perfect playback press the phone's volume buttons down a few steps; report
+   whether the level changes (it should not get louder at any point). Play the next song: on Auto it
+   now plays shared (the panel says why), at Android's volume. Report anything louder than before.
 5. Unplug the KA17 mid-song: the zone must pause (the bar says "FiiO KA17 was unplugged: paused"),
-   and nothing must play from the phone's speaker. Plug it in again: the DAC shows again; press Play:
+   and nothing must play from the phone's speaker. Also try at the end of a song, just as the next one
+   (in another format) starts: it must pause too. Plug it in again: the DAC shows again; press Play:
    it carries on where it was, on the DAC (check its display). Report any sound from the speaker,
    however short.
 6. Settings › This phone › Preferred mode: Shared, then play the 96/24 file: the display shows 48 and
