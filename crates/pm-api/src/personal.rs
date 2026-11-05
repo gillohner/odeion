@@ -95,28 +95,52 @@ fn sessions() -> &'static Mutex<HashMap<String, PubkySession>> {
     S.get_or_init(Default::default)
 }
 
-/// What a homeserver error means for the grant, from the error itself: never from its text,
-/// where a URL or an id can hold any digits.
-fn classify(e: &HomeserverError) -> PersonalError {
+// What a homeserver error means comes from the error itself, never from its text, where a URL
+// or an id can hold any digits.
+
+/// The HTTP status a homeserver answered with, when it answered.
+fn status_of(e: &HomeserverError) -> Option<u16> {
     use pubky::errors::{Error as Pe, RequestError};
-    let msg = e.to_string();
     match e {
-        HomeserverError::Pubky(Pe::Request(RequestError::Server { status, .. })) => match status.as_u16() {
-            401 | 403 => PersonalError::Refused(msg),
-            408 | 429 => PersonalError::Unreachable(msg),
-            400..=499 => PersonalError::Rejected(msg),
-            _ => PersonalError::Unreachable(msg),
-        },
-        // A grant that expired or doesn't verify any more
-        HomeserverError::Pubky(Pe::Authentication(_)) => PersonalError::Refused(msg),
+        HomeserverError::Pubky(Pe::Request(RequestError::Server { status, .. })) => Some(status.as_u16()),
+        _ => None,
+    }
+}
+
+fn is_auth_error(e: &HomeserverError) -> bool {
+    matches!(e, HomeserverError::Pubky(pubky::errors::Error::Authentication(_)))
+}
+
+/// A session that could not be restored or refreshed: the grant is gone (expired, revoked, the
+/// user or the grant unknown to the homeserver: any 4xx but "slow down", or an auth error), or
+/// the homeserver is away.
+fn classify_grant(e: &HomeserverError) -> PersonalError {
+    let msg = e.to_string();
+    match status_of(e) {
+        Some(408 | 429) => PersonalError::Unreachable(msg),
+        Some(400..=499) => PersonalError::Refused(msg),
+        _ if is_auth_error(e) => PersonalError::Refused(msg),
         _ => PersonalError::Unreachable(msg),
     }
 }
 
-/// The homeserver says there is nothing at that path.
+/// A read or a write that failed. Only what the homeserver says it will never take (400, 413,
+/// 415, 422) is dropped; any other 4xx is the grant's (a grant or user gone answers 404): lost,
+/// approve again, and the change keeps waiting.
+fn classify_call(e: &HomeserverError) -> PersonalError {
+    let msg = e.to_string();
+    match status_of(e) {
+        Some(400 | 413 | 415 | 422) => PersonalError::Rejected(msg),
+        Some(408 | 429) => PersonalError::Unreachable(msg),
+        Some(400..=499) => PersonalError::Refused(msg),
+        _ if is_auth_error(e) => PersonalError::Refused(msg),
+        _ => PersonalError::Unreachable(msg),
+    }
+}
+
+/// The homeserver says there is nothing there.
 fn is_not_found(e: &HomeserverError) -> bool {
-    use pubky::errors::{Error as Pe, RequestError};
-    matches!(e, HomeserverError::Pubky(Pe::Request(RequestError::Server { status, .. })) if status.as_u16() == 404)
+    status_of(e) == Some(404)
 }
 
 /// The node's own reach into listeners' homeservers: their grant files and the node's client.
@@ -139,21 +163,22 @@ impl Grants {
             .ok_or_else(|| PersonalError::Unreachable("the node's Pubky client didn't start".into()))
     }
 
-    async fn session(&self, key: &str) -> Result<PubkySession, PersonalError> {
+    /// Their session, and whether it was restored from the grant just now.
+    async fn session(&self, key: &str) -> Result<(PubkySession, bool), PersonalError> {
         if let Some(s) = sessions().lock().expect("sessions").get(key) {
-            return Ok(s.clone());
+            return Ok((s.clone(), false));
         }
         let file = grant_file(&self.dir, key).ok_or(PersonalError::NoGrant)?;
         let secret = std::fs::read_to_string(&file).map_err(|_| PersonalError::NoGrant)?;
         let session = tokio::time::timeout(CALL_LIMIT, self.client()?.restore_session(secret.trim()))
             .await
             .map_err(|_| PersonalError::Unreachable("the homeserver took too long".into()))?
-            .map_err(|e| self.noted(key, classify(&e)))?;
+            .map_err(|e| self.noted(key, classify_grant(&e)))?;
         sessions()
             .lock()
             .expect("sessions")
             .insert(key.to_string(), session.clone());
-        Ok(session)
+        Ok((session, true))
     }
 
     /// A call to their homeserver, time-limited; a refusal forgets the restored session.
@@ -165,7 +190,7 @@ impl Grants {
         match tokio::time::timeout(CALL_LIMIT, f).await {
             Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
             Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => Err(self.noted(key, classify(&e))),
+            Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
         }
     }
 
@@ -200,7 +225,7 @@ impl PersonalHomeserver for Grants {
         key: &str,
         known: &[(String, i64)],
     ) -> Result<Vec<(String, i64)>, PersonalError> {
-        let session = self.session(key).await?;
+        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
         // A listing, and only the bookmarks the node doesn't know yet (as the owner's sync)
         let known: HashMap<String, (String, i64)> = known
@@ -219,21 +244,33 @@ impl PersonalHomeserver for Grants {
     async fn put_bookmark(&self, key: &str, uri: &str, created_at: i64) -> Result<(), PersonalError> {
         let (object, path) =
             pm_pubky::v1::bookmark_of(uri, created_at).map_err(PersonalError::Unreachable)?;
-        let session = self.session(key).await?;
+        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
         self.limited(key, hs.write_object(&session, &path, &object)).await
     }
 
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError> {
         let path = pm_pubky::v1::bookmark_path(uri).map_err(PersonalError::Unreachable)?;
-        let session = self.session(key).await?;
+        let (session, fresh) = self.session(key).await?;
         let hs = self.client()?;
         match tokio::time::timeout(CALL_LIMIT, hs.delete(&session, &path)).await {
             Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
             Ok(Ok(())) => Ok(()),
-            // Not there: nothing to remove
-            Ok(Err(e)) if is_not_found(&e) => Ok(()),
-            Ok(Err(e)) => Err(self.noted(key, classify(&e))),
+            // Restored from the grant just now: the 404 is the bookmark's (nothing to remove)
+            Ok(Err(e)) if is_not_found(&e) && fresh => Ok(()),
+            // An older session: a 404 may be its grant gone. Restored again (a grant that is
+            // gone fails there), then asked once more
+            Ok(Err(e)) if is_not_found(&e) => {
+                sessions().lock().expect("sessions").remove(key);
+                let (session, _) = self.session(key).await?;
+                match tokio::time::timeout(CALL_LIMIT, hs.delete(&session, &path)).await {
+                    Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) if is_not_found(&e) => Ok(()),
+                    Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
+                }
+            }
+            Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
         }
     }
 }
@@ -493,8 +530,21 @@ pub(crate) fn may_keep(key: &str, approver: &str, granted: &[String]) -> Result<
     Ok(())
 }
 
-/// Ring approvals in progress: id → (flow, started, the listener who started it).
-type Connects = tokio::sync::Mutex<HashMap<String, (LoginFlow, Instant, String)>>;
+/// A Ring approval in progress. Its poll runs in a task of its own: after an approval it goes
+/// on to exchange it with the listener's homeserver, and a request that gives up (or goes
+/// away) must not cancel that, or the approval is lost.
+type Polled = (LoginFlow, Result<Option<PubkySession>, HomeserverError>);
+enum Asking {
+    /// Nobody is asking it now.
+    Waiting(LoginFlow),
+    /// Being asked; a poll picks up its answer.
+    Asked(tokio::task::JoinHandle<Polled>),
+    /// A poll of theirs holds it this moment.
+    Busy,
+}
+
+/// Ring approvals in progress: id → (where it stands, started, the listener who started it).
+type Connects = tokio::sync::Mutex<HashMap<String, (Asking, Instant, String)>>;
 
 fn connects() -> &'static Connects {
     static C: OnceLock<Connects> = OnceLock::new();
@@ -564,7 +614,7 @@ pub(crate) async fn connect_start(
     all.retain(|_, (_, at, _)| at.elapsed() < CONNECT_TTL);
     // One at a time per listener: a new one replaces theirs
     all.retain(|_, (_, _, who)| who != &key);
-    all.insert(id.clone(), (flow, Instant::now(), key));
+    all.insert(id.clone(), (Asking::Waiting(flow), Instant::now(), key));
     Ok(Json(
         serde_json::json!({"id": id, "qr_svg": crate::qr_svg(&url), "url": url}),
     ))
@@ -579,27 +629,58 @@ pub(crate) async fn connect_poll(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let key = listener_key(&c)?;
     let id = q.get("id").cloned().unwrap_or_default();
-    // Only the listener who started it may finish it. It is taken out while it is asked, so one
+    let pending = || Ok(Json(serde_json::json!({"state": "pending"})));
+    // Only the listener who started it may finish it. The shared map is held only to look: one
     // slow homeserver holds up nobody else's
-    let (flow, started) = {
+    let mut handle = {
         let mut all = connects().lock().await;
-        match all.get(&id) {
-            Some((_, _, who)) if who == &key => {}
-            _ => return Ok(Json(serde_json::json!({"state": "expired"}))),
-        }
-        let (flow, started, _) = all.remove(&id).expect("just seen");
-        if started.elapsed() > CONNECT_TTL {
+        let Some((state, started, who)) = all.get_mut(&id) else {
+            return Ok(Json(serde_json::json!({"state": "expired"})));
+        };
+        if who != &key {
             return Ok(Json(serde_json::json!({"state": "expired"})));
         }
-        (flow, started)
-    };
-    let session = match tokio::time::timeout(CALL_LIMIT, flow.poll()).await {
-        Err(_) | Ok(Ok(None)) => {
-            connects().lock().await.insert(id, (flow, started, key));
-            return Ok(Json(serde_json::json!({"state": "pending"})));
+        if started.elapsed() > CONNECT_TTL {
+            all.remove(&id);
+            return Ok(Json(serde_json::json!({"state": "expired"})));
         }
-        Ok(Ok(Some(session))) => session,
-        Ok(Err(e)) => return Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string())),
+        match std::mem::replace(state, Asking::Busy) {
+            // Another tab of theirs is asking it this moment
+            Asking::Busy => return pending(),
+            Asking::Waiting(flow) => tokio::spawn(async move {
+                let r = flow.poll().await;
+                (flow, r)
+            }),
+            Asking::Asked(h) => h,
+        }
+    };
+    let set = |id: String, st: Asking| async move {
+        if let Some(e) = connects().lock().await.get_mut(&id) {
+            e.0 = st;
+        }
+    };
+    let session = match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
+        // Still asking (an approval being exchanged): the next poll takes its answer
+        Err(_) => {
+            set(id, Asking::Asked(handle)).await;
+            return pending();
+        }
+        Ok(Ok((flow, Ok(None)))) => {
+            set(id, Asking::Waiting(flow)).await;
+            return pending();
+        }
+        Ok(Ok((_, Ok(Some(session))))) => {
+            connects().lock().await.remove(&id);
+            session
+        }
+        Ok(Ok((_, Err(e)))) => {
+            connects().lock().await.remove(&id);
+            return Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
+        }
+        Ok(Err(e)) => {
+            connects().lock().await.remove(&id);
+            return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        }
     };
     let approver = session.public_key().to_string();
     let granted = pm_pubky::homeserver::session_capabilities(&session);
@@ -689,15 +770,36 @@ mod tests {
                 message: String::new(),
             }))
         };
-        for c in [401, 403] {
-            assert!(matches!(classify(&server(c)), PersonalError::Refused(_)), "{c}");
+        // A call: only what will never be taken is dropped; a grant or user gone (404, 409, …) is
+        // lost (approve again), and the change keeps waiting
+        for c in [401, 403, 404, 405, 409] {
+            assert!(
+                matches!(classify_call(&server(c)), PersonalError::Refused(_)),
+                "{c}"
+            );
         }
-        for c in [400, 404, 413] {
-            assert!(matches!(classify(&server(c)), PersonalError::Rejected(_)), "{c}");
+        for c in [400, 413, 415, 422] {
+            assert!(
+                matches!(classify_call(&server(c)), PersonalError::Rejected(_)),
+                "{c}"
+            );
         }
         for c in [408, 429, 500, 503] {
             assert!(
-                matches!(classify(&server(c)), PersonalError::Unreachable(_)),
+                matches!(classify_call(&server(c)), PersonalError::Unreachable(_)),
+                "{c}"
+            );
+        }
+        // The grant: unknown user or grant (404), a broken grant (400), revoked: lost, never dropped
+        for c in [400, 401, 403, 404] {
+            assert!(
+                matches!(classify_grant(&server(c)), PersonalError::Refused(_)),
+                "{c}"
+            );
+        }
+        for c in [408, 429, 502] {
+            assert!(
+                matches!(classify_grant(&server(c)), PersonalError::Unreachable(_)),
                 "{c}"
             );
         }
@@ -706,15 +808,17 @@ mod tests {
         let expired = HomeserverError::Pubky(Pe::Authentication(AuthError::Validation(
             "stored grant credential has expired".into(),
         )));
-        assert!(matches!(classify(&expired), PersonalError::Refused(_)));
+        assert!(matches!(classify_grant(&expired), PersonalError::Refused(_)));
+        assert!(matches!(classify_call(&expired), PersonalError::Refused(_)));
         // Digits in a URL decide nothing: a homeserver on port 4031, a path with 403 in it
         let net = HomeserverError::Transport(
             "error sending request for url (http://hs.example:4031/pub/403/404)".into(),
         );
-        assert!(matches!(classify(&net), PersonalError::Unreachable(_)));
+        assert!(matches!(classify_call(&net), PersonalError::Unreachable(_)));
+        assert!(matches!(classify_grant(&net), PersonalError::Unreachable(_)));
         assert!(!is_not_found(&net));
         assert!(matches!(
-            classify(&HomeserverError::Timeout),
+            classify_call(&HomeserverError::Timeout),
             PersonalError::Unreachable(_)
         ));
     }

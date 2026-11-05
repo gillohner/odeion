@@ -653,12 +653,38 @@ async fn a_library_item_not_identified_yet_is_no_listener_bookmark() {
     let (s, fake, ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
     let app = router(s.clone());
+    // A song in an album MusicBrainz doesn't know yet
+    let track: pm_model::Track = serde_json::from_value(serde_json::json!({
+        "id": null, "title": "A", "artists": [{"id": null, "name": "X", "mbid": null}],
+        "album": {"id": null, "title": "No Id", "album_artist": "X", "release_mbid": null,
+                  "release_group_mbid": null, "year": null, "upc": null, "total_discs": null},
+        "track_no": 1, "disc_no": null, "duration_ms": 1000,
+        "file": {"path": dir.path().join("A.flac"), "size_bytes": 1, "mtime_unix": 0, "container": "flac",
+                 "format": serde_json::to_value(pm_model::AudioFormat::pcm(44_100, 16, 2)).unwrap(), "duration_ms": 1000},
+        "recording_mbid": null, "isrc": null, "acoustid": null, "canonical": null,
+        "replaygain_track_gain_db": null, "replaygain_album_gain_db": null}))
+    .unwrap();
+    let (tid, album) = {
+        let lib = s.library.lock().unwrap();
+        let tid = lib.upsert_track(&track).unwrap();
+        (
+            tid.0,
+            lib.get_track(tid).unwrap().unwrap().album.unwrap().id.unwrap(),
+        )
+    };
+    for body in [
+        serde_json::json!({"album_id": album}),
+        serde_json::json!({"track_id": tid}),
+    ] {
+        let (st, v) = call(&app, &ann, "PUT", "/v1/bookmarks", Some(body.clone())).await;
+        assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {v}");
+    }
     let (st, v) = call(
         &app,
         &ann,
         "PUT",
         "/v1/bookmarks",
-        Some(serde_json::json!({"album_id": 999})),
+        Some(serde_json::json!({"album_id": 999_999})),
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
@@ -666,7 +692,16 @@ async fn a_library_item_not_identified_yet_is_no_listener_bookmark() {
         fake.calls.lock().unwrap().is_empty(),
         "nothing reaches her homeserver"
     );
-    assert!(owners_rows(&s).is_empty());
+    assert!(owners_rows(&s).is_empty(), "and nothing lands in the owner's");
+    assert!(
+        s.library
+            .lock()
+            .unwrap()
+            .get_setting("bookmarks.local.albums")
+            .unwrap()
+            .is_none(),
+        "nor in the owner's node-only bookmarks"
+    );
 }
 
 fn urlencode(s: &str) -> String {
