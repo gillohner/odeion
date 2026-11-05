@@ -261,6 +261,9 @@ fn load_sources_off(lib: &Library) -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Outputs found on the network (discovery, Squeezebox players) are added while the node has
+/// fewer outputs than this.
+pub const MAX_FOUND_OUTPUTS: usize = 256;
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 /// Endpoint addresses (the desktop app's player) it registered.
@@ -895,8 +898,6 @@ impl NodeState {
             .clone()
     }
 
-    /// Start the Slimproto server (players connect to us) and the UDP
-    /// discovery responder. Call from inside the tokio runtime. Each connecting player becomes an output with a
     /// Offer every zone as a UPnP/DLNA MediaRenderer (`pm-renderer`): SSDP on the LAN, the
     /// device and control routes on the API port (merged by `router`, no token). Call from
     /// inside the runtime, before building the router. The advertiser lives as long as the
@@ -918,12 +919,39 @@ impl NodeState {
         }
     }
 
-    /// zone; its pull stream is registered for the HTTP route.
+    /// Whether one more output found on the network (discovery, Squeezebox players) may be added:
+    /// at most [`MAX_FOUND_OUTPUTS`] outputs in all, so a network announcing endless devices
+    /// can't fill the node with zones. Warns once each time the node is full.
+    pub(crate) fn room_for_found_output(&self) -> bool {
+        static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if self.outputs.len() < MAX_FOUND_OUTPUTS {
+            FULL.store(false, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+        if !FULL.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                outputs = self.outputs.len(),
+                "no more outputs added from the network: the node has as many as it takes"
+            );
+        }
+        false
+    }
+
+    /// Start the Slimproto server (players connect to us) and the UDP discovery responder. Call
+    /// from inside the tokio runtime. Each connecting player becomes an output with a zone; its
+    /// pull stream is registered for the HTTP route.
     pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
+        self.start_slimproto_on(None)
+    }
+
+    /// [`Self::start_slimproto`] on one address (`None`: all of them). On a loopback address the
+    /// discovery responder stays off: only players on this machine can connect.
+    pub fn start_slimproto_on(self: &Arc<Self>, bind: Option<std::net::IpAddr>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {
             return Ok(());
         }
-        let listener = std::net::TcpListener::bind(("0.0.0.0", self.slimproto_port))?;
+        let bind = bind.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let listener = std::net::TcpListener::bind((bind, self.slimproto_port))?;
         let web_port = url::Url::parse(&self.public_url)
             .ok()
             .and_then(|u| u.port_or_known_default())
@@ -937,6 +965,9 @@ impl NodeState {
         // Once per player: a player that reconnects keeps its output and zone.
         let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
             let _rt = runtime.enter();
+            if !state.room_for_found_output() {
+                return;
+            }
             let name = out.pull().stream_name().to_string();
             state
                 .pulls
@@ -950,6 +981,7 @@ impl NodeState {
             }
         });
         let name = self.name.clone();
+        let port = self.slimproto_port;
         std::thread::Builder::new()
             .name("slimproto".into())
             .spawn(move || {
@@ -957,14 +989,16 @@ impl NodeState {
                     tracing::warn!("slimproto server stopped: {e}");
                 }
             })?;
-        std::thread::Builder::new()
-            .name("slimproto-discovery".into())
-            .spawn(move || {
-                if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
-                    tracing::info!("slimproto discovery responder unavailable: {e}");
-                }
-            })?;
-        tracing::info!(port = self.slimproto_port, "Slimproto server listening");
+        if !bind.is_loopback() {
+            std::thread::Builder::new()
+                .name("slimproto-discovery".into())
+                .spawn(move || {
+                    if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
+                        tracing::info!("slimproto discovery responder unavailable: {e}");
+                    }
+                })?;
+        }
+        tracing::info!(%bind, port, "Slimproto server listening");
         Ok(())
     }
 
@@ -1001,6 +1035,9 @@ impl NodeState {
         );
         let id = OutputId::new("upnp", r.udn.trim_start_matches("uuid:"));
         if self.outputs.get(&id).is_some() {
+            return None;
+        }
+        if !self.room_for_found_output() {
             return None;
         }
         // What it accepts decides how the stream is offered; a renderer that takes no PCM stream
@@ -1289,6 +1326,9 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(device = %d.friendly_name, output = %id, "Cast device");
             let zone_name = out.name();
             self.outputs.register(out.clone());
@@ -1344,6 +1384,9 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             match pm_out_mpd::Client::connect(&server) {
                 Ok(c) => {
                     tracing::info!(server = %server.address(), version = %c.version, output = %id, "MPD server")
@@ -1390,6 +1433,9 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(player = %p.name, output = %id, "BluOS player");
             self.bluos_players
                 .lock()
@@ -1420,6 +1466,9 @@ impl NodeState {
             );
             let id = out.id();
             if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            if !self.room_for_found_output() {
                 continue;
             }
             tracing::info!(receiver = %d.name, output = %id, "AirPlay receiver");
@@ -1455,6 +1504,9 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(group = %out.name(), output = %id, "Snapcast group");
             let zone_name = out.name();
             self.outputs.register(out.clone());
@@ -1482,6 +1534,9 @@ impl NodeState {
         for out in f() {
             let id = out.id();
             if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            if !self.room_for_found_output() {
                 continue;
             }
             let name = out.name();

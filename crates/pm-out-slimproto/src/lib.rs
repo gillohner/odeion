@@ -13,9 +13,9 @@ pub mod output;
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use output::{PlayerStatus, SlimOutput};
 
@@ -114,12 +114,17 @@ pub fn parse_hello(data: &[u8]) -> Result<Hello, SlimError> {
 
 /// Read one client frame: 4-char opcode + u32 BE length + payload.
 pub fn read_frame(r: &mut dyn Read) -> io::Result<([u8; 4], Vec<u8>)> {
+    read_frame_max(r, 1 << 20)
+}
+
+/// [`read_frame`] refusing a payload over `max` bytes before reading it.
+fn read_frame_max(r: &mut dyn Read, max: usize) -> io::Result<([u8; 4], Vec<u8>)> {
     let mut head = [0u8; 8];
     r.read_exact(&mut head)?;
     let mut op = [0u8; 4];
     op.copy_from_slice(&head[..4]);
     let len = u32::from_be_bytes([head[4], head[5], head[6], head[7]]) as usize;
-    if len > 1 << 20 {
+    if len > max {
         return Err(io::Error::other(format!("frame of {len} bytes too large")));
     }
     let mut body = vec![0u8; len];
@@ -256,9 +261,6 @@ pub fn parse_stat(data: &[u8]) -> Option<Stat> {
     })
 }
 
-/// Serve players on `listener`; `on_player` is called once per player (by
-/// MAC) with its output, the first time it connects. A player that connects
-/// again gets the same output back. Blocks; run on a thread.
 /// How often the node asks each player for its status, as LMS does: a player hears from the
 /// server at least this often even when nothing else is sent.
 #[cfg(not(test))]
@@ -266,32 +268,156 @@ pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(test)]
 pub const HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The largest `HELO` a player sends is a few hundred bytes (its capabilities).
+const HELLO_MAX: usize = 4096;
+
+/// What connections to the Slimproto port may hold. Players are few and long-lived, so the
+/// defaults leave room for a large house and keep anything else on the network from tying up
+/// threads, sockets or zones.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// A new connection sends its whole `HELO` within this time, or is closed.
+    pub hello_within: Duration,
+    /// A player that sends nothing for this long is closed. Players answer every heartbeat
+    /// (`HEARTBEAT`) with a `STAT`, so one that is there is never this quiet; it can reconnect.
+    pub idle: Duration,
+    /// Open connections in all.
+    pub connections: usize,
+    /// Open connections from one address (several squeezelite instances may share a host).
+    pub per_address: usize,
+    /// Players (by MAC) the server keeps an output for. One already known always reconnects.
+    pub players: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            hello_within: Duration::from_secs(10),
+            idle: Duration::from_secs(60),
+            connections: 128,
+            per_address: 16,
+            players: 64,
+        }
+    }
+}
+
+/// Open connections, in all and by address.
+#[derive(Default)]
+struct Open {
+    total: usize,
+    by_address: HashMap<IpAddr, usize>,
+}
+
+/// One admitted connection; dropping it frees its place.
+struct Slot {
+    open: Arc<Mutex<Open>>,
+    address: IpAddr,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut o = self.open.lock().expect("open");
+        o.total = o.total.saturating_sub(1);
+        if let Some(n) = o.by_address.get_mut(&self.address) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                o.by_address.remove(&self.address);
+            }
+        }
+    }
+}
+
+/// A place for one more connection from `address`, or `None` when it or the server is full.
+fn admit(open: &Arc<Mutex<Open>>, address: IpAddr, limits: &Limits) -> Option<Slot> {
+    let mut o = open.lock().expect("open");
+    let from = o.by_address.get(&address).copied().unwrap_or(0);
+    if o.total >= limits.connections || from >= limits.per_address {
+        return None;
+    }
+    o.total += 1;
+    *o.by_address.entry(address).or_insert(0) += 1;
+    Some(Slot {
+        open: open.clone(),
+        address,
+    })
+}
+
+/// Reads from a socket until a deadline: a read that would end after it fails with `TimedOut`,
+/// so a peer sending a byte now and then can't stretch the time it has.
+struct Until<'a> {
+    stream: &'a TcpStream,
+    deadline: Instant,
+}
+
+impl Read for Until<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        let mut s = self.stream;
+        s.read(buf)
+    }
+}
+
+/// Serve players on `listener` with the default [`Limits`]; see [`serve_with`].
 pub fn serve(
     listener: TcpListener,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
     on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
 ) -> io::Result<()> {
+    serve_with(listener, server_port, stream_path, on_player, Limits::default())
+}
+
+/// Serve players on `listener`; `on_player` is called once per player (by MAC) with its output,
+/// the first time it connects. A player that connects again gets the same output back. A
+/// connection over `limits` is closed at once. Blocks; run on a thread.
+pub fn serve_with(
+    listener: TcpListener,
+    server_port: u16,
+    stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
+    limits: Limits,
+) -> io::Result<()> {
     let players: Arc<Mutex<HashMap<[u8; 6], Arc<SlimOutput>>>> = Default::default();
+    let open: Arc<Mutex<Open>> = Default::default();
     for stream in listener.incoming() {
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("slimproto accept: {e}");
+                // Out of file descriptors, say: let some close before trying again.
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
         };
-        let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        let Ok(addr) = stream.peer_addr() else {
+            continue;
+        };
+        let Some(slot) = admit(&open, addr.ip(), &limits) else {
+            tracing::debug!(peer = %addr, "slimproto: connection closed, too many open");
+            continue;
+        };
+        let peer = addr.to_string();
         let on_player = on_player.clone();
         let stream_path = stream_path.clone();
         let players = players.clone();
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name(format!("slimproto {peer}"))
-            .spawn(move || {
-                if let Err(e) = session(stream, server_port, stream_path, &players, on_player) {
-                    tracing::info!(%peer, "slimproto session ended: {e}");
+            .spawn({
+                let peer = peer.clone();
+                move || {
+                    let _slot = slot;
+                    if let Err(e) = session(stream, server_port, stream_path, &players, on_player, &limits) {
+                        tracing::info!(%peer, "slimproto session ended: {e}");
+                    }
                 }
-            })?;
+            });
+        if let Err(e) = spawned {
+            tracing::warn!(%peer, "slimproto: no thread for this connection: {e}");
+        }
     }
     Ok(())
 }
@@ -302,10 +428,17 @@ fn session(
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
     players: &Mutex<HashMap<[u8; 6], Arc<SlimOutput>>>,
     on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
+    limits: &Limits,
 ) -> Result<(), SlimError> {
     stream.set_nodelay(true)?;
     let mut reader = stream.try_clone()?;
-    let (op, body) = read_frame(&mut reader)?;
+    let (op, body) = {
+        let mut hello = Until {
+            stream: &reader,
+            deadline: Instant::now() + limits.hello_within,
+        };
+        read_frame_max(&mut hello, HELLO_MAX)?
+    };
     if &op != b"HELO" {
         return Err(SlimError::Protocol(format!(
             "expected HELO, got {}",
@@ -313,6 +446,7 @@ fn session(
         )));
     }
     let hello = parse_hello(&body)?;
+    reader.set_read_timeout(Some(limits.idle))?;
     let (output, new) = {
         let mut p = players.lock().expect("players");
         match p.get(&hello.mac) {
@@ -324,6 +458,11 @@ fn session(
                 }
                 (o.clone(), false)
             }
+            None if p.len() >= limits.players => {
+                tracing::warn!(player = %hello.mac_string(), players = p.len(),
+                    "Squeezebox player not added: the node has as many players as it takes");
+                return Err(SlimError::Protocol("no room for another player".into()));
+            }
             None => {
                 let o = Arc::new(SlimOutput::new(hello.clone(), server_port, stream_path));
                 p.insert(hello.mac, o.clone());
@@ -334,12 +473,33 @@ fn session(
     tracing::info!(player = %hello.mac_string(), model = %hello.model(), max_rate = hello.max_sample_rate(),
         reconnected = !new, "slimproto player");
     let generation = output.link().attach(stream);
+    let result = match start(&output, &hello, generation) {
+        Ok(()) => {
+            if new {
+                on_player(output.clone());
+            }
+            listen(&output, &mut reader)
+        }
+        Err(e) => {
+            // A new player that couldn't start is forgotten, so it is announced when it comes back.
+            if new {
+                players.lock().expect("players").remove(&hello.mac);
+            }
+            Err(e)
+        }
+    };
+    output.link().detach(generation);
+    result
+}
+
+/// Greet a player on connection `generation` and keep its heartbeat going.
+fn start(output: &Arc<SlimOutput>, hello: &Hello, generation: u64) -> Result<(), SlimError> {
     output.greet().map_err(|e| SlimError::Protocol(e.to_string()))?;
     let link = output.link().clone();
     std::thread::Builder::new()
         .name(format!("slimproto heartbeat {}", hello.mac_string()))
         .spawn(move || {
-            let since = std::time::Instant::now();
+            let since = Instant::now();
             loop {
                 std::thread::sleep(HEARTBEAT);
                 if !link.heartbeat(generation, since.elapsed().as_millis() as u32) {
@@ -347,26 +507,23 @@ fn session(
                 }
             }
         })?;
-    if new {
-        on_player(output.clone());
-    }
-    let result = loop {
-        let (op, body) = match read_frame(&mut reader) {
-            Ok(f) => f,
-            Err(e) => break Err(e.into()),
-        };
+    Ok(())
+}
+
+/// A player's reports until it says goodbye, goes quiet for `Limits::idle` or the connection ends.
+fn listen(output: &SlimOutput, reader: &mut TcpStream) -> Result<(), SlimError> {
+    loop {
+        let (op, body) = read_frame(reader)?;
         match &op {
             b"STAT" => {
                 if let Some(st) = parse_stat(&body) {
                     output.on_stat(st);
                 }
             }
-            b"BYE!" => break Ok(()),
+            b"BYE!" => return Ok(()),
             _ => {}
         }
-    };
-    output.link().detach(generation);
-    result
+    }
 }
 
 /// Answer players' UDP discovery broadcasts on port 3483 with our name so `squeezelite` without
@@ -519,5 +676,213 @@ mod tests {
         assert_eq!(st.output_buffer_fullness, 1_500_000);
         assert_eq!(st.elapsed_ms, 12_345);
         assert!(parse_stat(&d[..20]).is_none());
+    }
+
+    /// Limits small enough for a test to see them work.
+    fn tight() -> Limits {
+        Limits {
+            hello_within: Duration::from_millis(300),
+            idle: Duration::from_millis(600),
+            connections: 3,
+            per_address: 2,
+            players: 1,
+        }
+    }
+
+    /// A server on a free port; the players it announces come out of the receiver.
+    fn server(limits: Limits) -> (std::net::SocketAddr, std::sync::mpsc::Receiver<Arc<SlimOutput>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Mutex::new(tx);
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(move |o| {
+            let _ = tx.lock().unwrap().send(o);
+        });
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
+        std::thread::spawn(move || serve_with(listener, 7788, stream_path, on_player, limits).unwrap());
+        (addr, rx)
+    }
+
+    /// A `HELO` frame from the player whose MAC ends in `mac_last`.
+    fn hello(mac_last: u8) -> Vec<u8> {
+        let mut body = vec![12u8, 0, 0xaa, 0xbb, 0xcc, 0x00, 0x11, mac_last];
+        body.extend_from_slice(&[0u8; 28]);
+        let mut f = b"HELO".to_vec();
+        f.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        f.extend_from_slice(&body);
+        f
+    }
+
+    /// Whether the server closes `s` within `within`; frames it sends meanwhile are read past.
+    fn closed_within(s: &mut TcpStream, within: Duration) -> bool {
+        let end = Instant::now() + within;
+        let mut buf = [0u8; 512];
+        loop {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            s.set_read_timeout(Some(left)).unwrap();
+            match s.read(&mut buf) {
+                Ok(0) => return true,
+                Ok(_) => {}
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                    return false
+                }
+                Err(_) => return true,
+            }
+        }
+    }
+
+    #[test]
+    fn admission_counts_in_all_and_by_address() {
+        let open: Arc<Mutex<Open>> = Default::default();
+        let l = Limits {
+            connections: 3,
+            per_address: 2,
+            ..Limits::default()
+        };
+        let ip = |n: u8| IpAddr::from([10, 0, 0, n]);
+        let a1 = admit(&open, ip(1), &l).unwrap();
+        let a2 = admit(&open, ip(1), &l).unwrap();
+        assert!(admit(&open, ip(1), &l).is_none(), "two from one address");
+        let b1 = admit(&open, ip(2), &l).unwrap();
+        assert!(admit(&open, ip(3), &l).is_none(), "three in all");
+        drop(a1);
+        let c1 = admit(&open, ip(3), &l).unwrap();
+        assert!(admit(&open, ip(1), &l).is_none(), "full again");
+        drop((a2, b1, c1));
+        let o = open.lock().unwrap();
+        assert_eq!(o.total, 0);
+        assert!(o.by_address.is_empty(), "nothing kept for addresses that left");
+    }
+
+    /// One deadline for the whole HELO: a silent connection, one sending a byte now and then,
+    /// and one announcing an oversized HELO are closed.
+    #[test]
+    fn a_connection_has_one_deadline_for_its_hello() {
+        let (addr, _rx) = server(tight());
+        let mut silent = TcpStream::connect(addr).unwrap();
+        assert!(
+            closed_within(&mut silent, Duration::from_secs(3)),
+            "a silent connection is closed"
+        );
+
+        let (addr, _rx) = server(tight());
+        let mut slow = TcpStream::connect(addr).unwrap();
+        let mut w = slow.try_clone().unwrap();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            for b in hello(1) {
+                if w.write_all(&[b]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        assert!(
+            closed_within(&mut slow, Duration::from_secs(3)),
+            "a byte every 100 ms doesn't keep it open"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "closed at {:?}",
+            started.elapsed()
+        );
+
+        let (addr, rx) = server(Limits {
+            hello_within: Duration::from_secs(30),
+            ..tight()
+        });
+        let mut big = TcpStream::connect(addr).unwrap();
+        big.write_all(b"HELO").unwrap();
+        big.write_all(&(HELLO_MAX as u32 + 1).to_be_bytes()).unwrap();
+        assert!(
+            closed_within(&mut big, Duration::from_secs(3)),
+            "an oversized HELO is refused"
+        );
+        assert!(rx.try_recv().is_err(), "no player from any of them");
+    }
+
+    /// A player that answers keeps its connection; one that goes quiet is closed, and comes back
+    /// to the same output.
+    #[test]
+    fn a_quiet_player_is_closed_and_comes_back() {
+        let (addr, rx) = server(tight());
+        let mut p = TcpStream::connect(addr).unwrap();
+        p.write_all(&hello(1)).unwrap();
+        let _first = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut w = p.try_clone().unwrap();
+        let talking = std::thread::spawn(move || {
+            for _ in 0..15 {
+                w.write_all(b"STAT\0\0\0\0").unwrap();
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        assert!(
+            !closed_within(&mut p, Duration::from_millis(1200)),
+            "reports keep it open past the idle time"
+        );
+        talking.join().unwrap();
+        assert!(closed_within(&mut p, Duration::from_secs(3)), "closed once quiet");
+
+        let mut again = TcpStream::connect(addr).unwrap();
+        again.write_all(&hello(1)).unwrap();
+        assert!(
+            !closed_within(&mut again, Duration::from_millis(400)),
+            "it comes back"
+        );
+        assert!(rx.try_recv().is_err(), "as the same player, not announced again");
+    }
+
+    /// Connections from one address are capped, and a place frees when one closes.
+    #[test]
+    fn connections_from_one_address_are_capped() {
+        let (addr, _rx) = server(Limits {
+            hello_within: Duration::from_secs(30),
+            ..tight()
+        });
+        let mut a = TcpStream::connect(addr).unwrap();
+        let b = TcpStream::connect(addr).unwrap();
+        let mut c = TcpStream::connect(addr).unwrap();
+        assert!(
+            closed_within(&mut c, Duration::from_secs(2)),
+            "a third from one address is closed"
+        );
+        assert!(
+            !closed_within(&mut a, Duration::from_millis(200)),
+            "the first two stay"
+        );
+        drop(b);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut d = TcpStream::connect(addr).unwrap();
+        assert!(
+            !closed_within(&mut d, Duration::from_millis(300)),
+            "the place b left is free"
+        );
+    }
+
+    /// The server keeps outputs for at most `players` players; one it knows always reconnects.
+    #[test]
+    fn new_players_are_capped() {
+        let (addr, rx) = server(tight());
+        let mut one = TcpStream::connect(addr).unwrap();
+        one.write_all(&hello(1)).unwrap();
+        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut two = TcpStream::connect(addr).unwrap();
+        two.write_all(&hello(2)).unwrap();
+        assert!(
+            closed_within(&mut two, Duration::from_secs(2)),
+            "a second player is refused"
+        );
+        assert!(rx.try_recv().is_err());
+        drop(one);
+        std::thread::sleep(Duration::from_millis(300));
+        let mut back = TcpStream::connect(addr).unwrap();
+        back.write_all(&hello(1)).unwrap();
+        assert!(
+            !closed_within(&mut back, Duration::from_millis(400)),
+            "the known one reconnects"
+        );
     }
 }

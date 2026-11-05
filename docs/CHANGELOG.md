@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Squeezebox connections have limits.** A player has 10 s to send its hello and is disconnected after 60 s without a report (players report every 5 s and reconnect on their own). Up to 128 connections, 16 from one address, and 64 players; a known player always reconnects. A connection the node can't start a thread for is closed and the server keeps listening. Outputs found on the network stop being added at 256. New `[outputs] slimproto_bind` sets the listening address (unset: every address; on loopback the discovery responder is off).
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.

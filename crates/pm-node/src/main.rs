@@ -285,7 +285,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
     // A busy port turns Squeezebox players off; the node runs on
-    if let Err(e) = state.start_slimproto() {
+    if let Err(e) = state.start_slimproto_on(cfg.outputs.slimproto_bind) {
         let port = cfg.outputs.slimproto_port;
         if e.kind() == std::io::ErrorKind::AddrInUse {
             tracing::warn!(

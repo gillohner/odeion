@@ -20074,4 +20074,33 @@ exec sleep 300
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
+
+    /// Outputs found on the network stop being added once the node has `MAX_FOUND_OUTPUTS`, and
+    /// are added again when there is room.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn outputs_found_on_the_network_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let max = crate::state::MAX_FOUND_OUTPUTS;
+        let had = s.outputs.len();
+        let found: Vec<Arc<dyn Output>> = (0..max + 10)
+            .map(|i| {
+                Arc::new(pm_zones::outputs::PullOutput::controlled(&format!("found-{i}"))) as Arc<dyn Output>
+            })
+            .collect();
+        s.set_discover(Arc::new(move || found.clone()));
+        let st = s.clone();
+        let new = tokio::task::spawn_blocking(move || st.rescan_outputs())
+            .await
+            .unwrap();
+        assert_eq!(new.len(), max - had, "added up to the cap");
+        assert_eq!(s.outputs.len(), max);
+        s.outputs.remove(&new[0]);
+        let st = s.clone();
+        let again = tokio::task::spawn_blocking(move || st.rescan_outputs())
+            .await
+            .unwrap();
+        assert_eq!(again.len(), 1, "one place freed, one added");
+        assert_eq!(s.outputs.len(), max);
+    }
 }
