@@ -174,7 +174,7 @@ mod tests {
         let conf = locked.join("node.toml");
         std::fs::write(&conf, "x").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let out = tighten(&data, &[conf.clone()]);
+        let out = tighten(&data, std::slice::from_ref(&conf));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         // As root every file can be looked at; the check means something only for a service user
         if std::fs::metadata(&conf).is_ok() && out.left.is_empty() && running_as_root() {
