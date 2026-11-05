@@ -846,7 +846,7 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         }
     }
 
-    fn held_identity(&self) -> Option<String> {
+    fn held_identity(&self) -> Option<pm_out_local::exclusive::DacIdentity> {
         use jni021::objects::JClass;
         let answer = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
@@ -855,7 +855,41 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
                 .l()?;
             Ok(String::from(env.get_string(&s.into())?))
         });
-        answer.ok().filter(|a| !a.is_empty())
+        answer
+            .ok()
+            .and_then(|a| pm_out_local::exclusive::parse_identity(&a))
+    }
+
+    fn identity_of(
+        &self,
+        usb: pm_out_local::exclusive::UsbIds,
+    ) -> Option<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "identityOf", "(II)Ljava/lang/String;", &Self::ids(usb))?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .and_then(|a| pm_out_local::exclusive::parse_identity(&a))
+    }
+
+    fn take_detached(&self) -> Vec<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "takeDetached", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .map(|a| pm_out_local::exclusive::parse_detached_devices(&a))
+            .unwrap_or_default()
     }
 
     fn claims(&self) -> pm_out_local::exclusive::Claims {
