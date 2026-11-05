@@ -18,8 +18,10 @@ mod offline;
 mod player;
 mod ring_wait;
 mod settings;
-#[cfg(desktop)]
+#[cfg(any(desktop, target_os = "android"))]
 mod update;
+#[cfg(any(test, target_os = "android"))]
+mod update_apk;
 
 use serde::Serialize;
 use settings::Settings;
@@ -665,7 +667,7 @@ pub fn run() {
             }
             #[allow(unused_variables)]
             let window = builder.build()?;
-            #[cfg(desktop)]
+            #[cfg(any(desktop, target_os = "android"))]
             update::spawn(app.handle());
             #[cfg(target_os = "android")]
             android::init_tls(&window);

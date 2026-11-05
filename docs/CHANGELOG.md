@@ -14,6 +14,15 @@ Newest first. Dates are when the change landed on `main`.
   - An album or artist with no MusicBrainz match says so in the top card; an album's **Match this album to tag it** opens its folder in the matches to confirm. A link with no MusicBrainz item takes tags on the link only. No tag, and no tag count or face, ever comes from a guessed identity.
   - Home's tags, a tag's page, search's Tags, Genres' "Your Pubky tags" and the now-playing tags use the same chip and colours.
 
+- **The Android app updates itself** (owner's ask). Like the desktop app, it checks once at start on the channel it was built for (edge builds follow edge, releases follow the latest release) and asks "Odeion X is available (this is Y). Install it now?". After Install it downloads the APK for the phone (arm64 on most phones), installs it only when it matches the SHA-256 the release lists, and hands it to Android, which asks you to confirm and installs only an app signed with the same key. The first time, the app explains that Android needs your permission to install apps and opens that setting. A failed check (no network) says nothing. Local builds never check, and the `.aab` has no updater (an app from Google Play updates only through Play). The release feed (`latest.json`) gets an `android` entry; desktop entries stay as they were. Edge builds now show their full version (`0.3.0-412`) on Android too. Checked in CI on Android 15 and 17 emulators: a tampered download is refused, and the right one installs over the app and keeps its data.
+- **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
+  - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
+  - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
+  - Then open http://odeion.local:7788 for the usual web setup.
+  - The box gets Debian 13 with security updates by themselves, a nightly backup (with the homeserver), a firewall that opens only Odeion's ports to the outside (speakers on the home network get what they need), and a watchdog. No SSH.
+  - When the homeserver is published through a tunnel, the box reaches it directly.
+  - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.

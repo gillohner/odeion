@@ -231,10 +231,21 @@ jobs:
           PM_TIDAL_PKCE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_PKCE_CLIENT_SECRET }}
           PM_TIDAL_DEVICE_CLIENT_ID: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
           PM_TIDAL_DEVICE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
+          # The feed the app checks at start, as on desktops (src/update.rs)
+          ODEION_UPDATE_CHANNEL: ${{ needs.meta.outputs.update_channel }}
+        # The APKs update themselves from the release page; the .aab is built without the updater
+        # (tools/release/android-patch.py --without-updater, and no update channel): an app from
+        # Google Play may update only through Play. The version is the desktop app's, so an edge
+        # build's update question names two different versions (0.3.0-412, not 0.3.0 twice).
         run: |
-          echo '{"version":"${{ needs.meta.outputs.version }}","bundle":{"android":{"versionCode":${{ needs.meta.outputs.android_version_code }}}}}' > release.conf.json
-          npx tauri android build --ci --apk --aab \
+          echo '{"version":"${{ needs.meta.outputs.app_version }}","bundle":{"android":{"versionCode":${{ needs.meta.outputs.android_version_code }}}}}' > release.conf.json
+          npx tauri android build --ci --apk \
             --target aarch64 --target armv7 --target x86_64 --config release.conf.json
+          python3 -I ../../tools/release/android-patch.py . --without-updater
+          ODEION_UPDATE_CHANNEL= npx tauri android build --ci --aab \
+            --target aarch64 --target armv7 --target x86_64 --config release.conf.json
+          python3 -I ../../tools/release/aab-check.py gen/android/app/build/outputs \
+            "$(find gen/android/app/build/outputs/apk -name '*universal-release*.apk' | head -1)"
       - name: sign
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -463,7 +474,7 @@ jobs:
         run: |
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/${{ needs.meta.outputs.channel }}"
           python3 -I tools/release/updater-manifest.py dist "${{ needs.meta.outputs.app_version }}" "$base" \
-            > dist/latest.json
+            "${{ needs.meta.outputs.android_version_code }}" > dist/latest.json
           cat dist/latest.json
       - name: checksums
         working-directory: dist
@@ -488,6 +499,7 @@ jobs:
             echo "| \`pubky-music-android-arm64.apk\` (most phones), \`-universal.apk\`, \`.aab\` | the app on Android and Google TV |"
             echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node, \`odeiond\` (also as \`pm-node\`, its old name; armv7: 32-bit Raspberry Pi OS) |"
             echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the Odeion node image (amd64, arm64) |"
+            echo "| \`odeion-$CHANNEL-amd64.iso\` (added a little after the rest, with its \`.sha256\`) | a whole Odeion box on a spare PC: [install guide](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/guides/install-iso.md) |"
             echo
             echo "Check downloads against \`SHA256SUMS\`."
           } > notes.md
@@ -542,6 +554,8 @@ jobs:
           # Files an older build had and this one does not.
           keep=$(cd dist && ls)
           for a in $(gh release view edge --json assets -q '.assets[].name'); do
+            # The installer ISO comes from iso.yml after this run, and stays
+            case $a in odeion-edge-amd64.iso | odeion-edge-amd64.iso.sha256) continue ;; esac
             echo "$keep" | grep -qxF "$a" || gh release delete-asset edge "$a" --yes
           done
       - name: versioned

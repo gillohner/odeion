@@ -24,6 +24,7 @@ steps. You don't need to be a developer.
 
 | You have | Use | Guide |
 | :-- | :-- | :-- |
+| A spare PC or mini PC to make an Odeion box (it erases its disk) | the installer ISO on a USB stick | [Install an Odeion box from a USB stick](docs/guides/install-iso.md) |
 | A NAS or server with Docker (Synology, QNAP, Unraid, TrueNAS, any Linux) | the Docker image | [Install with Docker](docs/guides/install-docker.md) |
 | A Raspberry Pi or Linux machine without Docker | the release download and a system service | [Install on Linux without Docker](docs/guides/install-linux.md) |
 | A Mac, Windows PC, Linux desktop or Android phone | the Odeion app, to control a node and play on that device | [The desktop and Android app](docs/guides/desktop-app.md) |
