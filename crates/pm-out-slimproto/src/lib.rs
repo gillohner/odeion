@@ -461,7 +461,7 @@ fn session(
     limits: &Limits,
 ) -> Result<(), SlimError> {
     stream.set_nodelay(true)?;
-    let mut reader = stream.try_clone()?;
+    let reader = stream.try_clone()?;
     let (op, body) = {
         let mut hello = Until {
             stream: &reader,
@@ -476,7 +476,6 @@ fn session(
         )));
     }
     let hello = parse_hello(&body)?;
-    reader.set_read_timeout(Some(limits.idle))?;
     // `announce`: this session offers the player to the node. Marked at once, so two sessions of
     // one player don't both offer it; undone (`unannounce`) if it fails or the node says no.
     let (output, announce) = {
@@ -518,7 +517,7 @@ fn session(
             unannounce(players, &hello.mac, &output);
             Err(SlimError::Protocol("the node takes no more players".into()))
         }
-        Ok(()) => listen(&output, &mut reader),
+        Ok(()) => listen(&output, &reader, limits.idle),
         Err(e) => {
             if announce {
                 unannounce(players, &hello.mac, &output);
@@ -558,10 +557,15 @@ fn start(output: &Arc<SlimOutput>, hello: &Hello, generation: u64) -> Result<(),
     Ok(())
 }
 
-/// A player's reports until it says goodbye, goes quiet for `Limits::idle` or the connection ends.
-fn listen(output: &SlimOutput, reader: &mut TcpStream) -> Result<(), SlimError> {
+/// A player's reports until it says goodbye, sends no whole frame for `idle` or the connection
+/// ends. Each frame has one deadline: a byte now and then doesn't keep a connection.
+fn listen(output: &SlimOutput, reader: &TcpStream, idle: Duration) -> Result<(), SlimError> {
     loop {
-        let (op, body) = read_frame(reader)?;
+        let mut frame = Until {
+            stream: reader,
+            deadline: Instant::now() + idle,
+        };
+        let (op, body) = read_frame(&mut frame)?;
         match &op {
             b"STAT" => {
                 if let Some(st) = parse_stat(&body) {
@@ -1014,5 +1018,36 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(3))
             .expect("the second connection is a player");
         assert_eq!(tried.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A player has one deadline per frame: a byte now and then, short of a whole frame, doesn't
+    /// keep its connection (or its place) past the idle time.
+    #[test]
+    fn a_trickle_of_bytes_doesnt_keep_a_player() {
+        let (addr, rx) = server(tight());
+        let mut p = TcpStream::connect(addr).unwrap();
+        p.write_all(&hello(1)).unwrap();
+        rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let mut w = p.try_clone().unwrap();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            // A STAT header, then its body a byte at a time, well within the idle time each
+            let _ = w.write_all(b"STAT\0\0\0\x40");
+            for _ in 0..0x40 {
+                std::thread::sleep(Duration::from_millis(100));
+                if w.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+        });
+        assert!(
+            closed_within(&mut p, Duration::from_secs(3)),
+            "closed at the frame's deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "closed at {:?}",
+            started.elapsed()
+        );
     }
 }

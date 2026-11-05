@@ -898,6 +898,28 @@ impl NodeState {
             .clone()
     }
 
+    /// The pull output for a device found on the network: the one registered under `name`, or a new
+    /// one that is registered only once the device is taken ([`Self::keep_pull`]). A device the node
+    /// turns away (no room, already known, unreachable) leaves nothing behind.
+    fn found_pull(&self, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
+        self.pulls
+            .lock()
+            .expect("pulls lock")
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(pm_zones::outputs::PullOutput::controlled(name)))
+    }
+
+    /// Registers a found device's pull output ([`Self::found_pull`]) for the HTTP route, once the
+    /// device was taken.
+    fn keep_pull(&self, name: &str, pull: Arc<pm_zones::outputs::PullOutput>) {
+        self.pulls
+            .lock()
+            .expect("pulls lock")
+            .entry(name.to_string())
+            .or_insert(pull);
+    }
+
     /// Offer every zone as a UPnP/DLNA MediaRenderer (`pm-renderer`): SSDP on the LAN, the
     /// device and control routes on the API port (merged by `router`, no token). Call from
     /// inside the runtime, before building the router. The advertiser lives as long as the
@@ -1064,15 +1086,16 @@ impl NodeState {
             tracing::info!(renderer = %r.friendly_name, "UPnP renderer accepts no PCM stream (WAV or LPCM); no zone");
             return None;
         };
-        let pull = self.pull_output(&name);
+        let pull = self.found_pull(&name);
         let out = Arc::new(
-            pm_out_upnp::UpnpOutput::new(r.clone(), pull, self.pull_url(&name))
+            pm_out_upnp::UpnpOutput::new(r.clone(), pull.clone(), self.pull_url(&name))
                 .with_stream_kind(kind.clone())
                 .with_describe(self.describe_for_renderers()),
         );
         if !self.add_found_output(out.clone()) {
             return None;
         }
+        self.keep_pull(&name, pull);
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
         if pm_out_upnp::heos::is_heos(&r) {
             self.heos
@@ -1333,9 +1356,9 @@ impl NodeState {
                     .take(32)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(
-                pm_out_cast::CastOutput::new(d.clone(), pull, self.pull_url(&name))
+                pm_out_cast::CastOutput::new(d.clone(), pull.clone(), self.pull_url(&name))
                     .with_describe(self.describe_for_renderers()),
             );
             let id = out.id();
@@ -1349,6 +1372,7 @@ impl NodeState {
             if !self.add_found_output(out.clone()) {
                 continue;
             }
+            self.keep_pull(&name, pull);
             let zone_name = out.name();
             self.create_zone(&zone_name, out);
             new.push(id);
@@ -1392,10 +1416,10 @@ impl NodeState {
                     .take(40)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(pm_out_mpd::MpdOutput::new(
                 server.clone(),
-                pull,
+                pull.clone(),
                 self.pull_url(&name),
             ));
             let id = out.id();
@@ -1417,6 +1441,7 @@ impl NodeState {
             if !self.add_found_output(out.clone()) {
                 continue;
             }
+            self.keep_pull(&name, pull);
             let zone_name = out.name();
             self.create_zone(&zone_name, out);
             new.push(id);
@@ -1443,10 +1468,10 @@ impl NodeState {
                     .take(32)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(pm_out_bluos::BluosOutput::new(
                 p.clone(),
-                pull,
+                pull.clone(),
                 self.pull_url(&name),
             ));
             let id = out.id();
@@ -1459,6 +1484,7 @@ impl NodeState {
             if !self.add_found_output(out.clone()) {
                 continue;
             }
+            self.keep_pull(&name, pull);
             tracing::info!(player = %p.name, output = %id, "BluOS player");
             self.bluos_players
                 .lock()
