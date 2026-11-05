@@ -20303,4 +20303,152 @@ exec sleep 300
             assert!(accounts::SIGNIN_KEYS.contains(&signin::way_key(src).as_str()), "{src}");
         }
     }
+
+    /// The source policy reaches every use of an account, not only TIDAL plays (#277 reviews):
+    /// under `node` a listener's TIDAL search and item pages and their Qobuz plays use the node's
+    /// sign-in; under `own` never the node's; Spotify Connect (devices, play) is always the
+    /// listener's own, so the owner's phone is never listed for them.
+    #[tokio::test]
+    async fn the_source_policy_reaches_search_item_pages_qobuz_and_spotify_connect() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        // TIDAL: tokens for the app, every other call recorded with its bearer
+        let tl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tidal_base = format!("http://127.0.0.1:{}", tl.local_addr().unwrap().port());
+        let tidal_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ts = tidal_seen.clone();
+        let tidal_mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post(|| async {
+                    Json(serde_json::json!({"access_token": "app-token", "refresh_token": "r", "expires_in": 3600}))
+                }),
+            )
+            .fallback(move |headers: HeaderMap| {
+                let seen = ts.clone();
+                async move {
+                    if let Some(b) = headers.get("authorization") {
+                        seen.lock().unwrap().push(b.to_str().unwrap().to_string());
+                    }
+                    Json(serde_json::json!({"data": [], "included": []}))
+                }
+            });
+        tokio::spawn(async move { axum::serve(tl, tidal_mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), &tidal_base).await;
+        let app = router(s.clone());
+        let (anna_tok, ben_tok) = (accounts::mint(&s, anna).unwrap(), accounts::mint(&s, ben).unwrap());
+        let set_policy = |p: &str| {
+            s.library.lock().unwrap().set_setting(accounts::SOURCE_POLICY_KEY, p).unwrap();
+        };
+        let asked = |tok: &str, uri: &str| {
+            let (app, tok, uri, seen) = (app.clone(), tok.to_string(), uri.to_string(), tidal_seen.clone());
+            async move {
+                seen.lock().unwrap().clear();
+                let (st, v, _) = send_as(&app, "GET", &uri, Some(&tok), &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{uri}: {v}");
+                let got: Vec<String> = seen.lock().unwrap().drain(..).collect();
+                assert!(!got.is_empty(), "TIDAL was asked for {uri}");
+                got
+            }
+        };
+
+        // `node`: Ben (no TIDAL of his own) searches and reads an item page with the node's
+        set_policy("node");
+        for uri in ["/v1/search?q=lucky&scope=tidal", "/v1/discover/contents?uri=https://tidal.com/album/4242"] {
+            let got = asked(&ben_tok, uri).await;
+            assert!(got.iter().all(|b| b == "Bearer owner-token"), "{uri}: {got:?}");
+        }
+        // `own`: never the node's, for him or for Anna
+        set_policy("own");
+        let got = asked(&ben_tok, "/v1/search?q=other&scope=tidal").await;
+        assert!(got.iter().all(|b| b != "Bearer owner-token"), "{got:?}");
+        let got = asked(&anna_tok, "/v1/discover/contents?uri=https://tidal.com/album/4343").await;
+        assert!(got.iter().all(|b| b == "Bearer anna-token"), "{got:?}");
+
+        // Spotify Connect: always the caller's own, whatever the policy
+        let sl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let spotify_base = format!("http://127.0.0.1:{}", sl.local_addr().unwrap().port());
+        let sp_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sps = sp_seen.clone();
+        let sp_mock = Router::new().route(
+            "/me/player/devices",
+            get(move |headers: HeaderMap| {
+                let seen = sps.clone();
+                async move {
+                    let b = headers.get("authorization").unwrap().to_str().unwrap().to_string();
+                    let name = if b.ends_with("sp-owner") { "Owner's phone" } else { "Anna's laptop" };
+                    seen.lock().unwrap().push(b);
+                    Json(serde_json::json!({"devices": [{"id": "d1", "name": name, "type": "Smartphone", "is_active": false}]}))
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(sl, sp_mock).await.unwrap() });
+        s.spotify.write().unwrap().api_base = spotify_base;
+        {
+            let lib = s.library.lock().unwrap();
+            let until = pm_library::db::now_unix() + 3600;
+            let sess = |t: &str| serde_json::json!({"access_token": t, "expires_at": until}).to_string();
+            lib.set_setting("spotify.user", &sess("sp-owner")).unwrap();
+            lib.set_setting(&format!("person.{anna}.spotify.user"), &sess("sp-anna")).unwrap();
+        }
+        for p in ["node", "choice"] {
+            set_policy(p);
+            let (st, v, _) = send_as(&app, "GET", "/v1/sources/spotify/devices", Some(&anna_tok), &[], None).await;
+            assert_eq!(st, StatusCode::OK, "{p}: {v}");
+            assert_eq!(v[0]["name"], "Anna's laptop", "{p}: {v}");
+            let (st, v, _) = send_as(&app, "GET", "/v1/sources/spotify/devices", Some(&ben_tok), &[], None).await;
+            assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{p}: Ben has no Spotify of his own: {v}");
+        }
+        assert!(
+            sp_seen.lock().unwrap().iter().all(|b| b == "Bearer sp-anna"),
+            "the owner's devices never asked for a listener: {:?}",
+            sp_seen.lock().unwrap()
+        );
+
+        // Qobuz plays: the node's under `node`, none under `own` for someone without their own
+        let flac = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../pm-audio/tests/fixtures/60_mono_audio.flac")).unwrap();
+        let ql = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let qbase = format!("http://127.0.0.1:{}", ql.local_addr().unwrap().port());
+        let q_seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (qs, file_base) = (q_seen.clone(), qbase.clone());
+        let q_mock = Router::new()
+            .route(
+                "/track/getFileUrl",
+                get(move |headers: HeaderMap| {
+                    let (seen, base) = (qs.clone(), file_base.clone());
+                    async move {
+                        seen.lock().unwrap().push(headers.get("x-user-auth-token").unwrap().to_str().unwrap().to_string());
+                        Json(serde_json::json!({"url": format!("{base}/file.flac"), "format_id": 27, "mime_type": "audio/flac"}))
+                    }
+                }),
+            )
+            .route("/file.flac", get(move || { let f = flac.clone(); async move { f } }));
+        tokio::spawn(async move { axum::serve(ql, q_mock).await.unwrap() });
+        qobuz::set_api_base(&qbase);
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting(qobuz::APP_KEY, r#"{"id": "100000000", "secret": "s3cret", "from": "settings"}"#).unwrap();
+            lib.set_setting(
+                qobuz::STATE_KEY,
+                &serde_json::json!({"enabled": true, "quality": "max", "session": {"token": "t-owner", "hires": true}}).to_string(),
+            )
+            .unwrap();
+        }
+        let open_as_ben = |policy: &'static str| {
+            let lib = s.library.clone();
+            async move {
+                lib.lock().unwrap().set_setting(accounts::SOURCE_POLICY_KEY, policy).unwrap();
+                tokio::task::spawn_blocking(move || {
+                    let who = accounts::Who::Listener(ben.into()).resolved(&lib.lock().unwrap());
+                    qobuz::open_track_blocking(&lib, "5966783", &who).map(drop).map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap()
+            }
+        };
+        assert!(open_as_ben("node").await.is_ok());
+        assert_eq!(*q_seen.lock().unwrap(), ["t-owner"]);
+        assert!(open_as_ben("own").await.unwrap_err().contains("Connect Qobuz"));
+        assert_eq!(q_seen.lock().unwrap().len(), 1, "never the node's under `own`");
+    }
 }
