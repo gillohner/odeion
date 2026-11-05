@@ -138,7 +138,9 @@ repository); `ARCH` is `x86_64` or `arm64` (a 64-bit Pi).
    sudo useradd --system --home /var/lib/pubky-music --shell /usr/sbin/nologin --groups audio,pubky-files pubky-music
    sudo install -d -o pubky -g pubky-files -m 710 /var/lib/pubky-homeserver   # put it on the big disk if you like
    sudo install -d -o pubky -g pubky-files -m 2750 /var/lib/pubky-homeserver/data
-   sudo install -d -o pubky-music -g pubky-music -m 755 /var/lib/pubky-music /var/lib/pubky-music/tunnel
+   # The node's folder: its own (others may only pass through to tunnel/, which the homeserver reads)
+   sudo install -d -o pubky-music -g pubky-music -m 711 /var/lib/pubky-music
+   sudo install -d -o pubky-music -g pubky-music -m 755 /var/lib/pubky-music/tunnel
    sudo install -d -m 755 /etc/pubky-music /usr/local/lib/pubky-music
    ```
 

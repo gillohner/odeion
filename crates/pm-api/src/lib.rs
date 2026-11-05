@@ -2604,20 +2604,7 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|e| ApiError::not_found(format!("portrait for artist {id}: {e}")))?;
-    let mime = match bytes.get(..4) {
-        Some([0x89, b'P', b'N', b'G']) => "image/png",
-        Some([b'R', b'I', b'F', b'F']) => "image/webp",
-        Some([b'G', b'I', b'F', _]) => "image/gif",
-        _ => "image/jpeg",
-    };
-    Ok((
-        [
-            (header::CONTENT_TYPE, mime.to_string()),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    art::picture(bytes, "private, max-age=86400")
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
@@ -3061,14 +3048,8 @@ async fn album_cover(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Re
     let bytes = tokio::fs::read(&art.file)
         .await
         .map_err(|e| ApiError::not_found(format!("cover file for album {id}: {e}")))?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, art.mime),
-            (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-        ],
-        bytes,
-    )
-        .into_response())
+    // Its type by its bytes, also for covers stored before the scan checked them
+    art::picture(bytes, "private, max-age=86400")
 }
 
 // ---- pubky ----
@@ -20073,5 +20054,99 @@ exec sleep 300
         }
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+    }
+
+    /// A cover is served by what its bytes are, never by a type stored with it: a picture whose
+    /// tag claimed another type is served as the picture it is, bytes that are no picture are not
+    /// served at all, and every picture says it is only that (`nosniff`, a sandboxing policy).
+    #[tokio::test]
+    async fn covers_are_served_by_their_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let mut album_ids = Vec::new();
+        for (n, bytes, claimed) in [
+            ("a", b"\x89PNG\r\n\x1a\n-picture".to_vec(), "text/html"),
+            ("b", b"<html><body>page</body></html>".to_vec(), "text/html"),
+            (
+                "c",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec(),
+                "image/svg+xml",
+            ),
+        ] {
+            let lib = s.library.lock().unwrap();
+            let mut t = untagged_track(dir.path().join(format!("{n}.flac")), n, "Someone");
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: format!("Album {n}"),
+                album_artist: None,
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let id = lib.upsert_track(&t).unwrap();
+            let album = lib.get_track(id).unwrap().unwrap().album.unwrap().id.unwrap();
+            let file = dir.path().join(format!("{n}.cover"));
+            std::fs::write(&file, &bytes).unwrap();
+            lib.set_album_art(&pm_library::db::AlbumArt {
+                album_id: album,
+                file,
+                mime: claimed.into(),
+                source: "embedded".into(),
+            })
+            .unwrap();
+            album_ids.push(album);
+        }
+        let app = router(s.clone());
+        let get = |id: i64| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .uri(format!("/v1/library/albums/{id}/cover"))
+                    .header("authorization", "Bearer s3cret")
+                    .body(Body::empty())
+                    .unwrap();
+                let r = app.oneshot(req).await.unwrap();
+                (r.status(), r.headers().clone())
+            }
+        };
+        let (st, h) = get(album_ids[0]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(h[header::CONTENT_TYPE], "image/png");
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(h[header::CONTENT_SECURITY_POLICY], "default-src 'none'; sandbox");
+        for id in &album_ids[1..] {
+            let (st, h) = get(*id).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{h:?}");
+        }
+    }
+
+    /// Files relayed from another server keep their type when it is audio, video or a raster
+    /// picture; anything else is relayed as what the node asked for.
+    #[test]
+    fn relayed_files_keep_only_media_types() {
+        assert_eq!(
+            art::safe_media_type(Some("audio/flac"), "audio/mpeg"),
+            "audio/flac"
+        );
+        assert_eq!(
+            art::safe_media_type(Some("image/jpeg; charset=x"), "image/png"),
+            "image/jpeg"
+        );
+        for other in [
+            "text/html",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "",
+            "text/html; image/png",
+        ] {
+            assert_eq!(
+                art::safe_media_type(Some(other), "image/jpeg"),
+                "image/jpeg",
+                "{other}"
+            );
+        }
+        assert_eq!(art::safe_media_type(None, "audio/flac"), "audio/flac");
     }
 }

@@ -94,13 +94,18 @@ impl<'a> Scanner<'a> {
         if self.lib.album_art(album_id)?.is_some() {
             return Ok(());
         }
-        if let Some(pic) = &tags.picture {
+        // An embedded picture counts by what its bytes are, not by the type its tag claims
+        let embedded = tags
+            .picture
+            .as_ref()
+            .and_then(|pic| crate::image::image_type(&pic.data).map(|mime| (pic, mime)));
+        if let Some((pic, mime)) = embedded {
             std::fs::create_dir_all(art_dir).map_err(|e| LibraryError::Io {
                 path: art_dir.clone(),
                 source: e,
             })?;
             let hash = blake3::hash(&pic.data).to_hex();
-            let file = art_dir.join(format!("{}.{}", &hash[..32], pic.extension()));
+            let file = art_dir.join(format!("{}.{}", &hash[..32], crate::image::image_extension(mime)));
             if !file.exists() {
                 std::fs::write(&file, &pic.data).map_err(|e| LibraryError::Io {
                     path: file.clone(),
@@ -110,7 +115,7 @@ impl<'a> Scanner<'a> {
             return self.lib.set_album_art(&crate::db::AlbumArt {
                 album_id,
                 file,
-                mime: pic.mime.clone(),
+                mime: mime.into(),
                 source: "embedded".into(),
             });
         }
@@ -739,13 +744,14 @@ fn cover_in(dir: &Path) -> Option<(PathBuf, String)> {
         else {
             continue;
         };
-        let mime = match ext.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "webp" => "image/webp",
-            _ => continue,
-        };
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+            continue;
+        }
         let Some(rank) = FOLDER_COVERS.iter().position(|n| *n == stem) else {
+            continue;
+        };
+        // What the file is, by its first bytes, not its name
+        let Some(mime) = crate::image::file_image_type(&p) else {
             continue;
         };
         if best.as_ref().is_none_or(|(r, _, _)| rank < *r) {

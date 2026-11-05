@@ -27,6 +27,9 @@ Conflicts=pubky-music-node.service
 [Service]
 User=pubky-music
 Group=pubky-music
+# What the node writes (its library, sign-ins, keys) is its own; files meant for another service
+# get their own permissions (tunnel/domain)
+UMask=0077
 # audio: the DAC; pubky-files: read the homeserver's stored files (its music is a library folder),
 # nothing else of the homeserver's
 SupplementaryGroups=audio pubky-files

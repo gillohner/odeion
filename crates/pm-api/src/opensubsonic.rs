@@ -419,12 +419,13 @@ async fn relay(
     if !resp.status().is_success() {
         return Err(upstream(format!("{method} answered {}", resp.status())));
     }
-    let ctype = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(fallback_type)
-        .to_string();
+    // Audio, video or a raster picture as the server said, else what was asked for
+    let ctype = crate::art::safe_media_type(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        fallback_type,
+    );
     if ctype.starts_with("application/json") || ctype.starts_with("text/xml") {
         return Err(ApiError::not_found(format!(
             "the server has no {method} for this id"
@@ -432,6 +433,11 @@ async fn relay(
     }
     let mut out = axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, ctype)
+        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            crate::art::PASSIVE_CSP,
+        )
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=3600");
     if let Some(n) = resp.content_length() {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);

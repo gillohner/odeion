@@ -4,6 +4,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Covers, portraits and profile pictures are served by what they are.**
+  - A picture's type now comes from its bytes, so only JPEG, PNG, WebP and GIF are served, whatever type a tag or a server gave it. Anything else isn't shown.
+  - Every picture, and every file the node relays from Jellyfin, Plex, Audiobookshelf or a Subsonic server, is marked to be shown only as what it is.
+- **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, the node makes its library, its config and its remote-access key its own if a group or anyone else could read them, and logs that. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
