@@ -1238,10 +1238,16 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             .ok()
             .flatten()
             .and_then(|j| serde_json::from_str::<(i64, ItemContents)>(&j).ok())
-            // Kept a day (stored in the library, so it survives restarts): a cold page took 2.3 s
+            // Kept a day (stored in the library, so it survives restarts): a cold page took 2.3 s.
+            // A restricted answer alone (the archive's refusal) only 10 minutes: another source
+            // connected meanwhile gets its turn soon
             .filter(|(at, c)| {
-                pm_library::db::now_unix() - at < 24 * 3600
-                    && (!c.tracks.is_empty() || c.unavailable.is_some())
+                let age = pm_library::db::now_unix() - at;
+                if c.tracks.is_empty() {
+                    c.unavailable.is_some() && age < 600
+                } else {
+                    age < 24 * 3600
+                }
             })
             .map(|(_, c)| c)
     };
@@ -1288,6 +1294,8 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
                 .plays_from
                 .as_ref()
                 .is_some_and(|p| turned_off(&acc, &p.service))
+            // Only the archive refuses an item: with it off, its refusal doesn't stand either
+            && !(c.unavailable.is_some() && turned_off(&acc, "archive"))
     });
     if let Some(c) = cached {
         return External {
@@ -1467,8 +1475,8 @@ async fn fetch_contents(
                         }
                     }
                     "album" => match svc.item(s, &svc_item_id(l)).await {
-                        // The archive says an item is restricted: the page says so, and stops looking
-                        // (the next candidate may still list it)
+                        // The archive says an item is restricted: noted for the page; the next
+                        // candidate may still list it
                         Err(e) if l.service == "archive" && e.status == axum::http::StatusCode::FORBIDDEN => {
                             out.unavailable = Some(e.message);
                         }
@@ -2200,7 +2208,7 @@ mod archive_links {
         // A song's card: the archive's set (an album) is not this song; an Audius song may be
         let song = DiscoverItem {
             kind: "track".into(),
-            also_on: others.clone(),
+            also_on: others,
             ..Default::default()
         };
         let r = resolve(&acc, &song, None);
@@ -2213,21 +2221,26 @@ mod archive_links {
             r.link.as_ref().is_none_or(|l| l.service != "archive"),
             "a whole archive set never plays for one song"
         );
-        // An album's card: the archive's set may, the Audius song may not
+        // An album's card: the archive's set may, the Audius song may not (listed first, it
+        // would win the tie)
         let album = DiscoverItem {
             kind: "album".into(),
-            also_on: others,
+            also_on: vec![
+                row("https://audius.co/someone/a-song"),
+                row("https://archive.org/details/some-live-set"),
+            ],
             ..Default::default()
         };
         let r = resolve(&acc, &album, None);
         assert_eq!(r.link.as_ref().map(|l| l.service), Some("archive"));
-        // Only Deezer's preview is left for a card of another kind
+        // A card of another kind: neither, so nothing plays from them
         let artist = DiscoverItem {
             kind: "artist".into(),
             also_on: vec![row("https://archive.org/details/x"), row("https://audius.co/a/b")],
             ..Default::default()
         };
-        assert!(resolve(&acc, &artist, None).link.is_none());
+        let r = resolve(&acc, &artist, None);
+        assert!(r.link.is_none() && r.plays_from.is_none(), "{:?}", r.link);
     }
 
     #[test]
