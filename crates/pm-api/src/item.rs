@@ -1118,15 +1118,16 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         None => (None, false),
     };
     let about_text = more.as_ref().and_then(|m| m.text.clone());
+    // The library's year, unless the release group brings a release date (one of the two)
+    let released = more
+        .as_ref()
+        .is_some_and(|m| m.facts.iter().any(|f| f.label == "Released"));
+    if let (Some(y), false) = (a.year, released) {
+        about.push(fact("Year", y.to_string()));
+    }
     // Its links become sources like the rest: "Also on" and "Open on"
     if let Some(m) = more {
         versions.extend(m.links);
-        // The library's year when the release group brings no release date (one of the two)
-        if !m.facts.iter().any(|f| f.label == "Released") {
-            if let Some(y) = a.year {
-                about.push(fact("Year", y.to_string()));
-            }
-        }
         about.extend(m.facts);
     }
     let first_artist = tracks.first().and_then(|t| t.artists.first().cloned());
