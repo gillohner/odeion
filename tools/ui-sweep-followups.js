@@ -44,7 +44,7 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
         const hero = await p.$$eval('.hero .actions > .btn', (bs) => bs.filter((b) => b.offsetParent).map((b) => Math.round(b.getBoundingClientRect().top)));
         if (touch(w)) {
           check(hero.length >= 3 && new Set(hero).size === 1, `${w}: the playlist's hero buttons are one row (${JSON.stringify(hero)})`);
-          check(!(await p.$('#pldel')), `${w}: no Delete button beside Play`);
+          check(!(await p.locator('#pldel').isVisible()), `${w}: no Delete button beside Play`);
           await p.click('#plmore'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
           check(await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Delete playlist' }).count() === 1, `${w}: Delete playlist… is in ⋯`);
           await p.keyboard.press('Escape'); await sleep(200);
@@ -52,7 +52,7 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
           if (w >= 600) check(q.length && q.every(([bw, bh]) => bw >= 40 && bh >= 40), `${w}: Move and Remove are 40 px (${JSON.stringify(q.slice(0, 3))})`);
           const sel = await boxes(p, '[data-selstart]');
           check(sel.length && sel.every(([, bh]) => bh >= 40), `${w}: Select is 40 px tall (${JSON.stringify(sel)})`);
-        } else check(!!(await p.$('#pldel')), `${w}: the desktop keeps Delete beside Play`);
+        } else check(await p.locator('#pldel').isVisible(), `${w}: the desktop keeps Delete beside Play`);
       }
 
       check(errors.length === 0, `${w}: no page errors so far${errors.length ? ': ' + errors.join(' | ') : ''}`);

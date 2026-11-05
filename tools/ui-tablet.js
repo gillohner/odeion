@@ -214,6 +214,26 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     check(vol && !b.overlaps.length && !b.outside.length, `offline at ${w}: the volume slider is in the bar and the bar fits${b.overlaps.length || b.outside.length ? ': ' + [...b.overlaps, ...b.outside].slice(0, 4).join('; ') : ''}`);
     await context.close();
   }
+  // A playlist's Delete follows the window (#269 review): beside Play in a wide desktop window, in
+  // ⋯ otherwise, also after a resize without reopening the page
+  for (const widths of [[1280, 800, 1280], [800, 1280]]) {
+    const { page, context, state } = await open(browser, widths[0], 800);
+    await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plplay'); await page.waitForTimeout(300);
+    const menuHasDelete = async () => {
+      await page.click('#plmore'); await page.waitForTimeout(250);
+      const items = await page.evaluate(() => [...document.querySelectorAll('.popover.menu:not([hidden]) .pop-item')].map((b) => b.textContent.trim()));
+      await page.keyboard.press('Escape'); await page.waitForTimeout(200);
+      return items.some((t) => /^Delete playlist/.test(t));
+    };
+    for (const w of widths) {
+      await page.setViewportSize({ width: w, height: 800 }); await page.waitForTimeout(300);
+      const beside = await visible(page, '#pldel'); const inMenu = await menuHasDelete();
+      const wide = w > 1024;
+      check(beside === wide && inMenu === !wide, `playlist opened at ${widths[0]}, at ${w}: Delete ${wide ? 'beside Play, not in ⋯' : 'in ⋯, not beside Play'} (beside ${beside}, in ⋯ ${inMenu})`);
+    }
+    check(!state.errors.length, `playlist resize: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+    await context.close();
+  }
   // Settings › Appearance › Layout: Automatic / Phone / Desktop; the old choices map across
   // Comfortable (the tablet rail from 600 px, a phone below) becomes Automatic: the same at every width
   for (const [was, now, w, kept] of [['compact', 'phone', 1024, 'phone'], ['comfortable', 'desktop', 1024, null], ['comfortable', 'phone', 500, null], ['desktop', 'desktop', 500, 'desktop'], ['desktop', 'phone', 390, 'desktop'], ['phone', 'phone', 1366, 'phone']]) {
