@@ -182,15 +182,22 @@ async fn refresh(
     }
     sh.items.retain(|k| !(k.deleted && !k.pending));
 
+    // What the node knows there: an empty listing then is checked again (a gone user lists as empty)
+    let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
+    let had_public = sh.items.iter().any(|k| !k.pending && k.public);
     let private = match b
-        .list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE))
+        .list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE), had)
         .await
     {
         Ok(paths) => v1::heads(paths),
         Err(e) => return read_outcome(s, key, e),
     };
     let public = match b
-        .list(key, &v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE))
+        .list(
+            key,
+            &v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE),
+            had_public,
+        )
         .await
     {
         Ok(paths) => v1::heads(paths),

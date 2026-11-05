@@ -129,7 +129,7 @@ impl PersonalHomeserver for Fake {
         }
         Ok(())
     }
-    async fn list(&self, key: &str, dir: &str) -> Result<Vec<String>, PersonalError> {
+    async fn list(&self, key: &str, dir: &str, _expected: bool) -> Result<Vec<String>, PersonalError> {
         Self::moment().await;
         self.check(key, "list", dir)?;
         Ok(self.paths(key, dir))
