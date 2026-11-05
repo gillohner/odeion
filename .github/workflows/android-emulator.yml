@@ -10,6 +10,9 @@ on:
       - crates/pm-endpoint/**
       - crates/pm-stream/**
       - crates/pm-out-net/**
+      # The phone's output (cpal on AAudio) and the USB DACs it describes
+      - crates/pm-out-local/**
+      - crates/pm-usb-audio/**
       # The node's side: registration and keys (pm-api), the zones, the binary
       - crates/pm-api/**
       - crates/pm-zones/**

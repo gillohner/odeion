@@ -126,13 +126,34 @@ pub async fn register(mut s: Settings, player: Option<Arc<Player>>) -> Settings 
         }
     }
     match crate::node::add_endpoint(&s, &address, &player.key).await {
-        Ok(()) => {
-            tracing::info!(%address, "player registered with the node");
+        Ok(ids) => {
+            tracing::info!(%address, outputs = ids.len(), "player registered with the node");
             s.player_address = address;
+            *OUTPUT_IDS.lock().unwrap_or_else(|e| e.into_inner()) = ids;
         }
         Err(e) => tracing::warn!(%address, "player not registered (the node must reach this machine): {e}"),
     }
     s
+}
+
+/// The node's ids for this player's outputs, as the last registration answered.
+static OUTPUT_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// For the node's page: `window.pmDesktop.outputs` (the node's ids for this app's player) and
+/// `output` (the one, on a phone), then a `pmdesktop:output` event, so the page shows what this
+/// app plays through (a USB DAC) and fetches the outputs again. Empty before a registration.
+pub fn output_script() -> String {
+    output_script_for(&OUTPUT_IDS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+fn output_script_for(ids: &[String]) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    format!(
+        "(function(o){{if(!window.pmDesktop)return;window.pmDesktop.outputs=o;window.pmDesktop.output=o.length===1?o[0]:null;window.dispatchEvent(new Event('pmdesktop:output'));}})({});",
+        serde_json::to_string(ids).unwrap_or_else(|_| "[]".into())
+    )
 }
 
 #[cfg(test)]
@@ -236,5 +257,19 @@ mod tests {
             pm_stream::Incoming::Control(f) => f,
             pm_stream::Incoming::Audio(_) => panic!("audio"),
         }
+    }
+
+    #[test]
+    fn the_page_learns_this_apps_output() {
+        assert_eq!(output_script_for(&[]), "");
+        let one = output_script_for(&["net:192.168.1.20:7790/cpal:Speaker or headphones".into()]);
+        assert!(
+            one.contains(r#"(["net:192.168.1.20:7790/cpal:Speaker or headphones"])"#),
+            "{one}"
+        );
+        assert!(one.contains("pmdesktop:output"));
+        // An id is data, never script
+        let odd = output_script_for(&["net:x/</script>\"');alert(1)//".into()]);
+        assert!(odd.contains(r#"["net:x/</script>\"');alert(1)//"]"#), "{odd}");
     }
 }

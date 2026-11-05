@@ -241,6 +241,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/outputs/endpoints", post(add_endpoint))
         .route("/outputs/endpoints/{address}", delete(remove_endpoint))
         .route("/outputs/pull", post(create_pull))
+        .route("/outputs/{id}/device", axum::routing::put(put_output_device))
         .route("/outputs/pull/{name}/url", get(pull_url))
         .route("/zones", get(zones).post(create_zone))
         .route("/zones/{id}", get(zone).delete(delete_zone))
@@ -1319,6 +1320,51 @@ async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
             })
             .collect(),
     )
+}
+
+/// `PUT /v1/outputs/{id}/device {mode?, full_level_ok?}`: the listener's choices for the hardware
+/// behind an output (a phone's USB DAC: `auto`, `bit_perfect` or `shared`, and whether the zone's
+/// volume is the DAC's). The output's app keeps them; the answer is the output as listed.
+async fn put_output_device(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<DeviceSettingsPatch>,
+) -> ApiResult<OutputInfo> {
+    let out = s
+        .outputs
+        .get(&OutputId(id.clone()))
+        .ok_or_else(|| ApiError::not_found(format!("no output {id}")))?;
+    let Some(device) = out.device() else {
+        return Err(ApiError::bad_request(format!("{id} has no device to set")));
+    };
+    let mut settings = device.settings.unwrap_or_default();
+    if let Some(m) = body.mode {
+        if m == pm_zones::PreferredMode::Unknown {
+            return Err(ApiError::bad_request("mode is auto, bit_perfect or shared"));
+        }
+        settings.mode = m;
+    }
+    if let Some(v) = body.dac_volume {
+        settings.dac_volume = v;
+    }
+    // The listener's agreement that Bit-perfect plays at full level (asked when they choose it
+    // below Android's full volume); it goes with any other mode
+    settings.full_level_ok =
+        body.full_level_ok.unwrap_or(false) && settings.mode == pm_zones::PreferredMode::BitPerfect;
+    out.configure_device(settings)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(Json(out.info()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeviceSettingsPatch {
+    #[serde(default)]
+    mode: Option<pm_zones::PreferredMode>,
+    #[serde(default)]
+    dac_volume: Option<bool>,
+    #[serde(default)]
+    full_level_ok: Option<bool>,
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -20140,6 +20186,191 @@ exec sleep 300
         }
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+    }
+
+    /// A phone's USB DAC: the node tells owners (`outputs_changed`) only once the phone's output is
+    /// in the list, so a controller that fetches `GET /v1/outputs` on the event finds it with its
+    /// device; plugging out tells them again; listeners never hear it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_output_device_is_announced_after_its_output_is_listed() {
+        struct Phone {
+            inner: NullOutput,
+            dac: std::sync::Mutex<Option<pm_zones::OutputDevice>>,
+        }
+        #[async_trait::async_trait]
+        impl pm_zones::Output for Phone {
+            fn id(&self) -> OutputId {
+                OutputId::new("cpal", "Speaker or headphones")
+            }
+            fn name(&self) -> String {
+                "Speaker or headphones (Android audio, shared mode)".into()
+            }
+            fn device(&self) -> Option<pm_zones::OutputDevice> {
+                self.dac.lock().unwrap().clone()
+            }
+            async fn configure_device(
+                &self,
+                settings: pm_zones::DeviceSettings,
+            ) -> Result<(), pm_zones::SinkError> {
+                if let Some(d) = self.dac.lock().unwrap().as_mut() {
+                    d.settings = Some(settings);
+                }
+                Ok(())
+            }
+            fn caps(&self) -> &pm_model::OutputCaps {
+                self.inner.caps()
+            }
+            async fn open(
+                &self,
+                fmt: pm_model::AudioFormat,
+            ) -> Result<Box<dyn pm_zones::AudioSink>, pm_zones::SinkError> {
+                self.inner.open(fmt).await
+            }
+        }
+        let ka17 = pm_zones::OutputDevice {
+            name: "FiiO KA17".into(),
+            ..Default::default()
+        };
+        let phone = Arc::new(Phone {
+            inner: NullOutput::new(),
+            dac: std::sync::Mutex::new(Some(ka17)),
+        });
+        let outs = pm_zones::OutputRegistry::new();
+        outs.register(phone.clone());
+        let key = pm_stream::Key::random();
+        let serving = pm_endpoint::Endpoint::new("Pixel 8", outs, key.clone())
+            .spawn(std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let address = serving.addr().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        // What a controller would see when it fetches the outputs the moment the event arrives
+        let mut rx = s.events.subscribe();
+        let s2 = s.clone();
+        // Each observation is also signalled, so the test changes the phone only once the one
+        // before was observed (the observer reads the registry as it is then)
+        let (observed_tx, observed) = std::sync::mpsc::channel::<()>();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(observed));
+        let wait_observed = || {
+            let o = observed.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    o.lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("an outputs_changed event")
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let seen = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(ev) = rx.blocking_recv() {
+                match &ev.event {
+                    ApiEvent::OutputsChanged { output } => {
+                        let listed = s2.outputs.get(output).map(|o| o.device().map(|d| d.name));
+                        seen.push((ev.event.clone(), listed));
+                        let _ = observed_tx.send(());
+                    }
+                    // The test's own end mark
+                    ApiEvent::LibraryChanged => break,
+                    _ => {}
+                }
+            }
+            seen
+        });
+        let register = || {
+            let (app, address, key) = (app.clone(), address.clone(), key.clone());
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/outputs/endpoints",
+                    Some(serde_json::json!({"address": address, "key": key.expose()})),
+                )
+                .await
+            }
+        };
+        let (st, body) = register().await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_observed().await;
+        // The owner's choices reach the phone, and the answer shows them
+        let id = body[0]["id"].as_str().unwrap().to_string();
+        let enc = id
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(':', "%3A")
+            .replace(' ', "%20");
+        let (st, out) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "shared", "dac_volume": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert_eq!(
+            out["device"]["settings"],
+            serde_json::json!({"mode": "shared", "dac_volume": false, "full_level_ok": false})
+        );
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "loudest"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a mode this node doesn't know");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/outputs/null/device",
+            Some(serde_json::json!({"mode": "shared"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "an output without a device");
+        wait_observed().await;
+        *phone.dac.lock().unwrap() = None;
+        let (st, _) = register().await;
+        assert_eq!(st, StatusCode::OK);
+        s.events.send(ApiEvent::LibraryChanged);
+        let seen = tokio::task::spawn_blocking(move || seen.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.len(),
+            3,
+            "plugged in at the first registration, the settings, then out"
+        );
+        assert_eq!(
+            seen[0].1,
+            Some(Some("FiiO KA17".to_string())),
+            "listed, with its device, when announced"
+        );
+        assert_eq!(
+            seen[1].1,
+            Some(Some("FiiO KA17".to_string())),
+            "its settings changed"
+        );
+        assert_eq!(seen[2].1, Some(None), "listed, without a device, when unplugged");
+        let listener = accounts::Caller {
+            role: accounts::Role::Listener,
+            key: Some("o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy".into()),
+        };
+        let owner = accounts::Caller {
+            role: accounts::Role::Owner,
+            key: None,
+        };
+        for (ev, _) in &seen {
+            assert!(
+                events::for_caller(&s, &listener, ev).is_none(),
+                "listeners don't hear it"
+            );
+            assert!(events::for_caller(&s, &owner, ev).is_some(), "owners do");
+        }
+        drop(serving);
     }
 
     /// A node without a token answers only requests addressed to it by a loopback name from its
