@@ -1,6 +1,6 @@
 # The desktop and Android app
 
-The Pubky Music app is the node's web page in its own window, for macOS, Windows, Linux and
+The Odeion app is the node's web page in its own window, for macOS, Windows, Linux and
 Android. It connects to a node you have installed (see the [README](../../README.md#choose-how-to-run-it));
 it doesn't hold your library itself. What it adds over a browser:
 
@@ -19,6 +19,10 @@ Download from the [latest release](https://github.com/gillohner/pubky-music-node
 | Windows | `pubky-music-windows-x86_64-setup.exe` | The installer isn't signed: choose **More info**, then **Run anyway**. |
 | Linux | `.deb` (Debian, Ubuntu) or `.AppImage` (others), x86_64 or arm64 | `sudo apt install ./pubky-music-linux-x86_64.deb`, or make the AppImage executable and run it. |
 | Android, Google TV | `pubky-music-android-arm64.apk` | Open the file on the device and allow installs from that source. |
+
+On a computer the installed app still carries its earlier name for now: "Pubky Music" in Applications,
+the Dock, the Start menu and the Linux app menu (compat: pre-Odeion name; it is what lets updates
+replace the installed app). Its window says Odeion. On Android the app is called Odeion.
 
 ## Connect to your node
 

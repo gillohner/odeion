@@ -141,7 +141,7 @@ fn missing_wrong_and_old_hellos_are_refused() {
     assert_eq!(m, "endpoint speaks protocol 2, this node 1; update the node");
     let m = refusal(hello_as(addr, 3, &key).0);
     assert!(
-        m.contains("protocol 2, this node 3; update the Pubky Music app"),
+        m.contains("protocol 2, this node 3; update the Odeion app"),
         "{m}"
     );
     assert!(refusal(hello(addr, &Key::default()).0).starts_with("no key"));

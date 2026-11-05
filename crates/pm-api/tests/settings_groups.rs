@@ -499,3 +499,52 @@ async fn own_apps_are_set_in_service_apps_and_node_toml_wins() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
 }
+
+/// Review of #149 (apps.rs:190): where an app comes from is recorded, not guessed from client ids.
+/// A restored backup brings the settings' own app with another id than the one in use; that one
+/// is still the admin's (not node.toml's), so it can be changed (no 409), and says so.
+#[tokio::test]
+async fn an_own_app_replaced_by_a_restore_is_still_the_admins() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    pm_api::apps::apply_own(&s);
+    let app = router(s.clone());
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": "in-use-id", "client_secret": "in-use-secret"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    // A restore writes the backup's own apps into the settings
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            pm_api::apps::OWN_KEY,
+            r#"{"tidal":{"client_id":"restored-id","client_secret":"restored-secret"}}"#,
+        )
+        .unwrap();
+    let (_, apps) = call(&app, OWNER, "GET", "/v1/node/apps", None).await;
+    let tidal = apps
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == "tidal")
+        .cloned()
+        .unwrap();
+    assert_eq!(tidal["from"], "settings", "{tidal}");
+    assert_eq!(tidal["set"], "PUT /v1/node/apps/tidal");
+    let (st, row) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": "next-id"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{row}");
+    assert_eq!(s.tidal.read().unwrap().creds.client_id, "next-id");
+}

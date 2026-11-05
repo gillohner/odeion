@@ -526,17 +526,17 @@ async fn a_share_file_is_fetched_once_and_seeks_come_from_the_cache() {
 async fn transcodes_run_at_most_one_per_cpu() {
     use std::os::unix::fs::PermissionsExt;
     let slots = pm_api::downloads::max_transcodes();
-    // Bitrates 64 to 320 make the distinct transcodes; with more CPUs than that the cap can't show
+    // One track each makes the distinct transcodes (bitrates are a fixed few)
     let n = slots + 3;
-    if n > 257 {
-        eprintln!("{slots} CPUs: skipped");
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let s = node(dir.path());
-    let file = dir.path().join("07 Song.flac");
-    std::fs::write(&file, vec![7u8; 1000]).unwrap();
-    let id = add_track(&s, &file, "flac");
+    let ids: Vec<i64> = (0..n)
+        .map(|i| {
+            let file = dir.path().join(format!("{i:03} Song.flac"));
+            std::fs::write(&file, vec![7u8; 1000]).unwrap();
+            add_track(&s, &file, "flac")
+        })
+        .collect();
     // A stand-in for ffmpeg that notes how many of it run at once
     let runs = dir.path().join("runs");
     std::fs::create_dir(&runs).unwrap();
@@ -556,13 +556,13 @@ async fn transcodes_run_at_most_one_per_cpu() {
         .set_setting(pm_api::downloads::FFMPEG_SETTING, fake.to_str().unwrap())
         .unwrap();
     let app = router(s.clone());
-    let all = (0..n).map(|i| {
+    let all = ids.iter().map(|id| {
         let app = app.clone();
         async move {
             get(
                 &app,
                 OWNER,
-                &format!("/v1/library/tracks/{id}/download?format=mp3&bitrate={}", 64 + i),
+                &format!("/v1/library/tracks/{id}/download?format=mp3&bitrate=128"),
                 &[],
             )
             .await

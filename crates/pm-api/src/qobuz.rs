@@ -1069,6 +1069,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
                 ),
                 action: "setup".into(),
                 recommended: true,
+                advanced: false,
                 // The app is the node's: a listener signs in once the owner has set one
                 available: app.is_some() || who.is_owner(),
                 reason: (app.is_none() && !who.is_owner())
@@ -1080,6 +1081,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
                 note: format!("{note} {app_note}"),
                 action: "import".into(),
                 recommended: false,
+                advanced: false,
                 available: who.is_owner(),
                 reason: (!who.is_owner())
                     .then(|| "The sign-ins on the node's machine are the owner's; paste your own instead.".to_string()),
@@ -1090,6 +1092,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
                 note: format!("The contents of streamrip's config.toml or qobuz-dl's config.ini: the app values and the sign-in (a token, or the email with the password's MD5). Nothing is shown again once saved. {app_note}"),
                 action: "paste".into(),
                 recommended: false,
+                advanced: false,
                 available: true,
                 reason: None,
             },

@@ -166,183 +166,10 @@ pub(crate) async fn upload(
     }
 }
 
-/// `POST /v1/pubky/files/upload`: copy an album, some tracks or the whole library to the
-/// homeserver's private storage, as a background job (`GET …/upload/{id}` for progress). Files
-/// already there (same content) are skipped, so running it again only sends what is new.
-pub(crate) async fn upload_many(
-    State(s): State<Arc<NodeState>>,
-    Json(body): Json<UploadRequest>,
-) -> ApiResult<UploadProgress> {
-    let files: Vec<(PathBuf, u64)> = {
-        let lib = s.library.lock().expect("library poisoned");
-        let mut tracks = Vec::new();
-        if body.all {
-            let mut after = None;
-            loop {
-                let page = lib.list_tracks(after, 500)?;
-                after = page.last().and_then(|t| t.id);
-                let n = page.len();
-                tracks.extend(page);
-                if n < 500 {
-                    break;
-                }
-            }
-        } else if let Some(a) = body.album_id {
-            tracks = lib.album_tracks(a)?;
-        } else {
-            for id in &body.track_ids {
-                tracks.extend(lib.get_track(TrackId(*id))?);
-            }
-        }
-        let mut seen = std::collections::HashSet::new();
-        tracks
-            .into_iter()
-            .filter(|t| seen.insert(t.file.path.clone()))
-            .map(|t| (t.file.path.clone(), t.file.size_bytes))
-            .collect()
-    };
-    if files.is_empty() {
-        return Err(ApiError::bad_request("nothing to upload"));
-    }
-    let mut progress = UploadProgress {
-        id: crate::tidal::random_urlsafe(9),
-        kind: "copy".into(),
-        total: files.len(),
-        bytes_total: files.iter().map(|(_, b)| b).sum(),
-        ..Default::default()
-    };
-    let room = crate::copy_guard::room_of(&s);
-    let target = crate::copy_guard::target_of(&s);
-    // Path → size of what the homeserver has: a file there with another size (an empty upload) is
-    // sent again; what is there whole is skipped, and counted out of the space needed
-    let listed: Option<std::collections::HashMap<String, Option<u64>>> = match &target {
-        Ok(t) => t
-            .list()
-            .await
-            .ok()
-            .map(|l| l.into_iter().map(|f| (f.path, f.size)).collect()),
-        Err(_) => None,
-    };
-    let needed = files
-        .iter()
-        .filter(|(p, _)| !crate::copy_guard::is_apple_double(p))
-        .filter(|(p, n)| {
-            !listed.as_ref().is_some_and(|present| {
-                known_hash(&s, p).is_some_and(|h| {
-                    let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name_for(&h, &safe_file_name(p)));
-                    present.get(&remote).is_some_and(|sz| *sz == Some(*n))
-                })
-            })
-        })
-        .map(|(_, n)| n)
-        .sum();
-    let fits = crate::copy_guard::plan(room.as_ref(), &mut progress, needed);
-    if body.dry_run {
-        return Ok(Json(progress));
-    }
-    fits?;
-    let target = target?;
-    claim_job(&s, &progress)?;
-    let s2 = s.clone();
-    let id = progress.id.clone();
-    tokio::spawn(async move {
-        let set = |f: &dyn Fn(&mut UploadProgress)| {
-            if let Some(j) = s2.upload_jobs.lock().expect("upload jobs").get_mut(&id) {
-                f(j);
-            }
-        };
-        let stop = |why: String| {
-            set(&|j| {
-                j.errors.push(why.clone());
-                j.stopped_reason = Some(why.clone());
-            })
-        };
-        let listed = match listed {
-            Some(l) => Ok(l),
-            None => target
-                .list()
-                .await
-                .map(|l| l.into_iter().map(|f| (f.path, f.size)).collect()),
-        };
-        let mut present: std::collections::HashMap<String, Option<u64>> = match listed {
-            Ok(l) => l,
-            Err(msg) => {
-                set(&|j| {
-                    j.errors
-                        .push(format!("the homeserver did not list its files: {msg}"));
-                    j.finished = true;
-                });
-                return;
-            }
-        };
-        let mut streak = crate::copy_guard::Streak::default();
-        for (path, size) in files {
-            if is_cancelled(&s2, &id) {
-                break;
-            }
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            set(&|j| j.current = Some(name.clone()));
-            if !crate::copy_guard::is_audio(&path).await {
-                set(&|j| j.not_audio += 1);
-                continue;
-            }
-            // Never into the disk's reserve: checked right before each real upload (copy_one)
-            match copy_one(&s2, target.as_ref(), room.as_ref(), &mut present, &path, &name).await {
-                Ok(sent) => {
-                    streak.ok();
-                    set(&|j| {
-                        if sent {
-                            j.done += 1;
-                        } else {
-                            j.skipped += 1;
-                        }
-                        j.bytes_done += size;
-                    });
-                }
-                // Full: every further file would be sent whole only to be refused
-                Err(e) if crate::add_music::is_full_error(&e) => {
-                    crate::storage::note_full(&s2, true);
-                    set(&|j| j.failed += 1);
-                    stop(format!("{e}; the files after it were not copied"));
-                    break;
-                }
-                // The disk's reserve reached: nothing more is written
-                Err(e) if crate::copy_guard::is_space_stop(&e) => {
-                    stop(e);
-                    break;
-                }
-                Err(e) => {
-                    set(&|j| {
-                        j.failed += 1;
-                        j.errors.push(e.clone());
-                    });
-                    if let Some(why) = streak.failed(&e) {
-                        stop(why);
-                        break;
-                    }
-                }
-            }
-        }
-        set(&|j| {
-            j.current = None;
-            j.finished = true;
-            let n = j.errors.len();
-            if n > 5 {
-                j.errors.drain(..n - 5);
-            }
-        });
-    });
-    progress.current = None;
-    Ok(Json(progress))
-}
-
 /// One library file to the homeserver: Ok(true) sent, Ok(false) already there (same content and
 /// size). A failed or short upload is deleted there, never left looking like a song. What it
 /// sends is added to `present`: a second file of the job with the same name isn't sent again.
-async fn copy_one(
+pub(crate) async fn copy_one(
     s: &Arc<NodeState>,
     target: &dyn crate::copy_guard::Target,
     room: &dyn crate::copy_guard::Room,
@@ -350,7 +177,9 @@ async fn copy_one(
     path: &std::path::Path,
     name: &str,
 ) -> Result<bool, String> {
-    let bytes = tokio::fs::read(path).await.map_err(|e| format!("{name}: {e}"))?;
+    let bytes = crate::copy_jobs::read_file(s, path)
+        .await
+        .map_err(|e| format!("{name}: can't be read: {e}"))?;
     if bytes.is_empty() {
         return Err(format!("{name}: the file is empty, not copied"));
     }
@@ -414,11 +243,14 @@ async fn send_one(
     Ok(true)
 }
 
-/// `GET /v1/pubky/files/upload/{id}`.
+/// `GET /v1/pubky/files/upload/{id}`: a copy job, an import or a bring job.
 pub(crate) async fn upload_progress(
     State(s): State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<UploadProgress> {
+    if let Some(p) = crate::copy_jobs::find(&s, &id) {
+        return Ok(Json(p));
+    }
     s.upload_jobs
         .lock()
         .expect("upload jobs")
@@ -428,8 +260,35 @@ pub(crate) async fn upload_progress(
         .ok_or_else(|| ApiError::not_found("no such upload"))
 }
 
-/// Only one files job at a time (copy or bring): they share the uplink and the homeserver.
-fn claim_job(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
+/// Only one files job at a time (copy, import or bring): they share the uplink and the
+/// homeserver. A copy is queued instead (copy_jobs.rs). None while the start settles.
+pub(crate) fn claim_job(s: &NodeState, job: &UploadProgress) -> Result<(), ApiError> {
+    claim_job_as(s, job, false)
+}
+
+/// `resuming`: the bring job the node resumes at start (`resume_bring`), the only one let in
+/// while the start is held; the kept copies wait for it.
+pub(crate) fn claim_job_as(s: &NodeState, job: &UploadProgress, resuming: bool) -> Result<(), ApiError> {
+    let _admitted = crate::copy_jobs::admit(s);
+    if crate::copy_jobs::held(s) {
+        if !resuming {
+            return Err(crate::copy_jobs::settling());
+        }
+    } else if let Some(copy) = crate::copy_jobs::busy(s) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!(
+                "A copy to your homeserver is {} ({} of {} files); wait for it or cancel it",
+                if copy.state == "paused" {
+                    "paused"
+                } else {
+                    "running"
+                },
+                copy.done + copy.skipped,
+                copy.total
+            ),
+        ));
+    }
     let mut jobs = s.upload_jobs.lock().expect("upload jobs");
     jobs.retain(|_, j| !j.finished);
     if let Some(running) = jobs.values().next() {
@@ -465,6 +324,9 @@ pub(crate) async fn cancel_job(
     State(s): State<Arc<NodeState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<UploadProgress> {
+    if let Some(p) = crate::copy_jobs::cancel(&s, &id) {
+        return Ok(Json(p));
+    }
     let job = {
         let mut jobs = s.upload_jobs.lock().expect("upload jobs");
         let j = jobs
@@ -726,7 +588,7 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
         if let Err(e) = tokio::fs::create_dir_all(&dest).await {
             let msg = format!("could not create {}: {e}", dest.display());
             set(&|j| {
-                j.errors.push(msg.clone());
+                j.errors.push(msg.clone().into());
                 j.finished = true;
             });
             return;
@@ -754,7 +616,7 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                         let msg = format!("{local}: {e}");
                         set(&|j| {
                             j.failed += 1;
-                            j.errors.push(msg.clone());
+                            j.errors.push(msg.clone().into());
                         });
                     } else {
                         fetched += 1;
@@ -771,7 +633,7 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
                         j.bytes_done = j.bytes_done.saturating_sub(got);
                         if !j.cancelled {
                             j.failed += 1;
-                            j.errors.push(msg.clone());
+                            j.errors.push(msg.clone().into());
                         }
                     });
                 }
@@ -820,29 +682,35 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
 /// After a restart: carry on with a bring job the node was running (what already arrived is
 /// matched and not fetched again).
 pub fn resume_jobs(s: &Arc<NodeState>) {
-    // Uploads a stopped node left unsettled: what they half wrote on the homeserver goes
-    let s2 = s.clone();
-    tokio::spawn(async move {
-        crate::copy_guard::settle_in_flight(&s2, 120, std::time::Duration::from_secs(1)).await
-    });
-    let Some(v) = s
+    // The copies the node had are back in place now (a copy started meanwhile queues behind
+    // them); they run once the rest is done
+    crate::copy_jobs::resume_after_restart(s);
+    let dest = s
         .library
         .lock()
         .expect("library poisoned")
         .get_setting(BRING_RESUME_KEY)
         .ok()
         .flatten()
-    else {
-        return;
-    };
-    let Some(dest) = serde_json::from_str::<serde_json::Value>(&v)
-        .ok()
-        .and_then(|v| v["dest"].as_str().map(PathBuf::from))
-    else {
-        return;
-    };
+        .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok())
+        .and_then(|v| v["dest"].as_str().map(PathBuf::from));
     let s = s.clone();
     tokio::spawn(async move {
+        // First what uploads of a stopped node left half written on the homeserver goes: a copy
+        // carrying on would write the same paths
+        crate::copy_guard::settle_in_flight(&s, 120, std::time::Duration::from_secs(1)).await;
+        // A bring job before the copies, which would otherwise find a copy in its place
+        if let Some(dest) = dest {
+            resume_bring(&s, dest).await;
+        }
+        crate::copy_jobs::release_after_restart(&s);
+    });
+}
+
+/// A bring job the node was running when it stopped carries on.
+async fn resume_bring(s: &Arc<NodeState>, dest: PathBuf) {
+    let s = s.clone();
+    {
         // The Pubky session comes back in the background after start-up
         let mut sync = None;
         for _ in 0..120 {
@@ -878,20 +746,14 @@ pub fn resume_jobs(s: &Arc<NodeState>) {
             broken: plan.broken,
             ..Default::default()
         };
-        if claim_job(&s, &progress).is_ok() {
+        if claim_job_as(&s, &progress, true).is_ok() {
             tracing::info!(
                 files = progress.total,
                 "bringing files here: carrying on after a restart"
             );
             start_bring(s.clone(), sync, plan, progress.id);
         }
-    });
-}
-
-/// `GET /v1/pubky/files/jobs`: the files job running now, if any (the player bar's chip).
-pub(crate) async fn current_job(State(s): State<Arc<NodeState>>) -> ApiResult<Option<UploadProgress>> {
-    let jobs = s.upload_jobs.lock().expect("upload jobs");
-    Ok(Json(jobs.values().find(|j| !j.finished).cloned()))
+    }
 }
 
 /// `DELETE /v1/pubky/files {paths}`: remove private files (broken uploads, doubled copies).

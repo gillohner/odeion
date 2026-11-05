@@ -566,6 +566,24 @@ pub fn open_http_stream_guarded(uri: &str, reach: FetchLimit) -> Result<Box<dyn 
     open_http_stream_via(&client, uri, &[], None, Some(reach))
 }
 
+/// The most of an M3U or PLS read: a radio playlist is a few lines, and a listener may queue
+/// any public URL, whose "playlist" could be huge or never end.
+const PLAYLIST_MAX: u64 = 64 * 1024;
+
+/// A playlist's text: refused when it says it is bigger than [`PLAYLIST_MAX`], else read up to
+/// that much (its stream URLs come first).
+fn read_playlist(resp: reqwest::blocking::Response) -> Result<String, String> {
+    use std::io::Read;
+    if resp.content_length().is_some_and(|n| n > PLAYLIST_MAX) {
+        return Err("the playlist is too big (over 64 KiB)".into());
+    }
+    let mut buf = Vec::new();
+    resp.take(PLAYLIST_MAX)
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// `limit`: the playlist's stream is a second request, not a redirect: it is checked here too.
 fn open_http_stream_via(
     client: &reqwest::blocking::Client,
@@ -596,7 +614,7 @@ fn open_http_stream_via(
                 .unwrap_or("")
                 .to_string();
             if is_playlist(&url, &mime) && hop == 0 {
-                let text = resp.text().map_err(|e| err(e.to_string()))?;
+                let text = read_playlist(resp).map_err(err)?;
                 url = first_stream_url(&text).ok_or_else(|| err("playlist has no stream URL".into()))?;
                 if let Some(limit) = limit {
                     let ok = url::Url::parse(&url)
@@ -664,6 +682,29 @@ pub(crate) fn frame_source_from_reader(
         title: Arc::new(Mutex::new(None)),
         last: None,
     }))
+}
+
+/// The URL of an API call: `path` on `base`, or `path` itself when it is a whole URL (a page's
+/// `next` link), which must then be on `base`'s own origin (scheme, host and port). The call
+/// carries the account's token, so a next link elsewhere is never followed: whoever answers a
+/// page must not get to send the token to another host.
+pub(crate) fn api_url(base: &str, path: &str) -> Result<String, String> {
+    let url = if path.starts_with("http://") || path.starts_with("https://") {
+        path.to_string()
+    } else {
+        format!("{}/{}", base.trim_end_matches('/'), path.trim_start_matches('/'))
+    };
+    let origin = |u: &str| url::Url::parse(u).ok().map(|u| u.origin());
+    match (origin(base), origin(&url)) {
+        (Some(a), Some(b)) if a == b && a.is_tuple() => Ok(url),
+        _ => Err(format!(
+            "a link to another host ({}) was not followed",
+            url::Url::parse(&url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                .unwrap_or_else(|| "an invalid URL".into())
+        )),
+    }
 }
 
 pub fn is_http_uri(uri: &str) -> bool {
@@ -1084,5 +1125,59 @@ mod tests {
             !allows(lan, "64:ff9b:1::a9fe:a9fe".parse().unwrap()),
             "local-use NAT64"
         );
+    }
+
+    /// A "playlist" as big as a listener likes is never read whole: one that says it is over
+    /// 64 KiB is refused, one that doesn't is read to 64 KiB (security review 2026-11-02, medium 2).
+    #[test]
+    fn a_huge_playlist_is_never_read_whole() {
+        use std::io::{Read, Write};
+        const BODY: usize = 64 * 1024 * 1024;
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/list.m3u", server.local_addr().unwrap());
+        // Answers two requests with a 64 MiB M3U (its stream first), first without its length,
+        // then with it; says how much of each got out before the node stopped reading
+        let server_thread = std::thread::spawn(move || {
+            [false, true].map(|with_length| {
+                let (mut c, _) = server.accept().unwrap();
+                let mut req = [0u8; 2048];
+                let _ = c.read(&mut req);
+                let len = if with_length {
+                    format!("Content-Length: {BODY}\r\n")
+                } else {
+                    String::new()
+                };
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\n{len}Connection: close\r\n\r\n"
+                );
+                c.write_all(head.as_bytes()).unwrap();
+                let mut block = b"http://127.0.0.1:9/stream.mp3\n".to_vec();
+                block.resize(64 * 1024, b'#');
+                let mut sent = 0;
+                while sent < BODY {
+                    match c.write(&block) {
+                        Ok(n) if n > 0 => sent += n,
+                        _ => break,
+                    }
+                }
+                sent
+            })
+        });
+        let client = reqwest::blocking::Client::new();
+        // Without a length: read to 64 KiB, its stream found (and then not reachable)
+        let e = open_http_stream_via(&client, &url, &[], None, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!e.contains("too big") && !e.contains("no stream URL"), "{e}");
+        // With one: refused before reading
+        let e = open_http_stream_via(&client, &url, &[], None, None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("too big"), "{e}");
+        let [unsized_sent, sized_sent] = server_thread.join().unwrap();
+        assert!(unsized_sent < BODY / 4, "read {unsized_sent} bytes of it");
+        assert!(sized_sent < BODY / 4, "read {sized_sent} bytes of it");
     }
 }

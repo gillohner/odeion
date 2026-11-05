@@ -1,6 +1,6 @@
 [package]
 name = "pm-out-cast"
-description = "Chromecast / Google Cast receivers as outputs of the Pubky Music Node (pull streams)"
+description = "Chromecast / Google Cast receivers as outputs of the Odeion node (pull streams)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

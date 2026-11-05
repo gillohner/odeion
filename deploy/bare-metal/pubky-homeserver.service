@@ -1,6 +1,6 @@
 # The Pubky homeserver bundled with the node, on bare metal (docs/deploy.md).
 [Unit]
-Description=Pubky homeserver (bundled with Pubky Music Node)
+Description=Pubky homeserver (bundled with the Odeion node)
 Wants=network-online.target
 After=network-online.target postgresql.service
 Requires=postgresql.service

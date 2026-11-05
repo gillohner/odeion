@@ -1,4 +1,4 @@
-//! Pubky Music's own data on a person's homeserver: what only this app and its node read and write,
+//! Odeion's own data on a person's homeserver: what only this app and its node read and write,
 //! under `/priv/pubky.music/` (and `/pub/pubky.music/` where it must be public). The generic music
 //! spec, which any app can use, is `pubky-music-specs` (`/{pub,priv}/music/v1/`).
 //!

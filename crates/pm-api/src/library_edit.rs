@@ -94,22 +94,36 @@ pub struct MyMusic {
     pub bytes: u64,
 }
 
-/// `GET /v1/me/music`.
+/// A page of `GET /v1/me/music`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct MyMusicQuery {
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
+/// `GET /v1/me/music?offset=&limit=&q=`: a page of the files (`limit` 200 by default, at most
+/// 1000), those matching `q` (the name, title, artist or album) when given; `count` and `bytes`
+/// are of every match.
 pub(crate) async fn my_music(
     State(s): State<Arc<NodeState>>,
     Extension(c): Extension<Caller>,
+    axum::extract::Query(page): axum::extract::Query<MyMusicQuery>,
 ) -> ApiResult<MyMusic> {
     owner(&c)?;
-    let sync = s.sync_handle().ok_or_else(|| {
+    let target = crate::copy_guard::target_of(&s).map_err(|_| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "Sign in with Pubky to keep music on your homeserver",
         )
     })?;
-    let remote = sync
-        .list_private_files()
+    let remote = target
+        .list()
         .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e))?;
     let s2 = s.clone();
     let out = tokio::task::spawn_blocking(move || -> Result<MyMusic, ApiError> {
         let lib = s2.library.lock().expect("library poisoned");
@@ -160,11 +174,23 @@ pub(crate) async fn my_music(
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         });
-        Ok(MyMusic {
-            count: files.len(),
-            files,
-            bytes,
-        })
+        let q = page.q.as_deref().map(str::trim).unwrap_or("").to_lowercase();
+        if !q.is_empty() {
+            let hit = |v: &str| v.to_lowercase().contains(&q);
+            files.retain(|f| {
+                hit(&f.name)
+                    || f.song.as_ref().is_some_and(|x| {
+                        hit(&x.title)
+                            || x.artist.as_deref().is_some_and(hit)
+                            || x.album.as_deref().is_some_and(hit)
+                    })
+            });
+            bytes = files.iter().map(|f| f.size.unwrap_or(0)).sum();
+        }
+        let count = files.len();
+        let limit = page.limit.unwrap_or(200).clamp(1, 1000);
+        let files = files.into_iter().skip(page.offset).take(limit).collect();
+        Ok(MyMusic { files, count, bytes })
     })
     .await
     .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;

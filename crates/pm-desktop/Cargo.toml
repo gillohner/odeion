@@ -1,6 +1,6 @@
 [package]
 name = "pm-desktop"
-description = "Pubky Music app: the node's web UI in a native window (desktop and Android), connected with Pubky Ring, with a built-in player"
+description = "The Odeion app: the node's web UI in a native window (desktop and Android), connected with Pubky Ring, with a built-in player"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
@@ -20,13 +20,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "=2.7.1", features = [] }
 
 [dependencies]
+pm-model = { path = "../pm-model" }
 pm-pubky = { path = "../pm-pubky" }
 pm-offline = { path = "../pm-offline" }
 pm-discovery = { path = "../pm-discovery" }
 pm-remote = { path = "../pm-remote" }
 tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-opener = "=2.7.0"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 serde = { version = "1", features = ["derive"] }
@@ -58,8 +59,16 @@ jni = "0.22"
 # The webview hands over jni 0.21 objects (wry); used for the Wi-Fi multicast lock.
 jni021 = { package = "jni", version = "0.21" }
 rustls-platform-verifier = "0.7"
+# The Ring transport probe (feature `ring-transport-probe`, src/ring_probe.rs).
+pubky = { version = "0.16", optional = true }
+futures-util = { version = "0.3", optional = true }
 pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
+
+[features]
+# Android emulator CI only (.github/workflows/android-ring-transport.yml): the app routes a
+# fixture Pubky Ring grant exchange once at start and logs where it went. Never in releases.
+ring-transport-probe = ["dep:pubky", "dep:futures-util"]
 
 [profile.release]
 lto = "thin"

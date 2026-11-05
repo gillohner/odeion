@@ -1,4 +1,4 @@
-//! Every path Pubky Music keeps on a person's homeserver (docs/APP-DATA.md has the formats). A test
+//! Every path Odeion keeps on a person's homeserver (docs/APP-DATA.md has the formats). A test
 //! checks that the doc lists each one.
 
 /// The app's namespace on the homeserver.

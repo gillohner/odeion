@@ -1299,7 +1299,16 @@ async fn items_resolve_their_source_with_pins_and_orders() {
         serde_json::json!(["spotify", "tidal", "library", "jamendo"])
     );
     let (_, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
-    assert_eq!(pf["own_order"], true);
+    assert_eq!(
+        pf["own_order"], false,
+        "legacy collection order is retained but no longer applied"
+    );
+    assert_eq!(pf["order"]["order"][0], "library", "personal/default order wins");
+    let (_, unchanged) = call(&app, "GET", &format!("/v1/playlists/{id}"), None).await;
+    assert_eq!(
+        unchanged["playlist"]["source_order"], d["playlist"]["source_order"],
+        "reads preserve legacy data"
+    );
     assert_eq!(
         pf["items"][2]["plays_from"]["service"], "library",
         "the only usable source"
@@ -1452,7 +1461,7 @@ async fn another_subsonic_server_is_a_source() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["name"], "Pubky Music node");
+    assert_eq!(v["name"], "Odeion node");
     assert!(!v.to_string().contains("sesame"));
     let (_, sources) = call(&app, "GET", "/v1/sources", None).await;
     assert!(sources

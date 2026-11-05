@@ -8,7 +8,17 @@ ENV=.env
 touch "$ENV"
 chmod 600 "$ENV"
 
-has() { grep -q "^$1=" "$ENV"; }
+# dotenv_get: .env values as compose reads them (quotes, spaces, comments)
+. ./settings.sh
+# A setting counts as there when .env sets it, also under its ODEION_ name (the one from now on). The
+# token and the tag only with a value as compose reads it: compose takes an empty one as unset.
+has() {
+  case $1 in
+    PM_TOKEN | PM_TAG) [ -n "$(dotenv_get "$1" "$ENV")" ] || [ -n "$(dotenv_get "ODEION_${1#PM_}" "$ENV")" ] ;;
+    PM_*) dotenv_get "$1" "$ENV" >/dev/null || dotenv_get "ODEION_${1#PM_}" "$ENV" >/dev/null ;;
+    *) dotenv_get "$1" "$ENV" >/dev/null ;;
+  esac
+}
 put() { has "$1" || printf '%s=%s\n' "$1" "$2" >> "$ENV"; }
 secret() {
   if command -v openssl >/dev/null 2>&1; then openssl rand -hex 24

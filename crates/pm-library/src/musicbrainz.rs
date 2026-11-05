@@ -298,17 +298,8 @@ impl MusicBrainzClient {
         title: &str,
         duration_ms: Option<u64>,
     ) -> Result<Vec<RecordingHit>> {
-        let base = if artist.trim().is_empty() {
-            format!("recording:\"{}\"", lucene_escape(title))
-        } else {
-            format!(
-                "recording:\"{}\" AND artist:\"{}\"",
-                lucene_escape(title),
-                lucene_escape(artist)
-            )
-        };
-        if let Some(d) = duration_ms {
-            let q = format!("{base} AND dur:[{} TO {}]", d.saturating_sub(2000), d + 2000);
+        let (narrow, base) = recording_hit_queries(artist, title, duration_ms);
+        if let Some(q) = narrow {
             let v = self.get("recording", &[("query", &q), ("limit", "10")]).await?;
             let hits = v.map(|v| parse_search_hits(&v)).unwrap_or_default();
             if !hits.is_empty() {
@@ -466,6 +457,10 @@ pub struct RecordingHit {
     pub release: Option<String>,
     pub release_mbid: Option<Mbid>,
     pub length_ms: Option<u64>,
+    /// What MusicBrainz says tells it apart from other recordings of the song ("live, 1986",
+    /// "re-recording", "acoustic"), when it says something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disambiguation: Option<String>,
     /// Every release MusicBrainz lists it on, so the caller can pick the one the file is from.
     #[serde(default)]
     pub releases: Vec<HitRelease>,
@@ -492,6 +487,26 @@ impl HitRelease {
                     .contains(&k.to_lowercase().as_str())
             })
     }
+}
+
+/// The recording searches of [`MusicBrainzClient::search_recording_hits`]: with the length (± 2 s)
+/// when there is one, and without.
+pub fn recording_hit_queries(
+    artist: &str,
+    title: &str,
+    duration_ms: Option<u64>,
+) -> (Option<String>, String) {
+    let base = if artist.trim().is_empty() {
+        format!("recording:\"{}\"", lucene_escape(title))
+    } else {
+        format!(
+            "recording:\"{}\" AND artist:\"{}\"",
+            lucene_escape(title),
+            lucene_escape(artist)
+        )
+    };
+    let narrow = duration_ms.map(|d| format!("{base} AND dur:[{} TO {}]", d.saturating_sub(2000), d + 2000));
+    (narrow, base)
 }
 
 pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
@@ -552,6 +567,9 @@ pub fn parse_search_hits(v: &Value) -> Vec<RecordingHit> {
                         release: release.and_then(|x| str_at(x, "title")).map(str::to_string),
                         release_mbid: release.and_then(|x| mbid_at(x, "id")),
                         length_ms: r.get("length").and_then(Value::as_u64),
+                        disambiguation: str_at(r, "disambiguation")
+                            .filter(|d| !d.is_empty())
+                            .map(str::to_string),
                         releases,
                     })
                 })

@@ -74,6 +74,20 @@ jobs:
       - uses: actions/checkout@v6
       - run: tools/release/node-docs.sh /tmp/archive && python3 -I tools/release/node-docs-check.py /tmp/archive
       - run: python3 -I tools/truenas-check.py deploy/truenas/docker-compose.yaml
+  # The Odeion names and what kept its old name (docs/branding-compatibility.md): the branding check
+  # with its self-test, the bundle's settings against the runner's real `docker compose config`, the
+  # compose files and the systemd units (systemd-analyze verify). No build; like deploy-docs it runs
+  # on every change, docs-only included, so deploy/, tools/, docs/ and this file are always covered.
+  branding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - run: docker compose version
+      - run: python3 -I tools/branding-check.py --self-test
+      - run: python3 -I tools/bundle-settings-check.py
+      - run: python3 -I tools/units-check.py
+      - run: python3 -I tools/compose-check.py
   desktop:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -251,7 +265,7 @@ jobs:
       - run: cargo build -p pm-node
       - name: the node's CI image
         run: |
-          cp target/debug/pm-node deploy/docker/entrypoint.sh deploy/bundle/ci/
+          cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
           docker build -q -t pubky-music-node:ci deploy/bundle/ci
           # The image carries ffmpeg with the encoders downloads use
           docker run --rm --entrypoint ffmpeg pubky-music-node:ci -hide_banner -encoders | grep -E ' aac | libmp3lame | libopus ' | wc -l | grep -qx 3
@@ -374,6 +388,8 @@ jobs:
           node-version: 22
       - name: design lint (classed buttons, no icon glyphs, every class styled)
         run: node tools/design-lint.js
+      - name: installable web app (manifest, real icons, page links, routes, worker promises)
+        run: node tools/pwa-check.js
       - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |
@@ -400,6 +416,7 @@ jobs:
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
+          node $GITHUB_WORKSPACE/tools/ui-pwa.js $GITHUB_WORKSPACE
       - name: 'no developer-console link in the docs outside "Advanced: use your own app"'
         run: python3 -I tools/console-links.py
       - name: no client secret, private key or keystore in the repository or the binary
@@ -409,13 +426,54 @@ jobs:
           mkdir -p /tmp/tl/data /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
+          node $GITHUB_WORKSPACE/tools/ui-browser-library.js $GITHUB_WORKSPACE /tmp/pm/library-playback-shots
+          node $GITHUB_WORKSPACE/tools/ui-artist-links.js $GITHUB_WORKSPACE /tmp/pm/artist-link-shots
+          node $GITHUB_WORKSPACE/tools/ui-review-fixes.js $GITHUB_WORKSPACE /tmp/pm/review-fixes-shots
+          node $GITHUB_WORKSPACE/tools/ui-personal-play-share.js $GITHUB_WORKSPACE /tmp/pm/personal-play-share-shots
+          node $GITHUB_WORKSPACE/tools/ui-tablet.js $GITHUB_WORKSPACE /tmp/pm/tablet-shots
+          node $GITHUB_WORKSPACE/tools/ui-busy.js $GITHUB_WORKSPACE /tmp/pm/busy-shots
+          node $GITHUB_WORKSPACE/tools/ui-versions.js $GITHUB_WORKSPACE /tmp/pm/versions-shots
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
           (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \
             nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:7791/v1/info >/dev/null && break; sleep 1; done
           node $GITHUB_WORKSPACE/tools/ui-tidal-login.js http://127.0.0.1:7791 7811
+      - name: installable web app in a real Chromium (fixture node; CDP install checks with negative controls, worker privacy, offline/5xx/silent node, account switch)
+        # a normal run takes about two minutes; a broken harness must not hold the runner
+        timeout-minutes: 10
+        run: |
+          mkdir -p /tmp/pwa/data /tmp/pwa/music /tmp/pwa/home && cp crates/pm-audio/tests/fixtures/*.flac /tmp/pwa/music/
+          printf 'data_dir = "/tmp/pwa/data"\n[library]\nfolders = ["/tmp/pwa/music"]\n[api]\nlisten = "0.0.0.0:7841"\ntoken = "ci-pwa-token"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n' > /tmp/pwa/node.toml
+          cd /tmp/pw && npm install --no-audit --no-fund @noble/hashes@1.5.0 >/dev/null
+          SQLITE=$(node -e "try { require('node:sqlite') } catch { process.stdout.write('--experimental-sqlite') }")
+          node $SQLITE $GITHUB_WORKSPACE/tools/ui-pwa-browser.js ci-pwa-token http://127.0.0.1:7841 /tmp/pwa/out \
+            --lan "http://$(hostname -I | awk '{print $1}'):7841" --data /tmp/pwa/data \
+            -- env HOME=/tmp/pwa/home $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/pwa/node.toml serve
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pwa-browser
+          path: /tmp/pwa/out
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tablet-layout-shots
+          path: /tmp/pm/tablet-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: busy-and-loading-shots
+          path: /tmp/pm/busy-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: song-versions-shots
+          path: /tmp/pm/versions-shots
+          if-no-files-found: ignore
       - if: failure()
-        run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true
+        run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
 
   speed:
     # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan
@@ -554,6 +612,9 @@ jobs:
       - name: copy the library to the homeserver (folder tree, totals, the job chip; a 20 000-file library stays quick; desktop and phone)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-copy-library.js ci-token http://127.0.0.1:7788
+      - name: UX sweep follow-ups (a slow TIDAL collection, 40 px touch targets, hero rows, back or trail, tablet Now playing, file names, short notes; 390 to 1180 px)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-sweep-followups.js ci-token http://127.0.0.1:7788
       - name: guided setup for Qobuz and TIDAL full tracks (each state, Check, paste split, the code; desktop and phone)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-stream-setup.js ci-token http://127.0.0.1:7788

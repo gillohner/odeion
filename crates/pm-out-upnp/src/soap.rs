@@ -129,7 +129,7 @@ pub fn didl(meta: &pm_zones::TrackMeta, uri: &str, protocol_info: &str) -> Strin
         "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" xmlns:dlna=\"urn:schemas-dlna-org:metadata-1-0/\">\
 <item id=\"pm-stream\" parentID=\"0\" restricted=\"1\"><dc:title>{}</dc:title>{extra}<upnp:class>object.item.audioItem.musicTrack</upnp:class>\
 <res protocolInfo=\"{}\">{}</res></item></DIDL-Lite>",
-        xml_escape(meta.title.as_deref().unwrap_or("Pubky Music")),
+        xml_escape(meta.title.as_deref().unwrap_or("Odeion")),
         xml_escape(protocol_info),
         xml_escape(uri)
     )
@@ -168,7 +168,7 @@ mod tests {
             "http://h/s.wav",
             "http-get:*:audio/wav:*",
         );
-        assert!(d.contains("<dc:title>Pubky Music</dc:title>") && d.contains("http-get:*:audio/wav:*"));
+        assert!(d.contains("<dc:title>Odeion</dc:title>") && d.contains("http-get:*:audio/wav:*"));
         let m = pm_zones::TrackMeta {
             title: Some("Bohemian Rhapsody".into()),
             artist: Some("Queen".into()),

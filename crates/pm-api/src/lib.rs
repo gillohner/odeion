@@ -17,6 +17,7 @@ pub mod art;
 pub mod artist_info;
 pub mod audius;
 pub mod copy_guard;
+pub mod copy_jobs;
 pub mod renderer;
 
 /// "1 album", "2 albums".
@@ -37,6 +38,7 @@ pub mod backup;
 pub mod bandcamp;
 pub mod bookmarks;
 pub mod bundled;
+mod client_mask;
 pub mod comments;
 pub mod dash;
 pub mod deezer;
@@ -283,6 +285,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/backup/schedule/run", post(backup::run_schedule))
         .route("/library/folders/move", post(move_folder))
+        .route("/library/tree", get(copy_jobs::tree))
         .route("/library/tracks/{id}/file", get(track_file))
         .route("/library/tracks/{id}/download", get(downloads::download))
         .route("/library/search", get(search))
@@ -428,6 +431,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/identify/write", post(identify::write_now))
         .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
+        .route("/library/suggestions/albums", get(identify::review_albums))
+        .route("/library/suggestions/confirm", post(identify::confirm))
         .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))
@@ -461,6 +466,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route(
             "/sources/tidal/unofficial/client/check",
             post(tidal_unofficial::check_client),
+        )
+        .route(
+            "/sources/tidal/unofficial/browser",
+            post(tidal_unofficial::start_browser),
+        )
+        .route(
+            "/sources/tidal/unofficial/browser/finish",
+            post(tidal_unofficial::finish_browser),
         )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
@@ -756,9 +769,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(files::list).post(files::upload).delete(files::remove),
         )
         .route("/pubky/files/mirror", post(files::mirror))
-        .route("/pubky/files/upload", post(files::upload_many))
+        .route("/pubky/files/upload", post(copy_jobs::start))
         .route("/pubky/files/upload/{id}", get(files::upload_progress))
-        .route("/pubky/files/jobs", get(files::current_job))
+        .route("/pubky/files/upload/{id}/pause", post(copy_jobs::pause))
+        .route("/pubky/files/upload/{id}/resume", post(copy_jobs::resume))
+        .route("/pubky/files/upload/{id}/cancel", post(copy_jobs::cancel_route))
+        .route("/pubky/files/upload/{id}/retry", post(copy_jobs::retry))
+        .route("/pubky/files/jobs", get(copy_jobs::jobs))
+        .route("/pubky/files/jobs/last", delete(copy_jobs::dismiss_last))
         .route("/pubky/files/jobs/{id}", get(files::upload_progress))
         .route("/pubky/files/jobs/{id}/cancel", post(files::cancel_job))
         .route("/events", get(events::events_ws))
@@ -806,6 +824,59 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/app.js", get(web_js))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
+        // Installing the web app (docs/guides/install-web-app.md): public like the page
+        .route(
+            "/pwa.js",
+            get(|| async { install_file(INSTALL_JS, "no-cache", include_bytes!("../static/pwa.js")) }),
+        )
+        .route(
+            "/pwa.css",
+            get(|| async { install_file(INSTALL_CSS, "no-cache", include_bytes!("../static/pwa.css")) }),
+        )
+        .route(
+            "/sw.js",
+            get(|| async { install_file(INSTALL_JS, "no-cache", include_bytes!("../static/sw.js")) }),
+        )
+        .route(
+            "/icon-192.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/icon-192.png"),
+                )
+            }),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/icon-512.png"),
+                )
+            }),
+        )
+        .route(
+            "/icon-maskable-512.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/icon-maskable-512.png"),
+                )
+            }),
+        )
+        .route(
+            "/apple-touch-icon.png",
+            get(|| async {
+                install_file(
+                    INSTALL_PNG,
+                    INSTALL_ICON_CACHE,
+                    include_bytes!("../static/apple-touch-icon.png"),
+                )
+            }),
+        )
         .nest("/v1", v1)
         // Reached without a bearer token: the OAuth redirect target and the
         // Pubky Ring sign-in that hands the token out.
@@ -870,7 +941,7 @@ pub async fn bind(listen: &str) -> anyhow::Result<tokio::net::TcpListener> {
 pub fn bind_error(listen: &str, e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::AddrInUse => format!(
-            "cannot listen on {listen}: the port is already in use, most likely by another Pubky Music Node \
+            "cannot listen on {listen}: the port is already in use, most likely by another Odeion node \
              on this machine (an older install, or a second container on the host network). Stop it, or set \
              [api] listen (PM_LISTEN) to a free port"
         ),
@@ -1078,9 +1149,26 @@ async fn web_icon() -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
+            (header::CACHE_CONTROL, INSTALL_ICON_CACHE),
         ],
         include_str!("../static/icon.svg"),
+    )
+        .into_response()
+}
+
+const INSTALL_JS: &str = "text/javascript; charset=utf-8";
+const INSTALL_CSS: &str = "text/css; charset=utf-8";
+const INSTALL_PNG: &str = "image/png";
+/// The icons keep their file names when the picture changes (the Odeion logo replaced the old
+/// one), so browsers ask again every time instead of keeping a day-old icon.
+const INSTALL_ICON_CACHE: &str = "no-cache";
+
+/// One of the installable web app's files: the install script and its styles, the service
+/// worker (never cached by HTTP, so a changed one reaches browsers at once) and the icons.
+fn install_file(mime: &'static str, cache: &'static str, body: &'static [u8]) -> Response {
+    (
+        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
+        body,
     )
         .into_response()
 }
@@ -1565,7 +1653,7 @@ async fn add_endpoint(
 ) -> ApiResult<Vec<OutputInfo>> {
     let key = pm_stream::Key::parse(body.key.expose()).map_err(|_| {
         ApiError::bad_request(if body.key.is_empty() {
-            "the player's key is missing: update the Pubky Music app".to_string()
+            "the player's key is missing: update the Odeion app".to_string()
         } else {
             "the player's key is not 32 to 256 visible ASCII characters".to_string()
         })
@@ -2174,7 +2262,7 @@ async fn tracks(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiRe
         .lock()
         .expect("library poisoned")
         .list_tracks(p.after.map(TrackId), limit)?;
-    Ok(Json(Tracks { tracks }))
+    Ok(Json(Tracks::plain(tracks)))
 }
 
 async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<pm_model::Track> {
@@ -2329,7 +2417,9 @@ async fn lyrics(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResu
 /// public URL (constraint 2).
 /// A whole body or the byte range a browser asked for (seeking, resuming),
 /// with `Accept-Ranges` so the browser knows seeking is possible.
-pub(crate) fn ranged_response(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -> Response {
+/// `bytes` is shared, not copied: a range is a slice of it.
+pub(crate) fn ranged_response(headers: &HeaderMap, bytes: impl Into<bytes::Bytes>, mime: &str) -> Response {
+    let bytes: bytes::Bytes = bytes.into();
     let total = bytes.len();
     let range = headers
         .get(header::RANGE)
@@ -2352,7 +2442,7 @@ pub(crate) fn ranged_response(headers: &HeaderMap, bytes: Vec<u8>, mime: &str) -
                 (header::CONTENT_TYPE, mime.to_string()),
                 (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
             ],
-            axum::body::Body::from(bytes[start..=end].to_vec()),
+            axum::body::Body::from(bytes.slice(start..=end)),
         )
             .into_response(),
         None => (
@@ -2533,8 +2623,8 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
-    let tracks = s.library.lock().expect("library poisoned").artist_tracks(id)?;
-    Ok(Json(Tracks { tracks }))
+    let songs = s.library.lock().expect("library poisoned").artist_songs(id)?;
+    Ok(Json(Tracks::songs(songs)))
 }
 
 async fn albums(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiResult<Vec<pm_model::Album>> {
@@ -2586,8 +2676,8 @@ async fn genre(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
 }
 
 async fn album_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
-    let tracks = s.library.lock().expect("library poisoned").album_tracks(id)?;
-    Ok(Json(Tracks { tracks }))
+    let songs = s.library.lock().expect("library poisoned").album_songs(id)?;
+    Ok(Json(Tracks::songs(songs)))
 }
 
 async fn history(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<History> {
@@ -3193,7 +3283,7 @@ async fn controller_login_start(
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `pm-node login`), or restart it once its homeserver answers",
+            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `odeiond login`), or restart it once its homeserver answers",
         ));
     };
     let hs = s
@@ -4513,7 +4603,7 @@ mod tests {
                 ),
                 (Some("Song"), Some("Band"), Some("Record"))
             );
-            assert_eq!(m["additional_info"]["media_player"], "Pubky Music");
+            assert_eq!(m["additional_info"]["media_player"], "Odeion");
             assert!(got[0]["listened_at"].as_i64().unwrap() > 1_700_000_000);
         }
 
@@ -4574,7 +4664,7 @@ mod tests {
         fn authed(h: &axum::http::HeaderMap, q: &std::collections::HashMap<String, String>) -> bool {
             h.get("authorization")
                 .and_then(|v| v.to_str().ok())
-                .is_some_and(|a| a.contains("Token=\"T1\"") && a.contains("Client=\"Pubky Music\""))
+                .is_some_and(|a| a.contains("Token=\"T1\"") && a.contains("Client=\"Odeion\""))
                 || q.get("api_key").map(String::as_str) == Some("T1")
         }
         type Q = axum::extract::Query<std::collections::HashMap<String, String>>;
@@ -6565,7 +6655,7 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
-        assert!(e.to_string().contains("update the Pubky Music app"), "{e}");
+        assert!(e.to_string().contains("update the Odeion app"), "{e}");
         let (st, e) = register(serde_json::json!(pm_stream::Key::random().expose())).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
         assert!(e.to_string().contains("wrong key"), "{e}");
@@ -11955,9 +12045,9 @@ exec sleep 300
         let s = state(dir.path(), Some("s3cret")).await;
         let app = router(s);
         for (path, needle) in [
-            ("/", "<title>Pubky Music</title>"),
-            ("/app", "<title>Pubky Music</title>"),
-            ("/app/", "<title>Pubky Music</title>"),
+            ("/", "<title>Odeion</title>"),
+            ("/app", "<title>Odeion</title>"),
+            ("/app/", "<title>Odeion</title>"),
             ("/app.css", ".player"),
             ("/app.js", "/v1/events"),
             ("/manifest.webmanifest", "\"display\": \"standalone\""),
@@ -12249,8 +12339,13 @@ exec sleep 300
     /// (STEWARD-CREDENTIALS-REUSE.md).
     #[tokio::test]
     async fn tidal_sign_in_lists_the_ways_and_remembers_the_choice() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        let home = tempfile::tempdir().unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
+        // A build without TIDAL's built-in clients
+        s.tidal.write().unwrap().browser_client = None;
         s.tidal.write().unwrap().creds = tidal::TidalCredentials {
             client_id: "own-app".into(),
             client_secret: String::new(),
@@ -12258,7 +12353,8 @@ exec sleep 300
         };
         let app = router(s.clone());
         let signin = "/v1/sources/tidal/signin";
-        // No build carries a device client: the device way is open, and its page asks for one
+        // Without the build's clients: Sign in with TIDAL and the code sign-in are listed but not
+        // available, each saying why; the device client of your own is under Advanced
         let (st, si) = call(&app, "GET", signin, None).await;
         assert_eq!(st, StatusCode::OK, "{si}");
         let ids: Vec<&str> = si["ways"]
@@ -12267,23 +12363,44 @@ exec sleep 300
             .iter()
             .map(|w| w["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["app", "import", "device", "paste"]);
-        assert_eq!(si["ways"][0]["recommended"], true, "{si}");
         assert_eq!(
-            si["ways"][0]["label"], "Your own TIDAL app",
-            "no project app in a test build"
+            ids,
+            ["browser", "device", "app", "own-device", "paste"],
+            "no import way: nothing found"
         );
-        assert_eq!(si["ways"][0]["available"], true);
-        // The device way is open without a client: its page asks for one first (a step card)
-        assert_eq!(si["ways"][2]["available"], true);
         assert!(
-            si["ways"][2]["note"]
-                .as_str()
+            si["ways"]
+                .as_array()
                 .unwrap()
-                .contains("needs a TIDAL device client"),
+                .iter()
+                .all(|w| w["recommended"] == false),
             "{si}"
         );
-        assert_eq!(si["ways"][3]["available"], true);
+        assert_eq!(si["ways"][0]["available"], false);
+        assert_eq!(si["ways"][1]["available"], false);
+        assert!(
+            si["ways"][1]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Advanced › Your own device client"),
+            "{si}"
+        );
+        assert_eq!(
+            si["ways"][2]["label"], "Your own TIDAL app",
+            "no project app in a test build"
+        );
+        assert_eq!(
+            (
+                si["ways"][2]["available"].as_bool(),
+                si["ways"][2]["advanced"].as_bool()
+            ),
+            (Some(true), Some(true))
+        );
+        assert_eq!(
+            si["ways"][3]["available"], true,
+            "the owner sets a device client up"
+        );
+        assert_eq!(si["ways"][4]["available"], true);
         assert!(si["in_use"].is_null(), "{si}");
         assert_eq!(si["line"], "Not signed in");
         assert_eq!(si["details"]["unofficial"]["enabled"], false);
@@ -12295,7 +12412,7 @@ exec sleep 300
             r["error"]
                 .as_str()
                 .unwrap()
-                .contains("one of app, import, device, paste"),
+                .contains("one of browser, device, app, own-device, paste"),
             "{r}"
         );
         // Your own device client makes the device way available, labelled as yours; picking it is
@@ -12310,7 +12427,8 @@ exec sleep 300
         let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "device"}))).await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert_eq!(r["chosen"], "device");
-        assert_eq!(r["ways"][2]["label"], "Your own device client");
+        assert_eq!(r["ways"][1]["label"], "Your own device client");
+        assert_eq!(r["ways"][1]["available"], true);
         assert_eq!(r["details"]["unofficial"]["enabled"], true, "{r}");
         assert!(r["in_use"].is_null(), "picked, not signed in yet: {r}");
         // The approval stores a session: it is in use, shown by user and expiry, never the token
@@ -12325,6 +12443,8 @@ exec sleep 300
                 country: "DE".into(),
                 session_id: None,
                 from: None,
+                client: Default::default(),
+                named_client: None,
             });
             lib.set_setting(tidal_unofficial::STATE_KEY, &serde_json::to_string(&m).unwrap())
                 .unwrap();
@@ -12391,6 +12511,7 @@ exec sleep 300
         assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(&app, "GET", "/v1/sources/nope/signin", None).await;
         assert_eq!(st, StatusCode::NOT_FOUND);
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 
     /// One front for the quality choice (STEWARD-UX-PLAYER-SOURCES.md §2): the options, the pick
@@ -12414,7 +12535,7 @@ exec sleep 300
         assert_eq!(ids(&q), ["max", "high"]);
         assert_eq!(q["current"], "max");
         assert_eq!(q["applies"], "next_track");
-        assert!(q["note"].as_str().unwrap().contains("device sign-in"), "{q}");
+        assert!(q["note"].as_str().unwrap().contains("Sign in with TIDAL"), "{q}");
         let (st, r) = call(
             &app,
             "PUT",
@@ -12537,6 +12658,15 @@ exec sleep 300
         *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
+        // A device client of the owner's (a fake one): it renews python-tidal's device sessions
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                tidal_unofficial::CLIENT_KEY,
+                r#"{"id": "fake-device-client-id", "secret": "fake-device-secret", "from": "settings"}"#,
+            )
+            .unwrap();
         let app = router(s.clone());
         let signin = "/v1/sources/tidal/signin";
         let import = "/v1/sources/tidal/signin/import";
@@ -12547,7 +12677,10 @@ exec sleep 300
         assert_eq!(found[0]["id"], "tidal-dl-ng");
         assert_eq!(found[0]["user"], "4242");
         assert_eq!(found[0]["usable"], true);
-        assert_eq!(found[0]["renews"], true, "python-tidal's client is ours");
+        assert_eq!(
+            found[0]["renews"], true,
+            "a device session renews with the node's device client"
+        );
         assert_eq!(found[1]["id"], "tidal-dl");
         assert_eq!(found[1]["usable"], false);
         assert!(found[1]["reason"].as_str().unwrap().contains("expired"), "{si}");
@@ -12559,10 +12692,12 @@ exec sleep 300
                 .any(|p| p.as_str().unwrap().starts_with("Music Assistant: not read")),
             "{si}"
         );
-        assert_eq!(si["ways"][1]["id"], "import");
-        assert_eq!(si["ways"][1]["available"], true);
+        // Found: listed after the code sign-in, not under Advanced
+        assert_eq!(si["ways"][2]["id"], "import", "{si}");
+        assert_eq!(si["ways"][2]["available"], true);
+        assert!(si["ways"][2].get("advanced").is_none(), "{si}");
         assert!(
-            si["ways"][1]["note"]
+            si["ways"][2]["note"]
                 .as_str()
                 .unwrap()
                 .contains("tidal-dl-ng (user 4242)"),
@@ -14831,10 +14966,19 @@ exec sleep 300
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let after = std::time::Duration::from_millis(1500);
         assert!(s.begin_scan());
+        // The scan ends whatever happens in the thread below: a failed assertion there fails the
+        // test instead of leaving the run waiting for a scan that never ends
+        struct EndScan(Arc<NodeState>);
+        impl Drop for EndScan {
+            fn drop(&mut self) {
+                self.0.end_scan();
+            }
+        }
         let other = {
             let db = dir.path().join("lib.sqlite");
             let s = s.clone();
             std::thread::spawn(move || {
+                let _end = EndScan(s.clone());
                 let other = Library::open(&db).unwrap();
                 other.begin_batch().unwrap();
                 locked_tx.send(()).unwrap();
@@ -14867,9 +15011,12 @@ exec sleep 300
             })
         };
         locked_rx.recv().unwrap();
-        identify::run(&s, false).await.unwrap();
+        tokio::time::timeout(10 * pm_library::db::BUSY_TIMEOUT, identify::run(&s, false))
+            .await
+            .expect("the run ends")
+            .unwrap();
         let finished = std::time::Instant::now();
-        let scan_ended = other.join().unwrap();
+        let scan_ended = other.join().expect("the scan's thread ran to its end");
         assert!(
             finished >= scan_ended,
             "the retry waits for the scan to end, not for the lock alone"
@@ -15228,11 +15375,12 @@ exec sleep 300
         assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
     }
 
-    /// A song whose identity was stored but whose state write then failed (a disk error) still
-    /// gets its IDs written into the file ("Write IDs" on): later runs skip it, so this run is
-    /// its only chance.
+    /// A song's identity and state are stored together or not at all (identification review,
+    /// fix round 1): a disk error on the state write leaves no identity behind, so no file gets
+    /// the IDs of an identity that isn't stored, and the song is checked again. Once the disk is
+    /// back, the next run stores it and writes its IDs into the file ("Write IDs" on).
     #[tokio::test]
-    async fn an_identity_stored_before_a_failed_write_still_gets_its_ids_written() {
+    async fn a_failed_state_write_stores_no_identity_and_the_next_run_writes_the_ids() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("music").join("11 bohemian.flac");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -15271,16 +15419,29 @@ exec sleep 300
                 "score": 0.95, "recordings": [{"id": mbid, "title": "Bohemian Rhapsody"}]}]});
             lib.save_lookup(&key, &answer.to_string()).unwrap();
         }
-        // The song's state write fails after its identity is stored
-        rusqlite::Connection::open(dir.path().join("lib.sqlite"))
-            .unwrap()
-            .execute_batch(
-                "CREATE TRIGGER fail_state BEFORE INSERT ON identify_state
-                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
-            )
-            .unwrap();
+        // The song's state write fails (with its identity, in one transaction)
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER fail_state BEFORE INSERT ON identify_state
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
         let e = identify::run(&s, false).await.unwrap_err();
         assert!(e.message.contains("disk I/O error"), "{}", e.message);
+        let track = |s: &Arc<NodeState>| s.library.lock().unwrap().all_tracks().unwrap().remove(0);
+        assert!(track(&s).canonical.is_none(), "no identity without its state");
+        let (_, tags) = pm_library::probe_and_read(&f).unwrap();
+        assert_eq!(
+            tags.recording_mbid, None,
+            "no IDs for an identity that isn't stored"
+        );
+        // The disk is back: the next run stores it and its IDs reach the file
+        db.execute_batch("DROP TRIGGER fail_state;").unwrap();
+        identify::run(&s, false).await.unwrap();
+        assert_eq!(
+            track(&s).canonical.map(|(u, _)| u.to_url()),
+            Some(format!("https://musicbrainz.org/recording/{mbid}"))
+        );
         let (_, tags) = pm_library::probe_and_read(&f).unwrap();
         assert_eq!(
             tags.recording_mbid,
@@ -15585,6 +15746,88 @@ exec sleep 300
         let st = zone.wait_stopped().await;
         assert!(st.error.is_none(), "{:?}", st.error);
         assert_eq!(*seen.lock().unwrap(), ["Bearer owner-token", "Bearer anna-token"]);
+    }
+
+    #[tokio::test]
+    async fn personal_play_order_http_writes_never_change_another_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let a = accounts::mint(&s, anna).unwrap();
+        let b = accounts::mint(&s, ben).unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("play.provider_order", r#"["spotify"]"#)
+            .unwrap();
+        let send = |method: &str, uri: &str, token: &str, body: serde_json::Value| {
+            let app = app.clone();
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let st = r.status();
+                let bytes = r.into_body().collect().await.unwrap().to_bytes();
+                (st, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            }
+        };
+        let (st, v) = send(
+            "PUT",
+            "/v1/play-order",
+            &a,
+            serde_json::json!({"order":["tidal"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["order"][0], "tidal");
+        let (st, v) = send(
+            "PUT",
+            "/v1/play-order",
+            &b,
+            serde_json::json!({"order":["jamendo"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["order"][0], "jamendo");
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "tidal");
+        let (_, v) = send("GET", "/v1/play-order", "s3cret", serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "spotify", "only owner retains legacy default");
+        let (_, v) = send("GET", "/v1/me/prefs", &a, serde_json::json!(null)).await;
+        assert_eq!(v["play_order"]["value"][0], "tidal");
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/prefs",
+            &a,
+            serde_json::json!({"play_order":["unknown"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "tidal", "invalid update is non-destructive");
+        let (st, _) = send("PUT", "/v1/me/prefs", &a, serde_json::json!({"play_order":null})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(
+            v["order"][0], "library",
+            "listener reset never borrows legacy owner order"
+        );
+        let (_, v) = send("GET", "/v1/play-order", &b, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "jamendo");
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("play.provider_order")
+                .unwrap()
+                .unwrap(),
+            r#"["spotify"]"#
+        );
     }
 
     /// Settings › You › Services: each person sees their own sign-ins.
@@ -16076,6 +16319,14 @@ exec sleep 300
         stat_fails: std::sync::atomic::AtomicBool,
         /// Files whose size the homeserver doesn't say (no Content-Length).
         no_size: std::sync::Mutex<std::collections::HashSet<String>>,
+        /// How long each upload takes.
+        delay: Option<std::time::Duration>,
+        /// How long a size check takes.
+        stat_delay: Option<std::time::Duration>,
+        /// Uploads (`up:`) and deletes (`del:`) in the order they happened.
+        ops: std::sync::Mutex<Vec<String>>,
+        /// Whose homeserver it is when set (else `fake-account`): a sign-in as someone else.
+        who: std::sync::Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -16089,6 +16340,10 @@ exec sleep 300
             bytes: Vec<u8>,
             _rate: Option<u64>,
         ) -> Result<(), copy_guard::UploadError> {
+            if let Some(d) = self.delay {
+                tokio::time::sleep(d).await;
+            }
+            self.ops.lock().unwrap().push(format!("up:{remote}"));
             let n = {
                 let mut u = self.uploads.lock().unwrap();
                 u.push(remote.to_string());
@@ -16113,6 +16368,9 @@ exec sleep 300
             Ok(())
         }
         async fn stat(&self, remote: &str) -> Result<Option<Option<u64>>, String> {
+            if let Some(d) = self.stat_delay {
+                tokio::time::sleep(d).await;
+            }
             if self.stat_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("connection reset".into());
             }
@@ -16125,11 +16383,16 @@ exec sleep 300
                 .map(|n| (!no_size).then_some(*n)))
         }
         async fn delete(&self, remote: &str) -> Result<(), String> {
+            self.ops.lock().unwrap().push(format!("del:{remote}"));
             self.deletes.lock().unwrap().push(remote.to_string());
             Ok(())
         }
         fn account(&self) -> String {
-            "fake-account".into()
+            self.who
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "fake-account".into())
         }
     }
 
@@ -16360,7 +16623,7 @@ exec sleep 300
             Some(serde_json::json!({"all": true})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{job}");
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
         let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
         assert_eq!(done["failed"], 3, "{done}");
         assert!(
@@ -16540,7 +16803,7 @@ exec sleep 300
             Some(serde_json::json!({"all": true})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{job}");
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
         assert_eq!(job["needed_bytes"], 0, "{job}");
         let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
         assert_eq!(done["skipped"], 2, "{done}");
@@ -16943,12 +17206,10 @@ exec sleep 300
         let (s, anna, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
         let app = router(s.clone());
         let at = std::time::Instant::now();
-        tidal::stream_cache().lock().unwrap().push((
-            format!("{anna}/9990001"),
-            at,
-            Arc::new(vec![1]),
-            "audio/mp4".into(),
-        ));
+        tidal::keep_stream(
+            &mut tidal::stream_cache().lock().unwrap(),
+            (format!("{anna}/9990001"), at, vec![1].into(), "audio/mp4".into()),
+        );
         {
             let mut a = s.search_answers.lock().unwrap();
             a.insert(
@@ -17270,6 +17531,2550 @@ exec sleep 300
             .unwrap();
         let r = app.clone().oneshot(req).await.unwrap();
         assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
+    }
+
+    /// The installable web app (docs/guides/install-web-app.md): a browser installs it before
+    /// anyone signs in, so the manifest, its icons, the install script and the service worker
+    /// load without a token, with the types browsers insist on; the worker is never cached by
+    /// HTTP, so a fixed one reaches every browser at its next visit.
+    #[tokio::test]
+    async fn install_files_load_without_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s);
+        for (path, mime, cache) in [
+            ("/manifest.webmanifest", "application/manifest+json", "no-cache"),
+            ("/icon.svg", "image/svg+xml", "no-cache"),
+            ("/icon-192.png", "image/png", "no-cache"),
+            ("/icon-512.png", "image/png", "no-cache"),
+            ("/icon-maskable-512.png", "image/png", "no-cache"),
+            ("/apple-touch-icon.png", "image/png", "no-cache"),
+            ("/pwa.js", "text/javascript; charset=utf-8", "no-cache"),
+            ("/pwa.css", "text/css; charset=utf-8", "no-cache"),
+            ("/sw.js", "text/javascript; charset=utf-8", "no-cache"),
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path}");
+            assert_eq!(resp.headers()[header::CONTENT_TYPE], mime, "{path}");
+            assert_eq!(resp.headers()[header::CACHE_CONTROL], cache, "{path}");
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            if mime == "image/png" {
+                assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"), "{path} is a PNG");
+            } else {
+                assert!(!body.is_empty(), "{path}");
+            }
+        }
+        // The page names them, and its policy lets the node's own worker run
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.starts_with("script-src 'self'"), "{csp}");
+        assert!(
+            !csp.contains("worker-src") && !csp.contains("default-src"),
+            "{csp}"
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let page = std::str::from_utf8(&body).unwrap();
+        assert!(page.contains(r#"<script src="/pwa.js"></script>"#));
+        assert!(page.contains(r#"<link rel="apple-touch-icon" href="/apple-touch-icon.png">"#));
+    }
+
+    // Identification review, completion and reuse (their own file: fewer shared lines here)
+    mod identify_review;
+
+    /// The installed web app (PWA) and the page say Odeion; the stored token keeps its key, so a
+    /// browser that was signed in stays signed in (docs/branding-compatibility.md).
+    #[tokio::test]
+    async fn the_web_app_is_called_odeion() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), Some("s3cret")).await);
+        let get = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                let r = app
+                    .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), StatusCode::OK, "{path}");
+                String::from_utf8(r.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+            }
+        };
+        let m: serde_json::Value = serde_json::from_str(&get("/manifest.webmanifest").await).unwrap();
+        assert_eq!(m["name"], "Odeion");
+        assert_eq!(m["short_name"], "Odeion");
+        assert_eq!(
+            m["start_url"], "/",
+            "an installed web app keeps opening the same page"
+        );
+        let page = get("/").await;
+        assert!(page.contains("<title>Odeion</title>"), "{page}");
+        assert!(page.contains(r#"<meta name="apple-mobile-web-app-title" content="Odeion">"#));
+        assert!(page.contains(r#"<span class="brand-name">Odeion</span>"#));
+        assert!(!page.contains("Pubky Music")); // compat: pre-Odeion name must be gone
+        let js = get("/app.js").await;
+        assert!(
+            js.contains("localStorage.getItem('pm.token')"),
+            "the stored token's key is unchanged"
+        );
+        assert!(js.contains("‹ Odeion</a>"));
+    }
+
+    /// A listener's play (or a party's) is not the owner's listen: nothing of it goes to the owner's
+    /// ListenBrainz (or Last.fm), not even "playing now"; the owner's own play still does
+    /// (security review 2026-11-02, medium 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listeners_plays_are_not_scrobbled_to_the_owner() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let g1 = got.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "owner"})) }),
+            )
+            .route(
+                "/1/submit-listens",
+                post(move |Json(b): Json<serde_json::Value>| {
+                    let g = g1.clone();
+                    async move {
+                        g.lock().unwrap().push(b);
+                        StatusCode::OK
+                    }
+                }),
+            )
+            .route(
+                "/song.flac",
+                get(move || {
+                    let flac = flac.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.listenbrainz_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"token": "LBT"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let play = || {
+            let app = app.clone();
+            let (zid, port) = (zid.clone(), port);
+            async move {
+                call(&app, "POST", &format!("/v1/zones/{zid}/queue"), Some(serde_json::json!({"items": [
+                    {"uri": format!("http://127.0.0.1:{port}/song.flac"), "title": "Song", "artist": "Band"}], "replace": true, "play": true}))).await;
+            }
+        };
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+
+        // A party has the zone: its plays are the guests', whoever queues
+        let (st, party) = call(&app, "POST", "/v1/party", Some(serde_json::json!({"zone": zid}))).await;
+        assert_eq!(st, StatusCode::OK, "{party}");
+        play().await;
+        assert_eq!(zone.wait_stopped().await.error, None);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let sent = got.lock().unwrap().clone();
+        assert!(sent.is_empty(), "{sent:?}");
+
+        // The owner's again
+        let (st, _) = call(
+            &app,
+            "DELETE",
+            &format!("/v1/party/{}", party["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+        assert!(st.is_success(), "{st}");
+        play().await;
+        assert_eq!(zone.wait_stopped().await.error, None);
+        for _ in 0..100 {
+            if got
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|b| b["listen_type"] != "playing_now")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            got.lock()
+                .unwrap()
+                .iter()
+                .any(|b| b["listen_type"] != "playing_now"),
+            "the owner's play counts"
+        );
+    }
+
+    /// TIDAL tracks kept for browsers are bounded by their bytes, not only by their count, and a
+    /// byte range is served as a slice of the kept track, never a copy of it (security review
+    /// 2026-11-02, medium 4).
+    #[tokio::test]
+    async fn tidal_tracks_kept_for_browsers_are_bounded_and_ranges_not_copied() {
+        let at = std::time::Instant::now();
+        let mut cache = Vec::new();
+        // Zeroed allocations: the pages are never touched
+        let track = |n: usize| bytes::Bytes::from(vec![0u8; n]);
+        for i in 0..6 {
+            tidal::keep_stream(
+                &mut cache,
+                (format!("k/{i}"), at, track(100 * 1024 * 1024), "audio/mp4".into()),
+            );
+            let held: usize = cache.iter().map(|(_, _, b, _)| b.len()).sum();
+            assert!(held <= tidal::STREAM_CACHE_BYTES, "{held} bytes kept after {i}");
+            assert_eq!(cache.last().unwrap().0, format!("k/{i}"), "the newest is kept");
+        }
+        // One bigger than all of it is served, not kept
+        tidal::keep_stream(
+            &mut cache,
+            (
+                "k/big".into(),
+                at,
+                track(tidal::STREAM_CACHE_BYTES + 1),
+                "audio/mp4".into(),
+            ),
+        );
+        assert!(cache.iter().all(|(k, _, _, _)| k != "k/big"));
+
+        let kept: bytes::Bytes = (0..=255u8).cycle().take(1 << 20).collect::<Vec<u8>>().into();
+        let mut h = HeaderMap::new();
+        h.insert(header::RANGE, "bytes=1000-1999".parse().unwrap());
+        let resp = ranged_response(&h, kept.clone(), "audio/mp4");
+        assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], &kept[1000..2000]);
+        assert_eq!(
+            body.as_ptr(),
+            kept[1000..].as_ptr(),
+            "the range is the kept bytes, not a copy"
+        );
+        let resp = ranged_response(&HeaderMap::new(), kept.clone(), "audio/mp4");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body.as_ptr(),
+            kept.as_ptr(),
+            "the whole track is not a copy either"
+        );
+    }
+
+    /// A page's next link is followed only on the service's own API origin: an answer that points
+    /// the next page at another host never gets the account's token sent there (security review
+    /// 2026-11-02, low). TIDAL and Spotify end to end; SoundCloud's API base is process-wide in
+    /// tests, so its `get_json` is covered through the same `sources::api_url` it now goes by.
+    #[tokio::test]
+    async fn a_next_page_on_another_host_is_not_followed() {
+        let stolen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let noted = stolen.clone();
+        let thief = Router::new().fallback(move |h: HeaderMap| {
+            let noted = noted.clone();
+            async move {
+                let auth = h.get("authorization").and_then(|v| v.to_str().ok());
+                noted.lock().unwrap().push(auth.unwrap_or("").to_string());
+                Json(serde_json::json!({"data": [], "items": []}))
+            }
+        });
+        let tl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let next = format!("http://{}/steal?page=2", tl.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(tl, thief).await.unwrap() });
+        let (n1, n2) = (next.clone(), next.clone());
+        let api = Router::new()
+            .route(
+                "/playlists",
+                get(move || {
+                    let n = n1.clone();
+                    async move { Json(serde_json::json!({"data": [], "links": {"next": n}})) }
+                }),
+            )
+            .route(
+                "/me/playlists",
+                get(move || {
+                    let n = n2.clone();
+                    async move { Json(serde_json::json!({"items": [], "next": n})) }
+                }),
+            );
+        let al = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", al.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(al, api).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.tidal.write().unwrap().api_base = base.clone();
+        s.spotify.write().unwrap().api_base = base.clone();
+        {
+            let lib = s.library.lock().unwrap();
+            let until = pm_library::db::now_unix() + 3600;
+            lib.set_setting(
+                "tidal.user",
+                &serde_json::json!({"access_token": "tidal-token", "refresh_token": "r", "expires_at": until, "user_id": "4242", "scope": "playback"}).to_string(),
+            )
+            .unwrap();
+            lib.set_setting(
+                "spotify.user",
+                &serde_json::json!({"access_token": "spotify-token", "expires_at": until}).to_string(),
+            )
+            .unwrap();
+        }
+        let app = router(s.clone());
+        for path in ["/v1/sources/tidal/playlists", "/v1/sources/spotify/playlists"] {
+            let (st, v) = call(&app, "GET", path, None).await;
+            assert_eq!(st, StatusCode::BAD_GATEWAY, "{path}: {v}");
+            assert!(
+                v["error"].as_str().unwrap_or("").contains("another host"),
+                "{path}: {v}"
+            );
+        }
+        let seen = stolen.lock().unwrap().clone();
+        assert!(seen.is_empty(), "{seen:?}");
+
+        // Each service's own next links still go
+        for (base, next) in [
+            (
+                "https://openapi.tidal.com/v2",
+                "https://openapi.tidal.com/v2/playlists?page%5Bcursor%5D=x",
+            ),
+            (
+                "https://api.spotify.com/v1",
+                "https://api.spotify.com/v1/me/playlists?offset=50&limit=50",
+            ),
+            (
+                "https://api-v2.soundcloud.com",
+                "https://api-v2.soundcloud.com/me/playlists?offset=50",
+            ),
+        ] {
+            assert_eq!(sources::api_url(base, next).as_deref(), Ok(next));
+        }
+        assert_eq!(
+            sources::api_url("https://openapi.tidal.com/v2", "/playlists?x=1").as_deref(),
+            Ok("https://openapi.tidal.com/v2/playlists?x=1")
+        );
+        assert_eq!(
+            sources::api_url("https://api-v2.soundcloud.com", "search/tracks").as_deref(),
+            Ok("https://api-v2.soundcloud.com/search/tracks")
+        );
+        // Anywhere else does not: another host, scheme or port, a look-alike, a user-info trick
+        for bad in [
+            "https://evil.example/me/playlists",
+            "http://api-v2.soundcloud.com/me/playlists",
+            "https://api-v2.soundcloud.com:8443/me/playlists",
+            "https://api-v2.soundcloud.com.evil.example/me/playlists",
+            "https://api-v2.soundcloud.com@evil.example/me/playlists",
+        ] {
+            assert!(
+                sources::api_url("https://api-v2.soundcloud.com", bad).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    /// A song the owner started whose zone goes to a listener (or a party) before its listen is
+    /// due is not the owner's listen: its waiting entry is dropped, so even the zone coming back
+    /// to the owner doesn't count it (security review 2026-11-02, medium 1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zone_changing_hands_mid_song_drops_its_scrobble() {
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let g1 = got.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "owner"})) }),
+            )
+            .route(
+                "/1/submit-listens",
+                post(move |Json(b): Json<serde_json::Value>| {
+                    let g = g1.clone();
+                    async move {
+                        g.lock().unwrap().push(b);
+                        StatusCode::OK
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.listenbrainz_base.write().unwrap() = format!("http://127.0.0.1:{port}");
+        let app = router(s.clone());
+        let (st, v) = call(
+            &app,
+            "PUT",
+            "/v1/listenbrainz",
+            Some(serde_json::json!({"token": "LBT"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = ZoneId::new(zones[0]["id"].as_str().unwrap());
+        let zone = s.zones.get(&zid).unwrap();
+        let item: pm_zones::QueueItem = serde_json::from_value(serde_json::json!({
+            "id": 7, "uri": "http://127.0.0.1:9/song.flac", "title": "Song", "artist": "Band", "duration_ms": 200000
+        }))
+        .unwrap();
+        let listens =
+            |g: &Vec<serde_json::Value>| g.iter().filter(|b| b["listen_type"] != "playing_now").count();
+
+        // The owner's song starts: "playing now"
+        listenbrainz::track_started(&s, zone.clone(), item.clone());
+        for _ in 0..100 {
+            if !got.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(got.lock().unwrap().len(), 1, "playing now");
+        // A listener takes the zone before it counts; it plays to its end
+        s.zones_in_listeners_hands.lock().unwrap().insert(zid.0.clone());
+        listenbrainz::track_ended(&s, &zid, &item);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(listens(&got.lock().unwrap()), 0, "not the owner's listen");
+        // Back in the owner's hands, the dropped entry stays dropped
+        s.zones_in_listeners_hands.lock().unwrap().remove(&zid.0);
+        listenbrainz::track_ended(&s, &zid, &item);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let sent = got.lock().unwrap().clone();
+        assert_eq!(listens(&sent), 0, "{sent:?}");
+    }
+
+    /// Library songs at these paths (made as short tones), their sizes as on disk: what the
+    /// copy-library tests pick from.
+    fn songs_at(s: &NodeState, paths: &[std::path::PathBuf]) {
+        for (i, p) in paths.iter().enumerate() {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            tone_wav(p, 1 + i as u32 % 3);
+            let mut t = untagged_track(p.clone(), &format!("Song {i}"), "Band");
+            t.file.size_bytes = std::fs::metadata(p).unwrap().len();
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
+    }
+
+    async fn copy_ended(app: &Router, id: &str) -> serde_json::Value {
+        for _ in 0..400 {
+            let (_, v) = call(app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+            if v["finished"] == true {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the copy never ended");
+    }
+
+    fn roomy() -> Arc<FakeDisk> {
+        Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })))
+    }
+
+    /// The folder tree, one level at a time from the library: the music folders at the top, the
+    /// folders in one with their files and bytes, `leaf` without folders inside, paging, and what
+    /// the homeserver has once its list is known (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn the_folder_tree_counts_each_level_from_the_library() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs = [
+            src.join("A/01 one.wav"),
+            src.join("A/Disc 2/02 two.wav"),
+            src.join("B/03 three.wav"),
+            src.join("loose.wav"),
+        ];
+        songs_at(&s, &songs);
+        let (there, _) = copied_name(&s, &songs[0]);
+        hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+            path: there,
+            size: None,
+        });
+        let (st, top) = call(&app, "GET", "/v1/library/tree", None).await;
+        assert_eq!(st, StatusCode::OK, "{top}");
+        let root = top["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"] == src.to_string_lossy().as_ref())
+            .cloned()
+            .unwrap_or_else(|| panic!("{top}"));
+        assert_eq!(
+            (root["files"].as_u64(), root["leaf"].as_bool()),
+            (Some(4), Some(false))
+        );
+        assert_eq!(
+            root["present_pending"], true,
+            "the homeserver's list isn't known yet: {root}"
+        );
+        assert!(root.get("present").is_none());
+
+        // Once known (asked in the background): what is already there
+        let mut level = serde_json::Value::Null;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            level = call(
+                &app,
+                "GET",
+                &format!("/v1/library/tree?path={}", src.display()),
+                None,
+            )
+            .await
+            .1;
+            if level["present_pending"] != true {
+                break;
+            }
+        }
+        let kids = level["children"].as_array().unwrap();
+        let names: Vec<&str> = kids.iter().map(|k| k["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["A", "B"], "{level}");
+        assert_eq!(
+            (level["files"].as_u64(), kids[0]["files"].as_u64()),
+            (Some(4), Some(2))
+        );
+        assert_eq!(
+            (kids[0]["present"].as_u64(), kids[1]["present"].as_u64()),
+            (Some(1), Some(0))
+        );
+        assert_eq!(
+            (kids[0]["leaf"].as_bool(), kids[1]["leaf"].as_bool()),
+            (Some(false), Some(true))
+        );
+        let bytes_a: u64 = songs[..2]
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .sum();
+        assert_eq!(kids[0]["bytes"].as_u64(), Some(bytes_a));
+
+        let page = |after: Option<&str>| {
+            let app = app.clone();
+            let mut uri = format!("/v1/library/tree?path={}&limit=1", src.display());
+            if let Some(a) = after {
+                uri.push_str(&format!("&after={a}"));
+            }
+            async move { call(&app, "GET", &uri, None).await.1 }
+        };
+        let one = page(None).await;
+        assert_eq!(
+            (one["children"][0]["name"].as_str(), one["next"].as_str()),
+            (Some("A"), Some("A"))
+        );
+        let two = page(Some("A")).await;
+        assert_eq!(two["children"][0]["name"], "B");
+        assert!(two.get("next").is_none(), "{two}");
+    }
+
+    /// Picking two folders copies their songs and nothing else; the dry run first says what it
+    /// would be, without what is already there (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn a_copy_of_two_folders_sends_only_their_songs() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs = [
+            src.join("A/01 one.wav"),
+            src.join("B/02 two.wav"),
+            src.join("B/sub/03 three.wav"),
+            src.join("C/04 four.wav"),
+        ];
+        songs_at(&s, &songs);
+        // In the library, but no audio any more: left out, its bytes still counted as gone through
+        std::fs::write(src.join("A/05 notes.flac"), b"not audio at all").unwrap();
+        let mut notes = untagged_track(src.join("A/05 notes.flac"), "Notes", "Band");
+        notes.file.size_bytes = 16;
+        s.library.lock().unwrap().upsert_track(&notes).unwrap();
+        let (there, len) = copied_name(&s, &songs[0]);
+        hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+            path: there,
+            size: Some(len),
+        });
+        let pick = |dry: bool| {
+            Some(serde_json::json!({
+                "paths": [src.join("A"), src.join("B")],
+                "dry_run": dry,
+            }))
+        };
+        let (st, plan) = call(&app, "POST", "/v1/pubky/files/upload", pick(true)).await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(
+            (plan["total"].as_u64(), plan["skipped"].as_u64()),
+            (Some(4), Some(1)),
+            "{plan}"
+        );
+        assert_eq!(plan["bytes_skipped"].as_u64(), Some(len));
+        assert!(hs.uploads.lock().unwrap().is_empty(), "a dry run sends nothing");
+
+        let (st, job) = call(&app, "POST", "/v1/pubky/files/upload", pick(false)).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        assert_eq!(
+            (job["state"].as_str(), job["label"].as_str()),
+            (Some("running"), Some("2 folders"))
+        );
+        let done = copy_ended(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (
+                done["state"].as_str(),
+                done["done"].as_u64(),
+                done["skipped"].as_u64()
+            ),
+            (Some("finished"), Some(2), Some(1)),
+            "{done}"
+        );
+        assert_eq!(done["not_audio"], 1, "{done}");
+        assert_eq!(
+            done["bytes_done"], done["bytes_total"],
+            "the bar reaches the end: {done}"
+        );
+        let sent = hs.uploads.lock().unwrap().clone();
+        let mut names: Vec<&str> = sent.iter().map(|u| u.split_once('-').unwrap().1).collect();
+        names.sort();
+        assert_eq!(names, ["02_two.wav", "03_three.wav"]);
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["current"].is_null(), "{jobs}");
+        assert_eq!(jobs["last"]["id"], job["id"]);
+        let (st, _) = call(&app, "DELETE", "/v1/pubky/files/jobs/last", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["last"].is_null(), "{jobs}");
+    }
+
+    /// One copy at a time: a second waits in the queue and starts when the first is done. A
+    /// running copy pauses after the file in hand and carries on with Resume; Cancel stops it
+    /// within seconds, and a queued one leaves the queue (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn copies_wait_their_turn_and_can_be_paused_and_cancelled() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(150)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=8).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        songs_at(&s, &[src.join("B/01 other.wav")]);
+        let mut events = s.events.subscribe();
+        let start = |folder: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"paths": [src.join(folder)]});
+            async move { call(&app, "POST", "/v1/pubky/files/upload", Some(body)).await.1 }
+        };
+        let first = start("A").await;
+        let second = start("B").await;
+        assert_eq!(
+            (first["state"].as_str(), second["state"].as_str()),
+            (Some("running"), Some("queued"))
+        );
+        let (one, two) = (first["id"].as_str().unwrap(), second["id"].as_str().unwrap());
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(
+            (jobs["current"]["id"].as_str(), jobs["queued"][0]["id"].as_str()),
+            (Some(one), Some(two))
+        );
+        // An import waits for the copies
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src.join("B")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        let act = |id: &str, what: &str| {
+            let app = app.clone();
+            let uri = format!("/v1/pubky/files/upload/{id}/{what}");
+            async move { call(&app, "POST", &uri, None).await }
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let (st, p) = act(one, "pause").await;
+        assert_eq!((st, p["state"].as_str()), (StatusCode::OK, Some("paused")), "{p}");
+        // The file in hand finishes first
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let held = hs.uploads.lock().unwrap().len();
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(
+            hs.uploads.lock().unwrap().len(),
+            held,
+            "nothing is sent while paused"
+        );
+        assert!(held < 8);
+        let (st, p) = act(one, "resume").await;
+        assert_eq!((st, p["state"].as_str()), (StatusCode::OK, Some("running")));
+
+        // The queued one is cancelled: it leaves the queue
+        let (st, p) = act(two, "cancel").await;
+        assert_eq!((st, p["state"].as_str()), (StatusCode::OK, Some("cancelled")));
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(jobs["queued"].as_array().map(Vec::len), Some(0), "{jobs}");
+
+        // The running one stops within seconds (the old route still cancels)
+        let asked = std::time::Instant::now();
+        let (st, _) = call(&app, "POST", &format!("/v1/pubky/files/jobs/{one}/cancel"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let done = copy_ended(&app, one).await;
+        assert!(asked.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(done["state"], "cancelled", "{done}");
+        assert!(done["done"].as_u64().unwrap() < 8, "{done}");
+        assert!(!hs
+            .uploads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|u| u.ends_with("other.wav")));
+
+        // Each change went out to the owner's pages, and only theirs
+        let mut seen = 0;
+        while let Ok(ev) = events.try_recv() {
+            if matches!(ev.event, ApiEvent::Jobs { .. }) {
+                seen += 1;
+                let listener = accounts::Caller {
+                    role: accounts::Role::Listener,
+                    key: Some("o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy".into()),
+                };
+                let owner = accounts::Caller {
+                    role: accounts::Role::Owner,
+                    key: None,
+                };
+                assert!(events::for_caller(&s, &listener, &ev.event).is_none());
+                assert!(events::for_caller(&s, &owner, &ev.event).is_some());
+            }
+        }
+        assert!(seen >= 4, "{seen} jobs events");
+    }
+
+    /// A copy the node was running when it stopped carries on after the restart from where it
+    /// got, also when the library's list changed meanwhile (a song of it gone: the next one isn't
+    /// skipped, #237 review); a paused one stays paused until Resume (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn a_copy_carries_on_after_a_restart() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (0..=3).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        // 00 was sent before; 01 too, and then left the library (a rescan found it missing)
+        {
+            let lib = s.library.lock().unwrap();
+            let gone = lib
+                .list_tracks(None, 100)
+                .unwrap()
+                .into_iter()
+                .find(|t| t.file.path == songs[1]);
+            lib.hide_track(gone.unwrap().id.unwrap()).unwrap();
+        }
+        let after = songs[1].to_string_lossy().into_owned();
+        let kept = |state: &str| {
+            let progress = types::UploadProgress {
+                id: format!("kept-{state}"),
+                kind: "copy".into(),
+                state: state.into(),
+                total: 4,
+                done: 2,
+                started_at: Some(1),
+                ..Default::default()
+            };
+            serde_json::json!({
+                "current": {"progress": progress, "selection": {"paths": [src.join("A")]}, "after": after, "account": "fake-account"},
+                "queued": [],
+                "last": null,
+            })
+            .to_string()
+        };
+        // Stopped while running: the first song was sent before
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept("running"))
+            .unwrap();
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept-running").await;
+        assert_eq!(
+            (done["state"].as_str(), done["done"].as_u64()),
+            (Some("finished"), Some(4)),
+            "{done}"
+        );
+        let sent = hs.uploads.lock().unwrap().clone();
+        let mut names: Vec<&str> = sent.iter().map(|u| u.split_once('-').unwrap().1).collect();
+        names.sort();
+        assert_eq!(names, ["02_song.wav", "03_song.wav"], "only what was left");
+
+        // Paused before the restart: still paused, nothing sent, until Resume
+        hs.uploads.lock().unwrap().clear();
+        *s.copy_jobs.queue.lock().unwrap() = Default::default();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept("paused"))
+            .unwrap();
+        files::resume_jobs(&s);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(hs.uploads.lock().unwrap().is_empty());
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(jobs["current"]["state"], "paused", "{jobs}");
+        let (st, _) = call(&app, "POST", "/v1/pubky/files/upload/kept-paused/resume", None).await;
+        assert_eq!(st, StatusCode::OK);
+        let done = copy_ended(&app, "kept-paused").await;
+        assert_eq!(done["done"].as_u64(), Some(4), "{done}");
+
+        // Cancelled just before the stop: it ends at the start, and the copy queued after it runs
+        hs.uploads.lock().unwrap().clear();
+        *s.copy_jobs.queue.lock().unwrap() = Default::default();
+        let mut kept_cancelled: serde_json::Value = serde_json::from_str(&kept("cancelled")).unwrap();
+        let mut next = kept_cancelled["current"].clone();
+        next["progress"]["id"] = "kept-next".into();
+        next["progress"]["state"] = "queued".into();
+        next["after"] = serde_json::Value::Null;
+        kept_cancelled["queued"] = serde_json::json!([next]);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept_cancelled.to_string())
+            .unwrap();
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept-next").await;
+        assert_eq!(done["state"], "finished", "{done}");
+        let (_, gone) = call(&app, "GET", "/v1/pubky/files/upload/kept-cancelled", None).await;
+        assert_eq!(gone["state"], "cancelled", "{gone}");
+    }
+
+    /// Retry after a copy stopped early (failures in a row) sends the failed files and every one
+    /// it never got to, once; the speed limit for copies stays 2.5 MB/s by default (#237 review).
+    #[tokio::test]
+    async fn retry_after_a_stop_sends_what_was_never_tried() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=6).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"paths": [src.join("A")]})),
+        )
+        .await;
+        let id = job["id"].as_str().unwrap().to_string();
+        let done = copy_ended(&app, &id).await;
+        assert_eq!(
+            (
+                done["state"].as_str(),
+                done["failed"].as_u64(),
+                done["failed_retryable"].as_u64()
+            ),
+            (Some("failed"), Some(3), Some(6)),
+            "{done}"
+        );
+        hs.fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        hs.uploads.lock().unwrap().clear();
+        let retry = format!("/v1/pubky/files/upload/{id}/retry");
+        let (st, again) = call(&app, "POST", &retry, None).await;
+        assert_eq!(
+            (st, again["total"].as_u64()),
+            (StatusCode::ACCEPTED, Some(6)),
+            "{again}"
+        );
+        let (st, _) = call(&app, "POST", &retry, None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "once");
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(done["done"].as_u64(), Some(6), "{done}");
+
+        let (_, settings) = call(&app, "GET", "/v1/node/settings", None).await;
+        assert_eq!(settings["copy_rate"], 2_500_000, "{settings}");
+    }
+
+    /// Retry failed copies again only the files that failed, as a new job (TASK-copy-library-
+    /// folders); a song whose file can't be read is a failure with its reason, not "not audio"
+    /// (FOLLOWUP-copy-guard-224, item 2).
+    #[tokio::test]
+    async fn retry_sends_the_failed_files_and_unreadable_ones_are_failures() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
+        // In the library, but gone from the disk (a share that went away)
+        let mut gone = untagged_track(src.join("A/03 gone.wav"), "Gone", "Band");
+        gone.file.size_bytes = 1000;
+        s.library.lock().unwrap().upsert_track(&gone).unwrap();
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"paths": [src.join("A")]})),
+        )
+        .await;
+        let id = job["id"].as_str().unwrap().to_string();
+        let done = copy_ended(&app, &id).await;
+        assert_eq!(
+            (
+                done["failed"].as_u64(),
+                done["not_audio"].as_u64(),
+                done["failed_retryable"].as_u64()
+            ),
+            (Some(3), Some(0), Some(3)),
+            "{done}"
+        );
+        assert_eq!(done["bytes_done"], done["bytes_total"], "the bar reaches the end");
+        let reasons: Vec<&serde_json::Value> = done["errors"].as_array().unwrap().iter().collect();
+        assert!(
+            reasons
+                .iter()
+                .any(|e| e["path"].as_str().unwrap().ends_with("03 gone.wav")
+                    && e["reason"].as_str().unwrap().contains("can't be read")),
+            "{done}"
+        );
+        assert_eq!(done["errors_count"], 4, "three files and the stop: {done}");
+
+        hs.fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        hs.uploads.lock().unwrap().clear();
+        let (st, again) = call(&app, "POST", &format!("/v1/pubky/files/upload/{id}/retry"), None).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{again}");
+        assert_eq!(again["label"], "Retry: 3 files");
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].as_u64(), done["failed"].as_u64()),
+            (Some(2), Some(1)),
+            "{done}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 2);
+    }
+
+    /// A copy bigger than what the owner's homeserver quota leaves is refused before it starts,
+    /// with what it needs and what is free (TASK-copy-library-folders).
+    #[tokio::test]
+    async fn a_copy_past_the_homeserver_quota_is_refused() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav")]);
+        *s.copy_jobs.quota_seam.lock().unwrap() = Some(1000);
+        for dry in [true, false] {
+            let (st, v) = call(
+                &app,
+                "POST",
+                "/v1/pubky/files/upload",
+                Some(serde_json::json!({"paths": [src.join("A")], "dry_run": dry})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{v}");
+            assert_eq!(v["free_bytes"], 1000, "{v}");
+            assert!(v["needed_bytes"].as_u64().unwrap() > 1000);
+            assert!(v["error"].as_str().unwrap().contains("quota"), "{v}");
+        }
+        assert!(hs.uploads.lock().unwrap().is_empty());
+    }
+
+    /// The homeserver's file list comes a page at a time, and searched (TASK-copy-library-
+    /// folders: lists of 10k files).
+    #[tokio::test]
+    async fn my_music_on_the_homeserver_comes_in_pages() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, _s, app, _src) = copy_setup(hs.clone(), roomy(), 0).await;
+        for i in 0..5 {
+            hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+                path: format!("/priv/pubky.music/files/{i:016x}-song_{i}.flac"),
+                size: Some(10),
+            });
+        }
+        let get = |q: &str| {
+            let app = app.clone();
+            let uri = format!("/v1/me/music?{q}");
+            async move { call(&app, "GET", &uri, None).await }
+        };
+        let (st, v) = get("limit=2").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(
+            (
+                v["files"].as_array().unwrap().len(),
+                v["count"].as_u64(),
+                v["bytes"].as_u64()
+            ),
+            (2, Some(5), Some(50))
+        );
+        let (_, v) = get("offset=4&limit=2").await;
+        assert_eq!(v["files"].as_array().unwrap().len(), 1);
+        let (_, v) = get("q=SONG_3").await;
+        assert_eq!(
+            (v["count"].as_u64(), v["files"][0]["name"].as_str()),
+            (Some(1), Some("song_3.flac")),
+            "{v}"
+        );
+    }
+
+    /// The folder tree stays quick on a big library: a level of 20 000 songs.
+    #[tokio::test]
+    async fn the_folder_tree_answers_quickly_for_twenty_thousand_songs() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs, roomy(), 0).await;
+        {
+            let lib = s.library.lock().unwrap();
+            lib.begin_batch().unwrap();
+            for i in 0..20_000 {
+                let p = src.join(format!("Artist {}/Album {}/{i:05}.flac", i / 200, i / 20));
+                let mut t = untagged_track(p, &format!("Song {i}"), "Band");
+                t.file.size_bytes = 30_000_000;
+                lib.upsert_track(&t).unwrap();
+            }
+            lib.commit_batch().unwrap();
+        }
+        for uri in [
+            "/v1/library/tree".to_string(),
+            format!("/v1/library/tree?path={}", src.display()),
+        ] {
+            let t = std::time::Instant::now();
+            let (st, v) = call(&app, "GET", &uri, None).await;
+            assert_eq!(st, StatusCode::OK);
+            let ms = t.elapsed().as_millis();
+            assert!(ms < 1500, "{uri}: {ms} ms");
+            eprintln!(
+                "{uri}: {ms} ms, {} children",
+                v["children"].as_array().unwrap().len()
+            );
+        }
+    }
+
+    /// At start, what a stopped node half wrote on the homeserver is settled before a kept copy
+    /// carries on: the settling never deletes what the copy has just sent again (#237 review, K3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_start_settles_half_written_uploads_before_a_copy_carries_on() {
+        let hs = Arc::new(FakeHomeserver {
+            stat_delay: Some(std::time::Duration::from_millis(300)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let song = src.join("A/01 song.wav");
+        songs_at(&s, std::slice::from_ref(&song));
+        let (remote, _) = copied_name(&s, &song);
+        // The stopped node was sending it, and the homeserver kept part
+        hs.sizes.lock().unwrap().insert(remote.clone(), 3);
+        let progress = types::UploadProgress {
+            id: "kept".into(),
+            kind: "copy".into(),
+            state: "running".into(),
+            total: 1,
+            ..Default::default()
+        };
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting(
+                copy_guard::IN_FLIGHT_KEY,
+                &serde_json::json!({&remote: {"size": 7, "existed": false}}).to_string(),
+            )
+            .unwrap();
+            lib.set_setting(
+                copy_jobs::JOBS_KEY,
+                &serde_json::json!({"current": {"progress": progress, "selection": {"paths": [src.join("A")]}, "account": "fake-account"}, "queued": []})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept").await;
+        assert_eq!(done["done"], 1, "{done}");
+        let ops = hs.ops.lock().unwrap().clone();
+        assert_eq!(
+            ops,
+            [format!("del:{remote}"), format!("up:{remote}")],
+            "settled first"
+        );
+    }
+
+    /// A copy and an import (or bringing files here) are let in under one lock: the check that
+    /// nothing else runs and the start happen together (#237 review, K2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // The test holds the door on purpose while the copy's request waits on another worker
+    #[allow(clippy::await_holding_lock)]
+    async fn files_jobs_are_let_in_one_at_a_time() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
+        tone_wav(&src.join("B.wav"), 1);
+        std::fs::create_dir_all(src.join("B")).unwrap();
+        tone_wav(&src.join("B/01 b.wav"), 1);
+        // While another start holds the door, a copy waits instead of checking and starting
+        let held = copy_jobs::admit(&s);
+        let copy = {
+            let app = app.clone();
+            let body = serde_json::json!({"paths": [src.join("A")]});
+            tokio::spawn(async move { call(&app, "POST", "/v1/pubky/files/upload", Some(body)).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(copy_jobs::busy(&s).is_none(), "the copy went in past the lock");
+        drop(held);
+        let (st, job) = copy.await.unwrap();
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        copy_ended(&app, job["id"].as_str().unwrap()).await;
+
+        // Started side by side, many times: never both running
+        for _ in 0..10 {
+            let (c, i) = tokio::join!(
+                call(
+                    &app,
+                    "POST",
+                    "/v1/pubky/files/upload",
+                    Some(serde_json::json!({"paths": [src.join("A")]}))
+                ),
+                call(
+                    &app,
+                    "POST",
+                    "/v1/library/imports",
+                    Some(serde_json::json!({"path": src.join("B")}))
+                ),
+            );
+            let import_in = i.0 == StatusCode::OK;
+            assert!(
+                !(import_in && c.1["state"] == "running"),
+                "both started: {c:?} {i:?}"
+            );
+            if import_in {
+                call(
+                    &app,
+                    "POST",
+                    &format!("/v1/pubky/files/jobs/{}/cancel", i.1["id"].as_str().unwrap()),
+                    None,
+                )
+                .await;
+                copy_finished(&app, i.1["id"].as_str().unwrap()).await;
+            }
+            call(
+                &app,
+                "POST",
+                &format!("/v1/pubky/files/upload/{}/cancel", c.1["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+            copy_ended(&app, c.1["id"].as_str().unwrap()).await;
+        }
+    }
+
+    /// A copy job kept for the next start: `id`, running, of the folder `A` under `src`, for
+    /// `account` (none: kept by a node that didn't note it).
+    fn kept_copy(id: &str, src: &std::path::Path, account: Option<&str>) -> String {
+        let progress = types::UploadProgress {
+            id: id.into(),
+            kind: "copy".into(),
+            state: "running".into(),
+            total: 3,
+            started_at: Some(1),
+            ..Default::default()
+        };
+        let mut current = serde_json::json!({"progress": progress, "selection": {"paths": [src.join("A")]}});
+        if let Some(a) = account {
+            current["account"] = a.into();
+        }
+        serde_json::json!({"current": current, "queued": [], "last": null}).to_string()
+    }
+
+    /// A backup taken while a copy ran, restored later on an idle node, never starts that copy
+    /// again at the next start: the files jobs a node keeps (copies, bringing files here, uploads
+    /// it left half written) are its own, as its stream key is; the node's own stay (#237 review,
+    /// M2).
+    #[tokio::test]
+    async fn a_restored_backup_never_starts_an_old_copy() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        songs_at(&s, &[src.join("A/01 one.wav"), src.join("A/02 two.wav")]);
+        let keys = [
+            copy_jobs::JOBS_KEY,
+            files::BRING_RESUME_KEY,
+            copy_guard::IN_FLIGHT_KEY,
+        ];
+        let set = |k: &str, v: String| s.library.lock().unwrap().set_setting(k, &v).unwrap();
+        set(copy_jobs::JOBS_KEY, kept_copy("old", &src, Some("fake-account")));
+        set(
+            files::BRING_RESUME_KEY,
+            serde_json::json!({"dest": src.join("brought")}).to_string(),
+        );
+        set(
+            copy_guard::IN_FLIGHT_KEY,
+            serde_json::json!({"/pub/old.wav": {"size": 7, "existed": false}}).to_string(),
+        );
+        let (taken, _) = backup::make(&s, None).unwrap();
+        let open = backup::parse(&taken).unwrap();
+        let has = |hay: &[u8], needle: &str| hay.windows(needle.len()).any(|w| w == needle.as_bytes());
+        for k in keys {
+            assert!(!has(&open.database, k), "{k} in the backup");
+        }
+        // Since then that copy ended and the node is idle
+        for k in keys {
+            s.library.lock().unwrap().delete_setting(k).unwrap();
+        }
+        backup::restore(&s, taken.clone(), None, false).await.unwrap();
+        for k in keys {
+            assert_eq!(
+                s.library.lock().unwrap().get_setting(k).unwrap(),
+                None,
+                "{k} came back"
+            );
+        }
+        files::resume_jobs(&s);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(hs.uploads.lock().unwrap().is_empty(), "the old copy ran");
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert!(jobs["current"].is_null(), "{jobs}");
+
+        // A copy this node keeps itself stays through a restore
+        let own = kept_copy("own", &src, Some("fake-account"));
+        set(copy_jobs::JOBS_KEY, own.clone());
+        backup::restore(&s, taken, None, false).await.unwrap();
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(copy_jobs::JOBS_KEY)
+                .unwrap(),
+            Some(own)
+        );
+    }
+
+    /// A copy sends only into the Pubky account it was started for: kept over a restart or
+    /// paused while someone else signed in, it stops before sending anything, also when the
+    /// sign-in changes while it runs, and Retry waits for that account; a copy kept by a node
+    /// that didn't note its account doesn't run (#237 review, L6).
+    #[tokio::test]
+    async fn a_copy_never_sends_into_another_account() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(150)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=3).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        let sign_in_as = |who: Option<&str>| *hs.who.lock().unwrap() = who.map(str::to_string);
+        let sent = || hs.uploads.lock().unwrap().len();
+        let refused = |done: &serde_json::Value| {
+            done["state"] == "failed"
+                && done["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("another Pubky account"))
+        };
+
+        // Kept over a restart; the node came back signed in as someone else
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                copy_jobs::JOBS_KEY,
+                &kept_copy("kept", &src, Some("fake-account")),
+            )
+            .unwrap();
+        sign_in_as(Some("someone-else"));
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "kept").await;
+        assert!(refused(&done), "{done}");
+        assert_eq!(sent(), 0);
+        let retry = "/v1/pubky/files/upload/kept/retry";
+        let (st, e) = call(&app, "POST", retry, None).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{e}");
+        assert_eq!(sent(), 0);
+        // Back as the owner: Retry sends it
+        sign_in_as(None);
+        let (st, again) = call(&app, "POST", retry, None).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{again}");
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(done["done"], 3, "{done}");
+
+        // Paused, then someone else signs in and it is resumed
+        hs.uploads.lock().unwrap().clear();
+        let start = || {
+            call(
+                &app,
+                "POST",
+                "/v1/pubky/files/upload",
+                Some(serde_json::json!({"paths": [src.join("A")]})),
+            )
+        };
+        let (st, job) = start().await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{job}");
+        let id = job["id"].as_str().unwrap().to_string();
+        let (st, _) = call(&app, "POST", &format!("/v1/pubky/files/upload/{id}/pause"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let before = sent();
+        assert!(before < 3, "it paused");
+        sign_in_as(Some("someone-else"));
+        let (st, _) = call(&app, "POST", &format!("/v1/pubky/files/upload/{id}/resume"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let done = copy_ended(&app, &id).await;
+        assert!(refused(&done), "{done}");
+        assert_eq!(sent(), before, "nothing went to someone else");
+
+        // Someone else signs in while it runs: it stops before the next file
+        sign_in_as(None);
+        hs.uploads.lock().unwrap().clear();
+        let (_, job) = start().await;
+        let id = job["id"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        sign_in_as(Some("someone-else"));
+        let done = copy_ended(&app, &id).await;
+        assert!(refused(&done), "{done}");
+        assert!(sent() < 3, "{done}");
+
+        // Kept by a node that didn't note the account: it doesn't run
+        sign_in_as(None);
+        hs.uploads.lock().unwrap().clear();
+        *s.copy_jobs.queue.lock().unwrap() = Default::default();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(copy_jobs::JOBS_KEY, &kept_copy("unnoted", &src, None))
+            .unwrap();
+        files::resume_jobs(&s);
+        let done = copy_ended(&app, "unnoted").await;
+        assert_eq!(done["state"], "failed", "{done}");
+        assert_eq!(sent(), 0);
+    }
+
+    /// While the start settles what a stopped node left, no import or bring job is let in (it
+    /// would race the settling, and keep a bring the node had from resuming); only the bring job
+    /// the node resumes itself goes in. Once settled, imports come in again (#237 review, Kimi M2).
+    #[tokio::test]
+    async fn imports_wait_while_the_start_settles() {
+        let hs = Arc::new(FakeHomeserver {
+            stat_delay: Some(std::time::Duration::from_millis(1500)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        std::fs::create_dir_all(src.join("B")).unwrap();
+        tone_wav(&src.join("B/01 b.wav"), 1);
+        // A stopped node left an upload to settle; checking it takes a while
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                copy_guard::IN_FLIGHT_KEY,
+                &serde_json::json!({"/pub/left.wav": {"size": 7, "existed": false}}).to_string(),
+            )
+            .unwrap();
+        files::resume_jobs(&s);
+        let body = Some(serde_json::json!({"path": src.join("B")}));
+        let (st, e) = call(&app, "POST", "/v1/library/imports", body.clone()).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("settling"), "{e}");
+        let job = types::UploadProgress {
+            id: "resumed".into(),
+            kind: "bring".into(),
+            total: 1,
+            ..Default::default()
+        };
+        assert!(files::claim_job(&s, &job).is_err(), "a bring job asked for");
+        files::claim_job_as(&s, &job, true).expect("the bring job the node resumes");
+        s.upload_jobs.lock().unwrap().remove("resumed");
+        for _ in 0..100 {
+            if !copy_jobs::held(&s) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!copy_jobs::held(&s), "settled");
+        let (st, e) = call(&app, "POST", "/v1/library/imports", body).await;
+        assert_eq!(st, StatusCode::OK, "{e}");
+    }
+
+    /// Retry asked twice at once makes one job; a copy's summary always says how many files a
+    /// retry would send, `0` too (left out, the page fell back to `failed` and kept offering
+    /// Retry failed) (#237 review).
+    #[tokio::test]
+    async fn retry_asked_twice_at_once_makes_one_job() {
+        let hs = Arc::new(FakeHomeserver {
+            delay: Some(std::time::Duration::from_millis(100)),
+            ..Default::default()
+        });
+        let (_dir, s, app, src) = copy_setup(hs.clone(), roomy(), 0).await;
+        let songs: Vec<_> = (1..=4).map(|i| src.join(format!("A/{i:02} song.wav"))).collect();
+        songs_at(&s, &songs);
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"paths": [src.join("A")]})),
+        )
+        .await;
+        let id = job["id"].as_str().unwrap().to_string();
+        let done = copy_ended(&app, &id).await;
+        assert_eq!(done["state"], "failed", "{done}");
+        hs.fails.store(false, std::sync::atomic::Ordering::SeqCst);
+        let retry = format!("/v1/pubky/files/upload/{id}/retry");
+        let (a, b) = tokio::join!(call(&app, "POST", &retry, None), call(&app, "POST", &retry, None));
+        let mut st = [a.0, b.0];
+        st.sort();
+        assert_eq!(st, [StatusCode::ACCEPTED, StatusCode::CONFLICT], "{a:?} {b:?}");
+        let (_, jobs) = call(&app, "GET", "/v1/pubky/files/jobs", None).await;
+        assert_eq!(jobs["last"]["id"], id.as_str(), "{jobs}");
+        assert_eq!(jobs["last"]["failed_retryable"], 0, "{jobs}");
+        assert!(jobs["queued"].as_array().unwrap().is_empty(), "{jobs}");
+        let again = if a.0 == StatusCode::ACCEPTED { a.1 } else { b.1 };
+        let done = copy_ended(&app, again["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].as_u64(), done["failed_retryable"].as_u64()),
+            (Some(4), Some(0)),
+            "{done}"
+        );
+        assert_eq!(
+            hs.uploads.lock().unwrap().len(),
+            3 + 4,
+            "three failed, then four sent"
+        );
+    }
+
+    // ---- TIDAL full tracks: Sign in with TIDAL (browser, PKCE), what TIDAL answered (2026-11-04) ----
+
+    /// Log lines written while a test runs, for checking that no secret is in them.
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuf {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    /// Everything the node logs (all levels of its own crates and the HTTP stack's), into a buffer.
+    fn log_capture() -> (LogBuf, tracing::Dispatch) {
+        let buf = LogBuf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_env_filter(tracing_subscriber::EnvFilter::new("trace"))
+            .finish();
+        (buf, tracing::Dispatch::new(sub))
+    }
+
+    /// What the mock TIDAL was sent, by endpoint.
+    #[derive(Default)]
+    struct TidalSeen {
+        tokens: Vec<String>,
+        asked: Vec<(String, String)>,
+        agents: Vec<String>,
+    }
+
+    const FAKE_BROWSER_ID: &str = "fake-browser-client-id";
+    const FAKE_BROWSER_SECRET: &str = "fake-browser-client-secret";
+
+    /// A mock of TIDAL's auth, sessions and private playback for the full-tracks tests. Track ids:
+    /// `1` BTS FLAC 16/44.1; `2` DASH FLAC 24/96 (hi-res); `3` DASH AAC for HI_RES_LOSSLESS, BTS
+    /// FLAC for LOSSLESS; `4` DASH AAC at any quality. Every CDN address carries `SECRET-CDN`.
+    async fn full_tracks_mock(flac: Vec<u8>) -> (String, Arc<std::sync::Mutex<TidalSeen>>) {
+        use base64::Engine;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = Arc::new(std::sync::Mutex::new(TidalSeen::default()));
+        let b64 = |v: &str| base64::engine::general_purpose::STANDARD.encode(v);
+        let bts_flac = b64(&format!(
+            r#"{{"mimeType":"audio/flac","codecs":"flac","encryptionType":"NONE","urls":["{base}/file.flac?token=SECRET-CDN"]}}"#
+        ));
+        let dash = |codecs: &str, rate: u32, id: &str| {
+            b64(&format!(
+                r#"<?xml version='1.0' encoding='UTF-8'?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-main:2011" type="static" minBufferTime="PT3.993S" mediaPresentationDuration="PT0M8.0S"><Period id="0"><AdaptationSet id="0" contentType="audio" mimeType="audio/mp4" segmentAlignment="true"><Representation id="{id}" codecs="{codecs}" bandwidth="2770880" audioSamplingRate="{rate}"><SegmentTemplate timescale="{rate}" initialization="{base}/seg/init?token=SECRET-CDN" media="{base}/seg/$Number$?token=SECRET-CDN" startNumber="1"><SegmentTimeline><S d="383936" r="1"/><S d="214080"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>"#
+            ))
+        };
+        let dash_flac = dash("flac", 96_000, "FLAC,96000,24");
+        let dash_aac = dash("mp4a.40.2", 44_100, "AAC,320000");
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post({
+                    let seen = seen.clone();
+                    move |body: String| {
+                        let seen = seen.clone();
+                        async move {
+                            seen.lock().unwrap().tokens.push(body.clone());
+                            let q: std::collections::HashMap<String, String> =
+                                url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
+                            let get = |k: &str| q.get(k).map(String::as_str).unwrap_or("");
+                            match get("grant_type") {
+                                "authorization_code" if get("code") == "good-code" || get("code") == "anna-code" => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({"access_token": format!("pk-at-{}", get("code")), "refresh_token": "pk-rt", "expires_in": 3600, "token_type": "Bearer", "user_id": 77, "user": {"userId": 77, "countryCode": "CH"}})),
+                                ),
+                                "authorization_code" => (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({"error": "invalid_grant", "error_description": "Authorization code is invalid"})),
+                                ),
+                                "refresh_token" if get("client_id") == FAKE_BROWSER_ID && get("client_secret") == FAKE_BROWSER_SECRET => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({"access_token": "pk-at-renewed", "expires_in": 3600})),
+                                ),
+                                "refresh_token" if get("client_id") == "dev-id" && get("client_secret") == "dev-secret" => (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({"access_token": "dev-at-renewed", "refresh_token": "dev-rt-2", "expires_in": 3600})),
+                                ),
+                                _ => (
+                                    StatusCode::UNAUTHORIZED,
+                                    Json(serde_json::json!({"error": "invalid_client"})),
+                                ),
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                get(|| async { Json(serde_json::json!({"userId": 77, "countryCode": "CH", "sessionId": "sid"})) }),
+            )
+            .route(
+                "/v1/tracks/{id}/playbackinfopostpaywall",
+                get({
+                    let seen = seen.clone();
+                    move |Path(id): Path<String>, headers: HeaderMap, q: axum::extract::Query<std::collections::HashMap<String, String>>| {
+                        let seen = seen.clone();
+                        let (bts_flac, dash_flac, dash_aac) = (bts_flac.clone(), dash_flac.clone(), dash_aac.clone());
+                        async move {
+                            let asked = q.get("audioquality").cloned().unwrap_or_default();
+                            {
+                                let mut seen = seen.lock().unwrap();
+                                seen.asked.push((id.clone(), asked.clone()));
+                                seen.agents.push(
+                                    headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").to_string(),
+                                );
+                            }
+                            let bts = || serde_json::json!({"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "LOSSLESS", "manifestMimeType": "application/vnd.tidal.bts", "manifest": bts_flac, "bitDepth": 16, "sampleRate": 44100});
+                            let aac = || serde_json::json!({"trackId": id, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "HIGH", "manifestMimeType": "application/dash+xml", "manifest": dash_aac});
+                            let v = match (id.as_str(), asked.as_str()) {
+                                ("1", _) => bts(),
+                                ("2", _) => serde_json::json!({"trackId": 2, "assetPresentation": "FULL", "audioMode": "STEREO", "audioQuality": "HI_RES_LOSSLESS", "manifestMimeType": "application/dash+xml", "manifest": dash_flac, "bitDepth": 24, "sampleRate": 96000}),
+                                ("3", "HI_RES_LOSSLESS") => aac(),
+                                ("3", _) => bts(),
+                                ("4", _) => aac(),
+                                _ => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"userMessage": "no such track"}))),
+                            };
+                            (StatusCode::OK, Json(v))
+                        }
+                    }
+                }),
+            )
+            .route("/file.flac", get(move || { let f = flac.clone(); async move { f } }))
+            .route("/seg/{n}", get(|Path(n): Path<String>| async move { format!("[{n}]") }));
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        (base, seen)
+    }
+
+    fn point_tidal_at(s: &NodeState, base: &str, browser: bool) {
+        let mut ep = s.tidal.write().unwrap();
+        ep.auth_base = base.to_string();
+        ep.login_base = base.to_string();
+        ep.v1_base = format!("{base}/v1");
+        ep.browser_client = browser.then(|| tidal_unofficial::BrowserClient {
+            id: FAKE_BROWSER_ID.into(),
+            secret: FAKE_BROWSER_SECRET.into(),
+        });
+    }
+
+    /// Opens a TIDAL track the full-tracks way on the audio thread's path and records the health,
+    /// with the test's log capture; the extension and the bytes read, or the error.
+    async fn open_full(
+        s: &Arc<NodeState>,
+        who: accounts::Who,
+        id: &'static str,
+        logs: &tracing::Dispatch,
+    ) -> Result<Option<(&'static str, bool, Vec<u8>)>, String> {
+        let s = s.clone();
+        let logs = logs.clone();
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&logs, || {
+                use std::io::Read;
+                let ep = s.tidal.read().unwrap().clone();
+                let r = crate::tidal_unofficial::open_blocking(&s.library, &ep, id, &who);
+                crate::tidal_unofficial::record(&s.library, &who, &r);
+                match r {
+                    Ok(Some(mut f)) => {
+                        let mut b = Vec::new();
+                        f.reader.read_to_end(&mut b).unwrap();
+                        Ok(Some((f.ext, f.lossy, b)))
+                    }
+                    Ok(None) => Ok(None),
+                    Err(crate::tidal_unofficial::FullError::Mode(e)) => Err(format!("mode: {e}")),
+                    Err(crate::tidal_unofficial::FullError::Track(e)) => Err(format!("track: {e}")),
+                }
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// The pasted address of the browser sign-in: the whole tidal.com address or the bare code;
+    /// anything else (another host, a look-alike, http, no code, TIDAL's error) in plain words.
+    #[test]
+    fn tidal_browser_sign_in_paste_is_parsed_after_its_host() {
+        use tidal_unofficial::code_from_paste as code;
+        assert_eq!(
+            code(" https://tidal.com/android/login/auth?code=abc_DEF-1.2~3&state=na \n").as_deref(),
+            Ok("abc_DEF-1.2~3")
+        );
+        assert_eq!(
+            code("https://listen.tidal.com/login/auth?code=x1").as_deref(),
+            Ok("x1")
+        );
+        assert_eq!(
+            code("tidal.com/android/login/auth?code=x2").as_deref(),
+            Ok("x2"),
+            "no scheme: https"
+        );
+        assert_eq!(
+            code("HTTPS://TIDAL.COM./android/login/auth?code=x3").as_deref(),
+            Ok("x3")
+        );
+        assert_eq!(code("bare-Code_123.x~y").as_deref(), Ok("bare-Code_123.x~y"));
+        let err = |t: &str| code(t).unwrap_err();
+        for evil in [
+            "https://evil.example/android/login/auth?code=x",
+            "https://tidal.com.evil.example/android/login/auth?code=x",
+            "https://eviltidal.com/android/login/auth?code=x",
+            "https://tidal.com@evil.example/?code=x",
+        ] {
+            assert!(
+                err(evil).contains("isn't a TIDAL address"),
+                "{evil}: {}",
+                err(evil)
+            );
+        }
+        assert!(err("http://tidal.com/android/login/auth?code=x").contains("https://"));
+        assert!(err("https://tidal.com/android/login/auth?state=1").contains("no sign-in code"));
+        assert!(err("https://tidal.com/android/login/auth?code=").contains("no sign-in code"));
+        assert!(err(
+            "https://tidal.com/android/login/auth?error=access_denied&error_description=User%20cancelled"
+        )
+        .contains("User cancelled"));
+        assert!(err("  ").contains("Paste the address"));
+        assert!(err("hello world").contains("neither a TIDAL address nor a sign-in code"));
+    }
+
+    /// Sign in with TIDAL against a mock TIDAL: the login.tidal.com address carries python-tidal's
+    /// parameters and an S256 challenge of the verifier kept here; a wrong paste, a refused code,
+    /// no attempt and an expired one each say so; the code is exchanged with the verifier and the
+    /// client unique key (no secret); the session is kept marked as the browser one, is in use as
+    /// "Sign in with TIDAL", renews with the browser client, and nothing secret is ever logged.
+    #[tokio::test]
+    async fn tidal_browser_sign_in_from_a_mock() {
+        let _home_guard = imports::HOME_TEST_LOCK.lock().await;
+        let home = tempfile::tempdir().unwrap();
+        *imports::HOME_OVERRIDE.write().unwrap() = Some(home.path().to_path_buf());
+        let (logs, dispatch) = log_capture();
+        let _logging = tracing::dispatcher::set_default(&dispatch);
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (base, seen) = full_tracks_mock(flac).await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let signin = "/v1/sources/tidal/signin";
+
+        // The chooser: Sign in with TIDAL first and Recommended, the code sign-in next; the rest
+        // under Advanced; no import way with nothing found
+        let (_, si) = call(&app, "GET", signin, None).await;
+        let ids: Vec<&str> = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["browser", "device", "app", "own-device", "paste"], "{si}");
+        let flags: Vec<(bool, bool)> = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| (w["recommended"] == true, w["advanced"] == true))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                (true, false),
+                (false, false),
+                (false, true),
+                (false, true),
+                (false, true)
+            ],
+            "{si}"
+        );
+        assert_eq!(si["ways"][0]["label"], "Sign in with TIDAL");
+        assert_eq!(si["ways"][0]["available"], true);
+        assert!(si["ways"][1]["note"].as_str().unwrap().contains("AAC"), "{si}");
+        assert_eq!(si["details"]["unofficial"]["browser_available"], true);
+
+        let finish = |text: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({ "text": text });
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/sources/tidal/unofficial/browser/finish",
+                    Some(body),
+                )
+                .await
+            }
+        };
+        // Nothing started yet
+        let (st, r) = finish("https://tidal.com/android/login/auth?code=good-code").await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("Press Sign in with TIDAL"),
+            "{r}"
+        );
+
+        // The address to open
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let url = url::Url::parse(r["url"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            url.as_str().split('?').next().unwrap(),
+            format!("{base}/authorize")
+        );
+        let pending = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner)
+            .browser
+            .unwrap();
+        assert_eq!(
+            pending.code_verifier.len(),
+            43,
+            "32 random bytes, base64url without padding"
+        );
+        assert!(pending
+            .code_verifier
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        let q: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        let names: Vec<&str> = q.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "response_type",
+                "redirect_uri",
+                "client_id",
+                "lang",
+                "appMode",
+                "client_unique_key",
+                "code_challenge",
+                "code_challenge_method",
+                "restrict_signup"
+            ],
+            "python-tidal's pkce_login_url, in its order"
+        );
+        let v = |k: &str| q.iter().find(|(n, _)| n == k).unwrap().1.as_str();
+        assert_eq!(v("response_type"), "code");
+        assert_eq!(v("redirect_uri"), "https://tidal.com/android/login/auth");
+        assert_eq!(v("client_id"), FAKE_BROWSER_ID);
+        assert_eq!(
+            (v("lang"), v("appMode"), v("restrict_signup")),
+            ("EN", "android", "true")
+        );
+        assert_eq!(v("client_unique_key"), pending.client_unique_key);
+        assert_eq!(v("code_challenge_method"), "S256");
+        {
+            use base64::Engine;
+            use sha2::Digest;
+            let want = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(pending.code_verifier.as_bytes()));
+            assert_eq!(v("code_challenge"), want);
+            assert_ne!(v("code_challenge"), pending.code_verifier);
+        }
+        assert!(
+            !r.to_string().contains(&pending.code_verifier),
+            "the verifier stays on the node"
+        );
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert!(
+            u["browser_pending"].as_i64().unwrap() > pm_library::db::now_unix(),
+            "{u}"
+        );
+        assert!(!u.to_string().contains(&pending.code_verifier));
+
+        // Wrong pastes: nothing is sent to TIDAL for them
+        for (text, says) in [
+            (
+                "https://evil.example/android/login/auth?code=good-code",
+                "isn't a TIDAL address",
+            ),
+            ("http://tidal.com/android/login/auth?code=good-code", "https://"),
+            ("https://tidal.com/android/login/auth", "no sign-in code"),
+        ] {
+            let (st, r) = finish(text).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{text}: {r}");
+            assert!(r["error"].as_str().unwrap().contains(says), "{text}: {r}");
+        }
+        assert!(
+            seen.lock().unwrap().tokens.is_empty(),
+            "nothing sent for a wrong paste"
+        );
+        // TIDAL refuses the code: said so, the attempt stays for another code
+        let (st, r) = finish("https://tidal.com/android/login/auth?code=old-code").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("didn't accept that sign-in code"),
+            "{r}"
+        );
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("Authorization code is invalid"),
+            "{r}"
+        );
+        // The right address
+        let (st, r) = finish("https://tidal.com/android/login/auth?code=good-code&lang=en").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["signed_in"], true, "{r}");
+        assert_eq!(r["enabled"], true, "{r}");
+        assert_eq!(r["session_client"], "pkce", "{r}");
+        assert_eq!(r["user"], "77");
+        assert!(r.get("browser_pending").is_none(), "{r}");
+        let exchange = seen.lock().unwrap().tokens.last().unwrap().clone();
+        let form: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(exchange.as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(form["grant_type"], "authorization_code");
+        assert_eq!(form["code"], "good-code");
+        assert_eq!(form["client_id"], FAKE_BROWSER_ID);
+        assert_eq!(form["redirect_uri"], "https://tidal.com/android/login/auth");
+        assert_eq!(
+            form["scope"], "r_usr+w_usr+w_sub",
+            "python-tidal's scope, as it sends it"
+        );
+        assert_eq!(form["code_verifier"], pending.code_verifier);
+        assert_eq!(form["client_unique_key"], pending.client_unique_key);
+        assert!(
+            !form.contains_key("client_secret"),
+            "python-tidal's exchange has no secret: {exchange}"
+        );
+        // Kept marked as the browser sign-in; in use as Sign in with TIDAL, the way remembered
+        let raw = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(tidal_unofficial::STATE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            raw.contains(r#""client":"pkce""#),
+            "the session says which client renews it"
+        );
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(si["in_use"]["way"], "browser", "{si}");
+        assert_eq!(si["in_use"]["label"], "Sign in with TIDAL");
+        assert_eq!(si["chosen"], "browser");
+        assert_eq!(si["line"], "Sign in with TIDAL · full tracks");
+        assert!(
+            !si.to_string().contains("pk-at") && !si.to_string().contains("pk-rt"),
+            "{si}"
+        );
+        // The attempt is used up
+        let (st, _) = finish("https://tidal.com/android/login/auth?code=good-code").await;
+        assert_eq!(st, StatusCode::CONFLICT);
+
+        // An expired attempt
+        call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.browser.as_mut().unwrap().expires_at = pm_library::db::now_unix() - 1;
+        });
+        let (st, r) = finish("good-code").await;
+        assert_eq!(st, StatusCode::GONE, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("expired"), "{r}");
+        assert!(
+            tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner)
+                .browser
+                .is_none()
+        );
+        // A bare code works as well as the address
+        call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        let (st, r) = finish("good-code").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+
+        // Renewal with the browser client (python-tidal's token_refresh: id and secret, no scope)
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.session.as_mut().unwrap().expires_at = pm_library::db::now_unix();
+        });
+        let (ext, lossy, bytes) = open_full(&s, accounts::Who::Owner, "2", &dispatch)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (ext, lossy),
+            ("m4a", false),
+            "hi-res DASH FLAC: fragmented MP4 into the decoder"
+        );
+        assert_eq!(String::from_utf8(bytes).unwrap(), "[init][1][2][3]");
+        let renewal = seen.lock().unwrap().tokens.last().unwrap().clone();
+        let form: std::collections::HashMap<String, String> = url::form_urlencoded::parse(renewal.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(form["grant_type"], "refresh_token");
+        assert_eq!(form["refresh_token"], "pk-rt");
+        assert_eq!(form["client_id"], FAKE_BROWSER_ID);
+        assert_eq!(form["client_secret"], FAKE_BROWSER_SECRET);
+        assert!(!form.contains_key("scope"), "{renewal}");
+        let st = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner);
+        let sess = st.session.unwrap();
+        assert_eq!(sess.access_token, "pk-at-renewed");
+        assert_eq!(
+            sess.refresh_token.as_deref(),
+            Some("pk-rt"),
+            "kept when TIDAL sends none"
+        );
+        assert_eq!(
+            sess.client,
+            tidal_unofficial::ClientKind::Pkce,
+            "still the browser one"
+        );
+        // python-tidal's Android web view headers on the private API
+        assert!(seen.lock().unwrap().agents.iter().all(|a| a.contains("Android")));
+
+        // A build without the browser client: the way is there, not available, says why, and is
+        // not recommended; its endpoints refuse; a browser session can't be renewed
+        point_tidal_at(&s, &base, false);
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(si["ways"][0]["id"], "browser");
+        assert_eq!(si["ways"][0]["available"], false);
+        assert_eq!(si["ways"][0]["recommended"], false);
+        assert!(
+            si["ways"][0]["reason"].as_str().unwrap().contains("code sign-in"),
+            "{si}"
+        );
+        let (st, _) = call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.session.as_mut().unwrap().expires_at = pm_library::db::now_unix();
+        });
+        let r = open_full(&s, accounts::Who::Owner, "1", &dispatch).await;
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.starts_with("mode:") && e.contains("Sign in with TIDAL")),
+            "{r:?}"
+        );
+
+        *imports::HOME_OVERRIDE.write().unwrap() = None;
+        // Nothing secret in any log line: the client, the verifier, tokens, CDN addresses
+        let text = logs.text();
+        assert!(text.contains("signed in with TIDAL"), "the sign-in is logged");
+        for secret in [
+            FAKE_BROWSER_SECRET,
+            FAKE_BROWSER_ID,
+            pending.code_verifier.as_str(),
+            "pk-at",
+            "pk-rt",
+            "good-code",
+            "SECRET-CDN",
+        ] {
+            assert!(!text.contains(secret), "a secret in the logs: {secret}");
+        }
+    }
+
+    /// Each person's Sign in with TIDAL is their own: an attempt, its pasted address and the
+    /// session it makes belong to whoever started it.
+    #[tokio::test]
+    async fn tidal_browser_sign_in_is_per_person() {
+        let (base, _) = full_tracks_mock(Vec::new()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let anna_tok = accounts::mint(&s, anna).unwrap();
+        let owner = Some("s3cret");
+        let start = "/v1/sources/tidal/unofficial/browser";
+        let finish = "/v1/sources/tidal/unofficial/browser/finish";
+        let (st, r, _) = send_as(&app, "POST", start, Some(&anna_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        // The owner has no attempt of their own: Anna's address does nothing for them
+        let body = serde_json::json!({"text": "https://tidal.com/android/login/auth?code=anna-code"});
+        let (st, r, _) = send_as(&app, "POST", finish, owner, &[], Some(body.clone())).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        let (st, r, _) = send_as(&app, "POST", finish, Some(&anna_tok), &[], Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["session_client"], "pkce");
+        let anna_who = accounts::Who::Listener(anna.to_string());
+        {
+            let lib = s.library.lock().unwrap();
+            let a = tidal_unofficial::load(&lib, &anna_who);
+            assert_eq!(a.session.unwrap().access_token, "pk-at-anna-code");
+            assert!(tidal_unofficial::load(&lib, &accounts::Who::Owner)
+                .session
+                .is_none());
+        }
+        let (_, u, _) = send_as(&app, "GET", "/v1/sources/tidal/unofficial", owner, &[], None).await;
+        assert_eq!(u["signed_in"], false, "{u}");
+        let (_, si, _) = send_as(
+            &app,
+            "GET",
+            "/v1/sources/tidal/signin",
+            Some(&anna_tok),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(si["in_use"]["way"], "browser", "{si}");
+        assert_eq!(
+            si["ways"][0]["available"], true,
+            "a listener signs in with TIDAL too: {si}"
+        );
+        // Nobody signed in to the node has no attempt to start
+        let (st, _, _) = send_as(&app, "POST", start, None, &[], None).await;
+        assert!(
+            st == StatusCode::UNAUTHORIZED || st == StatusCode::FORBIDDEN,
+            "{st}"
+        );
+    }
+
+    /// What TIDAL answered is logged per track (quality, manifest, codecs, depth and rate; no
+    /// address, no token); AAC for HI_RES_LOSSLESS is asked again as LOSSLESS before it plays; a
+    /// code sign-in that still gets AAC says so on its health line with what to do; and a session
+    /// stored before sessions said their client still loads and renews with the device client.
+    #[tokio::test]
+    async fn tidal_full_track_answers_are_logged_and_aac_is_asked_again() {
+        let (logs, dispatch) = log_capture();
+        let _logging = tracing::dispatcher::set_default(&dispatch);
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (base, seen) = full_tracks_mock(flac).await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"client_id": "dev-id", "client_secret": "dev-secret"})),
+        )
+        .await;
+        // As an older node stored it: no `client`, ran out
+        let old = format!(
+            r#"{{"enabled":true,"quality":"max","session":{{"access_token":"dev-at","refresh_token":"dev-rt","expires_at":{},"user_id":"42","country":"CH","session_id":"sid"}}}}"#,
+            pm_library::db::now_unix() - 10
+        );
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(tidal_unofficial::STATE_KEY, &old)
+            .unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(
+            (u["signed_in"].as_bool(), u["session_client"].as_str()),
+            (Some(true), Some("device")),
+            "{u}"
+        );
+        let who = accounts::Who::Owner;
+
+        // BTS FLAC (16/44.1): the old session renewed with the device client first
+        let (ext, lossy, bytes) = open_full(&s, who.clone(), "1", &dispatch).await.unwrap().unwrap();
+        assert_eq!((ext, lossy), ("flac", false));
+        assert!(bytes.starts_with(b"fLaC"));
+        let renewal = seen.lock().unwrap().tokens.last().unwrap().clone();
+        assert!(
+            renewal.contains("grant_type=refresh_token")
+                && renewal.contains("refresh_token=dev-rt")
+                && renewal.contains("client_id=dev-id")
+                && renewal.contains("client_secret=dev-secret")
+                && renewal.contains("scope=r_usr+w_usr+w_sub"),
+            "{renewal}"
+        );
+        let raw = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(tidal_unofficial::STATE_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(
+            raw.contains("dev-at-renewed") && !raw.contains(r#""client""#),
+            "still a device session"
+        );
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], "full tracks are playing", "{u}");
+        assert!(u["health"].get("lossy").is_none(), "{u}");
+
+        // DASH FLAC, hi-res
+        let (ext, lossy, bytes) = open_full(&s, who.clone(), "2", &dispatch).await.unwrap().unwrap();
+        assert_eq!(
+            (ext, lossy, bytes.as_slice()),
+            ("m4a", false, b"[init][1][2][3]".as_slice())
+        );
+        // DASH AAC for HI_RES_LOSSLESS: asked again as LOSSLESS, which is FLAC
+        let (ext, lossy, _) = open_full(&s, who.clone(), "3", &dispatch).await.unwrap().unwrap();
+        assert_eq!((ext, lossy), ("flac", false), "the LOSSLESS answer plays");
+        // AAC either way: played, and the health line says why and what to do
+        let (ext, lossy, _) = open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        assert_eq!((ext, lossy), ("m4a", true));
+        let asked: Vec<(String, String)> = seen.lock().unwrap().asked.clone();
+        let q = |id: &str| {
+            asked
+                .iter()
+                .filter(|(t, _)| t == id)
+                .map(|(_, q)| q.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(q("1"), ["HI_RES_LOSSLESS"]);
+        assert_eq!(q("2"), ["HI_RES_LOSSLESS"]);
+        assert_eq!(q("3"), ["HI_RES_LOSSLESS", "LOSSLESS"]);
+        assert_eq!(q("4"), ["HI_RES_LOSSLESS", "LOSSLESS"]);
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["ok"], true, "AAC plays: {u}");
+        assert_eq!(u["health"]["lossy"], true, "{u}");
+        assert_eq!(u["health"]["detail"], tidal_unofficial::AAC_ONLY_DEVICE);
+        assert!(tidal_unofficial::AAC_ONLY_DEVICE.contains("Sign in with TIDAL again for lossless"));
+        assert_eq!(u["enabled"], true, "AAC is not a failure of the mode");
+        // A lossless track again: OK again
+        open_full(&s, who.clone(), "1", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], "full tracks are playing", "{u}");
+        // High asks LOSSLESS only: no second question
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"quality": "high"})),
+        )
+        .await;
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        assert_eq!(
+            seen.lock().unwrap().asked.last().unwrap(),
+            &("4".to_string(), "LOSSLESS".to_string())
+        );
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .asked
+                .iter()
+                .filter(|(t, _)| t == "4")
+                .count(),
+            3
+        );
+        // A build without the browser client doesn't send people to Sign in with TIDAL: it says
+        // what lossless needs
+        let browser = s.tidal.write().unwrap().browser_client.take();
+        assert!(browser.is_some());
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(
+            u["health"]["detail"],
+            tidal_unofficial::AAC_ONLY_NO_BROWSER,
+            "{u}"
+        );
+        assert!(!tidal_unofficial::AAC_ONLY_NO_BROWSER.contains("again"));
+        s.tidal.write().unwrap().browser_client = browser;
+        // An imported device session wasn't signed in here: Sign in with TIDAL, not "again"
+        tidal_unofficial::update(&s, &who, |st| {
+            st.session.as_mut().unwrap().from = Some("tidal-dl-ng".into())
+        });
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], tidal_unofficial::AAC_ONLY_IMPORTED, "{u}");
+        tidal_unofficial::update(&s, &who, |st| st.session.as_mut().unwrap().from = None);
+        // A browser session's AAC track: that track, not the sign-in
+        call(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            Some(serde_json::json!({"quality": "max"})),
+        )
+        .await;
+        tidal_unofficial::update(&s, &who, |st| {
+            st.session.as_mut().unwrap().client = tidal_unofficial::ClientKind::Pkce
+        });
+        open_full(&s, who.clone(), "4", &dispatch).await.unwrap().unwrap();
+        let (_, u) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(u["health"]["detail"], tidal_unofficial::AAC_TRACK, "{u}");
+
+        // One line per opened track with what TIDAL answered; no address or token in any line
+        let text = logs.text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains("TIDAL full track ")).collect();
+        let line = |id: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(&format!("TIDAL full track {id} ")))
+                .copied()
+                .unwrap_or_else(|| panic!("no line for {id}: {text}"))
+        };
+        assert!(line("1").contains("(code sign-in): asked HI_RES_LOSSLESS, TIDAL answered audioQuality=LOSSLESS manifestMimeType=application/vnd.tidal.bts codecs=flac bitDepth=16 sampleRate=44100"), "{}", line("1"));
+        assert!(line("2").contains("audioQuality=HI_RES_LOSSLESS manifestMimeType=application/dash+xml codecs=flac bitDepth=24 sampleRate=96000"), "{}", line("2"));
+        assert!(line("3").contains("asked LOSSLESS, TIDAL answered audioQuality=LOSSLESS") && line("3").contains("(HI_RES_LOSSLESS had answered audioQuality=HIGH manifestMimeType=application/dash+xml codecs=mp4a.40.2 sampleRate=44100)"), "{}", line("3"));
+        assert!(line("4").contains("codecs=mp4a.40.2"), "{}", line("4"));
+        assert!(lines.iter().any(|l| l.contains("(browser sign-in)")), "{text}");
+        for secret in [
+            "SECRET-CDN",
+            "dev-secret",
+            "dev-at",
+            "dev-rt",
+            FAKE_BROWSER_SECRET,
+        ] {
+            assert!(!text.contains(secret), "a secret in the logs: {secret}");
+        }
+    }
+
+    /// The vault carries each kind of TIDAL full-tracks session under its own app: a code sign-in
+    /// under the device client's id (as before), a Sign in with TIDAL one under `pkce:` and the
+    /// browser client's id. A node takes only a session it can renew, and a code sign-in made on a
+    /// node without the browser client doesn't replace a lossless session made elsewhere.
+    #[tokio::test]
+    async fn the_vault_carries_each_kind_of_tidal_session_under_its_own_app() {
+        use vault_cache::{
+            decide, made_with_our_app, node_app_for, sign_in_for, Do, Side, Synced, VaultSide, Wipe,
+        };
+        let b = vault_cache::BRIDGES
+            .iter()
+            .find(|b| b.service == "tidal-full")
+            .unwrap();
+        let node = |device: &'static str, browser: bool| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    tidal_unofficial::CLIENT_KEY,
+                    &serde_json::json!({"id": device, "secret": "fake-device-secret", "from": "settings"})
+                        .to_string(),
+                )
+                .unwrap();
+            s.tidal.write().unwrap().browser_client = browser.then(|| tidal_unofficial::BrowserClient {
+                id: "fake-browser-client-id".into(),
+                secret: "fake-browser-secret".into(),
+            });
+            (dir, s)
+        };
+        let travels = |client: Option<&str>, at: &str| {
+            let mut sess = serde_json::json!({"access_token": at, "refresh_token": "fake-rt", "expires_at": 4_000_000_000i64, "user_id": "42"});
+            if let Some(c) = client {
+                sess["client"] = serde_json::json!(c);
+            }
+            serde_json::json!({"tidal.unofficial": {"session": sess}})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let (device, browser) = (
+            travels(None, "fake-at-device"),
+            travels(Some("pkce"), "fake-at-browser"),
+        );
+        let (_d1, both) = node("fake-device-client-id", true).await;
+        // Labelled by kind; the device one exactly as before, so device sessions synced already
+        // still match
+        let device_app = node_app_for(&both, b, Some(&device));
+        let browser_app = node_app_for(&both, b, Some(&browser));
+        assert_eq!(device_app.as_deref(), Some("fake-device-client-id"));
+        assert_eq!(browser_app.as_deref(), Some("pkce:fake-browser-client-id"));
+        assert_eq!(
+            node_app_for(&both, b, None),
+            device_app,
+            "no copy: the usual kind's"
+        );
+        let in_vault_device = sign_in_for(b, &device, None, device_app.clone(), "L-device");
+        let in_vault_browser = sign_in_for(b, &browser, None, browser_app.clone(), "L-browser");
+        assert_eq!(
+            in_vault_browser.client_id.as_deref(),
+            Some("pkce:fake-browser-client-id")
+        );
+        assert!(made_with_our_app(&both, b, &in_vault_device));
+        assert!(made_with_our_app(&both, b, &in_vault_browser));
+        // The same device client, no browser client (a build from source): the device session
+        // is taken, the browser one isn't (it couldn't be renewed here)
+        let (_d2, no_browser) = node("fake-device-client-id", false).await;
+        assert_eq!(node_app_for(&no_browser, b, Some(&browser)), None);
+        assert!(made_with_our_app(&no_browser, b, &in_vault_device));
+        assert!(!made_with_our_app(&no_browser, b, &in_vault_browser));
+        // A device client of the owner's and this build's browser client: the browser session is
+        // taken (it renews with the browser client), the other device client's isn't
+        let (_d3, own_device) = node("fake-own-device-client-id", true).await;
+        assert!(made_with_our_app(&own_device, b, &in_vault_browser));
+        assert!(!made_with_our_app(&own_device, b, &in_vault_device));
+        // On the node without the browser client: it synced a code sign-in, another node then
+        // signed in with TIDAL. Its own code sign-in, refreshed or new, doesn't replace that
+        // lossless session in the vault
+        let side = |hash: &str, lineage: &str| Side {
+            hash: hash.into(),
+            account: Some("42".into()),
+            lineage: Some(lineage.into()),
+            expires_at: Some(4_000_000_000),
+        };
+        let seen = Synced {
+            hash: "h-device".into(),
+            account: Some("42".into()),
+            lineage: Some("L-device".into()),
+            app: device_app.clone(),
+            ..Default::default()
+        };
+        let theirs = VaultSide {
+            side: side("h-browser", "L-browser"),
+            from_a_node: true,
+            our_app: made_with_our_app(&no_browser, b, &in_vault_browser),
+        };
+        let wipe = Wipe::default();
+        let refreshed = side("h-device-2", "L-device");
+        let new_code = side("h-device-3", "L-device-new");
+        assert_eq!(
+            decide(Some(&seen), Some(&refreshed), Some(&theirs), &wipe),
+            Do::NotUsable
+        );
+        assert_ne!(
+            decide(Some(&seen), Some(&new_code), Some(&theirs), &wipe),
+            Do::Push
+        );
+        assert_ne!(decide(None, Some(&new_code), Some(&theirs), &wipe), Do::Push);
+        // ...while on a node with the browser client, the same vault copy is taken
+        let ours = VaultSide {
+            our_app: made_with_our_app(&both, b, &in_vault_browser),
+            ..theirs.clone()
+        };
+        assert_eq!(
+            decide(Some(&seen), Some(&refreshed), Some(&ours), &wipe),
+            Do::Pull
+        );
+    }
+
+    /// The chooser's Sign out while TIDAL is asked for the browser sign-in's tokens: the attempt
+    /// ends with the sign-out, so the answer is not kept (`tidal::sign_out_of`).
+    #[tokio::test]
+    async fn tidal_sign_out_during_the_browser_exchange_is_not_undone() {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post({
+                    let (arrived, release) = (arrived.clone(), release.clone());
+                    move || {
+                        let (arrived, release) = (arrived.clone(), release.clone());
+                        async move {
+                            arrived.notify_one();
+                            release.notified().await;
+                            Json(serde_json::json!({"access_token": "late-at", "refresh_token": "late-rt", "expires_in": 3600, "user_id": 77, "user": {"userId": 77, "countryCode": "CH"}}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                get(|| async { Json(serde_json::json!({"userId": 77, "countryCode": "CH", "sessionId": "sid"})) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        point_tidal_at(&s, &base, true);
+        let app = router(s.clone());
+        let signin = "/v1/sources/tidal/signin";
+        // A code sign-in in use, then Sign in with TIDAL started
+        tidal_unofficial::update(&s, &accounts::Who::Owner, |st| {
+            st.enabled = true;
+            st.session = Some(tidal_unofficial::Session {
+                access_token: "code-at".into(),
+                refresh_token: Some("code-rt".into()),
+                expires_at: 4_000_000_000,
+                user_id: Some("42".into()),
+                ..Default::default()
+            });
+        });
+        let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/browser", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert_eq!(si["in_use"]["way"], "device", "{si}");
+        // The paste goes in; TIDAL holds its answer while the person signs out
+        let finish = tokio::spawn({
+            let app = app.clone();
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/sources/tidal/unofficial/browser/finish",
+                    Some(
+                        serde_json::json!({ "text": "https://tidal.com/android/login/auth?code=late-code" }),
+                    ),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), arrived.notified())
+            .await
+            .expect("the token request reached TIDAL");
+        let (st, si) = call(&app, "DELETE", signin, None).await;
+        assert_eq!(st, StatusCode::OK, "{si}");
+        assert!(si["in_use"].is_null(), "{si}");
+        let m = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner);
+        assert!(m.browser.is_none(), "the sign-out ends the attempt");
+        release.notify_one();
+        let (st, r) = finish.await.unwrap();
+        assert_eq!(st, StatusCode::CONFLICT, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("changed meanwhile"), "{r}");
+        let m = tidal_unofficial::load(&s.library.lock().unwrap(), &accounts::Who::Owner);
+        assert!(
+            m.session.is_none() && !m.enabled,
+            "signed out stays signed out (session kept: {})",
+            m.session.is_some()
+        );
+        let (_, si) = call(&app, "GET", signin, None).await;
+        assert!(si["in_use"].is_null(), "{si}");
+    }
+
+    /// Owner report (iPad, 2026-11-04): an album showed every song twice, the NAS file and an old
+    /// homeserver copy whose file is gone. The album page and its tracks show each song once,
+    /// play-all gets one per song, and a song kept in two present copies lists them as `versions`.
+    #[tokio::test]
+    async fn album_shows_one_row_per_song_with_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (aid, nas, kept, home) = {
+            let lib = s.library.lock().unwrap();
+            let album = pm_model::Album {
+                id: None,
+                title: "Crossroad: Unplugged Live".into(),
+                album_artist: Some("Calvin Russell".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(1997),
+                upc: None,
+                total_discs: None,
+            };
+            let mut ids = Vec::new();
+            for (no, path) in [
+                (1, "music/Roon/01.flac"),
+                (
+                    1,
+                    "homeserver/data/files/u/priv/pubky.music/files/aaaaaaaaaaaaaaaa-01.flac",
+                ),
+                (2, "music/Roon/02.flac"),
+                (
+                    2,
+                    "homeserver/data/files/u/priv/pubky.music/files/bbbbbbbbbbbbbbbb-02.flac",
+                ),
+            ] {
+                let mut tr = untagged_track(dir.path().join(path), &format!("Song {no}"), "Calvin Russell");
+                tr.album = Some(album.clone());
+                tr.track_no = Some(no);
+                tr.duration_ms = Some(60_000);
+                ids.push(lib.upsert_track(&tr).unwrap().0);
+            }
+            // The copy of song 1 was deleted; the copy of song 2 is still there
+            let gone = dir
+                .path()
+                .join("homeserver/data/files/u/priv/pubky.music/files/aaaaaaaaaaaaaaaa-01.flac");
+            let root = dir.path().join("homeserver/data/files/u/priv/pubky.music/files");
+            let scan = lib.begin_scan(&root).unwrap();
+            lib.mark_file_seen(&root.join("bbbbbbbbbbbbbbbb-02.flac"), scan)
+                .unwrap();
+            assert_eq!(lib.mark_missing_under(&root, scan).unwrap(), 1, "{gone:?}");
+            let aid = lib
+                .get_track(pm_model::TrackId(ids[0]))
+                .unwrap()
+                .unwrap()
+                .album
+                .unwrap()
+                .id
+                .unwrap();
+            (aid, ids[0], ids[2], ids[3])
+        };
+        let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        let songs = al["songs"].as_array().unwrap();
+        assert_eq!(songs.len(), 2, "{al}");
+        assert_eq!(songs[0]["track_id"], nas);
+        assert!(
+            songs[0].get("versions").is_none(),
+            "one present copy: no versions {al}"
+        );
+        assert_eq!(
+            songs[1]["track_id"], kept,
+            "the NAS file over the homeserver copy"
+        );
+        let v = songs[1]["versions"].as_array().unwrap();
+        assert_eq!(v.len(), 2, "{al}");
+        assert_eq!(
+            (v[0]["track_id"].as_i64(), v[0]["best"].as_bool()),
+            (Some(kept), Some(true))
+        );
+        assert_eq!(v[1]["track_id"], home);
+        assert_eq!(v[1]["source"], "homeserver");
+        assert!(v[1].get("path").is_none(), "no file paths in versions");
+        let (st, tr) = call(&app, "GET", &format!("/v1/library/albums/{aid}/tracks"), None).await;
+        assert_eq!(st, StatusCode::OK, "{tr}");
+        assert_eq!(
+            tr["tracks"].as_array().unwrap().len(),
+            2,
+            "play-all queues one per song"
+        );
+        assert_eq!(
+            tr["versions"][kept.to_string()].as_array().unwrap().len(),
+            2,
+            "{tr}"
+        );
+    }
+
+    /// PR #268 review (Claude H1): a node-only favourite of a song whose file is gone for a while
+    /// (a NAS share not mounted at a scan) is kept, and is there again when the file is back.
+    #[tokio::test]
+    async fn a_favourite_survives_its_file_going_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let nas = dir.path().join("nas");
+        let id = {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(nas.join("01.flac"), "Song", "Someone"))
+                .unwrap()
+                .0
+        };
+        let body = serde_json::json!({ "track_id": id });
+        let (st, b) = call(&app, "PUT", "/v1/bookmarks", Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+        {
+            let lib = s.library.lock().unwrap();
+            let scan = lib.begin_scan(&nas).unwrap();
+            lib.mark_missing_under(&nas, scan).unwrap();
+        }
+        // Reading the favourites tidies node-only ones: the gone song must stay
+        let (st, _) = call(&app, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+        {
+            let lib = s.library.lock().unwrap();
+            let scan = lib.begin_scan(&nas).unwrap();
+            lib.mark_file_seen(&nas.join("01.flac"), scan).unwrap();
+        }
+        let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
 
     /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).

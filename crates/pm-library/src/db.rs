@@ -31,6 +31,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (15, include_str!("migrations/0015_mb_matches.sql")),
     (16, include_str!("migrations/0016_bookmarks.sql")),
     (17, include_str!("migrations/0017_library_edits.sql")),
+    (18, include_str!("migrations/0018_identify_review.sql")),
 ];
 
 pub struct Library {
@@ -96,6 +97,81 @@ pub struct SuggestionRow {
     pub source: String,
 }
 
+/// One song of a batch confirmation (album review): the suggestion the owner picked, and what
+/// they saw, so a suggestion that changed meanwhile is not confirmed by mistake.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ConfirmChoice {
+    pub track_id: i64,
+    pub suggestion_id: i64,
+    pub recording_mbid: String,
+}
+
+/// A choice that no longer holds: `gone` (the suggestion or song is no more), `changed` (it is
+/// for another song or recording now), `identified` (the song got an identity meanwhile) or
+/// `duplicate` (the same song twice in one batch).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StaleChoice {
+    pub track_id: i64,
+    pub suggestion_id: i64,
+    pub reason: String,
+}
+
+/// How a batch confirmation went: all stored (the songs, in order), or none, with every choice
+/// that went stale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfirmReport {
+    Confirmed(Vec<i64>),
+    Stale(Vec<StaleChoice>),
+}
+
+/// What a run found for a song, to store in one step ([`Library::settle`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettleAnswer {
+    Identified {
+        recording: MusicUri,
+        confidence: Confidence,
+        acoustid: Option<String>,
+        detail: String,
+        release: Option<Mbid>,
+        input_key: Option<String>,
+    },
+    Suggest {
+        candidates: Vec<crate::identify::Candidate>,
+        input_key: Option<String>,
+    },
+    /// `unknown` or `error`.
+    State {
+        state: String,
+        detail: Option<String>,
+        input_key: Option<String>,
+    },
+}
+
+/// What [`Library::settle`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// Stored as found.
+    Stored,
+    /// The song has an identity already (the owner's, its tags, another run's): left as it is.
+    Kept,
+    /// The recording found is one the owner rejected for the song: not stored (the song is
+    /// "unknown").
+    Rejected,
+    /// Every suggestion was one the owner rejected: the song is "unknown".
+    Empty,
+    /// The song changed since the run read it (a rescan replaced its file or changed its tags):
+    /// the answer is for what it was, so nothing is stored; the next run checks it again.
+    Changed,
+}
+
+/// Whether a suggestion still is what the caller saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuggestionCheck {
+    Holds,
+    Gone,
+    Changed,
+}
+
 /// How much of the library has a canonical identity.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IdentityCounts {
@@ -120,6 +196,9 @@ pub struct IdentifiedBy {
     pub album: u64,
     pub fingerprint: u64,
     pub you: u64,
+    /// By a search of their exact title, artist and length.
+    #[serde(default)]
+    pub title_artist: u64,
 }
 
 /// A bookmark as stored locally (a social v1 bookmark of a canonical music URL).
@@ -502,6 +581,11 @@ impl Library {
             ),
             None => (None, None, None),
         };
+        // What identification went by (the file, its tags) before this write
+        let before: Option<String> = match existing {
+            Some(id) => identify_input_of(&tx, id, &path)?,
+            None => None,
+        };
         let track_id = match existing {
             Some(id) => {
                 tx.execute(
@@ -509,9 +593,9 @@ impl Library {
                     // found (fingerprint, release match, folder match, the owner's confirmation).
                     "UPDATE tracks SET title=?2, album_id=?3, track_no=?4, disc_no=?5, duration_ms=?6, recording_mbid=?7, isrc=?8,
                      acoustid=COALESCE(?9, acoustid),
-                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
-                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
-                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
+                     canonical_uri=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') THEN canonical_uri ELSE ?10 END,
+                     canonical_confidence_score=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') THEN canonical_confidence_score ELSE ?12 END,
+                     canonical_confidence_source=CASE WHEN ?10 IS NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') THEN canonical_confidence_source ELSE ?11 END,
                      replaygain_track_gain_db=?13, replaygain_album_gain_db=?14
                      WHERE id=?1",
                     params![
@@ -580,6 +664,26 @@ impl Library {
             album_text.push(' ');
             album_text.push_str(g);
         }
+        // The file replaced or its tags changed: suggestions found for what it was are dropped (a
+        // review page loaded before can't confirm them), and a song without an identity is
+        // checked again by the next run. An identity stays, as it always did.
+        if before.is_some() && before != identify_input_of(&tx, track_id, &path)? {
+            let open: bool = tx.query_row(
+                "SELECT canonical_uri IS NULL FROM tracks WHERE id = ?1",
+                params![track_id],
+                |r| r.get(0),
+            )?;
+            if open {
+                tx.execute(
+                    "DELETE FROM identify_suggestions WHERE track_id = ?1",
+                    params![track_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM identify_state WHERE track_id = ?1",
+                    params![track_id],
+                )?;
+            }
+        }
         tx.execute("DELETE FROM tracks_fts WHERE rowid = ?1", params![track_id])?;
         tx.execute(
             "INSERT INTO tracks_fts(rowid, track_id, title, artist, album) VALUES (?1, ?1, ?2, ?3, ?4)",
@@ -589,9 +693,13 @@ impl Library {
         Ok(TrackId(track_id))
     }
 
+    /// A track by id, also when its file is gone (favourites, playlists, plays and devices keep
+    /// it; lists leave it out). Its present file when it has one.
     pub fn get_track(&self, id: TrackId) -> Result<Option<Track>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!("{TRACK_SELECT} WHERE t.id = ?1"))?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} WHERE t.id = ?1 ORDER BY fi.missing LIMIT 1"
+        ))?;
         let row = stmt.query_row(params![id.0], row_to_track_raw).optional()?;
         match row {
             Some(raw) => Ok(Some(finish_track(&conn, raw)?)),
@@ -602,8 +710,10 @@ impl Library {
     /// Tracks ordered by id, keyset-paged: pass the last id seen.
     pub fn list_tracks(&self, after: Option<TrackId>, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare_cached(&format!("{TRACK_SELECT} WHERE t.id > ?1 ORDER BY t.id LIMIT ?2"))?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "{} WHERE t.id > ?1 ORDER BY t.id LIMIT ?2",
+            present_select()
+        ))?;
         let raws: Vec<RawTrack> = stmt
             .query_map(
                 params![after.map(|a| a.0).unwrap_or(0), limit as i64],
@@ -616,7 +726,8 @@ impl Library {
     /// Tracks by id, `limit` from `offset` (clients that page by offset: Subsonic `search3`).
     pub fn tracks_page(&self, offset: u32, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!("{TRACK_SELECT} ORDER BY t.id LIMIT ?1 OFFSET ?2"))?;
+        let mut stmt =
+            conn.prepare_cached(&format!("{} ORDER BY t.id LIMIT ?1 OFFSET ?2", present_select()))?;
         let raws: Vec<RawTrack> = stmt
             .query_map(params![limit as i64, offset as i64], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
@@ -631,7 +742,8 @@ impl Library {
         }
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} JOIN tracks_fts f ON f.rowid = t.id WHERE tracks_fts MATCH ?1 ORDER BY bm25(tracks_fts) LIMIT ?2"
+            "{} JOIN tracks_fts f ON f.rowid = t.id WHERE tracks_fts MATCH ?1 ORDER BY bm25(tracks_fts) LIMIT ?2",
+            present_select()
         ))?;
         let raws: Vec<RawTrack> = stmt
             .query_map(params![q, limit as i64], row_to_track_raw)?
@@ -654,7 +766,9 @@ impl Library {
 
     fn tracks_where(&self, clause: &str, arg: String) -> Result<Vec<Track>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!("{TRACK_SELECT} WHERE {clause} ORDER BY t.id"))?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "{TRACK_SELECT} WHERE {clause} ORDER BY fi.missing, t.id"
+        ))?;
         let raws: Vec<RawTrack> = stmt
             .query_map(params![arg], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
@@ -1016,7 +1130,7 @@ impl Library {
                 " AND EXISTS (SELECT 1 FROM tracks t JOIN files f ON f.track_id = t.id WHERE t.album_id = albums.id AND f.missing = 0 AND {})",
                 f.predicate()
             ),
-            None => String::new(),
+            None => format!(" AND {ALBUM_PRESENT}"),
         };
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums WHERE id > ?1{filter} ORDER BY id LIMIT ?2"
@@ -1054,15 +1168,31 @@ impl Library {
         Ok(out)
     }
 
+    /// An album's songs, one row per song: copies of the same song (a homeserver copy, another
+    /// format) show once, as their best copy (see `songs_in_order`).
     pub fn album_tracks(&self, album_id: i64) -> Result<Vec<Track>> {
+        Ok(songs_only(self.album_songs(album_id)?))
+    }
+
+    /// Every track of an album, files gone or not (what an offline device keeps for it).
+    pub fn album_track_ids(&self, album_id: i64) -> Result<Vec<i64>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} WHERE t.album_id = ?1 ORDER BY t.disc_no, t.track_no, t.id"
-        ))?;
-        let raws: Vec<RawTrack> = stmt
-            .query_map(params![album_id], row_to_track_raw)?
-            .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        let mut stmt = conn.prepare_cached("SELECT id FROM tracks WHERE album_id = ?1 ORDER BY id")?;
+        let v = stmt
+            .query_map(params![album_id], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<i64>, _>>()?;
+        Ok(v)
+    }
+
+    /// [`Library::album_tracks`] with each song's other copies.
+    pub fn album_songs(&self, album_id: i64) -> Result<Vec<Song>> {
+        let conn = self.lock();
+        let ids = candidates(
+            &conn,
+            &format!("SELECT t.id, t.album_id FROM tracks t WHERE t.album_id = ?1 AND {TRACK_PRESENT} ORDER BY t.disc_no, t.track_no, t.id"),
+            params![album_id],
+        )?;
+        songs_in_order(&conn, ids, None)
     }
 
     // ----- browsing (artists, albums by artist, random) ----------------
@@ -1070,35 +1200,46 @@ impl Library {
     /// Every artist with how many albums and tracks they appear on, by name.
     pub fn list_artists(&self) -> Result<Vec<ArtistSummary>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT a.id, a.name, a.mbid,
-                    COUNT(DISTINCT t.album_id) AS albums, COUNT(DISTINCT t.id) AS tracks
+        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT a.id, a.name, a.mbid, t.id, t.album_id
              FROM artists a
              JOIN track_artists ta ON ta.artist_id = a.id
              JOIN tracks t ON t.id = ta.track_id
-             GROUP BY a.id ORDER BY a.name COLLATE NOCASE",
-        )?;
+             WHERE {TRACK_PRESENT}
+             ORDER BY a.name COLLATE NOCASE, a.id"
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, i64>(3)?,
-                r.get::<_, i64>(4)?,
+                r.get::<_, Option<i64>>(4)?,
             ))
         })?;
-        let mut out = Vec::new();
+        // Artists in name order, each with its albums and songs (copies of a song count once)
+        let mut out: Vec<(i64, String, Option<String>, SongCount)> = Vec::new();
         for r in rows {
-            let (id, name, mbid, albums, tracks) = r?;
-            out.push(ArtistSummary {
-                id,
-                name,
-                mbid: opt_mbid(mbid, "artists.mbid")?,
-                albums: albums as u64,
-                tracks: tracks as u64,
-            });
+            let (id, name, mbid, track, album) = r?;
+            if out.last().is_none_or(|l| l.0 != id) {
+                out.push((id, name, mbid, SongCount::default()));
+            }
+            if let Some(last) = out.last_mut() {
+                last.3.add(&reps, track, album);
+            }
         }
-        Ok(out)
+        out.into_iter()
+            .map(|(id, name, mbid, c)| {
+                Ok(ArtistSummary {
+                    id,
+                    name,
+                    mbid: opt_mbid(mbid, "artists.mbid")?,
+                    albums: c.albums.len() as u64,
+                    tracks: c.songs.len() as u64,
+                })
+            })
+            .collect()
     }
 
     pub fn get_artist(&self, id: i64) -> Result<Option<ArtistSummary>> {
@@ -1109,31 +1250,38 @@ impl Library {
     /// artist's list). `None` when every song has one.
     pub fn unknown_artist(&self) -> Result<Option<ArtistSummary>> {
         let conn = self.lock();
-        let (tracks, albums): (i64, i64) = conn.query_row(
-            "SELECT COUNT(*), COUNT(DISTINCT t.album_id) FROM tracks t
-             WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id)",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?;
-        Ok((tracks > 0).then(|| ArtistSummary {
+        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT t.id, t.album_id FROM tracks t
+             WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) AND {TRACK_PRESENT}"
+        ))?;
+        let mut count = SongCount::default();
+        for r in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)))? {
+            let (track, album) = r?;
+            count.add(&reps, track, album);
+        }
+        Ok((!count.songs.is_empty()).then(|| ArtistSummary {
             id: UNKNOWN_ARTIST_ID,
             name: "Unknown artist".into(),
             mbid: None,
-            albums: albums as u64,
-            tracks: tracks as u64,
+            albums: count.albums.len() as u64,
+            tracks: count.songs.len() as u64,
         }))
     }
 
     /// The songs behind [`Library::unknown_artist`], by album then track number.
     pub fn tracks_without_artist(&self) -> Result<Vec<Track>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) ORDER BY al.title, t.disc_no, t.track_no, t.title"
-        ))?;
-        let raws: Vec<RawTrack> = stmt
-            .query_map([], row_to_track_raw)?
-            .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        let ids = candidates(
+            &conn,
+            &format!(
+                "SELECT t.id, t.album_id FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
+                 WHERE NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) AND {TRACK_PRESENT}
+                 ORDER BY al.title, t.disc_no, t.track_no, t.title, t.id"
+            ),
+            [],
+        )?;
+        Ok(songs_only(songs_in_order(&conn, ids, None)?))
     }
 
     /// Albums an artist appears on, by year then title.
@@ -1144,7 +1292,8 @@ impl Library {
              FROM albums al
              JOIN tracks t ON t.album_id = al.id
              JOIN track_artists ta ON ta.track_id = t.id
-             WHERE ta.artist_id = ?1 ORDER BY al.year, al.title COLLATE NOCASE",
+             WHERE ta.artist_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND +f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path))
+             ORDER BY al.year, al.title COLLATE NOCASE",
         )?;
         let v = stmt
             .query_map(params![artist_id], row_to_album)?
@@ -1164,31 +1313,51 @@ impl Library {
         a.transpose()
     }
 
+    /// An artist's songs, one row per song ([`Library::album_tracks`]).
     pub fn artist_tracks(&self, artist_id: i64) -> Result<Vec<Track>> {
+        Ok(songs_only(self.artist_songs(artist_id)?))
+    }
+
+    /// [`Library::artist_tracks`] with each song's other copies.
+    pub fn artist_songs(&self, artist_id: i64) -> Result<Vec<Song>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} JOIN track_artists ta ON ta.track_id = t.id WHERE ta.artist_id = ?1 ORDER BY al.year, al.title, t.disc_no, t.track_no"
-        ))?;
-        let raws: Vec<RawTrack> = stmt
-            .query_map(params![artist_id], row_to_track_raw)?
-            .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        let ids = candidates(
+            &conn,
+            &format!(
+                "SELECT t.id, t.album_id FROM tracks t JOIN track_artists ta ON ta.track_id = t.id
+                 LEFT JOIN albums al ON al.id = t.album_id
+                 WHERE ta.artist_id = ?1 AND {TRACK_PRESENT} ORDER BY al.year, al.title, t.disc_no, t.track_no, t.id"
+            ),
+            params![artist_id],
+        )?;
+        songs_in_order(&conn, ids, None)
     }
 
     pub fn random_tracks(&self, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!("{TRACK_SELECT} ORDER BY RANDOM() LIMIT ?1"))?;
-        let raws: Vec<RawTrack> = stmt
-            .query_map(params![limit as i64], row_to_track_raw)?
-            .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        // Songs drawn, not files: a song kept in two copies is no likelier than one kept once
+        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let songs: std::collections::BTreeSet<i64> = reps.values().copied().collect();
+        let list = format!(
+            "[{}]",
+            songs.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        );
+        let ids = candidates(
+            &conn,
+            "SELECT t.id, t.album_id FROM json_each(?1) j JOIN tracks t ON t.id = j.value ORDER BY RANDOM() LIMIT ?2",
+            params![list, limit as i64],
+        )?;
+        Ok(songs_only(songs_in_order(&conn, ids, None)?))
     }
 
     /// Albums newest-first by id (a proxy for "recently added").
     pub fn recent_albums(&self, offset: u32, limit: u32) -> Result<Vec<Album>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+            &format!(
+                "SELECT id, title, album_artist, release_mbid, release_group_mbid, year, upc, total_discs FROM albums
+                 WHERE {ALBUM_PRESENT} ORDER BY id DESC LIMIT ?1 OFFSET ?2"
+            ),
         )?;
         let v = stmt
             .query_map(params![limit as i64, offset as i64], row_to_album)?
@@ -1475,6 +1644,33 @@ impl Library {
         Ok(v)
     }
 
+    /// Every present library file whose path starts with `prefix` (a folder ending in its separator,
+    /// a share's or a drive's key ending in `/`), by path: its size and the first 16 hex digits of
+    /// its content hash when one is kept for that size. The range on the path uses its index.
+    pub fn files_under(&self, prefix: &str) -> Result<Vec<(String, u64, Option<String>)>> {
+        let Some(last) = prefix.chars().last() else {
+            return Ok(Vec::new());
+        };
+        // Every path with this prefix sorts before the prefix with its last character raised by one
+        let upper = format!(
+            "{}{}",
+            &prefix[..prefix.len() - last.len_utf8()],
+            char::from_u32(last as u32 + 1).unwrap_or(char::MAX)
+        );
+        let conn = self.lock();
+        let v = conn
+            .prepare(
+                "SELECT f.path, f.size_bytes, substr(h.blake3, 1, 16) FROM files f
+                 LEFT JOIN file_hashes h ON h.path = f.path AND h.size_bytes = f.size_bytes
+                 WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2 ORDER BY f.path",
+            )?
+            .query_map(params![prefix, upper], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64, r.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(v)
+    }
+
     /// Every present file under `root` with its album's id and title. The scanner uses it to
     /// find albums that one folder's files were split into.
     pub fn album_files_under(&self, root: &Path) -> Result<Vec<(PathBuf, i64, String)>> {
@@ -1667,22 +1863,40 @@ impl Library {
     /// Every genre with track and album counts, by name.
     pub fn list_genres(&self) -> Result<Vec<GenreSummary>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT g.id, g.name, COUNT(DISTINCT t.id), COUNT(DISTINCT t.album_id)
+        let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT g.id, g.name, t.id, t.album_id
              FROM genres g JOIN track_genres tg ON tg.genre_id = g.id JOIN tracks t ON t.id = tg.track_id
-             GROUP BY g.id ORDER BY g.name COLLATE NOCASE",
-        )?;
-        let v = stmt
-            .query_map([], |r| {
-                Ok(GenreSummary {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    tracks: r.get::<_, i64>(2)?.max(0) as u64,
-                    albums: r.get::<_, i64>(3)?.max(0) as u64,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(v)
+             WHERE {TRACK_PRESENT}
+             ORDER BY g.name COLLATE NOCASE, g.id"
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        let mut out: Vec<(i64, String, SongCount)> = Vec::new();
+        for r in rows {
+            let (id, name, track, album) = r?;
+            if out.last().is_none_or(|l| l.0 != id) {
+                out.push((id, name, SongCount::default()));
+            }
+            if let Some(last) = out.last_mut() {
+                last.2.add(&reps, track, album);
+            }
+        }
+        Ok(out
+            .into_iter()
+            .map(|(id, name, c)| GenreSummary {
+                id,
+                name,
+                tracks: c.songs.len() as u64,
+                albums: c.albums.len() as u64,
+            })
+            .collect())
     }
 
     pub fn get_genre(&self, id: i64) -> Result<Option<GenreSummary>> {
@@ -1702,7 +1916,7 @@ impl Library {
         let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
              FROM albums al JOIN tracks t ON t.album_id = al.id JOIN track_genres tg ON tg.track_id = t.id
-             WHERE tg.genre_id = ?1 ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
+             WHERE tg.genre_id = ?1 AND EXISTS (SELECT 1 FROM files f WHERE f.track_id = t.id AND +f.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = f.path)) ORDER BY al.album_artist COLLATE NOCASE, al.year, al.title COLLATE NOCASE",
         )?;
         let v = stmt
             .query_map(params![genre_id], row_to_album)?
@@ -1712,14 +1926,17 @@ impl Library {
 
     pub fn genre_tracks(&self, genre_id: i64, limit: u32) -> Result<Vec<Track>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(&format!(
-            "{TRACK_SELECT} JOIN track_genres tg ON tg.track_id = t.id WHERE tg.genre_id = ?1
-             ORDER BY al.album_artist COLLATE NOCASE, al.title COLLATE NOCASE, t.disc_no, t.track_no LIMIT ?2"
-        ))?;
-        let raws: Vec<RawTrack> = stmt
-            .query_map(params![genre_id, limit as i64], row_to_track_raw)?
-            .collect::<std::result::Result<_, _>>()?;
-        raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+        let ids = candidates(
+            &conn,
+            &format!(
+                "SELECT t.id, t.album_id FROM tracks t JOIN track_genres tg ON tg.track_id = t.id
+                 LEFT JOIN albums al ON al.id = t.album_id
+                 WHERE tg.genre_id = ?1 AND {TRACK_PRESENT}
+                 ORDER BY al.album_artist COLLATE NOCASE, al.title COLLATE NOCASE, t.disc_no, t.track_no, t.id"
+            ),
+            params![genre_id],
+        )?;
+        Ok(songs_only(songs_in_order(&conn, ids, Some(limit as usize))?))
     }
 
     // ----- tags -------------------------------------------------------------
@@ -2112,10 +2329,10 @@ impl Library {
     pub fn recently_played_albums(&self, limit: u32) -> Result<Vec<Album>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
+            &format!("SELECT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
              FROM albums al JOIN (SELECT t.album_id AS album_id, MAX(p.played_at) AS last FROM plays p
                  JOIN tracks t ON t.id = p.track_id WHERE t.album_id IS NOT NULL GROUP BY t.album_id) r
-             ON r.album_id = al.id ORDER BY r.last DESC LIMIT ?1",
+             ON r.album_id = al.id WHERE {ALBUM_PRESENT_AL} ORDER BY r.last DESC LIMIT ?1"),
         )?;
         let v = stmt
             .query_map(params![limit as i64], row_to_album)?
@@ -2127,10 +2344,10 @@ impl Library {
     pub fn most_played_albums(&self, limit: u32) -> Result<Vec<Album>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
+            &format!("SELECT al.id, al.title, al.album_artist, al.release_mbid, al.release_group_mbid, al.year, al.upc, al.total_discs
              FROM albums al JOIN (SELECT t.album_id AS album_id, COUNT(*) AS n, MAX(p.played_at) AS last FROM plays p
                  JOIN tracks t ON t.id = p.track_id WHERE t.album_id IS NOT NULL GROUP BY t.album_id) r
-             ON r.album_id = al.id ORDER BY r.n DESC, r.last DESC LIMIT ?1",
+             ON r.album_id = al.id WHERE {ALBUM_PRESENT_AL} ORDER BY r.n DESC, r.last DESC LIMIT ?1"),
         )?;
         let v = stmt
             .query_map(params![limit as i64], row_to_album)?
@@ -2234,7 +2451,8 @@ impl Library {
 
     /// Set a track's canonical identity found after the scan (fingerprint,
     /// release match, the owner's confirmation). Tag-derived identities are
-    /// set by the scanner; this never overwrites one of those.
+    /// set by the scanner; this never overwrites one of those, and only the owner replaces the
+    /// owner's own choice.
     pub fn set_identity(
         &self,
         track: i64,
@@ -2245,7 +2463,8 @@ impl Library {
         let n = self.lock().execute(
             "UPDATE tracks SET canonical_uri = ?2, canonical_confidence_source = ?3, canonical_confidence_score = ?4,
              acoustid = COALESCE(?5, acoustid)
-             WHERE id = ?1 AND (canonical_confidence_source IS NULL OR canonical_confidence_source NOT IN ('tagged_mbid','tagged_isrc'))",
+             WHERE id = ?1 AND (canonical_confidence_source IS NULL OR canonical_confidence_source NOT IN ('tagged_mbid','tagged_isrc'))
+               AND (?3 = 'confirmed_by_user' OR COALESCE(canonical_confidence_source, '') <> 'confirmed_by_user')",
             params![track, uri.to_url(), confidence_source(&confidence), confidence.score() as f64, acoustid],
         )?;
         Ok(n > 0)
@@ -2295,7 +2514,7 @@ impl Library {
 
     pub fn identified_not_tagged(&self) -> Result<Vec<(Track, Option<Mbid>)>> {
         let tracks = self.tracks_where(
-            "t.canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','confirmed_by_user') AND t.canonical_uri LIKE ?1 || '%'",
+            "t.canonical_confidence_source IN ('fingerprint','fingerprint+release','album_fit','tag_match','confirmed_by_user') AND t.canonical_uri LIKE ?1 || '%'",
             "https://musicbrainz.org/recording/".into(),
         )?;
         let conn = self.lock();
@@ -2347,9 +2566,22 @@ impl Library {
     }
 
     pub fn add_suggestions(&self, track: i64, candidates: &[crate::identify::Candidate]) -> Result<()> {
-        let conn = self.lock();
-        for c in candidates {
-            conn.execute(
+        insert_suggestions(&self.lock(), track, candidates)
+    }
+}
+
+/// Add suggestions for a song, leaving out what the owner said "Not this" to.
+fn insert_suggestions(
+    conn: &Connection,
+    track: i64,
+    candidates: &[crate::identify::Candidate],
+) -> Result<()> {
+    for c in candidates {
+        // What the owner said "Not this" to stays out
+        if rejected(conn, track, &c.recording.to_string())? {
+            continue;
+        }
+        conn.execute(
                 "INSERT INTO identify_suggestions(track_id, recording_mbid, release_mbid, title, artist, release_title, score, source, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(track_id, recording_mbid) DO UPDATE SET score = MAX(score, excluded.score),
@@ -2368,10 +2600,11 @@ impl Library {
                     now_unix()
                 ],
             )?;
-        }
-        Ok(())
     }
+    Ok(())
+}
 
+impl Library {
     /// Open suggestions, grouped by track (best first within a track).
     /// One track's open suggestions, best first.
     pub fn suggestions_for(&self, track: i64) -> Result<Vec<SuggestionRow>> {
@@ -2410,6 +2643,7 @@ impl Library {
 
     /// The owner confirms a suggestion: the track gets that recording as its
     /// identity (`confirmed_by_user`) and its other suggestions go.
+    /// `None` when there is no such suggestion, or its song got an identity meanwhile.
     pub fn accept_suggestion(&self, id: i64) -> Result<Option<(i64, MusicUri)>> {
         let row: Option<(i64, String)> = self
             .lock()
@@ -2420,18 +2654,445 @@ impl Library {
             )
             .optional()?;
         let Some((track, mbid)) = row else { return Ok(None) };
-        let mbid = pm_model::Mbid::parse(&mbid).map_err(|_| LibraryError::Corrupt {
-            column: "identify_suggestions.recording_mbid",
-            value: mbid.clone(),
-        })?;
-        let uri = MusicUri::Recording { mbid };
-        self.set_identity(track, &uri, Confidence::ConfirmedByUser, None)?;
-        self.lock().execute(
-            "DELETE FROM identify_suggestions WHERE track_id = ?1",
-            params![track],
+        let choice = ConfirmChoice {
+            track_id: track,
+            suggestion_id: id,
+            recording_mbid: mbid,
+        };
+        let uri = recording_uri(&choice.recording_mbid)?;
+        match self.confirm_suggestions(&[choice])? {
+            ConfirmReport::Confirmed(_) => Ok(Some((track, uri))),
+            ConfirmReport::Stale(_) => Ok(None),
+        }
+    }
+
+    /// The owner confirms several suggestions at once (album review). Each choice must still be
+    /// open as the owner saw it: the suggestion there, for that song and recording, the song
+    /// without an identity, each song once. Then every song gets its recording
+    /// (`confirmed_by_user`) and loses its other suggestions, all in one transaction; otherwise
+    /// nothing is stored and the stale choices say why.
+    pub fn confirm_suggestions(&self, choices: &[ConfirmChoice]) -> Result<ConfirmReport> {
+        immediately(&mut self.lock(), |conn| {
+            let tx = conn.savepoint()?;
+            let mut stale = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut uris = Vec::with_capacity(choices.len());
+            for c in choices {
+                let why = |reason: &str| StaleChoice {
+                    track_id: c.track_id,
+                    suggestion_id: c.suggestion_id,
+                    reason: reason.into(),
+                };
+                if !seen.insert(c.track_id) {
+                    stale.push(why("duplicate"));
+                    continue;
+                }
+                let row: Option<(i64, String)> = tx
+                    .query_row(
+                        "SELECT track_id, recording_mbid FROM identify_suggestions WHERE id = ?1",
+                        params![c.suggestion_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((track, rec)) = row else {
+                    stale.push(why("gone"));
+                    continue;
+                };
+                if track != c.track_id || rec != c.recording_mbid {
+                    stale.push(why("changed"));
+                    continue;
+                }
+                let identified: Option<Option<String>> = tx
+                    .query_row(
+                        "SELECT canonical_uri FROM tracks WHERE id = ?1",
+                        params![track],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                match identified {
+                    None => stale.push(why("gone")),
+                    Some(Some(_)) => stale.push(why("identified")),
+                    Some(None) => uris.push((track, recording_uri(&rec)?)),
+                }
+            }
+            if !stale.is_empty() {
+                // Dropping the savepoint rolls back (nothing was written)
+                return Ok(ConfirmReport::Stale(stale));
+            }
+            let now = now_unix();
+            for (track, uri) in &uris {
+                tx.execute(
+                "UPDATE tracks SET canonical_uri = ?2, canonical_confidence_source = 'confirmed_by_user', canonical_confidence_score = ?3
+                 WHERE id = ?1 AND canonical_uri IS NULL",
+                params![track, uri.to_url(), Confidence::ConfirmedByUser.score() as f64],
+            )?;
+                tx.execute(
+                    "DELETE FROM identify_suggestions WHERE track_id = ?1",
+                    params![track],
+                )?;
+                tx.execute(
+                "INSERT INTO identify_state(track_id, state, detail, checked_at) VALUES (?1, 'identified', 'confirmed_by_user', ?2)
+                 ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at",
+                params![track, now],
+            )?;
+            }
+            tx.commit()?;
+            Ok(ConfirmReport::Confirmed(
+                uris.into_iter().map(|(t, _)| t).collect(),
+            ))
+        })
+    }
+
+    /// Songs with open suggestions and their file's path, in one cheap query (album review
+    /// groups them by folder, then reads only the page's songs).
+    pub fn suggested_track_paths(&self) -> Result<Vec<(i64, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND f.missing = 0
+             WHERE t.canonical_uri IS NULL AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)
+             ORDER BY t.id",
         )?;
-        self.set_identify_state(track, "identified", Some("confirmed_by_user"))?;
-        Ok(Some((track, uri)))
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// The open suggestions of these songs, best first within a song.
+    pub fn suggestions_for_tracks(&self, tracks: &[i64]) -> Result<Vec<SuggestionRow>> {
+        let conn = self.lock();
+        let mut out = Vec::new();
+        for chunk in tracks.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT id, track_id, recording_mbid, release_mbid, title, artist, release_title, score, source
+                 FROM identify_suggestions WHERE track_id IN ({marks}) ORDER BY track_id, score DESC, id"
+            ))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok(SuggestionRow {
+                    id: r.get(0)?,
+                    track_id: r.get(1)?,
+                    recording_mbid: r.get(2)?,
+                    release_mbid: r.get(3)?,
+                    title: r.get(4)?,
+                    artist: r.get(5)?,
+                    release_title: r.get(6)?,
+                    score: r.get::<_, f64>(7)? as f32,
+                    source: r.get(8)?,
+                })
+            })?;
+            for row in rows {
+                out.push(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Songs with open suggestions, in one query (album review groups them by folder).
+    pub fn suggested_tracks(&self) -> Result<Vec<Track>> {
+        self.tracks_where(
+            "t.canonical_uri IS NULL AND ?1 = '' AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)",
+            String::new(),
+        )
+    }
+
+    /// One suggestion by id, whatever its song's state.
+    pub fn suggestion_by_id(&self, id: i64) -> Result<Option<SuggestionRow>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT id, track_id, recording_mbid, release_mbid, title, artist, release_title, score, source
+                 FROM identify_suggestions WHERE id = ?1",
+                params![id],
+                |r| {
+                    Ok(SuggestionRow {
+                        id: r.get(0)?,
+                        track_id: r.get(1)?,
+                        recording_mbid: r.get(2)?,
+                        release_mbid: r.get(3)?,
+                        title: r.get(4)?,
+                        artist: r.get(5)?,
+                        release_title: r.get(6)?,
+                        score: r.get::<_, f64>(7)? as f32,
+                        source: r.get(8)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// How long identification reuses a MusicBrainz answer (30 days).
+    pub const IDENTIFY_MB_TTL_SECS: i64 = 30 * 24 * 3600;
+    /// The most MusicBrainz answers identification keeps (oldest go first).
+    pub const IDENTIFY_MB_MAX: i64 = 50_000;
+
+    /// A MusicBrainz answer kept no earlier than `since`: `Some(None)` is a kept "nothing there".
+    pub fn identify_mb_cached(&self, key: &str, since: i64) -> Result<Option<Option<String>>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT body FROM identify_mb_cache WHERE key = ?1 AND fetched_at >= ?2",
+                params![key, since],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn save_identify_mb(&self, key: &str, body: Option<&str>) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO identify_mb_cache(key, body, fetched_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET body = excluded.body, fetched_at = excluded.fetched_at",
+            params![key, body, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// Keep identification's caches bounded: MusicBrainz answers older than their time or beyond
+    /// the `max` newest, and content keys of files the library no longer has. Rows dropped.
+    pub fn prune_identify_cache(&self, now: i64, max: i64) -> Result<usize> {
+        let conn = self.lock();
+        let mut n = conn.execute(
+            "DELETE FROM identify_mb_cache WHERE fetched_at < ?1",
+            params![now - Self::IDENTIFY_MB_TTL_SECS],
+        )?;
+        n += conn.execute(
+            "DELETE FROM identify_mb_cache WHERE key IN (SELECT key FROM identify_mb_cache ORDER BY fetched_at DESC LIMIT -1 OFFSET ?1)",
+            params![max.max(0)],
+        )?;
+        n += conn.execute(
+            "DELETE FROM identify_file_keys WHERE path NOT IN (SELECT path FROM files)",
+            [],
+        )?;
+        Ok(n)
+    }
+
+    /// A file's content key kept while its size and time are these.
+    pub fn cached_file_key(&self, path: &Path, size: u64, mtime: i64) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT file_key FROM identify_file_keys WHERE path = ?1 AND size = ?2 AND mtime = ?3",
+                params![path.to_string_lossy(), size as i64, mtime],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn save_file_key(&self, path: &Path, size: u64, mtime: i64, key: &str) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO identify_file_keys(path, size, mtime, file_key) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, file_key = excluded.file_key",
+            params![path.to_string_lossy(), size as i64, mtime, key],
+        )?;
+        Ok(())
+    }
+
+    /// Remember what a song looked like when it was checked.
+    pub fn set_identify_input(&self, track: i64, input_key: &str) -> Result<()> {
+        self.lock().execute(
+            "UPDATE identify_state SET input_key = ?2 WHERE track_id = ?1",
+            params![track, input_key],
+        )?;
+        Ok(())
+    }
+
+    /// Songs a plain run compares with what they look like now (no identity): "not found" songs
+    /// (unknown or error) with what they looked like when checked (those checked before this was
+    /// kept have none and are not compared), and songs waiting for review, with or without it
+    /// (one an earlier version of identification left waiting is checked again once: owner,
+    /// 2026-11-04, most of them settle now).
+    pub fn identify_inputs(&self) -> Result<std::collections::HashMap<i64, Option<String>>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT s.track_id, s.input_key FROM identify_state s JOIN tracks t ON t.id = s.track_id
+             WHERE t.canonical_uri IS NULL AND ((s.state IN ('unknown','error') AND s.input_key IS NOT NULL) OR s.state = 'suggested')",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Store what a run found for a song in one step, against what holds now: a song with an
+    /// identity (the owner's choice made meanwhile, its tags, another run) is left as it is
+    /// (`Kept`); a recording the owner rejected for it is not stored (`Rejected`, the song
+    /// "unknown"); suggestions leave out rejected recordings, and none left makes the song
+    /// "unknown" (`Empty`), never "suggested" with nothing to review. Identity, state, release and
+    /// what the song looked like are written together or not at all.
+    pub fn settle(&self, track: i64, answer: &SettleAnswer) -> Result<Settled> {
+        self.settle_checked(track, answer, None)
+    }
+
+    /// [`Self::settle`], for an answer the run found for the song as it was when it read it
+    /// (`read`, from [`Self::input_generations`]): when a rescan replaced the file or changed the
+    /// tags since, the answer is stale and nothing is stored (`Changed`).
+    pub fn settle_checked(&self, track: i64, answer: &SettleAnswer, read: Option<&str>) -> Result<Settled> {
+        immediately(&mut self.lock(), |conn| {
+            if let Some(read) = read {
+                if identify_input_by_track(conn, track)?.as_deref() != Some(read) {
+                    return Ok(Settled::Changed);
+                }
+            }
+            let tx = conn.savepoint()?;
+            let identified: Option<bool> = tx
+                .query_row(
+                    "SELECT canonical_uri IS NOT NULL FROM tracks WHERE id = ?1",
+                    params![track],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            // A song gone meanwhile, or with an identity: nothing to do (the savepoint rolls back)
+            if identified != Some(false) {
+                return Ok(Settled::Kept);
+            }
+            let put_state = |state: &str,
+                             detail: Option<&str>,
+                             release: Option<String>,
+                             input: Option<&str>| {
+                tx.execute(
+                "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, input_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
+                   release_mbid = excluded.release_mbid, input_key = COALESCE(excluded.input_key, identify_state.input_key)",
+                params![track, state, detail, now_unix(), release, input],
+            )
+            };
+            let done = match answer {
+                SettleAnswer::Identified {
+                    recording,
+                    confidence,
+                    acoustid,
+                    detail,
+                    release,
+                    input_key,
+                } => {
+                    let rec = match recording {
+                        MusicUri::Recording { mbid } => mbid.to_string(),
+                        other => other.to_url(),
+                    };
+                    if rejected(&tx, track, &rec)? {
+                        put_state("unknown", Some("rejected by you"), None, input_key.as_deref())?;
+                        Settled::Rejected
+                    } else {
+                        tx.execute(
+                        "UPDATE tracks SET canonical_uri = ?2, canonical_confidence_source = ?3, canonical_confidence_score = ?4,
+                         acoustid = COALESCE(?5, acoustid) WHERE id = ?1 AND canonical_uri IS NULL",
+                        params![
+                            track,
+                            recording.to_url(),
+                            confidence_source(confidence),
+                            confidence.score() as f64,
+                            acoustid
+                        ],
+                    )?;
+                        put_state(
+                            "identified",
+                            Some(detail),
+                            release.map(|r| r.to_string()),
+                            input_key.as_deref(),
+                        )?;
+                        // Options an earlier run left for it are settled with it
+                        tx.execute(
+                            "DELETE FROM identify_suggestions WHERE track_id = ?1",
+                            params![track],
+                        )?;
+                        Settled::Stored
+                    }
+                }
+                SettleAnswer::Suggest {
+                    candidates,
+                    input_key,
+                } => {
+                    insert_suggestions(&tx, track, candidates)?;
+                    let open: i64 = tx.query_row(
+                        "SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1",
+                        params![track],
+                        |r| r.get(0),
+                    )?;
+                    if open > 0 {
+                        put_state("suggested", None, None, input_key.as_deref())?;
+                        Settled::Stored
+                    } else {
+                        let why = (!candidates.is_empty()).then_some("suggestions rejected");
+                        put_state("unknown", why, None, input_key.as_deref())?;
+                        Settled::Empty
+                    }
+                }
+                SettleAnswer::State {
+                    state,
+                    detail,
+                    input_key,
+                } => {
+                    put_state(state, detail.as_deref(), None, input_key.as_deref())?;
+                    Settled::Stored
+                }
+            };
+            tx.commit()?;
+            Ok(done)
+        })
+    }
+
+    /// What identification goes by for every song (its file's size and time and its tags, see
+    /// [`Self::settle_checked`]), by track, read when a run starts.
+    pub fn input_generations(&self) -> Result<std::collections::HashMap<i64, String>> {
+        let ids: Vec<(i64, String)> = {
+            let conn = self.lock();
+            let mut stmt = conn.prepare("SELECT track_id, path FROM files WHERE missing = 0")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        let conn = self.lock();
+        let mut out = std::collections::HashMap::new();
+        for (id, path) in ids {
+            if let Some(g) = identify_input_of(&conn, id, &path)? {
+                out.insert(id, g);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether suggestion `id` still is what the caller saw: there, and for `track` and
+    /// `recording` when given (an id from a stale page names nothing else: ids are never reused).
+    pub fn check_suggestion(
+        &self,
+        id: i64,
+        track: Option<i64>,
+        recording: Option<&str>,
+    ) -> Result<SuggestionCheck> {
+        check_suggestion_on(&self.lock(), id, track, recording)
+    }
+
+    /// "Not this", when the suggestion still is what the caller saw ([`Self::check_suggestion`]).
+    pub fn reject_suggestion_checked(
+        &self,
+        id: i64,
+        track: Option<i64>,
+        recording: Option<&str>,
+    ) -> Result<SuggestionCheck> {
+        let check = check_suggestion_on(&self.lock(), id, track, recording)?;
+        if check == SuggestionCheck::Holds {
+            self.reject_suggestion(id)?;
+        }
+        Ok(check)
+    }
+
+    /// Whether a song has a canonical identity (tags, a run, the owner).
+    pub fn has_identity(&self, track: i64) -> Result<bool> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT canonical_uri IS NOT NULL FROM tracks WHERE id = ?1",
+                params![track],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Whether the owner said "Not this" to `recording` for this song.
+    pub fn is_rejected(&self, track: i64, recording: &str) -> Result<bool> {
+        rejected(&self.lock(), track, recording)
     }
 
     /// Drop one suggestion; when it was the last for its track, the track is
@@ -2446,6 +3107,12 @@ impl Library {
             )
             .optional()?;
         let Some(track) = track else { return Ok(false) };
+        // Remembered: a later run, a retry or a cached answer never brings it back
+        conn.execute(
+            "INSERT OR IGNORE INTO identify_rejections(track_id, recording_mbid, rejected_at)
+             SELECT track_id, recording_mbid, ?2 FROM identify_suggestions WHERE id = ?1",
+            params![id, now_unix()],
+        )?;
         conn.execute("DELETE FROM identify_suggestions WHERE id = ?1", params![id])?;
         let left: i64 = conn.query_row(
             "SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1",
@@ -2482,6 +3149,7 @@ impl Library {
                 album: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'album_fit'")?,
                 fingerprint: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source IN ('fingerprint','fingerprint+release')")?,
                 you: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'confirmed_by_user'")?,
+                title_artist: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL AND canonical_confidence_source = 'tag_match'")?,
             },
         })
     }
@@ -2598,9 +3266,15 @@ impl Library {
         let count =
             |sql: &str| -> Result<u64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u64) };
         Ok(LibraryStats {
-            tracks: count("SELECT COUNT(*) FROM tracks")?,
-            albums: count("SELECT COUNT(*) FROM albums")?,
-            artists: count("SELECT COUNT(*) FROM artists")?,
+            // Songs and albums the lists show: copies of a song once, gone files left out
+            tracks: {
+                let reps = song_reps(&song_rows(&conn, "ORDER BY t.id", [])?);
+                reps.values().collect::<std::collections::HashSet<_>>().len() as u64
+            },
+            albums: count(&format!("SELECT COUNT(*) FROM albums WHERE {ALBUM_PRESENT}"))?,
+            artists: count(&format!(
+                "SELECT COUNT(DISTINCT ta.artist_id) FROM track_artists ta JOIN tracks t ON t.id = ta.track_id WHERE {TRACK_PRESENT}"
+            ))?,
             files: count("SELECT COUNT(*) FROM files WHERE missing = 0")?,
             missing_files: count("SELECT COUNT(*) FROM files WHERE missing = 1")?,
             total_duration_ms: count("SELECT COALESCE(SUM(duration_ms), 0) FROM files WHERE missing = 0")?,
@@ -2904,6 +3578,113 @@ fn originals_of(t: &Track) -> (String, String, Option<String>, Option<String>) {
     )
 }
 
+/// Run `f` holding the write lock from its start (`BEGIN IMMEDIATE`, waiting for another writer
+/// through the busy handler), unless a batch already holds it. A transaction that reads first
+/// and writes later asks for the lock only at its first write, and in WAL mode that write fails
+/// at once ("database is locked") when another connection holds it or committed meanwhile:
+/// [`Library::begin_batch`] says the same of scans.
+fn immediately<T>(conn: &mut Connection, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+    let began = conn.is_autocommit();
+    if began {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+    }
+    let r = f(conn);
+    if began {
+        let end = match &r {
+            Ok(_) => conn.execute_batch("COMMIT"),
+            Err(_) => conn.execute_batch("ROLLBACK"),
+        };
+        if let Err(e) = end {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e.into());
+        }
+    }
+    r
+}
+
+fn check_suggestion_on(
+    conn: &Connection,
+    id: i64,
+    track: Option<i64>,
+    recording: Option<&str>,
+) -> Result<SuggestionCheck> {
+    let row: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT track_id, recording_mbid FROM identify_suggestions WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        None => SuggestionCheck::Gone,
+        Some((t, r)) if track.is_some_and(|x| x != t) || recording.is_some_and(|x| x != r) => {
+            SuggestionCheck::Changed
+        }
+        Some(_) => SuggestionCheck::Holds,
+    })
+}
+
+fn rejected(conn: &Connection, track: i64, recording: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM identify_rejections WHERE track_id = ?1 AND recording_mbid = ?2)",
+        params![track, recording],
+        |r| r.get(0),
+    )?)
+}
+
+/// What identification goes by for a song's file: its size and time, and the tags it is matched
+/// by (title, artists, album, album artist, the album's release id, disc, number, length).
+fn identify_input_of(conn: &Connection, track: i64, path: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT f.size_bytes, f.mtime_unix, t.title, t.track_no, t.disc_no, t.duration_ms, a.title, a.album_artist, a.release_mbid,
+               (SELECT group_concat(name, char(31)) FROM (SELECT ar.name AS name FROM track_artists ta JOIN artists ar ON ar.id = ta.artist_id
+                  WHERE ta.track_id = t.id ORDER BY ta.position))
+             FROM tracks t LEFT JOIN files f ON f.track_id = t.id AND f.path = ?2 LEFT JOIN albums a ON a.id = t.album_id
+             WHERE t.id = ?1",
+            params![track, path],
+            |r| {
+                Ok(format!(
+                    "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, Option<i64>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                ))
+            },
+        )
+        .optional()?)
+}
+
+/// [`identify_input_of`] for a song's present file.
+fn identify_input_by_track(conn: &Connection, track: i64) -> Result<Option<String>> {
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM files WHERE track_id = ?1 AND missing = 0 ORDER BY rowid LIMIT 1",
+            params![track],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match path {
+        Some(p) => identify_input_of(conn, track, &p),
+        None => Ok(None),
+    }
+}
+
+fn recording_uri(mbid: &str) -> Result<MusicUri> {
+    let mbid = Mbid::parse(mbid).map_err(|_| LibraryError::Corrupt {
+        column: "identify_suggestions.recording_mbid",
+        value: mbid.to_string(),
+    })?;
+    Ok(MusicUri::Recording { mbid })
+}
+
 fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
@@ -2927,6 +3708,7 @@ fn confidence_source(c: &Confidence) -> &'static str {
         Confidence::FingerprintRelease { .. } => "fingerprint+release",
         Confidence::AlbumFit { .. } => "album_fit",
         Confidence::ConfirmedByUser => "confirmed_by_user",
+        Confidence::TagMatch { .. } => "tag_match",
         Confidence::Fuzzy { .. } => "fuzzy",
     }
 }
@@ -2939,6 +3721,7 @@ fn confidence_from(source: &str, score: f64) -> Result<Confidence> {
         "fingerprint+release" => Confidence::FingerprintRelease { score: score as f32 },
         "album_fit" => Confidence::AlbumFit { score: score as f32 },
         "confirmed_by_user" => Confidence::ConfirmedByUser,
+        "tag_match" => Confidence::TagMatch { score: score as f32 },
         "fuzzy" => Confidence::Fuzzy { score: score as f32 },
         other => {
             return Err(LibraryError::Corrupt {
@@ -3032,6 +3815,315 @@ const TRACK_SELECT: &str = "SELECT t.id, t.title, t.album_id, t.track_no, t.disc
     FROM tracks t
     JOIN files fi ON fi.track_id = t.id AND NOT EXISTS (SELECT 1 FROM hidden_files h WHERE h.path = fi.path)
     LEFT JOIN albums al ON al.id = t.album_id";
+
+/// A track (aliased `t`) has a present file.
+const TRACK_PRESENT: &str = "EXISTS (SELECT 1 FROM files pf WHERE pf.track_id = t.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path))";
+
+/// An album (the `albums` table unaliased) has a song with a present file.
+const ALBUM_PRESENT: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = albums.id)";
+
+/// [`ALBUM_PRESENT`] for an album aliased `al`.
+const ALBUM_PRESENT_AL: &str = "EXISTS (SELECT 1 FROM tracks pt JOIN files pf ON pf.track_id = pt.id AND +pf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = pf.path) WHERE pt.album_id = al.id)";
+
+/// A song row: the copy played by default and, when there are several, every copy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Song {
+    pub track: Track,
+    /// Every present copy, the default first. Empty when the song has one copy.
+    pub versions: Vec<TrackVersion>,
+}
+
+/// One copy of a song, as a version chooser lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackVersion {
+    pub track_id: i64,
+    /// `library` (a file in a library folder) or `homeserver` (the copy kept on the homeserver).
+    pub source: String,
+    pub container: String,
+    /// `24/96 FLAC`, `MP3`, as album formats are labelled.
+    pub format: String,
+    pub rate_hz: u32,
+    pub bits: u8,
+    pub size_bytes: u64,
+    pub lossless: bool,
+    /// The copy the song row plays.
+    pub best: bool,
+}
+
+/// A copy kept on the homeserver rather than a file of the owner's own: a path in the
+/// homeserver's private storage, or the node's mirror of it (`<16 hex of the hash>-<name>`).
+pub fn is_homeserver_copy(path: &Path) -> bool {
+    if path.to_string_lossy().contains("/priv/pubky.music/files/") {
+        return true;
+    }
+    path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+        let b = n.as_bytes();
+        b.len() > 17
+            && b[16] == b'-'
+            && b[..16]
+                .iter()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c))
+            && b[..16].iter().any(|c| (b'a'..=b'f').contains(c))
+    })
+}
+
+fn songs_only(songs: Vec<Song>) -> Vec<Track> {
+    songs.into_iter().map(|s| s.track).collect()
+}
+
+/// Which copy plays by default: a local file over a homeserver copy, then lossless, then the
+/// highest rate × bits, then the larger file, then the oldest track. Smaller is better.
+fn copy_rank(t: &Track) -> (bool, bool, std::cmp::Reverse<u64>, std::cmp::Reverse<u64>, i64) {
+    let f = &t.file;
+    (
+        is_homeserver_copy(&f.path),
+        crate::tags::is_lossy_container(&f.container),
+        std::cmp::Reverse(f.format.rate_hz as u64 * f.format.bits as u64),
+        std::cmp::Reverse(f.size_bytes),
+        t.id.map(|i| i.0).unwrap_or(i64::MAX),
+    )
+}
+
+fn version_of(t: &Track, best: bool) -> TrackVersion {
+    let f = &t.file;
+    let label = describe_format(
+        0,
+        &f.container,
+        sample_kind_str(f.format.kind),
+        f.format.rate_hz as i64,
+        f.format.bits as i64,
+    );
+    TrackVersion {
+        track_id: t.id.map(|i| i.0).unwrap_or_default(),
+        source: if is_homeserver_copy(&f.path) {
+            "homeserver"
+        } else {
+            "library"
+        }
+        .into(),
+        container: f.container.clone(),
+        format: label.label,
+        rate_hz: f.format.rate_hz,
+        bits: f.format.bits,
+        size_bytes: f.size_bytes,
+        lossless: label.lossless,
+        best,
+    }
+}
+
+/// What tells copies of a song apart, for one present track.
+struct SongRow {
+    id: i64,
+    album: Option<i64>,
+    disc: u32,
+    no: Option<u32>,
+    title: String,
+    hash: Option<String>,
+    duration_ms: Option<i64>,
+}
+
+/// [`SongRow`]s of present tracks; `tail` adds conditions (`AND …`) and the order.
+fn song_rows<P: rusqlite::Params>(conn: &Connection, tail: &str, p: P) -> Result<Vec<SongRow>> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT t.id, t.album_id, t.disc_no, t.track_no, t.title,
+            (SELECT h.blake3 FROM files hf JOIN file_hashes h ON h.path = hf.path
+                 AND h.size_bytes = hf.size_bytes AND h.mtime_unix = hf.mtime_unix
+             WHERE hf.track_id = t.id AND +hf.missing = 0 AND NOT EXISTS (SELECT 1 FROM hidden_files ph WHERE ph.path = hf.path) LIMIT 1),
+            t.duration_ms
+         FROM tracks t WHERE {TRACK_PRESENT} {tail}"
+    ))?;
+    let v = stmt
+        .query_map(p, |r| {
+            Ok(SongRow {
+                id: r.get(0)?,
+                album: r.get(1)?,
+                disc: r.get::<_, Option<u32>>(2)?.unwrap_or(1),
+                no: r.get(3)?,
+                title: r.get(4)?,
+                hash: r.get(5)?,
+                duration_ms: r.get(6)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(v)
+}
+
+/// Which song each track is (owner, 2026-11-04: "we should generally not show it twice"):
+/// within one album, tracks with the same disc, number and title, or files with the same
+/// content, are one song. Maps every track id to the first (by row order) track of its song.
+fn song_reps(rows: &[SongRow]) -> std::collections::HashMap<i64, i64> {
+    use std::collections::HashMap;
+    fn root(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    let mut parent: Vec<usize> = (0..rows.len()).collect();
+    let mut by_key: HashMap<(i64, u32, u32, String), Vec<usize>> = HashMap::new();
+    let mut by_hash: HashMap<(i64, &str), usize> = HashMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        let Some(album) = r.album else { continue };
+        let mut joined = Vec::with_capacity(2);
+        if let Some(no) = r.no {
+            let title = r.title.trim_matches(' ').to_ascii_lowercase();
+            let same = by_key.entry((album, r.disc, no, title)).or_default();
+            // The same length too: two discs without disc tags may each have a track 1 "Intro"
+            joined.extend(
+                same.iter()
+                    .copied()
+                    .filter(|&j| close_lengths(rows[j].duration_ms, r.duration_ms)),
+            );
+            same.push(i);
+        }
+        if let Some(h) = r.hash.as_deref() {
+            joined.push(*by_hash.entry((album, h)).or_insert(i));
+        }
+        for j in joined {
+            let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+            if a != b {
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    (0..rows.len())
+        .map(|i| (rows[i].id, rows[root(&mut parent, i)].id))
+        .collect()
+}
+
+/// Whether two copies are the same length, within 3 seconds (a length unknown on either side
+/// counts as the same).
+fn close_lengths(a: Option<i64>, b: Option<i64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() <= 3_000,
+        _ => true,
+    }
+}
+
+/// Albums and songs counted for a summary; copies of a song count once.
+#[derive(Default)]
+struct SongCount {
+    albums: std::collections::HashSet<i64>,
+    songs: std::collections::HashSet<i64>,
+}
+
+impl SongCount {
+    fn add(&mut self, reps: &std::collections::HashMap<i64, i64>, track: i64, album: Option<i64>) {
+        self.songs.insert(reps.get(&track).copied().unwrap_or(track));
+        if let Some(a) = album {
+            self.albums.insert(a);
+        }
+    }
+}
+
+/// `(track id, album id)` rows of a listing query, in its order.
+fn candidates<P: rusqlite::Params>(conn: &Connection, sql: &str, p: P) -> Result<Vec<(i64, Option<i64>)>> {
+    let mut stmt = conn.prepare_cached(sql)?;
+    let v = stmt
+        .query_map(p, |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(v)
+}
+
+/// Per album: which song each track is, and each song's tracks.
+type AlbumSongs = (
+    std::collections::HashMap<i64, i64>,
+    std::collections::HashMap<i64, Vec<i64>>,
+);
+
+/// One row per song for a listing: walks the listing's tracks in order and keeps the first
+/// `limit` songs (all when `None`), each with every present copy on its album, whether the
+/// listing had that copy or not. A song plays its best copy ([`copy_rank`]).
+fn songs_in_order(
+    conn: &Connection,
+    listed: Vec<(i64, Option<i64>)>,
+    limit: Option<usize>,
+) -> Result<Vec<Song>> {
+    use std::collections::{HashMap, HashSet};
+    // Per album: which song each track is, and each song's tracks
+    let mut albums: HashMap<i64, AlbumSongs> = HashMap::new();
+    let mut seen: HashSet<(Option<i64>, i64)> = HashSet::new();
+    let mut picked: Vec<Vec<i64>> = Vec::new();
+    for (id, album) in listed {
+        if limit.is_some_and(|l| picked.len() >= l) {
+            break;
+        }
+        let Some(album) = album else {
+            if seen.insert((None, id)) {
+                picked.push(vec![id]);
+            }
+            continue;
+        };
+        let (reps, members) = &*match albums.entry(album) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let rows = song_rows(conn, "AND t.album_id = ?1 ORDER BY t.id", params![album])?;
+                let reps = song_reps(&rows);
+                let mut members: HashMap<i64, Vec<i64>> = HashMap::new();
+                for r in &rows {
+                    members.entry(reps[&r.id]).or_default().push(r.id);
+                }
+                e.insert((reps, members))
+            }
+        };
+        let rep = reps.get(&id).copied().unwrap_or(id);
+        if seen.insert((Some(album), rep)) {
+            picked.push(members.get(&rep).cloned().unwrap_or_else(|| vec![id]));
+        }
+    }
+    let ids: Vec<i64> = picked.iter().flatten().copied().collect();
+    let mut tracks: HashMap<i64, Track> = HashMap::new();
+    for chunk in ids.chunks(500) {
+        let list = format!(
+            "[{}]",
+            chunk.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")
+        );
+        let mut stmt = conn.prepare_cached(&format!(
+            "{} WHERE t.id IN (SELECT value FROM json_each(?1)) ORDER BY t.id",
+            present_select()
+        ))?;
+        let raws: Vec<RawTrack> = stmt
+            .query_map(params![list], row_to_track_raw)?
+            .collect::<std::result::Result<_, _>>()?;
+        for raw in raws {
+            let t = finish_track(conn, raw)?;
+            if let Some(id) = t.id {
+                tracks.entry(id.0).or_insert(t);
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(picked.len());
+    for group in picked {
+        let mut copies: Vec<Track> = group.iter().filter_map(|i| tracks.remove(i)).collect();
+        if copies.is_empty() {
+            continue;
+        }
+        copies.sort_by_key(copy_rank);
+        let versions = if copies.len() > 1 {
+            copies
+                .iter()
+                .enumerate()
+                .map(|(k, t)| version_of(t, k == 0))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let track = copies.swap_remove(0);
+        out.push(Song { track, versions });
+    }
+    Ok(out)
+}
+
+/// [`TRACK_SELECT`] with present files only: what lists show (owner, 2026-11-04: a song whose
+/// file is gone is left out). Reads by id keep [`TRACK_SELECT`].
+fn present_select() -> String {
+    TRACK_SELECT.replacen(
+        "JOIN files fi ON fi.track_id = t.id AND",
+        "JOIN files fi ON fi.track_id = t.id AND +fi.missing = 0 AND",
+        1,
+    )
+}
 
 /// Number of columns `TRACK_SELECT` yields (track 14, file 9, album 8).
 const TRACK_COLUMNS: usize = 31;
@@ -3545,7 +4637,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 17);
+        assert_eq!(lib.schema_version().unwrap(), 18);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -4343,5 +5435,921 @@ mod identify_tests {
         );
         lib.save_lookup("k", "{}").unwrap();
         assert!(lib.has_cached_lookups().unwrap());
+    }
+
+    fn cand(mbid: &str, title: &str, score: f32, source: &str) -> Candidate {
+        Candidate {
+            recording: Mbid::parse(mbid).unwrap(),
+            release: None,
+            title: Some(title.into()),
+            artist: Some("Band".into()),
+            release_title: Some("Album".into()),
+            score,
+            source: source.into(),
+        }
+    }
+
+    const R: [&str; 5] = [
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003",
+        "00000000-0000-4000-8000-000000000004",
+        "00000000-0000-4000-8000-000000000005",
+    ];
+
+    /// Album review confirms several songs at once: every choice is checked against what is
+    /// open now (the same suggestion, for that song, of that recording, the song still without an
+    /// identity) and either all are stored, in one transaction, or none.
+    #[test]
+    fn a_batch_confirmation_is_all_or_nothing_and_checks_every_choice() {
+        let lib = Library::open_in_memory().unwrap();
+        let t: Vec<i64> = (1..=5)
+            .map(|i| {
+                lib.upsert_track(&untagged(&format!("/m/A/{i:02}.flac"), &format!("Song {i}")))
+                    .unwrap()
+                    .0
+            })
+            .collect();
+        for (i, id) in t.iter().enumerate() {
+            lib.add_suggestions(*id, &[cand(R[i], &format!("Song {}", i + 1), 0.9, "album")])
+                .unwrap();
+            lib.set_identify_state(*id, "suggested", None).unwrap();
+        }
+        // Song 3 also sounds like another recording: a real conflict, two options
+        lib.add_suggestions(t[2], &[cand(R[4], "Song 3 (other take)", 0.92, "fingerprint")])
+            .unwrap();
+        let open = |track: i64| -> Vec<SuggestionRow> { lib.suggestions_for(track).unwrap() };
+        let choice = |track: i64, rec: &str| {
+            let row = open(track).into_iter().find(|r| r.recording_mbid == rec).unwrap();
+            ConfirmChoice {
+                track_id: track,
+                suggestion_id: row.id,
+                recording_mbid: rec.into(),
+            }
+        };
+        // Two songs confirmed together
+        let r = lib
+            .confirm_suggestions(&[choice(t[0], R[0]), choice(t[1], R[1])])
+            .unwrap();
+        assert_eq!(r, ConfirmReport::Confirmed(vec![t[0], t[1]]));
+        for (id, rec) in [(t[0], R[0]), (t[1], R[1])] {
+            let tr = lib.get_track(TrackId(id)).unwrap().unwrap();
+            let (uri, conf) = tr.canonical.unwrap();
+            assert_eq!(uri.to_url(), format!("https://musicbrainz.org/recording/{rec}"));
+            assert_eq!(conf, Confidence::ConfirmedByUser);
+            assert!(open(id).is_empty());
+        }
+        // Song 4 got an identity meanwhile (a run, another tab): the batch with it stores nothing,
+        // song 3's conflict included, and says which choice went stale and why
+        let c3 = choice(t[2], R[2]);
+        let c4 = choice(t[3], R[3]);
+        lib.set_identity(
+            t[3],
+            &MusicUri::Recording {
+                mbid: Mbid::parse(R[3]).unwrap(),
+            },
+            Confidence::Fingerprint { score: 0.97 },
+            None,
+        )
+        .unwrap();
+        let r = lib.confirm_suggestions(&[c3.clone(), c4.clone()]).unwrap();
+        assert_eq!(
+            r,
+            ConfirmReport::Stale(vec![StaleChoice {
+                track_id: t[3],
+                suggestion_id: c4.suggestion_id,
+                reason: "identified".into()
+            }])
+        );
+        assert!(lib.get_track(TrackId(t[2])).unwrap().unwrap().canonical.is_none());
+        assert_eq!(open(t[2]).len(), 2, "song 3 still has both options");
+        // A suggestion that is gone, one for another song, one naming another recording, and the
+        // same song twice: each refused, nothing stored
+        let c5 = choice(t[4], R[4]);
+        let mut wrong_song = c5.clone();
+        wrong_song.track_id = t[0];
+        let mut wrong_rec = c3.clone();
+        wrong_rec.recording_mbid = R[4].into();
+        let r = lib
+            .confirm_suggestions(&[
+                ConfirmChoice {
+                    suggestion_id: 999_999,
+                    ..c5.clone()
+                },
+                wrong_song,
+                wrong_rec,
+            ])
+            .unwrap();
+        let ConfirmReport::Stale(why) = r else {
+            panic!("{r:?}")
+        };
+        let reasons: Vec<&str> = why.iter().map(|w| w.reason.as_str()).collect();
+        assert_eq!(reasons, vec!["gone", "changed", "changed"]);
+        let r = lib
+            .confirm_suggestions(&[c3.clone(), choice(t[2], R[4])])
+            .unwrap();
+        let ConfirmReport::Stale(why) = r else {
+            panic!("{r:?}")
+        };
+        assert_eq!(why[0].reason, "duplicate");
+        assert!(lib.get_track(TrackId(t[2])).unwrap().unwrap().canonical.is_none());
+        assert!(lib.get_track(TrackId(t[4])).unwrap().unwrap().canonical.is_none());
+        // The owner's choice of the conflict, alone: stored
+        assert_eq!(
+            lib.confirm_suggestions(&[c3]).unwrap(),
+            ConfirmReport::Confirmed(vec![t[2]])
+        );
+        // A failure half way leaves nothing: a trigger refuses the second song's state
+        lib.lock()
+            .execute_batch(&format!(
+                "CREATE TRIGGER no_state BEFORE UPDATE ON identify_state WHEN NEW.track_id = {}
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+                t[4]
+            ))
+            .unwrap();
+        let t6 = lib.upsert_track(&untagged("/m/A/06.flac", "Song 6")).unwrap().0;
+        lib.add_suggestions(t6, &[cand(R[0], "Song 6", 0.9, "album")])
+            .unwrap();
+        lib.set_identify_state(t6, "suggested", None).unwrap();
+        assert!(lib.confirm_suggestions(&[choice(t6, R[0]), c5]).is_err());
+        assert!(
+            lib.get_track(TrackId(t6)).unwrap().unwrap().canonical.is_none(),
+            "rolled back"
+        );
+        assert_eq!(open(t6).len(), 1);
+    }
+
+    /// "Not this" is remembered for the song: a later run, a retry or a cached answer never
+    /// suggests that recording again for it, nor makes it its identity; and nothing a run finds
+    /// replaces the owner's own choice.
+    #[test]
+    fn rejections_and_the_owners_choices_survive_later_runs() {
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib.upsert_track(&untagged("/m/x.flac", "X")).unwrap().0;
+        lib.add_suggestions(
+            id,
+            &[cand(R[0], "X", 0.8, "search"), cand(R[1], "X", 0.7, "search")],
+        )
+        .unwrap();
+        let rows = lib.suggestions_for(id).unwrap();
+        assert!(lib.reject_suggestion(rows[0].id).unwrap());
+        assert!(lib.is_rejected(id, R[0]).unwrap());
+        assert!(!lib.is_rejected(id, R[1]).unwrap());
+        // The same answer again (a retry, the cache): the rejected one stays out
+        lib.add_suggestions(
+            id,
+            &[
+                cand(R[0], "X", 0.99, "fingerprint"),
+                cand(R[1], "X", 0.7, "search"),
+            ],
+        )
+        .unwrap();
+        let left: Vec<String> = lib
+            .suggestions_for(id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.recording_mbid)
+            .collect();
+        assert_eq!(left, vec![R[1].to_string()]);
+        // Rejecting the last one: unknown, and a legacy retry still looks at it again
+        let last = lib.suggestions_for(id).unwrap()[0].id;
+        assert!(lib.reject_suggestion(last).unwrap());
+        assert_eq!(lib.tracks_to_identify(true).unwrap().len(), 1);
+        // The owner picks one (another song): no run's answer replaces it
+        let other = lib.upsert_track(&untagged("/m/y.flac", "Y")).unwrap().0;
+        lib.add_suggestions(other, &[cand(R[2], "Y", 0.8, "search")])
+            .unwrap();
+        let s = lib.suggestions_for(other).unwrap()[0].id;
+        lib.accept_suggestion(s).unwrap().unwrap();
+        let uri = |r: &str| MusicUri::Recording {
+            mbid: Mbid::parse(r).unwrap(),
+        };
+        assert!(!lib
+            .set_identity(other, &uri(R[3]), Confidence::Fingerprint { score: 0.99 }, None)
+            .unwrap());
+        assert!(!lib
+            .set_identity(other, &uri(R[3]), Confidence::AlbumFit { score: 0.95 }, None)
+            .unwrap());
+        let (kept, conf) = lib.get_track(TrackId(other)).unwrap().unwrap().canonical.unwrap();
+        assert_eq!((kept, conf), (uri(R[2]), Confidence::ConfirmedByUser));
+        // A suggestion accepted for a song that got an identity meanwhile is refused
+        let third = lib.upsert_track(&untagged("/m/z.flac", "Z")).unwrap().0;
+        lib.add_suggestions(third, &[cand(R[4], "Z", 0.8, "search")])
+            .unwrap();
+        let s = lib.suggestions_for(third).unwrap()[0].id;
+        lib.set_identity(third, &uri(R[3]), Confidence::Fingerprint { score: 0.95 }, None)
+            .unwrap();
+        assert_eq!(lib.accept_suggestion(s).unwrap(), None);
+        assert_eq!(
+            lib.get_track(TrackId(third))
+                .unwrap()
+                .unwrap()
+                .canonical
+                .unwrap()
+                .0,
+            uri(R[3])
+        );
+    }
+
+    fn rec_uri(r: &str) -> MusicUri {
+        MusicUri::Recording {
+            mbid: Mbid::parse(r).unwrap(),
+        }
+    }
+
+    fn state_of(lib: &Library, track: i64) -> Option<(String, Option<String>, Option<String>)> {
+        lib.lock()
+            .query_row(
+                "SELECT state, detail, release_mbid FROM identify_state WHERE track_id = ?1",
+                params![track],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
+    /// Fix round 1, item 1: a run's answer is stored in one guarded step, against what holds
+    /// now: a recording the owner rejected meanwhile is not stored; a song the owner confirmed
+    /// meanwhile keeps the owner's recording, state and (no) release; suggestions for it are not
+    /// added; only a real transition reports `Stored`.
+    #[test]
+    fn a_run_answer_is_settled_in_one_guarded_step() {
+        let lib = Library::open_in_memory().unwrap();
+        let rel = Mbid::parse(R[4]).unwrap();
+        let t: Vec<i64> = (1..=5)
+            .map(|i| {
+                lib.upsert_track(&untagged(&format!("/m/S/{i}.flac"), &format!("S{i}")))
+                    .unwrap()
+                    .0
+            })
+            .collect();
+        let found = |track: i64| SettleAnswer::Identified {
+            recording: rec_uri(R[0]),
+            confidence: Confidence::AlbumFit { score: 0.95 },
+            acoustid: None,
+            detail: "album_fit".into(),
+            release: Some(rel),
+            input_key: Some(format!("k{track}")),
+        };
+        // The owner rejects A while the run decides
+        lib.add_suggestions(t[0], &[cand(R[0], "S1", 0.9, "search")])
+            .unwrap();
+        let sid = lib.suggestions_for(t[0]).unwrap()[0].id;
+        assert!(lib.reject_suggestion(sid).unwrap());
+        assert_eq!(lib.settle(t[0], &found(t[0])).unwrap(), Settled::Rejected);
+        assert!(lib.get_track(TrackId(t[0])).unwrap().unwrap().canonical.is_none());
+        assert_ne!(state_of(&lib, t[0]).unwrap().0, "identified");
+        // The owner confirms B while the run decides A
+        lib.add_suggestions(t[1], &[cand(R[1], "S2", 0.9, "search")])
+            .unwrap();
+        let sid = lib.suggestions_for(t[1]).unwrap()[0].id;
+        lib.accept_suggestion(sid).unwrap().unwrap();
+        assert_eq!(lib.settle(t[1], &found(t[1])).unwrap(), Settled::Kept);
+        let (uri, conf) = lib.get_track(TrackId(t[1])).unwrap().unwrap().canonical.unwrap();
+        assert_eq!((uri, conf), (rec_uri(R[1]), Confidence::ConfirmedByUser));
+        assert_eq!(
+            state_of(&lib, t[1]).unwrap(),
+            ("identified".into(), Some("confirmed_by_user".into()), None),
+            "no release of the run's recording on the owner's"
+        );
+        let suggest = SettleAnswer::Suggest {
+            candidates: vec![cand(R[2], "x", 0.9, "fingerprint")],
+            input_key: None,
+        };
+        assert_eq!(lib.settle(t[1], &suggest).unwrap(), Settled::Kept);
+        assert!(lib.suggestions_for(t[1]).unwrap().is_empty());
+        assert_eq!(state_of(&lib, t[1]).unwrap().0, "identified");
+        let unknown = SettleAnswer::State {
+            state: "unknown".into(),
+            detail: None,
+            input_key: None,
+        };
+        assert_eq!(lib.settle(t[1], &unknown).unwrap(), Settled::Kept);
+        assert_eq!(state_of(&lib, t[1]).unwrap().0, "identified");
+        // Nothing in the way: stored, with its release and what the song looked like
+        assert_eq!(lib.settle(t[2], &found(t[2])).unwrap(), Settled::Stored);
+        assert_eq!(
+            state_of(&lib, t[2]).unwrap(),
+            ("identified".into(), Some("album_fit".into()), Some(R[4].into()))
+        );
+        assert_eq!(
+            lib.get_track(TrackId(t[2]))
+                .unwrap()
+                .unwrap()
+                .canonical
+                .unwrap()
+                .0,
+            rec_uri(R[0])
+        );
+        // Suggestions: the rejected one stays out; none left is "unknown", not "suggested"
+        lib.add_suggestions(t[3], &[cand(R[3], "S4", 0.9, "search")])
+            .unwrap();
+        let sid = lib.suggestions_for(t[3]).unwrap()[0].id;
+        assert!(lib.reject_suggestion(sid).unwrap());
+        let both = SettleAnswer::Suggest {
+            candidates: vec![
+                cand(R[3], "S4", 0.9, "fingerprint"),
+                cand(R[2], "S4b", 0.9, "fingerprint"),
+            ],
+            input_key: Some("k4".into()),
+        };
+        assert_eq!(lib.settle(t[3], &both).unwrap(), Settled::Stored);
+        assert_eq!(lib.suggestions_for(t[3]).unwrap().len(), 1);
+        assert_eq!(state_of(&lib, t[3]).unwrap().0, "suggested");
+        // A song left "suggested" with nothing open (an older run) whose answer is all rejected
+        lib.set_identify_state(t[4], "suggested", None).unwrap();
+        lib.add_suggestions(t[4], &[cand(R[3], "S5", 0.9, "search")])
+            .unwrap();
+        let sid = lib.suggestions_for(t[4]).unwrap()[0].id;
+        lib.lock()
+            .execute(
+                "INSERT INTO identify_rejections(track_id, recording_mbid, rejected_at) VALUES (?1, ?2, 0)",
+                params![t[4], R[3]],
+            )
+            .unwrap();
+        lib.lock()
+            .execute("DELETE FROM identify_suggestions WHERE id = ?1", params![sid])
+            .unwrap();
+        let rejected_only = SettleAnswer::Suggest {
+            candidates: vec![cand(R[3], "S5", 0.9, "search")],
+            input_key: None,
+        };
+        assert_eq!(lib.settle(t[4], &rejected_only).unwrap(), Settled::Empty);
+        assert_eq!(state_of(&lib, t[4]).unwrap().0, "unknown");
+        assert!(lib
+            .tracks_to_identify(true)
+            .unwrap()
+            .iter()
+            .any(|x| x.id == Some(TrackId(t[4]))));
+    }
+
+    /// Fix round 1, item 6: a suggestion's id is never given to another one (deleting the newest,
+    /// or all, of them); a stale "Not this" or accept names nothing, and the caller's expectation
+    /// (song, recording) is checked.
+    #[test]
+    fn suggestion_ids_are_never_reused_and_expectations_are_checked() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = lib.upsert_track(&untagged("/m/I/a.flac", "A")).unwrap().0;
+        let b = lib.upsert_track(&untagged("/m/I/b.flac", "B")).unwrap().0;
+        lib.add_suggestions(a, &[cand(R[0], "A", 0.9, "search")]).unwrap();
+        let old = lib.suggestions_for(a).unwrap()[0].id;
+        assert!(lib.reject_suggestion(old).unwrap());
+        lib.add_suggestions(b, &[cand(R[1], "B", 0.9, "search")]).unwrap();
+        let new = lib.suggestions_for(b).unwrap()[0].id;
+        assert_ne!(new, old, "the newest id deleted is not given again");
+        // A stale tab's "Not this" on the old id: nothing to reject
+        assert!(!lib.reject_suggestion(old).unwrap());
+        assert!(!lib.is_rejected(b, R[1]).unwrap());
+        // Expectations: the right song and recording, else refused
+        assert_eq!(
+            lib.check_suggestion(new, Some(a), None).unwrap(),
+            SuggestionCheck::Changed
+        );
+        assert_eq!(
+            lib.check_suggestion(new, Some(b), Some(R[0])).unwrap(),
+            SuggestionCheck::Changed
+        );
+        assert_eq!(
+            lib.check_suggestion(new, Some(b), Some(R[1])).unwrap(),
+            SuggestionCheck::Holds
+        );
+        assert_eq!(
+            lib.check_suggestion(old, None, None).unwrap(),
+            SuggestionCheck::Gone
+        );
+        // All deleted: still new ids
+        lib.lock()
+            .execute("DELETE FROM identify_suggestions", [])
+            .unwrap();
+        lib.add_suggestions(a, &[cand(R[2], "A", 0.9, "search")]).unwrap();
+        assert!(lib.suggestions_for(a).unwrap()[0].id > new);
+    }
+
+    /// Fix round 1, item 5: a song's open suggestions are for the file and tags they were found
+    /// with. A rescan that finds the file replaced or its tags changed drops them (and the song is
+    /// checked again), so a review page loaded before can't confirm them: the batch is stale.
+    #[test]
+    fn a_changed_file_or_tags_drop_the_songs_open_suggestions() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = untagged("/m/C/01.flac", "One");
+        let id = lib.upsert_track(&t).unwrap().0;
+        t.id = Some(TrackId(id));
+        let open = |lib: &Library| lib.suggestions_for(id).unwrap();
+        let suggest = |lib: &Library| {
+            lib.add_suggestions(id, &[cand(R[0], "One", 0.9, "fingerprint")])
+                .unwrap();
+            lib.set_identify_state(id, "suggested", None).unwrap();
+            let row = lib.suggestions_for(id).unwrap()[0].clone();
+            ConfirmChoice {
+                track_id: id,
+                suggestion_id: row.id,
+                recording_mbid: row.recording_mbid,
+            }
+        };
+        let choice = suggest(&lib);
+        // The same file read again: kept
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(open(&lib).len(), 1);
+        // Replaced at the same path (another size and time): dropped, the batch is stale
+        t.file.size_bytes += 1000;
+        t.file.mtime_unix += 5;
+        lib.upsert_track(&t).unwrap();
+        assert!(open(&lib).is_empty());
+        assert!(state_of(&lib, id).is_none(), "checked again by the next run");
+        let sid = choice.suggestion_id;
+        assert_eq!(
+            lib.confirm_suggestions(&[choice]).unwrap(),
+            ConfirmReport::Stale(vec![StaleChoice {
+                track_id: id,
+                suggestion_id: sid,
+                reason: "gone".into()
+            }])
+        );
+        assert!(lib.get_track(TrackId(id)).unwrap().unwrap().canonical.is_none());
+        // Its tags corrected: dropped too
+        let choice = suggest(&lib);
+        t.title = "One (fixed)".into();
+        lib.upsert_track(&t).unwrap();
+        assert!(open(&lib).is_empty());
+        let ConfirmReport::Stale(why) = lib.confirm_suggestions(&[choice]).unwrap() else {
+            panic!("stale expected")
+        };
+        assert_eq!(why[0].reason, "gone");
+    }
+
+    /// PR #250 review (high): a run's answer is for the song as it was when the run read it. A
+    /// rescan that replaced its file or changed its tags meanwhile makes the answer stale: it is
+    /// not stored (nor written into the new file); the song is checked again.
+    #[test]
+    fn an_answer_for_a_song_that_changed_meanwhile_is_not_stored() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = untagged("/m/G/01.flac", "One");
+        let id = lib.upsert_track(&t).unwrap().0;
+        t.id = Some(TrackId(id));
+        let read = lib.input_generations().unwrap().get(&id).cloned();
+        assert!(read.is_some());
+        let found = SettleAnswer::Identified {
+            recording: rec_uri(R[0]),
+            confidence: Confidence::TagMatch { score: 0.9 },
+            acoustid: None,
+            detail: "tag_match".into(),
+            release: None,
+            input_key: Some("k".into()),
+        };
+        // The file is replaced while the run works on it
+        t.file.size_bytes += 10;
+        t.file.mtime_unix += 1;
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(
+            lib.settle_checked(id, &found, read.as_deref()).unwrap(),
+            Settled::Changed
+        );
+        assert!(lib.get_track(TrackId(id)).unwrap().unwrap().canonical.is_none());
+        assert!(state_of(&lib, id).is_none(), "checked again by the next run");
+        // Its tags change: the same
+        let read = lib.input_generations().unwrap().get(&id).cloned();
+        t.title = "One (fixed)".into();
+        lib.upsert_track(&t).unwrap();
+        assert_eq!(
+            lib.settle_checked(id, &found, read.as_deref()).unwrap(),
+            Settled::Changed
+        );
+        // Nothing changed since it was read: stored
+        let read = lib.input_generations().unwrap().get(&id).cloned();
+        assert_eq!(
+            lib.settle_checked(id, &found, read.as_deref()).unwrap(),
+            Settled::Stored
+        );
+        assert!(lib.get_track(TrackId(id)).unwrap().unwrap().canonical.is_some());
+    }
+
+    /// PR #250 review (low): the release id in a song's tags is part of what identification goes
+    /// by: correcting only it drops the song's open suggestions, as other tag changes do.
+    #[test]
+    fn a_corrected_release_id_drops_open_suggestions() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = untagged("/m/R/01.flac", "Rel");
+        let id = lib.upsert_track(&t).unwrap().0;
+        t.id = Some(TrackId(id));
+        lib.add_suggestions(id, &[cand(R[0], "Rel", 0.9, "fingerprint")])
+            .unwrap();
+        lib.set_identify_state(id, "suggested", None).unwrap();
+        let album = t.album.as_mut().expect("the sample track has an album");
+        album.release_mbid = Some(Mbid::parse(R[3]).unwrap());
+        lib.upsert_track(&t).unwrap();
+        assert!(lib.suggestions_for(id).unwrap().is_empty());
+    }
+
+    /// An album as on the owner's NUC (2026-11-04): each song once on the NAS and once as an old
+    /// homeserver copy whose file was deleted. The album must show each song once.
+    fn album_with_gone_copies(lib: &Library, n: u32) -> (i64, Vec<i64>, Vec<i64>) {
+        let (mut present, mut gone) = (Vec::new(), Vec::new());
+        for no in 1..=n {
+            let mut t = sample_track(
+                &format!("/music/Roon/Crossroad/{no:02}.flac"),
+                &format!("Song {no}"),
+            );
+            t.track_no = Some(no);
+            t.duration_ms = Some(60_000);
+            present.push(lib.upsert_track(&t).unwrap().0);
+            t.file.path = PathBuf::from(format!(
+                "/homeserver/data/files/u/priv/pubky.music/files/{:016x}-{no:02}.flac",
+                no
+            ));
+            gone.push(lib.upsert_track(&t).unwrap().0);
+        }
+        let scan = lib.begin_scan(Path::new("/homeserver")).unwrap();
+        lib.mark_missing_under(Path::new("/homeserver"), scan).unwrap();
+        let album = lib
+            .get_track(TrackId(present[0]))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        (album, present, gone)
+    }
+
+    #[test]
+    fn songs_whose_files_are_gone_leave_album_artist_and_counts() {
+        let lib = Library::open_in_memory().unwrap();
+        let (album, present, gone) = album_with_gone_copies(&lib, 4);
+        let tracks = lib.album_tracks(album).unwrap();
+        let ids: Vec<i64> = tracks.iter().map(|t| t.id.unwrap().0).collect();
+        assert_eq!(ids, present, "each song once, the present copy");
+        let total: u64 = tracks.iter().filter_map(|t| t.duration_ms).sum();
+        assert_eq!(total, 4 * 60_000);
+        let artist = tracks[0].artists[0].id.unwrap();
+        assert_eq!(lib.artist_tracks(artist).unwrap().len(), 4);
+        let summary = lib.get_artist(artist).unwrap().unwrap();
+        assert_eq!((summary.albums, summary.tracks), (1, 4));
+        let genres = lib.list_genres().unwrap();
+        assert!(genres.iter().all(|g| g.tracks == 4), "{genres:?}");
+        // PR #268 review (Claude H1): read by id it is still there, so favourites, playlists,
+        // plays and device downloads that name it keep it; no list shows it
+        for id in &gone {
+            assert!(
+                lib.get_track(TrackId(*id)).unwrap().is_some(),
+                "a gone copy stays readable by id"
+            );
+        }
+        let listed: Vec<i64> = lib
+            .list_tracks(None, 100)
+            .unwrap()
+            .iter()
+            .map(|t| t.id.unwrap().0)
+            .collect();
+        assert_eq!(listed, present);
+        let stats = lib.stats().unwrap();
+        assert_eq!((stats.tracks, stats.albums, stats.artists), (4, 1, 1));
+        // the rows stay: plays and ids are kept
+        lib.record_play(TrackId(gone[0]), None).unwrap();
+        assert_eq!(lib.play_count(TrackId(gone[0])).unwrap(), 1);
+        assert!(lib
+            .file_by_path(Path::new(&format!(
+                "/homeserver/data/files/u/priv/pubky.music/files/{:016x}-01.flac",
+                1
+            )))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn an_album_with_no_present_song_leaves_the_lists_and_comes_back() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = sample_track("/nas/Gone/01.flac", "Gone");
+        t.album.as_mut().unwrap().title = "Gone album".into();
+        t.artists[0].name = "Gone artist".into();
+        t.artists[0].mbid = None;
+        let id = lib.upsert_track(&t).unwrap().0;
+        let album = lib
+            .get_track(TrackId(id))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        let artist = lib.get_track(TrackId(id)).unwrap().unwrap().artists[0]
+            .id
+            .unwrap();
+        lib.record_play(TrackId(id), None).unwrap();
+        let scan = lib.begin_scan(Path::new("/nas")).unwrap();
+        lib.mark_missing_under(Path::new("/nas"), scan).unwrap();
+        let listed = |lib: &Library| {
+            (
+                lib.list_albums(None, 100)
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.id == Some(album)),
+                lib.recent_albums(0, 100)
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.id == Some(album)),
+                lib.recently_played_albums(10)
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.id == Some(album)),
+                lib.most_played_albums(10)
+                    .unwrap()
+                    .iter()
+                    .any(|a| a.id == Some(album)),
+                lib.list_artists().unwrap().iter().any(|a| a.id == artist),
+                lib.artist_albums(artist).unwrap().len(),
+                lib.album_tracks(album).unwrap().len(),
+            )
+        };
+        assert_eq!(listed(&lib), (false, false, false, false, false, 0, 0));
+        // the file is found again: the song is back as it was
+        let scan = lib.begin_scan(Path::new("/nas")).unwrap();
+        lib.mark_file_seen(Path::new("/nas/Gone/01.flac"), scan).unwrap();
+        assert_eq!(listed(&lib), (true, true, true, true, true, 1, 1));
+        assert_eq!(lib.album_tracks(album).unwrap()[0].id, Some(TrackId(id)));
+        assert_eq!(lib.play_count(TrackId(id)).unwrap(), 1);
+    }
+
+    #[test]
+    fn copies_of_a_song_are_one_row_with_versions() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = sample_track("/m/Album/01.flac", "Song");
+        t.track_no = Some(1);
+        let mut add = |path: &str, container: &str, rate: u32, bits: u8, size: u64| {
+            t.file.path = PathBuf::from(path);
+            t.file.container = container.into();
+            t.file.format = AudioFormat::pcm(rate, bits, 2);
+            t.file.size_bytes = size;
+            lib.upsert_track(&t).unwrap().0
+        };
+        // a homeserver copy (first, so ids alone would pick it), an MP3 and a hi-res FLAC
+        let home = add(
+            "/data/homeserver/1698088e5519dff7-01.flac",
+            "flac",
+            96_000,
+            24,
+            900,
+        );
+        let mp3 = add("/m/Album/01.mp3", "mp3", 44_100, 16, 100);
+        let flac = add("/m/Album/01 (hi-res).flac", "flac", 96_000, 24, 800);
+        let other = {
+            let mut o = sample_track("/m/Album/02.flac", "Other");
+            o.track_no = Some(2);
+            lib.upsert_track(&o).unwrap().0
+        };
+        let album = lib
+            .get_track(TrackId(flac))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        let songs = lib.album_songs(album).unwrap();
+        assert_eq!(songs.len(), 2, "one row per song");
+        assert_eq!(
+            songs[0].track.id,
+            Some(TrackId(flac)),
+            "local over homeserver, then quality"
+        );
+        let v: Vec<(i64, &str, bool)> = songs[0]
+            .versions
+            .iter()
+            .map(|v| (v.track_id, v.source.as_str(), v.best))
+            .collect();
+        assert_eq!(
+            v,
+            vec![
+                (flac, "library", true),
+                (mp3, "library", false),
+                (home, "homeserver", false)
+            ]
+        );
+        assert_eq!(songs[0].versions[0].format, "24/96 FLAC");
+        assert!(!songs[0].versions[1].lossless);
+        assert_eq!(songs[1].track.id, Some(TrackId(other)));
+        assert!(songs[1].versions.is_empty(), "one copy: no versions");
+        let artist = songs[0].track.artists[0].id.unwrap();
+        assert_eq!(lib.artist_tracks(artist).unwrap().len(), 2);
+        assert_eq!(lib.get_artist(artist).unwrap().unwrap().tracks, 2);
+        assert!(lib.list_genres().unwrap().iter().all(|g| g.tracks == 2));
+        assert_eq!(lib.random_tracks(10).unwrap().len(), 2);
+        // every copy stays a playable track of its own
+        assert!(lib.get_track(TrackId(home)).unwrap().is_some());
+    }
+
+    #[test]
+    fn same_content_under_another_title_is_one_song() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/Album/01.flac", "Song");
+        a.track_no = Some(1);
+        let a_id = lib.upsert_track(&a).unwrap().0;
+        let mut b = a.clone();
+        b.title = "01".into();
+        b.track_no = None;
+        b.file.path = PathBuf::from("/m/copies/01.flac");
+        let b_id = lib.upsert_track(&b).unwrap().0;
+        for p in ["/m/Album/01.flac", "/m/copies/01.flac"] {
+            lib.store_file_hash(Path::new(p), 123, 1_700_000_000, "abc")
+                .unwrap();
+        }
+        let album = lib
+            .get_track(TrackId(a_id))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        let songs = lib.album_songs(album).unwrap();
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].versions.len(), 2);
+        assert!(songs[0].versions.iter().any(|v| v.track_id == b_id));
+        // PR #268 review (Codex M1): counts go by the same songs as the lists
+        let artist = songs[0].track.artists[0].id.unwrap();
+        assert_eq!(lib.get_artist(artist).unwrap().unwrap().tracks, 1);
+        assert!(lib.list_genres().unwrap().iter().all(|g| g.tracks == 1));
+    }
+
+    /// PR #268 review (Codex M2): a limit counts songs, not copies, and a song keeps every copy
+    /// even when the limit falls between them.
+    #[test]
+    fn a_limit_counts_songs_and_keeps_every_copy() {
+        let lib = Library::open_in_memory().unwrap();
+        for no in 1..=4 {
+            let mut t = sample_track(&format!("/m/A/{no:02}.mp3"), &format!("Song {no}"));
+            t.track_no = Some(no);
+            t.file.container = "mp3".into();
+            lib.upsert_track(&t).unwrap();
+            t.file.path = PathBuf::from(format!("/m/A/{no:02}.flac"));
+            t.file.container = "flac".into();
+            lib.upsert_track(&t).unwrap();
+        }
+        let genre = lib.list_genres().unwrap()[0].id;
+        let got = lib.genre_tracks(genre, 3).unwrap();
+        assert_eq!(got.len(), 3, "three songs, not three copies");
+        assert!(
+            got.iter().all(|t| t.file.container == "flac"),
+            "each plays its best copy"
+        );
+        assert_eq!(lib.random_tracks(3).unwrap().len(), 3);
+        assert_eq!(lib.random_tracks(10).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn search_still_finds_present_songs_only_and_is_not_grouped() {
+        let lib = Library::open_in_memory().unwrap();
+        let (_, present, _) = album_with_gone_copies(&lib, 2);
+        let found: Vec<i64> = lib
+            .search_tracks("Song", 10)
+            .unwrap()
+            .iter()
+            .map(|t| t.id.unwrap().0)
+            .collect();
+        let mut sorted = found.clone();
+        sorted.sort();
+        assert_eq!(sorted, present);
+    }
+
+    #[test]
+    fn homeserver_copies_are_told_apart() {
+        assert!(is_homeserver_copy(Path::new(
+            "/homeserver/data/files/u/priv/pubky.music/files/x-01.flac"
+        )));
+        assert!(is_homeserver_copy(Path::new(
+            "/data/homeserver/1698088e5519dff7-01.flac"
+        )));
+        assert!(!is_homeserver_copy(Path::new("/music/Roon/01 Song.flac")));
+        assert!(!is_homeserver_copy(Path::new("/music/1698088E5519DFF7-01.flac")));
+        assert!(!is_homeserver_copy(Path::new(
+            "/music/2024010112345678-live.flac"
+        )));
+    }
+
+    /// PR #268 review (Claude L1): two discs without disc tags each with a track 1 "Intro" are
+    /// two songs; the same song in two formats is one.
+    #[test]
+    fn songs_of_other_lengths_are_not_merged() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut t = sample_track("/m/A/CD1/01.flac", "Intro");
+        t.track_no = Some(1);
+        t.disc_no = None;
+        t.duration_ms = Some(60_000);
+        let one = lib.upsert_track(&t).unwrap().0;
+        t.file.path = PathBuf::from("/m/A/CD2/01.flac");
+        t.duration_ms = Some(95_000);
+        let two = lib.upsert_track(&t).unwrap().0;
+        t.file.path = PathBuf::from("/m/A/CD1/01.mp3");
+        t.file.container = "mp3".into();
+        t.duration_ms = Some(60_400);
+        lib.upsert_track(&t).unwrap();
+        let album = lib
+            .get_track(TrackId(one))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        let songs = lib.album_songs(album).unwrap();
+        let ids: Vec<i64> = songs.iter().map(|s| s.track.id.unwrap().0).collect();
+        assert_eq!(ids, vec![one, two]);
+        assert_eq!(songs[0].versions.len(), 2);
+        assert!(songs[1].versions.is_empty());
+    }
+
+    /// PR #268 review (Claude L3): a stored hash counts only for the file as it was hashed.
+    #[test]
+    fn a_stale_hash_does_not_merge_songs() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/A/01.flac", "One");
+        a.track_no = Some(1);
+        let a_id = lib.upsert_track(&a).unwrap().0;
+        let mut b = sample_track("/m/A/02.flac", "Two");
+        b.track_no = Some(2);
+        lib.upsert_track(&b).unwrap();
+        lib.store_file_hash(Path::new("/m/A/01.flac"), 123, 1_700_000_000, "same")
+            .unwrap();
+        // hashed when it had another size: the file changed since
+        lib.store_file_hash(Path::new("/m/A/02.flac"), 999, 1_700_000_000, "same")
+            .unwrap();
+        let album = lib
+            .get_track(TrackId(a_id))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        assert_eq!(lib.album_songs(album).unwrap().len(), 2);
+    }
+
+    /// PR #268 delta review (Codex M2): a hidden file is no present song: it takes no place in a
+    /// limited list and no count.
+    #[test]
+    fn a_hidden_file_takes_no_place_in_a_list() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/A/01.flac", "One");
+        a.track_no = Some(1);
+        let hidden = lib.upsert_track(&a).unwrap();
+        let mut b = sample_track("/m/A/02.flac", "Two");
+        b.track_no = Some(2);
+        let shown = lib.upsert_track(&b).unwrap();
+        lib.hide_track(hidden).unwrap();
+        // as if a scan had seen the file again without asking whether it is hidden
+        lib.lock().execute("UPDATE files SET missing = 0", []).unwrap();
+        let genre = lib.list_genres().unwrap()[0].clone();
+        assert_eq!(genre.tracks, 1);
+        let got = lib.genre_tracks(genre.id, 1).unwrap();
+        assert_eq!(got.iter().map(|t| t.id).collect::<Vec<_>>(), vec![Some(shown)]);
+        assert_eq!(lib.random_tracks(5).unwrap().len(), 1);
+        assert_eq!(lib.stats().unwrap().tracks, 1);
+    }
+
+    /// PR #268 delta review (Codex M1): Shuffle draws songs, so a song with copies is not likelier.
+    #[test]
+    fn shuffle_draws_songs_not_copies() {
+        let lib = Library::open_in_memory().unwrap();
+        let mut a = sample_track("/m/A/01.flac", "Many");
+        a.track_no = Some(1);
+        for n in 0..9 {
+            a.file.path = PathBuf::from(format!("/m/A/01-{n}.flac"));
+            lib.upsert_track(&a).unwrap();
+        }
+        let mut b = sample_track("/m/A/02.flac", "Once");
+        b.track_no = Some(2);
+        let once = lib.upsert_track(&b).unwrap();
+        let hits = (0..400)
+            .filter(|_| lib.random_tracks(1).unwrap()[0].id == Some(once))
+            .count();
+        // a fair draw gives about 200; drawing copies would give about 40
+        assert!((120..=280).contains(&hits), "{hits}");
+    }
+
+    /// PR #268 CI (speed): the presence checks ran through the index on `files.missing`, one
+    /// scan of every present file per track (11 s for 5,000 tracks). They must use `files_track`.
+    #[test]
+    fn whole_library_counts_stay_fast() {
+        let lib = Library::open_in_memory().unwrap();
+        lib.begin_batch().unwrap();
+        for n in 0..3000u32 {
+            let mut t = sample_track(&format!("/m/A{}/{n}.flac", n / 10), &format!("S{n}"));
+            t.album.as_mut().unwrap().title = format!("Album {}", n / 10);
+            t.track_no = Some(n % 10 + 1);
+            t.recording_mbid = None;
+            t.isrc = None;
+            t.canonical = None;
+            lib.upsert_track(&t).unwrap();
+        }
+        lib.commit_batch().unwrap();
+        let t0 = std::time::Instant::now();
+        assert_eq!(lib.stats().unwrap().tracks, 3000);
+        lib.list_artists().unwrap();
+        lib.list_genres().unwrap();
+        lib.random_tracks(50).unwrap();
+        assert_eq!(lib.list_albums(None, 1000).unwrap().len(), 300);
+        assert_eq!(lib.recent_albums(0, 1000).unwrap().len(), 300);
+        let took = t0.elapsed();
+        // a few tens of ms here; the quadratic plan took seconds
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 }

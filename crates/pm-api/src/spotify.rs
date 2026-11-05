@@ -400,13 +400,11 @@ pub(crate) async fn track_isrc(s: &NodeState, id: &str) -> Option<String> {
     v["external_ids"]["isrc"].as_str().map(str::to_string)
 }
 
+/// GET an API path, or a whole URL (a page's `next`) only on the API's own origin: the token
+/// goes with it.
 async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result<Value, ApiError> {
+    let url = crate::sources::api_url(&api_base(s), path).map_err(upstream)?;
     let token = bearer(s).await?;
-    let url = if path.starts_with("http") {
-        path.to_string()
-    } else {
-        format!("{}{path}", api_base(s))
-    };
     for attempt in 0..3 {
         let resp = s
             .http_client()
@@ -1498,6 +1496,7 @@ impl crate::signin::SignInSource for SpotifySignIn {
                 ),
                 action: if configured { "browser" } else { "setup" }.into(),
                 recommended: true,
+                advanced: false,
                 // The app is the node's: a listener signs in once the owner has set one up
                 available: configured || who.is_owner(),
                 reason: (!configured && !who.is_owner())
@@ -1509,6 +1508,7 @@ impl crate::signin::SignInSource for SpotifySignIn {
                 note: "Unofficial: librespot appears as a speaker in your Spotify apps; playing to it signs it in, and it plays into one of the node's zones. Spotify has not approved this and can stop it at any time.".into(),
                 action: "setup".into(),
                 recommended: false,
+                advanced: false,
                 available: supported,
                 reason: ls_reason.clone(),
             },
@@ -1518,6 +1518,7 @@ impl crate::signin::SignInSource for SpotifySignIn {
                 note: "The credentials.json another librespot (spotifyd, raspotify, go-librespot) saved after its sign-in; the node never looks for it, you pick the file or paste it. Kept readable by the node only.".into(),
                 action: "import".into(),
                 recommended: false,
+                advanced: false,
                 available: supported,
                 reason: ls_reason,
             },

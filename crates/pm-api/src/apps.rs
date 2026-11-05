@@ -191,17 +191,36 @@ fn current(s: &NodeState, id: &str) -> OwnApp {
     }
 }
 
+/// The services in [`OWN`] whose app node.toml or the environment sets. Recorded once, before
+/// any of the admin's own apps is applied (at start, or at the first look), while what is in use
+/// is node.toml's or this build's own; never guessed later from client ids, which a restored
+/// backup changes (review of #149: an own app then read as node.toml's, and a change got 409).
+fn from_config(s: &NodeState) -> &[&'static str] {
+    s.apps_from_config.get_or_init(|| {
+        OWN.into_iter()
+            .filter(|id| {
+                let now = current(s, id);
+                !now.client_id.trim().is_empty() && !builtin(id).is_some_and(|b| b.client_id == now.client_id)
+            })
+            .collect()
+    })
+}
+
 /// Where the app a service in [`OWN`] signs in with comes from.
 fn origin(s: &NodeState, own: &HashMap<String, OwnApp>, id: &str) -> Option<&'static str> {
+    if from_config(s).contains(&id) {
+        return Some("config");
+    }
     let now = current(s, id);
     if now.client_id.trim().is_empty() {
         None
-    } else if own.get(id).is_some_and(|o| o.client_id == now.client_id) {
-        Some("settings")
-    } else if builtin(id).is_some_and(|b| b.client_id == now.client_id) {
+    } else if !own.get(id).is_some_and(|o| o.client_id == now.client_id)
+        && builtin(id).is_some_and(|b| b.client_id == now.client_id)
+    {
         Some("builtin")
     } else {
-        Some("config")
+        // Entered here (also one a restored backup has since replaced in the settings)
+        Some("settings")
     }
 }
 
@@ -234,6 +253,7 @@ fn set_app(s: &NodeState, id: &str, app: Option<OwnApp>) {
 
 /// At start: the admin's own apps, where node.toml or the environment sets none.
 pub fn apply_own(s: &NodeState) {
+    from_config(s);
     let own = own_apps(&s.library.lock().expect("library poisoned"));
     for id in OWN {
         if let Some(app) = own.get(id) {
@@ -299,8 +319,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
     };
     let return_page = s.return_page();
     let spotify = crate::spotify::app_origin(s);
-    let mut out =
-        vec![
+    let mut out = vec![
         NodeApp {
             // node.toml wins over Settings: the route refuses then
             set: (spotify != Some("config")).then_some("PUT /v1/sources/spotify/app"),
@@ -314,7 +333,12 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
                  people need Spotify's approval, which it gives only to large organisations. Playing \
                  through Spotify Connect (librespot) needs no app.",
             ),
-            ..app("spotify", "Spotify", spotify.is_some(), spotify.map(str::to_string))
+            ..app(
+                "spotify",
+                "Spotify",
+                spotify.is_some(),
+                spotify.map(str::to_string),
+            )
         },
         NodeApp {
             limits: Some(
@@ -340,10 +364,12 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             ],
             status: Some("GET /v1/sources/tidal/unofficial"),
             limits: Some(
-                "Whole songs need a device client, the kind TIDAL's own apps use. TIDAL gives those only \
-                 to its partners and can stop accepting one at any time; an app from TIDAL's developer \
-                 site doesn't work here.",
+                "For the code sign-in to full tracks: a device client, the kind TIDAL's own apps use. A \
+                 release build carries one; yours replaces it. Sign in with TIDAL (lossless and hi-res) \
+                 needs nothing here. TIDAL can stop accepting a client at any time; an app from TIDAL's \
+                 developer site doesn't work here.",
             ),
+            builtin: crate::project_apps::tidal_device_client().is_some(),
             ..app(
                 "tidal-full",
                 "TIDAL full tracks",
@@ -353,10 +379,13 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
         },
         NodeApp {
             set: Some("PUT /v1/sources/qobuz/unofficial"),
-            fields: vec![field("app_id", "App ID"), secret("app_secret", "App secret", false)],
+            fields: vec![
+                field("app_id", "App ID"),
+                secret("app_secret", "App secret", false),
+            ],
             status: Some("GET /v1/sources/qobuz/unofficial"),
             limits: Some(
-                "Qobuz gives app IDs only to its partners, not to other players, so Pubky Music has none \
+                "Qobuz gives app IDs only to its partners, not to other players, so Odeion has none \
                  to build in. Without one, Qobuz doesn't play here.",
             ),
             ..app("qobuz", "Qobuz", qobuz.is_some(), qobuz)
@@ -419,12 +448,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             builtin: crate::project_apps::acoustid_key().is_some(),
             note: Some("Entered on Your library › Node library › Identify, with its state and a Check."),
             page: Some("library:node"),
-            ..app(
-                "acoustid",
-                "AcoustID",
-                acoustid_from.is_some(),
-                acoustid_from,
-            )
+            ..app("acoustid", "AcoustID", acoustid_from.is_some(), acoustid_from)
         },
         NodeApp {
             status: Some("GET /v1/library/drives"),

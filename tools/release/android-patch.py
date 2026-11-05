@@ -26,6 +26,9 @@ silently cannot connect.
    Application class installs the handler before any activity or native library
    loads; the player's notification gets a monochrome status-bar icon (an adaptive
    launcher icon there crashes some phones).
+9. The launcher label and the activity title say Odeion. Tauri writes them from productName, which
+   stays at its pre-Odeion value because it also names the desktop installs (docs/branding-compatibility.md);
+   the application id is not touched, so an installed app updates in place.
 
 Usage: android-patch.py <crates/pm-desktop>
 """
@@ -230,7 +233,16 @@ drawable.mkdir(parents=True, exist_ok=True)
 </vector>
 """)
 
+# 9. the label people see: Odeion (productName, and so the template's value, is an install identity)
+strings = app / "src" / "main" / "res" / "values" / "strings.xml"
+stext = strings.read_text() if strings.exists() else ""
+for name in ("app_name", "main_activity_title"):
+    stext, n = re.subn(rf'(<string name="{name}">)[^<]*(</string>)', r"\1Odeion\2", stext)
+    if name == "app_name" and n != 1:
+        die(f"expected one app_name string in {strings}")
+strings.write_text(stext)
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion"
 )

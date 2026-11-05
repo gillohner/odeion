@@ -23,15 +23,19 @@ use crate::{accounts::Who, state::NodeState, ApiError, ApiResult};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Way {
     pub id: String,
-    /// Plainly by where it comes from: "Pubky Music's app", "Your own device client", "Your own app".
+    /// Plainly by where it comes from: "Odeion's app", "Your own device client", "Your own app".
     pub label: String,
     pub note: String,
-    /// `browser` (a sign-in page opens and comes back), `code` (a code to enter on another
+    /// `browser` (a sign-in page opens and comes back, or its address is pasted back here),
+    /// `code` (a code to enter on another
     /// device), `setup` (something to enter here first), `import` (a found sign-in or a file),
     /// `paste` (a token or a file's contents).
     pub action: String,
     #[serde(default)]
     pub recommended: bool,
+    /// Shown under the chooser's Advanced disclosure, not among the everyday ways.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub advanced: bool,
     pub available: bool,
     /// Why it is not available, in plain words.
     #[serde(default, skip_serializing_if = "Option::is_none")]

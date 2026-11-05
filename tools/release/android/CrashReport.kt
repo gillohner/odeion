@@ -60,7 +60,7 @@ object CrashReport {
         } catch (_: Throwable) {
             "?"
         }
-        return "Pubky Music $version on ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} " +
+        return "Odeion $version on ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} " +
             "(API ${Build.VERSION.SDK_INT}), ${Build.SUPPORTED_ABIS.joinToString()}"
     }
 
@@ -129,7 +129,7 @@ object CrashReport {
     fun share(activity: Activity, text: String) {
         val send = Intent(Intent.ACTION_SEND)
             .setType("text/plain")
-            .putExtra(Intent.EXTRA_SUBJECT, "Pubky Music crash report")
+            .putExtra(Intent.EXTRA_SUBJECT, "Odeion crash report")
             .putExtra(Intent.EXTRA_TEXT, text)
         activity.startActivity(Intent.createChooser(send, "Share the crash report"))
     }

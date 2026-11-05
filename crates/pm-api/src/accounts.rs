@@ -473,6 +473,7 @@ const OWNER_ONLY: &[&str] = &[
     "/library/uploads",
     "/library/imports",
     "/library/folders",
+    "/library/tree",
     "/library/scan",
     "/library/tag-fixes",
     "/outputs",
@@ -515,6 +516,7 @@ const LISTENER_READS: &[&str] = &[
 /// acts on the caller's own account, reads included; the apps and clients behind them stay the
 /// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
 const LISTENER_OWN: &[&str] = &[
+    "/play-order",
     "/sources/tidal/signin",
     "/sources/qobuz/signin",
     "/sources/spotify/signin",

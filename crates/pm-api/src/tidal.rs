@@ -72,6 +72,9 @@ pub struct TidalEndpoints {
     pub login_base: String,
     /// TIDAL's private v1 API (full tracks, unofficial).
     pub v1_base: String,
+    /// The browser sign-in's client for full tracks ("Sign in with TIDAL"): this build's, if it
+    /// carries one (tests set their own).
+    pub browser_client: Option<crate::tidal_unofficial::BrowserClient>,
 }
 
 impl Default for TidalEndpoints {
@@ -82,6 +85,7 @@ impl Default for TidalEndpoints {
             auth_base: "https://auth.tidal.com".into(),
             login_base: "https://login.tidal.com".into(),
             v1_base: "https://api.tidal.com/v1".into(),
+            browser_client: crate::tidal_unofficial::BrowserClient::built_in(),
         }
     }
 }
@@ -505,12 +509,9 @@ fn country(s: &NodeState) -> String {
 }
 
 /// GET a v2 path (or an absolute `links.next` URL) as JSON:API.
+/// A whole URL is followed only on the API's own origin (the token goes with it).
 async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result<Value, ApiError> {
-    let url = if path.starts_with("http") {
-        path.to_string()
-    } else {
-        format!("{}{}", api_base(s), path)
-    };
+    let url = crate::sources::api_url(&api_base(s), path).map_err(upstream)?;
     let token = bearer(s).await?;
     let q: Vec<(&str, &str)> = query.iter().map(|(k, v)| (*k, v.as_str())).collect();
     for attempt in 0..3 {
@@ -1340,24 +1341,30 @@ pub(crate) fn app_changed(s: &NodeState) -> Result<(), ApiError> {
 
 // ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md) ----
 
+pub(crate) const WAY_BROWSER: &str = "browser";
 pub(crate) const WAY_APP: &str = "app";
 pub(crate) const WAY_IMPORT: &str = "import";
 pub(crate) const WAY_DEVICE: &str = "device";
+pub(crate) const WAY_OWN_DEVICE: &str = "own-device";
 pub(crate) const WAY_PASTE: &str = "paste";
 
 /// The official app's name by where it comes from: the project's built-in one or the node's own.
 fn app_label(c: &TidalCredentials) -> &'static str {
     let project = crate::project_apps::tidal_client_id().is_some_and(|id| id == c.client_id);
     if project {
-        "Pubky Music's app"
+        "Odeion's app"
     } else {
         "Your own TIDAL app"
     }
 }
 
-/// The ways to sign in to TIDAL, which one is in use, and the overview line. The two sessions
-/// (the official app's and the device client's) can both exist: the device one plays full
-/// tracks, the official one serves the collection and playlist imports.
+/// The ways to sign in to TIDAL, which one is in use, and the overview line (owner, 2026-11-04):
+/// first and Recommended "Sign in with TIDAL" (the browser sign-in, full tracks lossless and
+/// hi-res), then the code sign-in (a fallback TIDAL may send AAC only), a sign-in found in another
+/// app on this machine only when one is found, and under Advanced the official app, a device
+/// client of your own and a pasted token. The two sessions (the official app's and the
+/// full-tracks one) can both exist: the full-tracks one plays, the official one serves the
+/// collection and playlist imports.
 pub(crate) fn sign_in(
     s: &NodeState,
     who: &Who,
@@ -1377,11 +1384,17 @@ pub(crate) fn sign_in(
         )
     };
     let app = app_label(&c);
-    let device_label = "Your own device client";
+    let browser = endpoints(s).browser_client.is_some();
+    let own_client = device_client.as_ref().is_some_and(|d| d.from != "builtin");
+    let device_label = if own_client {
+        "Your own device client"
+    } else {
+        "Sign in with a code"
+    };
     // Other apps' files are looked at for the tab, not for the overview line, and only for the
     // owner: they are on the owner's machine
     let found = if headers.is_some() && who.is_owner() {
-        crate::imports::scan_tidal()
+        crate::imports::scan_tidal(crate::imports::Renewers::of(s))
     } else {
         Vec::new()
     };
@@ -1412,80 +1425,117 @@ pub(crate) fn sign_in(
                 .join(" · ")
         )
     };
-    let ways = vec![
+    let signed_in_node = *who != Who::Nobody;
+    let mut ways = vec![
+        Way {
+            id: WAY_BROWSER.into(),
+            label: "Sign in with TIDAL".into(),
+            note: "Full tracks, lossless and hi-res: sign in at TIDAL in a new tab, then paste the address of the page you land on. Unofficial: TIDAL has not approved this for other apps and can stop it at any time.".into(),
+            action: "browser".into(),
+            recommended: browser,
+            advanced: false,
+            available: browser && signed_in_node,
+            reason: (!browser).then(|| crate::tidal_unofficial::NO_BROWSER_CLIENT.to_string()),
+        },
+        Way {
+            id: WAY_DEVICE.into(),
+            label: device_label.into(),
+            note: if own_client {
+                "Fallback, which TIDAL may send AAC only (lossy): a code you enter at link.tidal.com, with the device client set on this node.".into()
+            } else {
+                "Fallback, which TIDAL may send AAC only (lossy): a code you enter at link.tidal.com.".into()
+            },
+            action: "code".into(),
+            recommended: false,
+            advanced: false,
+            available: device_client.is_some() && signed_in_node,
+            reason: device_client.is_none().then(|| {
+                if who.is_owner() {
+                    "This build has no device client: add one under Advanced › Your own device client.".to_string()
+                } else {
+                    "The node's owner hasn't added a TIDAL device client yet.".to_string()
+                }
+            }),
+        },
+    ];
+    // Only when something was found (also what isn't usable, which says why)
+    if !found.is_empty() {
+        ways.push(Way {
+            id: WAY_IMPORT.into(),
+            label: "A sign-in from another app on this machine".into(),
+            note: import_note,
+            action: "import".into(),
+            recommended: false,
+            advanced: false,
+            available: !usable.is_empty(),
+            reason: usable
+                .is_empty()
+                .then(|| "What was found is not usable; pick a newer file or paste one instead.".to_string()),
+        });
+    }
+    ways.extend([
         Way {
             id: WAY_APP.into(),
             label: app.into(),
             note: "Official API, sign in at TIDAL in this browser: search, albums, your collection and playlists. TIDAL plays 30-second previews to apps on its third-party developer tier.".into(),
             action: "browser".into(),
-            recommended: true,
+            recommended: false,
+            advanced: true,
             available: c.configured(),
             reason: (!c.configured()).then(|| {
                 "This build has no built-in TIDAL app; add one in Settings › This node › Service apps."
                     .to_string()
             }),
         },
+        // The owner's device client: the code sign-in then uses it instead of the build's
         Way {
-            id: WAY_IMPORT.into(),
-            label: "A sign-in from another app on this machine".into(),
-            note: import_note,
-            action: "import".into(),
+            id: WAY_OWN_DEVICE.into(),
+            label: "Your own device client".into(),
+            note: "A TIDAL device client id and secret you are allowed to use, for the code sign-in. It replaces the built-in one for everyone on this node.".into(),
+            action: "setup".into(),
             recommended: false,
-            available: !usable.is_empty(),
-            reason: usable.is_empty().then(|| {
-                if !who.is_owner() {
-                    "The sign-ins on the node's machine are the owner's; paste your own instead.".to_string()
-                } else if found.is_empty() {
-                    "Nothing found in the known places; pick the file or paste it instead.".to_string()
-                } else {
-                    "What was found is not usable; pick a newer file or paste one instead.".to_string()
-                }
-            }),
-        },
-        // Without a device client the way is still the place to go: its page asks for one first
-        // (a step card with Check), so there is no separate "Your own app" way
-        Way {
-            id: WAY_DEVICE.into(),
-            label: device_label.into(),
-            note: if device_client.is_some() {
-                "Full tracks (unofficial): the device sign-in tidal-dl-ng and python-tidal use, with a code you enter at link.tidal.com. TIDAL has not approved this for other apps and can stop it at any time.".into()
-            } else {
-                "Full tracks (unofficial): a code you enter at link.tidal.com, as tidal-dl-ng and python-tidal do. It needs a TIDAL device client: enter one you are allowed to use first. TIDAL has not approved this for other apps and can stop it at any time.".into()
-            },
-            action: "code".into(),
-            recommended: false,
-            // The device client is the node's: a listener signs in once the owner has added one
-            available: device_client.is_some() || who.is_owner(),
-            reason: (device_client.is_none() && !who.is_owner())
-                .then(|| "The node's owner hasn't added a TIDAL device client yet.".to_string()),
+            advanced: true,
+            available: who.is_owner(),
+            reason: (!who.is_owner()).then(|| "The node's device client is the owner's.".to_string()),
         },
         Way {
             id: WAY_PASTE.into(),
             label: "Paste a token".into(),
-            note: "The contents of one of those apps' token files, or a bare TIDAL access token (a refresh token on the next line keeps it alive). Nothing is shown again once saved.".into(),
+            note: "Another app's token file (tidal-dl-ng, beets, tidal-dl, streamrip) or its contents, or a bare TIDAL access token (a refresh token on the next line keeps it alive). Nothing is shown again once saved.".into(),
             action: "paste".into(),
             recommended: false,
+            advanced: true,
             available: true,
             reason: None,
         },
-    ];
+    ]);
     let previews = playback_limit.is_some()
         || user.as_ref().and_then(|u| u.access_tier.as_deref()) == Some("THIRD_PARTY");
     let device_session = mode.session.as_ref().filter(|_| mode.enabled);
     // An imported session is its own way, named after the app it came from
     let device_in_use = || {
         device_session.map(|d| {
-            let (way, label) = match d.from.as_deref() {
-                Some("pasted") => (WAY_PASTE, "Pasted token".to_string()),
-                Some(app) => (WAY_IMPORT, format!("{}'s sign-in", crate::imports::app_name(app))),
-                None => (WAY_DEVICE, device_label.to_string()),
+            let (way, label) = match (d.from.as_deref(), d.client) {
+                (Some("pasted"), _) => (WAY_PASTE, "Pasted token".to_string()),
+                (Some(app), _) => (WAY_IMPORT, format!("{}'s sign-in", crate::imports::app_name(app))),
+                (None, crate::tidal_unofficial::ClientKind::Pkce) => {
+                    (WAY_BROWSER, "Sign in with TIDAL".to_string())
+                }
+                (None, crate::tidal_unofficial::ClientKind::Device) => (WAY_DEVICE, device_label.to_string()),
             };
             InUse {
                 way: way.into(),
                 label,
                 user: d.user_id.clone(),
                 expires_at: Some(d.expires_at),
-                gives: Some("full tracks".into()),
+                gives: Some(
+                    if d.client == crate::tidal_unofficial::ClientKind::Pkce {
+                        "full tracks, lossless"
+                    } else {
+                        "full tracks"
+                    }
+                    .into(),
+                ),
             }
         })
     };
@@ -1555,7 +1605,11 @@ pub(crate) fn sign_in(
 /// the refresh token came from the client this build carries.
 pub(crate) fn import_sign_in(s: &NodeState, who: &Who, session: crate::tidal_unofficial::Session) {
     crate::tidal_unofficial::update_signed_in(s, who, "tidal-full", |st| {
-        st.session = Some(session);
+        // What the file said made it was for the import's check only
+        st.session = Some(crate::tidal_unofficial::Session {
+            named_client: None,
+            ..session
+        });
         st.login = None;
         st.enabled = true;
         st.health = None;
@@ -1567,7 +1621,7 @@ pub(crate) fn import_sign_in(s: &NodeState, who: &Who, session: crate::tidal_uno
 /// nothing yet.
 pub(crate) fn way_chosen(s: &NodeState, who: &Who, way: &str) {
     match way {
-        WAY_DEVICE | WAY_IMPORT | WAY_PASTE => {
+        WAY_BROWSER | WAY_DEVICE | WAY_IMPORT | WAY_PASTE => {
             crate::tidal_unofficial::update(s, who, |st| {
                 st.enabled = true;
                 st.health = None;
@@ -1610,12 +1664,12 @@ impl crate::signin::SignInSource for TidalSignIn {
     ) -> Result<&'static str, ApiError> {
         let (imp, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
             (Some(text), _) if !text.is_empty() => (
-                crate::imports::pasted_tidal(text)
+                crate::imports::pasted_tidal(text, crate::imports::Renewers::of(s))
                     .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
                 WAY_PASTE,
             ),
             (_, Some(id)) => {
-                let imp = crate::imports::scan_tidal()
+                let imp = crate::imports::scan_tidal(crate::imports::Renewers::of(s))
                     .into_iter()
                     .find(|i| i.found.id == id)
                     .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;
@@ -1640,11 +1694,13 @@ impl crate::signin::SignInSource for TidalSignIn {
 }
 
 /// Sign out of one way: the device way also goes off, so TIDAL falls back to the official app.
+/// A browser sign-in on its way is dropped too, so its token answer is not kept after this.
 pub(crate) fn sign_out_of(s: &NodeState, who: &Who, way: &str) -> Result<(), ApiError> {
     if way != WAY_APP {
         crate::tidal_unofficial::update(s, who, |st| {
             st.session = None;
             st.login = None;
+            st.browser = None;
             st.enabled = false;
         });
         Ok(())
@@ -2383,9 +2439,10 @@ pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Versi
 
 /// Whole tracks fetched for browsers, kept a short while so seeking and
 /// replaying do not hit TIDAL again. Previews are tiny; full tracks are tens
-/// of megabytes, so only a few are kept.
-/// (track id, fetched at, bytes, media type).
-type CachedStream = (String, std::time::Instant, Arc<Vec<u8>>, String);
+/// of megabytes, so only a few are kept, [`STREAM_CACHE_BYTES`] at most.
+/// (track id, fetched at, bytes, media type). The bytes are shared: a range
+/// served from them is a slice, never a copy of the track.
+pub(crate) type CachedStream = (String, std::time::Instant, bytes::Bytes, String);
 
 pub(crate) fn stream_cache() -> &'static Mutex<Vec<CachedStream>> {
     static C: std::sync::OnceLock<Mutex<Vec<CachedStream>>> = std::sync::OnceLock::new();
@@ -2401,8 +2458,27 @@ pub(crate) fn forget_streams_of(tag: &str) {
         .retain(|(k, _, _, _)| !k.starts_with(&prefix));
 }
 const STREAM_CACHE_ENTRIES: usize = 6;
+/// The most the kept tracks may hold together: six full hi-res tracks were up to 1.8 GB.
+pub(crate) const STREAM_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const STREAM_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const STREAM_MAX_BYTES: usize = 300 * 1024 * 1024;
+
+/// Keep a fetched track in `cache` (replacing one of the same key), dropping the oldest until
+/// there are at most [`STREAM_CACHE_ENTRIES`] of at most [`STREAM_CACHE_BYTES`] together. A
+/// track bigger than that on its own is served but not kept.
+pub(crate) fn keep_stream(cache: &mut Vec<CachedStream>, entry: CachedStream) {
+    cache.retain(|(k, _, _, _)| *k != entry.0);
+    if entry.2.len() > STREAM_CACHE_BYTES {
+        return;
+    }
+    let held = |c: &Vec<CachedStream>| c.iter().map(|(_, _, b, _)| b.len()).sum::<usize>();
+    while !cache.is_empty()
+        && (cache.len() >= STREAM_CACHE_ENTRIES || held(cache) + entry.2.len() > STREAM_CACHE_BYTES)
+    {
+        cache.remove(0);
+    }
+    cache.push(entry);
+}
 
 /// `GET /v1/sources/tidal/stream/{id}`: the track as one `audio/mp4` body
 /// with a known length and byte ranges, so browsers (the web UI's own zone)
@@ -2468,18 +2544,16 @@ pub(crate) async fn stream(
     let (bytes, mime) = match (cached, full) {
         (Some(c), _) => c,
         (None, Some((b, mime))) => {
-            let bytes = Arc::new(b);
-            let mut c = stream_cache().lock().expect("stream cache");
-            c.retain(|(k, _, _, _)| *k != key);
-            if c.len() >= STREAM_CACHE_ENTRIES {
-                c.remove(0);
-            }
-            c.push((
-                key.clone(),
-                std::time::Instant::now(),
-                bytes.clone(),
-                mime.clone(),
-            ));
+            let bytes = bytes::Bytes::from(b);
+            keep_stream(
+                &mut stream_cache().lock().expect("stream cache"),
+                (
+                    key.clone(),
+                    std::time::Instant::now(),
+                    bytes.clone(),
+                    mime.clone(),
+                ),
+            );
             tracing::info!(track = %id, bytes = bytes.len(), "TIDAL full track fetched for a browser (unofficial)");
             (bytes, mime)
         }
@@ -2538,23 +2612,21 @@ pub(crate) async fn stream(
             .await
             .map_err(|e| upstream(e.to_string()))?
             .map_err(upstream)?;
-            let bytes = Arc::new(bytes);
-            let mut c = stream_cache().lock().expect("stream cache");
-            c.retain(|(k, _, _, _)| *k != key);
-            if c.len() >= STREAM_CACHE_ENTRIES {
-                c.remove(0);
-            }
-            c.push((
-                key.clone(),
-                std::time::Instant::now(),
-                bytes.clone(),
-                mime.clone(),
-            ));
+            let bytes = bytes::Bytes::from(bytes);
+            keep_stream(
+                &mut stream_cache().lock().expect("stream cache"),
+                (
+                    key.clone(),
+                    std::time::Instant::now(),
+                    bytes.clone(),
+                    mime.clone(),
+                ),
+            );
             tracing::info!(track = %id, bytes = bytes.len(), presentation = %m.presentation, "TIDAL stream fetched for a browser");
             (bytes, mime)
         }
     };
-    let mut resp = crate::ranged_response(&headers, bytes.as_ref().clone(), &mime);
+    let mut resp = crate::ranged_response(&headers, bytes, &mime);
     resp.headers_mut().insert(
         "Cache-Control",
         axum::http::HeaderValue::from_static("private, max-age=600"),
@@ -2689,7 +2761,7 @@ pub(crate) fn open_track_blocking(
     crate::tidal_unofficial::record(library, who, &full);
     match full {
         Ok(Some(f)) => {
-            tracing::info!(track = id, "TIDAL full track (unofficial)");
+            // open_blocking logged what TIDAL answered
             if let Ok(lib) = library.lock() {
                 let _ = lib.delete_setting(PLAYBACK_LIMIT_KEY);
             }

@@ -1,6 +1,6 @@
 # Install on Linux without Docker
 
-This runs the node as a system service on a Raspberry Pi, a mini PC or any Debian or Ubuntu
+This runs the Odeion node (`odeiond`) as a system service on a Raspberry Pi, a mini PC or any Debian or Ubuntu
 machine. You type a few commands in a terminal on that machine (or over SSH).
 
 Which download:
@@ -23,11 +23,13 @@ curl -LO https://github.com/gillohner/pubky-music-node/releases/download/edge/pu
 curl -LO https://github.com/gillohner/pubky-music-node/releases/download/edge/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS      # must print OK
 tar xzf pubky-music-node-linux-$ARCH.tar.gz
-sudo install -m 755 pubky-music-node-linux-$ARCH/pm-node /usr/local/bin/
+sudo install -m 755 pubky-music-node-linux-$ARCH/odeiond /usr/local/bin/
+sudo ln -sf odeiond /usr/local/bin/pm-node   # the old name, for scripts that still use it
 sudo apt install ffmpeg      # optional: smaller copies for phones to download
 ```
 
-The unpacked folder also has `README.md` and these guides (`docs/guides/`), to read offline.
+The downloads keep their names from before Odeion (`pubky-music-node-…`), and the folder also
+has `pm-node`, the node's old name: the same program. The unpacked folder also has `README.md` and these guides (`docs/guides/`), to read offline.
 `edge` is built from the newest code. For the last numbered release, use
 `releases/latest/download/` instead of `releases/download/edge/`.
 
@@ -60,17 +62,18 @@ whether it is.
 ## 3. Run it as a service
 
 ```sh
-sudo tee /etc/systemd/system/pubky-music-node.service >/dev/null <<'EOF'
+sudo tee /etc/systemd/system/odeiond.service >/dev/null <<'EOF'
 [Unit]
-Description=Pubky Music Node
+Description=Odeion node
 Wants=network-online.target
-After=network-online.target sound.target
+After=network-online.target sound.target pubky-music-node.service
+Conflicts=pubky-music-node.service
 
 [Service]
 User=pubky-music
 Group=pubky-music
 SupplementaryGroups=audio
-ExecStart=/usr/local/bin/pm-node -c /etc/pubky-music/node.toml serve
+ExecStart=/usr/local/bin/odeiond -c /etc/pubky-music/node.toml serve
 Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=5
@@ -84,9 +87,45 @@ ReadWritePaths=/var/lib/pubky-music
 WantedBy=multi-user.target
 EOF
 sudo systemctl daemon-reload
-sudo systemctl enable --now pubky-music-node
-journalctl -u pubky-music-node -f      # the log; Ctrl+C stops following it
+sudo systemctl enable --now odeiond
+journalctl -u odeiond -f      # the log; Ctrl+C stops following it
 ```
+
+The user, the config file and the data folder keep their names from before Odeion
+(`pubky-music`, `/etc/pubky-music/node.toml`, `/var/lib/pubky-music`), so an update never moves
+your library.
+
+### Installed before Odeion (`pubky-music-node.service`)
+
+That unit keeps working: `pm-node` is still installed, and nothing has to change. To move to the
+new unit name, first look at the old unit as it runs, including anything you changed in it (an
+extra folder in `ReadWritePaths=` for backups, `Environment=` lines, drop-ins):
+
+```sh
+systemctl cat pubky-music-node      # its file, then its drop-ins (pubky-music-node.service.d/)
+```
+
+Then install the new program and unit, and carry those changes over: the drop-ins move with it,
+and lines you edited in the old unit's own file go into a drop-in of the new one.
+
+```sh
+sudo install -m 755 pubky-music-node-linux-$ARCH/odeiond /usr/local/bin/
+sudo ln -sf odeiond /usr/local/bin/pm-node
+# write /etc/systemd/system/odeiond.service as above, then:
+sudo mkdir -p /etc/systemd/system/odeiond.service.d
+[ ! -d /etc/systemd/system/pubky-music-node.service.d ] ||
+  sudo cp -a /etc/systemd/system/pubky-music-node.service.d/. /etc/systemd/system/odeiond.service.d/
+sudo systemctl edit odeiond          # your own lines, e.g. ReadWritePaths=/mnt/backup (added to the unit's)
+sudo systemctl daemon-reload
+systemctl cat odeiond                # the same ReadWritePaths= and Environment= as before
+sudo systemctl disable --now pubky-music-node
+sudo systemctl enable --now odeiond
+```
+
+Run the node from one unit only: each stops the other, and `odeiond.service` starts after the old
+one has stopped, but only one should start at boot. The same user, config and data are used, so the
+library and sign-ins are all there. To go back:
+`sudo systemctl disable --now odeiond && sudo systemctl enable --now pubky-music-node`.
 
 Open `http://<this machine's address>:7788` (step 2 printed it), click **Or paste the API
 token**, paste the token and press **Connect**. Then in **Your library › Node library**, type your
@@ -118,8 +157,8 @@ doesn't use, or stop the desktop's sound server for it.
 
 ## Updating
 
-Download the new file as in step 1, install `pm-node` again, then
-`sudo systemctl restart pubky-music-node`. Your library and settings stay in
+Download the new file as in step 1, install `odeiond` again (and the `pm-node` link), then
+`sudo systemctl restart odeiond` (`pubky-music-node` on an install from before Odeion). Your library and settings stay in
 `/var/lib/pubky-music`. See [Backups and updates](backup-and-update.md).
 
 ## With your own Pubky homeserver
@@ -134,8 +173,9 @@ sudo apt install build-essential pkg-config libasound2-dev
 curl https://sh.rustup.rs -sSf | sh       # Rust, if you don't have it
 git clone https://github.com/gillohner/pubky-music-node.git
 cd pubky-music-node
-cargo build --release -p pm-node --features alsa
-sudo install -m 755 target/release/pm-node /usr/local/bin/
+cargo build --release -p pm-node --features alsa      # builds odeiond, and pm-node (its old name)
+sudo install -m 755 target/release/odeiond /usr/local/bin/
+sudo ln -sf odeiond /usr/local/bin/pm-node
 ```
 
 Then continue with step 2. The build takes a while and several GB of disk; on a Pi 4 it can take

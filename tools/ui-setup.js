@@ -23,8 +23,8 @@
 //     redraws only About when it arrives in the background;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
-//   * Play to: while something plays or is queued, every other device gets Move here (This zone
-//     gets Move to…): the song at its position, the queue and repeat move, paused stays paused,
+//   * Play to: while something plays or is queued, every other device gets Move here (the one way
+//     to move there; the Queue page has Move to…): the song at its position, the queue and repeat move, paused stays paused,
 //     out of and into This browser too, and the menu follows; the node's errors show in the menu;
 //     the device line says the protocol and model in words, with the id as a tooltip;
 //   * the sound pill in the player bar says where it plays from (the provider's mark), the path in
@@ -154,8 +154,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
     await c.close();
 
-    // ---- Every sidebar place on tablets and phones (TASK-tablet-nav) ----
-    // Desktop's sidebar destinations online (Downloads is the offline app's), each reached within two taps (the rail or tabs, else the
+    // ---- Every sidebar place on tablets and phones (TASK-tablet-nav; tablets have the desktop layout since 2026-11-04) ----
+    // Desktop's sidebar destinations online (Downloads is the offline app's), each reached within two taps (the sidebar or tabs, else the
     // Library chips; Queue through Now playing and Settings through the account button on phones),
     // plus search and volume
     {
@@ -170,7 +170,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         if (await shown('[data-bnav="library"]')) { await p.click('[data-bnav="library"]'); if (await visible(p, `[data-libnav="${d}"]`, 5000)) { await p.click(`[data-libnav="${d}"]`); return 2; } }
         return 0;
       };
-      for (const [w, h, layout] of [[768, 1024], [1024, 768], [834, 1194], [1194, 834], [1024, 1366], [1366, 1024], [820, 1180], [1180, 820], [1080, 800], [1345, 900, 'comfortable'], [390, 844]]) {
+      for (const [w, h, layout] of [[768, 1024], [1024, 768], [834, 1194], [1194, 834], [1024, 1366], [1366, 1024], [820, 1180], [1180, 820], [1080, 800], [1345, 900, 'phone'], [600, 450], [390, 844]]) {
         c = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: w < 1100 });
         await c.addInitScript(([t, l]) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); if (l) localStorage.setItem('pm.layout', l); }, [TOKEN, layout || '']);
         p = await c.newPage();
@@ -192,31 +192,35 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           const off = await p.evaluate(() => { document.body.classList.add('offline'); const d = getComputedStyle(document.querySelector('#volbtn')).display; document.body.classList.remove('offline'); return d; });
           check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
         }
-        if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
+        // A phone, or a desktop window under 760 px (no volume button there): the sound pill's panel
+        if (!vol && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         // A phone with nothing playing has no sound pill (UX sweep A4): volume is on the zone's card
         // (Zones, one tap), and in Now playing while something plays
         let where = (await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel';
         if (!vol && shell === 'phone') { await p.click('[data-bnav="zones"]'); vol = await visible(p, '#main [data-zvol]', 8000); where = 'on the zone card'; }
         check(vol, `${w}×${h}: volume (${where})`);
-        if (shell === 'tablet') {
-          const foot = p.locator('[data-bnav="settings"]'); await foot.scrollIntoViewIfNeeded().catch(() => {});
+        check((shell === 'phone') === (w < 600 || layout === 'phone'), `${w}×${h}${layout ? ` (${layout})` : ''}: the ${shell} layout`);
+        if (shell === 'desktop') {
+          check(!(await shown('.bottomnav')), `${w}×${h}: no bottom tabs in the desktop layout`);
+          const foot = p.locator('.nav-item[data-view="settings"]'); await foot.scrollIntoViewIfNeeded().catch(() => {});
           const box = await foot.boundingBox();
-          check(!!box && box.y >= 0 && box.y + box.height <= h, `${w}×${h}: the rail's foot (Settings) is on screen, scrolled to if need be`);
+          check(!!box && box.y >= 0 && box.y + box.height <= h, `${w}×${h}: the sidebar's last place (Settings) is on screen, scrolled to if need be`);
         }
         if (w === 834) {
-          await p.goto(BASE + '/'); await p.waitForSelector('[data-bnav="sources"]');
-          await p.click('[data-bnav="sources"]'); await p.waitForTimeout(500); await p.click('[data-bnav="home"]'); await p.waitForTimeout(500); await p.click('[data-bnav="library"]'); await p.waitForTimeout(800);
-          check(new URL(p.url()).pathname !== '/sources' && await p.$eval('[data-bnav="library"]', (b) => b.classList.contains('on')) && !(await p.$eval('[data-bnav="sources"]', (b) => b.classList.contains('on'))), `${w}×${h}: after Sources, Library opens the library, marked`);
+          await p.goto(BASE + '/'); await p.waitForSelector('.nav-item[data-view="sources"]');
+          await p.click('.nav-item[data-view="sources"]'); await p.waitForTimeout(500); await p.click('.nav-item[data-view="library"]'); await p.waitForTimeout(800);
+          check(new URL(p.url()).pathname === '/library' && await p.$eval('.nav-item[data-view="library"]', (b) => b.classList.contains('on')) && !(await p.$eval('.nav-item[data-view="sources"]', (b) => b.classList.contains('on'))), `${w}×${h}: after Sources, Your library opens the library, marked`);
         }
         if (w === 1080) check(await shown('#volbtn') && !(await shown('#vol')), `${w}×${h}: a narrow desktop has the volume button`);
         if (w === 390) {
-          // Sources recorded on the phone, then the window becomes a tablet: Library is the library
+          // A phone turned into a tablet's width: the desktop layout, its sidebar marking where you are
           await p.goto(BASE + '/sources'); await p.waitForTimeout(800);
-          await p.setViewportSize({ width: 834, height: 1194 }); await p.waitForSelector('[data-bnav="sources"]', { state: 'visible', timeout: 5000 }).catch(() => {});
-          await p.click('[data-bnav="home"]'); await p.waitForTimeout(500); await p.click('[data-bnav="library"]'); await p.waitForTimeout(800);
-          check(new URL(p.url()).pathname === '/library', `phone then tablet: Library opens the library, not Sources (${new URL(p.url()).pathname})`);
+          await p.setViewportSize({ width: 834, height: 1194 }); await p.waitForSelector('.nav-item[data-view="sources"]', { state: 'visible', timeout: 5000 }).catch(() => {});
+          check(await p.evaluate(() => document.documentElement.dataset.shell) === 'desktop' && await p.$eval('.nav-item[data-view="sources"]', (b) => b.classList.contains('on')), 'phone then tablet: the desktop layout, Sources marked in the sidebar');
+          await p.click('.nav-item[data-view="library"]'); await p.waitForTimeout(800);
+          check(new URL(p.url()).pathname === '/library', `phone then tablet: Your library opens the library (${new URL(p.url()).pathname})`);
         }
-        if (OUT_SHOTS && (layout || w === 834)) { await p.goto(BASE + '/albums'); await p.waitForTimeout(1500); await p.screenshot({ path: `${OUT_SHOTS}/tablet-rail-${w}x${h}.png` }); }
+        if (OUT_SHOTS && (layout || w === 834)) { await p.goto(BASE + '/albums'); await p.waitForTimeout(1500); await p.screenshot({ path: `${OUT_SHOTS}/tablet-${w}x${h}.png` }); }
         await c.close();
       }
     }
@@ -244,7 +248,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const IMG = BASE + '/icon.svg';
     const pageJson = (kind, id, extra) => ({ kind, id, uri: null, target: {}, title: 'Mock ' + kind, artist: kind === 'artist' ? null : { id: 'tidal-77', name: 'Mock Artist' }, album: null, year: 2020, image: kind === 'artist' ? null : IMG, source: 'TIDAL', source_id: 'tidal', section: 'home', plays_from: null, connect: [], reading: false, pending: false, songs: [], total_ms: 0, albums: [], versions: [], also_on: [], opened_as: null, plays_note: null, song_uri: null, link: null, on_pubky: null, ...extra });
     const SONGS = [{ no: 1, title: 'Streamed song', artist: 'Mock Artist', duration_ms: 1000, uri: 'tidal:1', track_id: null, page: null, image: IMG, id: 'tidal-1', artist_id: 'tidal-77', album: 'Mock album', album_id: 'tidal-5' }, { no: 2, title: 'Local song', artist: 'Mock Artist', duration_ms: 1000, uri: 'track:5', track_id: 5, page: null, image: IMG, id: 'lib-5', artist_id: null, album: 'Local album', album_id: 'lib-1' }];
-    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }];
+    // The third tile's "year" is a remote subtitle with markup in it: it must show as text
+    const ALBUMS = [{ id: 'tidal-5', title: 'Mock album', image: IMG, year: 2020 }, { id: 'lib-1', title: 'Local album', image: IMG, year: 2019 }, { id: 'tidal-6', title: 'Odd album', image: IMG, year: '<img id="yearinj" src="x"><b>Someone</b>' }];
     await p.route(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/, (r) => {
       const u = new URL(r.request().url()); if (u.pathname.endsWith('/extras')) return r.fulfill({ json: {} });
       const [, , kind, id] = u.pathname.replace('/v1/', '/').split('/');
@@ -256,6 +261,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/artist/tidal-77');
     await p.waitForSelector('#ialbums [data-tile="1"]');
     const t0 = await badge('#ialbums [data-tile="0"]'); const t1 = await badge('#ialbums [data-tile="1"]');
+    check(!(await p.$('#ialbums #yearinj, #ialbums [data-tile="2"] b')) && /<img id="yearinj"/.test(await p.textContent('#ialbums [data-tile="2"] .a')), 'a tile\'s year from a service is text, never markup');
     check(t0 && t0.label === 'From TIDAL' && t0.hidden && !t0.role, `a TIDAL album tile says where it is from, at the end of its name, the badge itself decoration (${t0 && t0.label})`);
     check(t1 && t1.label === 'From your library', `a library album tile too (${t1 && t1.label})`);
     check(t0 && t0.absolute && t0.inside && t0.square, 'in the cover’s bottom corner, over it (the cover stays square)');
@@ -331,7 +337,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const sub = row(nz.id).locator('.sub').first();
       const subText = await sub.evaluate((e) => { const c = e.cloneNode(true); c.querySelectorAll('.sr-only').forEach((x) => x.remove()); return c.textContent; }); // the id is there too, for screen readers only
       check(subText === 'Null output, for developers · HomePod mini' && (await sub.getAttribute('title')) === nz.output, `the device line is in words, the id a tooltip (${subText})`);
-      check(await p.locator('#zpmove').count() === 1, 'and This zone has Move to…');
+      check(await p.locator('#zpmove').count() === 0 && !/Move to…/.test(await p.textContent('#zonepop')), 'one way to move: no Move to… under This zone (UX sweep A14)');
       await row(nz.id).locator('[data-move]').click();
       check(await waitText(p, '#zonename', nz.name), 'Move here: the zone in use is the new one');
       const zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`);
@@ -651,7 +657,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           const vis = !!crumb && getComputedStyle(crumb.closest('.crumbs')).display !== 'none';
           return { trail: vis, diff: vis ? Math.round(Math.abs(mid(back) - mid(crumb)) * 10) / 10 : 0, backFont: getComputedStyle(back).fontSize, crumbFont: vis ? getComputedStyle(crumb).fontSize : null, backMb: getComputedStyle(back).marginBottom, barMb: getComputedStyle(bar).marginBottom };
         });
-        check(m.trail === (w > 720) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
+        check(m.trail === (w >= 600) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
         // An artist page has no trail: the bar keeps the same gap below
         await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
         const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
@@ -905,8 +911,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(/^pubkyauth:/.test(await p.getAttribute('#loginring', 'href')), 'the link opens Pubky Ring');
       check((await p.textContent('#loginh')).trim() === 'Log in to CI node', 'the screen names the node');
       const hint = await p.textContent('#logintoken');
-      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1, 'the API token stays as the alternative, saying where it is');
-      await p.click('#logintoken summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
+      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1 && !(await p.$eval('#logintoken .tokwhere', (d) => d.open)) && (await p.$eval('#tokhint', (e) => e.textContent.length)) < 90, 'the API token stays as the alternative (one short line, where to find it folded: UX sweep A20), saying where it is');
+      await p.click('#logintoken > summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
       check(await waitText(p, '#tokerr', 'The node doesn\u2019t take that token.') && await p.isVisible('#loginpage'), 'a wrong token is said on the screen');
       await p.fill('#tok', TOKEN); await p.click('#tokform button[type=submit]');
       check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false) && await visible(p, '#me'), 'the right token logs in');

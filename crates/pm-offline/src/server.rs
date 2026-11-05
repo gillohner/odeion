@@ -112,7 +112,7 @@ async fn info(State(s): State<Arc<Store>>) -> Json<Value> {
     let node = ix.node.clone().unwrap_or_else(|| json!({}));
     Json(json!({
         "id": node.get("id").cloned().unwrap_or(Value::Null),
-        "name": node.get("name").and_then(Value::as_str).unwrap_or("Pubky Music"),
+        "name": node.get("name").and_then(Value::as_str).unwrap_or("Odeion"),
         "version": node.get("version").cloned().unwrap_or(Value::Null),
         "api": "v1",
         "offline": true,

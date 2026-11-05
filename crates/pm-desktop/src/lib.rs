@@ -1,4 +1,4 @@
-//! Pubky Music app: one native window around the node's web UI (the same UI
+//! The Odeion app: one native window around the node's web UI (the same UI
 //! on every platform), built with Tauri 2 for macOS, Windows, Linux and
 //! Android. The window starts on a small connect page (`ui/`): approving in
 //! Pubky Ring lets the app find the node's address and token through the
@@ -16,6 +16,7 @@ mod node;
 mod offline;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
+mod ring_wait;
 mod settings;
 #[cfg(desktop)]
 mod update;
@@ -67,8 +68,10 @@ impl AppState {
 /// Links that would open a second window (`target="_blank"`, a
 /// cross-origin `window.open`) become plain navigations, which the
 /// navigation guard sends to the system browser. WebKitGTK does not always
-/// raise a new-window request for them, and Android never does.
-const EXTERNAL_LINKS_JS: &str = "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[target=_blank]');if(a&&a.href&&!e.defaultPrevented){e.preventDefault();location.assign(a.href);}});var wo=window.open;window.open=function(u){try{var x=new URL(u,location.href);if(x.origin!==location.origin){location.assign(x.href);return null;}}catch(e){}return wo.apply(window,arguments);};";
+/// raise a new-window request for them, and Android never does. An `about:`
+/// window (`about:blank`, origin "null") opens nothing: as a navigation it
+/// would replace the app's own page, which the guard allows.
+const EXTERNAL_LINKS_JS: &str = "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[target=_blank]');if(a&&a.href&&!e.defaultPrevented){e.preventDefault();location.assign(a.href);}});var wo=window.open;window.open=function(u){try{var x=new URL(u,location.href);if(x.protocol==='about:')return null;if(x.origin!==location.origin){location.assign(x.href);return null;}}catch(e){}return wo.apply(window,arguments);};";
 
 /// Run before every page: the node's page gets the token in the
 /// localStorage key the web UI reads (only on the node's origin), and every
@@ -453,10 +456,15 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     android::tls_ready().await;
     let hs =
         pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet).map_err(|e| e.to_string())?;
+    // Ends the wait after ring_wait::DEADLINE, or on the page's Cancel (ring_cancel).
+    let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
     let flow = hs
         .start_login_with("pubky-music-desktop", RING_CAPS)
         .map_err(|e| e.to_string())?;
+    // The relay listener runs from here: trips away from now on can stop it.
+    let since_trip = ring_wait::trips();
     let url = flow.url().to_string();
+    let relay = ring_wait::relay_host(&url);
     let _ = app.emit(
         "ring-url",
         RingUrl {
@@ -464,7 +472,12 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
             url,
         },
     );
-    let session = flow.await_approval().await.map_err(|e| e.to_string())?;
+    // Only on screen and online: Android 15+ cuts a backgrounded app's network (see ring_wait).
+    let page = app.clone();
+    let session = ring_wait::approval(RingFlow(flow), since_trip, &relay, 443, stop, move |s| {
+        let _ = page.emit("ring-state", s);
+    })
+    .await?;
     let record = hs
         .read_node_record(&session)
         .await
@@ -475,6 +488,40 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     let (s, info) = reach(&app, &state, s).await?;
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// A Ring sign-in in progress, for [`ring_wait::approval`].
+struct RingFlow(pm_pubky::homeserver::LoginFlow);
+
+impl ring_wait::Pending for RingFlow {
+    type Done = pm_pubky::homeserver::PubkySession;
+    /// An error that came before the poll waited for anything is the relay listener's own (no
+    /// grant was sent): see [`ring_wait::at_once`].
+    async fn poll(&self) -> Result<Option<Self::Done>, ring_wait::Failed> {
+        let (r, at_once) = ring_wait::at_once(self.0.poll()).await;
+        r.map_err(|e| {
+            ring_wait::Failed::sort(
+                ring_wait::chain(&e),
+                at_once,
+                e.is_transient(),
+                e.is_server_error(),
+                &ring_wait::relay_host(self.0.url()),
+            )
+        })
+    }
+    /// A fresh client: nothing it holds comes from the time in the background.
+    fn resume(&self) -> Result<Self, String> {
+        let hs = pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet)
+            .map_err(|e| e.to_string())?;
+        hs.resume_login(&self.0).map(RingFlow).map_err(|e| e.to_string())
+    }
+}
+
+/// The connect page's Cancel: the running Ring sign-in stops waiting (`ring_connect` then fails
+/// with [`ring_wait::CANCELLED`]).
+#[tauri::command]
+fn ring_cancel() {
+    ring_wait::cancel();
 }
 
 /// Hand a `pubkyauth://` link to Pubky Ring on this device.
@@ -499,6 +546,10 @@ fn forget(state: State<'_, AppState>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First, while this is the only thread: ODEION_ settings onto the PM_ names the code reads.
+    // Not on Android, where the app starts on a thread of a running process and reads no settings.
+    #[cfg(not(target_os = "android"))]
+    let env_compat = pm_model::brand::apply_env_compat();
     crash::install_hook();
     // WebKitGTK's DMA-BUF renderer crashes the web process on some Linux
     // GPU stacks (NVIDIA, some Wayland compositors); the software path is
@@ -517,6 +568,10 @@ pub fn run() {
         .with_ansi(false)
         .without_time()
         .try_init();
+    #[cfg(not(target_os = "android"))]
+    for line in env_compat.log_lines() {
+        tracing::info!("{line}");
+    }
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
@@ -531,6 +586,7 @@ pub fn run() {
             follow_moved,
             discover_nodes,
             ring_connect,
+            ring_cancel,
             open_ring,
             forget,
             has_downloads,
@@ -544,7 +600,7 @@ pub fn run() {
                 crash::set_dir(dir);
             }
             let path = app.path().app_config_dir()?.join("node.json");
-            // PM_NODE/PM_TOKEN for scripts, then this app's file, then the
+            // ODEION_NODE/ODEION_TOKEN (or PM_NODE/PM_TOKEN) for scripts, then this app's file, then the
             // wry shell's file from before.
             let initial = std::env::var("PM_NODE")
                 .ok()
@@ -603,7 +659,7 @@ pub fn run() {
                     tauri::webview::NewWindowResponse::Deny
                 });
                 builder = builder
-                    .title("Pubky Music")
+                    .title("Odeion")
                     .inner_size(1280.0, 840.0)
                     .min_inner_size(420.0, 600.0);
             }
@@ -617,7 +673,20 @@ pub fn run() {
         })
         .build(tauri::generate_context!());
     match app {
-        Ok(app) => app.run(|_, _| {}),
+        Ok(app) => app.run(|_, event| {
+            // The Ring sign-in waits for the screen (ring_wait): Android onPause / onResume. Not on
+            // iOS, whose Suspended (willResignActive) and Resumed (willEnterForeground) do not pair.
+            #[cfg(target_os = "android")]
+            if let tauri::RunEvent::WindowEvent { event, .. } = &event {
+                match event {
+                    tauri::WindowEvent::Suspended => ring_wait::left(),
+                    tauri::WindowEvent::Resumed => ring_wait::back(),
+                    _ => {}
+                }
+            }
+            #[cfg(not(target_os = "android"))]
+            let _ = event;
+        }),
         Err(e) => {
             tracing::error!("cannot start: {e}");
             std::process::exit(1);
@@ -709,6 +778,21 @@ mod tests {
         assert!(js.contains("location.origin===o"));
         // Nothing to hand over before the first connection.
         assert!(init_script(None).contains(r#"var o="",t="""#));
+    }
+
+    #[test]
+    fn a_blank_window_does_not_replace_the_app_page() {
+        // about:blank's origin is "null", never the page's: the override must stop it before the
+        // cross-origin branch, whose navigation the guard would allow (an app page)
+        let js = init_script(None);
+        let blank = js
+            .find("x.protocol==='about:')return null;")
+            .expect("about: is refused");
+        let away = js
+            .find("x.origin!==location.origin")
+            .expect("other origins go out");
+        assert!(blank < away, "{js}");
+        assert!(is_app_page(&url::Url::parse("about:blank").unwrap()));
     }
 
     #[test]
