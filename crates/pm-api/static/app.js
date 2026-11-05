@@ -1676,7 +1676,7 @@
       const r = await api('POST', '/sources/tidal/unofficial/browser');
       h.m.browserUrl = r.url; h.m.way = 'browser';
       if (inApp) window.open(r.url, '_blank');
-      else if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
+      else if (tab) { tab.opener = null; tab.location.href = r.url; } else toast(`${appPlatform() ? 'The app' : 'Your browser'} kept the tab from opening: use Open TIDAL’s sign-in`, 'error');
     } catch (e) { if (tab) tab.close(); toast(e.message, 'error'); }
     // The chooser is drawn again: whoever comes back from TIDAL's tab lands on the address field
     await h.refill();
@@ -6163,7 +6163,7 @@
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
                 <button class="icon-btn" data-zt="next" data-repeat title="Next">${icon('next')}</button>
-                ${hv ? `<input type="range" data-zvol="${esc(z.id)}" min="${hv.min}" max="${hv.max}" step="${hv.step || 1}" value="${z.volume_db != null ? z.volume_db : hv.max}" aria-label="Volume of ${esc(z.name)}">` : z.id === BROWSER ? `<input type="range" data-zvol="${BROWSER}" min="-60" max="0" value="${Math.round(20 * Math.log10(audio.volume || 1))}" aria-label="Browser volume">` : '<span class="muted small">Volume: set on the device</span>'}
+                ${hv ? `<input type="range" data-zvol="${esc(z.id)}" min="${hv.min}" max="${hv.max}" step="${hv.step || 1}" value="${z.volume_db != null ? z.volume_db : hv.max}" aria-label="Volume of ${esc(z.name)}">` : z.id === BROWSER ? `<input type="range" data-zvol="${BROWSER}" min="-60" max="0" value="${Math.round(20 * Math.log10(audio.volume || 1))}" aria-label="Volume of ${esc(hereName())}">` : '<span class="muted small">Volume: set on the device</span>'}
                 ${z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}">Play to</button>`}
                 ${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''}
               </div></div>`;

@@ -78,10 +78,12 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       await wide.page.screenshot({ path: path.join(SHOTS, `sound-${tag}.png`) });
       await wide.context.close();
     }
-    // The Queue page is headed by the zone's name; Now playing names it too
+    // The Queue page is headed by the zone's name; the Zones page has its card; Now playing names it too
     await fx.go(page, '/queue'); await page.waitForSelector('#main'); await sleep(400);
     const queuePage = await text(page, '#main'); seen.push(queuePage);
     check(queuePage.includes(name), `${at}: the Queue page is headed "${name}"`);
+    await fx.go(page, '/zones'); await page.waitForSelector('#main'); await sleep(400);
+    seen.push(await page.$eval('#main', (el) => `${el.innerText} ${[...el.querySelectorAll('[aria-label]')].map((e) => e.getAttribute('aria-label')).join(' ')}`));
     // Now playing with the saved song in the bar: its Details line says who plays it
     await fx.go(page, '/library'); await page.waitForSelector('#npart'); await sleep(500);
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
@@ -93,35 +95,42 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     await page.screenshot({ path: path.join(SHOTS, `nowplaying-${tag}.png`) });
     await page.keyboard.press('Escape'); await sleep(200);
     const where = seen.map((t) => (t.match(/[^.\n]*\bbrowser\b[^.\n]*/i) || [''])[0]).filter(Boolean);
-    if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue page or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
+    if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue and Zones pages or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
     else check(seen.some(hasBrowser), `${at}: the web UI still says browser`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
-  // app.js's own text: every string literal with "this browser" / "the browser" is one of the
-  // helpers' own, or sits in a `appPlatform() ? … : …` branch (the helper pattern); literals about
-  // real browsers (a site's sign-in, other browsers' sessions, the clipboard, Your browser kept the
-  // tab) are named here one by one.
+  // app.js's own text: every string literal with the word "browser" is one of the helpers' own, sits
+  // in the web branch of `appPlatform() ? … : …`, is the player's id or an API path, or is one of the
+  // sentences about real browsers named here in full. A new "this browser" literal fails here.
   const srcText = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
   const lines = srcText.split('\n');
   const helperLines = new Set(lines.map((l, i) => (/const (hereName|hereIn|hereOnly|playedBy|decodedBy|decodeNote|wordHere) =/.test(l) ? i + 1 : 0)).filter(Boolean));
-  const EXACT = ['every browser of yours is logged out', 'Your browser kept the tab from opening', 'in your browser, open its cookies', 'the one your browser uses', 'Every Pubky Ring browser session'];
+  const ID = [/^['"`]browser['"`]$/, /^['"`]#browser['"`]$/, /\/browser\b/, /radio-browser\.info/, /pm\.browser/, /browser_(pending|available|url)/i];
+  const SENTENCES = [
+    'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out',
+    'The old token stops working at once. Every app and Subsonic app then needs the new one, and your other browsers are logged out',
+    'To download what you bought: sign in on bandcamp.com in your browser, open its cookies',
+    'Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in)',
+  ];
   const bad = [];
-  // String literals: '…', "…" and `…` (template holes left in; good enough for a wording check)
   const lit = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
   let m;
   while ((m = lit.exec(srcText))) {
-    const str = m[0];
-    if (!/this browser|the browser|in a browser/i.test(str)) continue;
-    const line = srcText.slice(0, m.index).split('\n').length;
-    if (helperLines.has(line)) continue;
+    // A template's ${…} holes hold code (BROWSER, isBrowser(), nested literals in their own ternaries), not words
+    let str = m[0]; if (str[0] === '`') for (let n = 0; n < 6 && /\$\{[^{}]*\}/.test(str); n++) str = str.replace(/\$\{[^{}]*\}/g, '');
+    if (!/\b[Bb]rowsers?\b/.test(str)) continue;
+    const before = srcText.slice(0, m.index); const line = before.split('\n').length; const col = m.index - before.lastIndexOf('\n') - 1;
     const l = lines[line - 1];
-    if (/^\s*(\/\/|\*|\/\*)/.test(l)) continue;
-    if (/appPlatform\(\) \?/.test(l)) continue; // both branches on the line: the web one may say browser
-    if (EXACT.some((e) => str.includes(e))) continue;
-    bad.push(`${line}: ${str.slice(0, 60)}`);
+    if (helperLines.has(line) || /^\s*(\/\/|\*|\/\*)/.test(l)) continue;
+    if (ID.some((re) => re.test(str))) continue;
+    // The web branch of a ternary: the literal after the ` : ` that follows `appPlatform() ?`
+    const q = l.indexOf('appPlatform() ?'); const colon = q >= 0 ? l.indexOf(' : ', q) : -1;
+    if (q >= 0 && colon >= 0 && col > colon && col - colon < 4) continue;
+    if (SENTENCES.some((s) => str.slice(1).startsWith(s))) continue;
+    bad.push(`${line}: ${str.slice(0, 70)}`);
   }
-  check(!bad.length, `app.js: every "browser" the page can show goes through the helpers${bad.length ? ': ' + bad.slice(0, 4).join(' | ') : ''}`);
+  check(!bad.length, `app.js: every "browser" the page can show goes through the helpers${bad.length ? ': ' + bad.slice(0, 5).join(' | ') : ''}`);
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all passed'); console.log(`screenshots: ${SHOTS}`);
   process.exit(failed ? 1 : 0);
