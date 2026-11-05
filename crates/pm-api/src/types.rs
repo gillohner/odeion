@@ -545,6 +545,9 @@ pub struct NodeSettingsView {
     /// with `POST /v1/node/token`; false when the token is set in the config or there is none.
     #[serde(default)]
     pub token_replaceable: bool,
+    /// Whose TIDAL, Qobuz and Spotify sign-ins listeners play with: `node`, `own` or `choice`.
+    #[serde(default)]
+    pub sources_policy: crate::accounts::SourcePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -566,6 +569,10 @@ pub struct NodeSettingsUpdate {
     /// Hide Home's "Get started" card for everyone (false shows it again).
     #[serde(default)]
     pub first_steps_hidden: Option<bool>,
+    /// Whose sign-ins listeners play with (`node`, `own`, `choice`); every person's own sign-ins
+    /// and the node's stay as they are whichever is chosen.
+    #[serde(default)]
+    pub sources_policy: Option<crate::accounts::SourcePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

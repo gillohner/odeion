@@ -57,6 +57,11 @@ pub enum Who {
     Owner,
     /// A listener (their z32 key): their own sign-ins, under `person.<key>.<setting>`.
     Listener(String),
+    /// A listener playing through the node's sign-ins (the admin's source policy, [`source_policy`]):
+    /// the same person for everything of their own (play order, preferences, who queued what), but
+    /// their TIDAL, Qobuz and Spotify are the node's ([`SIGNIN_KEYS`]). Only the paths that *use* an
+    /// account get this ([`Who::resolved`]); signing in and out always act on their own.
+    ListenerOnNode(String),
     /// No one with sign-ins: a party guest, a LAN controller, an item queued by someone the node
     /// can't name. Nothing that needs a sign-in plays for them.
     Nobody,
@@ -65,13 +70,89 @@ pub enum Who {
 /// Where listeners' own settings start: `person.<key>.<setting>`.
 pub const PERSON_PREFIX: &str = "person.";
 
+/// The node admin's choice of whose streaming sign-ins listeners play with (owner, 2026-11-03: "can we
+/// have both and node admin can set if user use node or own sources").
+pub const SOURCE_POLICY_KEY: &str = "sources.policy";
+/// A listener's own choice under [`SourcePolicy::Choice`]: `node` (the default) or `own`.
+pub const SOURCE_USE_KEY: &str = "sources.use";
+
+/// Whose sign-ins listeners play TIDAL, Qobuz and Spotify with. The owner always plays with the
+/// node's: theirs are the node's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePolicy {
+    /// Everyone plays through the node's sign-ins; listeners can't sign in to their own.
+    Node,
+    /// Each person signs in to their own (how it was since per-person accounts, the default).
+    #[default]
+    Own,
+    /// The node's by default; each listener may switch to their own.
+    Choice,
+}
+
+impl SourcePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourcePolicy::Node => "node",
+            SourcePolicy::Own => "own",
+            SourcePolicy::Choice => "choice",
+        }
+    }
+    pub fn parse(s: &str) -> Option<SourcePolicy> {
+        match s {
+            "node" => Some(SourcePolicy::Node),
+            "own" => Some(SourcePolicy::Own),
+            "choice" => Some(SourcePolicy::Choice),
+            _ => None,
+        }
+    }
+}
+
+/// The node's source policy. A node that never set one keeps playing as it did: [`SourcePolicy::Own`].
+pub fn source_policy(lib: &pm_library::Library) -> SourcePolicy {
+    lib.get_setting(SOURCE_POLICY_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| SourcePolicy::parse(&v))
+        .unwrap_or(SourcePolicy::Own)
+}
+
+/// A listener's own choice, as saved (the default `node` when they never chose).
+pub fn listener_use(lib: &pm_library::Library, key: &str) -> &'static str {
+    match Who::Listener(key.to_string()).get(lib, SOURCE_USE_KEY).as_deref() {
+        Some("own") => "own",
+        _ => "node",
+    }
+}
+
+/// Whether a listener plays through the node's sign-ins now.
+pub fn plays_on_node(lib: &pm_library::Library, key: &str) -> bool {
+    match source_policy(lib) {
+        SourcePolicy::Node => true,
+        SourcePolicy::Own => false,
+        SourcePolicy::Choice => listener_use(lib, key) == "node",
+    }
+}
+
+/// The settings that hold a streaming sign-in for TIDAL, Qobuz and Spotify (and the sign-in way
+/// picked): what [`Who::ListenerOnNode`] reads and refreshes at the node's keys.
+pub const SIGNIN_KEYS: &[&str] = &[
+    "tidal.user",
+    "tidal.unofficial",
+    "qobuz.unofficial",
+    "spotify.user",
+    "tidal.signin_way",
+    "qobuz.signin_way",
+    "spotify.signin_way",
+];
+
 tokio::task_local! {
     /// Who the request being answered is from (set around every handler by the middleware).
     pub static ASKING: Who;
 }
 
 /// Who is asking, for catalogue reads that use a streaming sign-in (search, item pages): the
-/// request's person. Outside a request it fails closed: nobody's account (the services' own app
+/// request's person, resolved for the node's source policy ([`Who::resolved`]). Outside a request it fails closed: nobody's account (the services' own app
 /// tokens at most), so a task that lost its request never borrows the owner's; work done for the
 /// owner in the background says so ([`as_owner`]). Plays and sign-ins never use this: they take
 /// their person explicitly.
@@ -180,14 +261,38 @@ impl Who {
     pub fn of_item_in(it: &pm_zones::QueueItem, lib: &pm_library::Library) -> Who {
         match Who::of_item(it) {
             Who::Listener(k) if !crate::people::listed_for_music(lib, &k) => Who::Nobody,
+            w => w.resolved(lib),
+        }
+    }
+
+    /// The person whose account a play, a stream or a catalogue read uses, under the node's source
+    /// policy: a listener who plays through the node's sign-ins becomes [`Who::ListenerOnNode`];
+    /// everyone else is unchanged. Signing in, out and a person's own status never resolve: they
+    /// act on the caller's own sign-ins.
+    pub fn resolved(self, lib: &pm_library::Library) -> Who {
+        match self {
+            Who::Listener(k) if plays_on_node(lib, &k) => Who::ListenerOnNode(k),
             w => w,
         }
+    }
+
+    /// The person themselves, for their own sign-ins and settings: undoes [`Who::resolved`].
+    pub fn own(&self) -> Who {
+        match self {
+            Who::ListenerOnNode(k) => Who::Listener(k.clone()),
+            w => w.clone(),
+        }
+    }
+
+    /// Whether this plays with the node's sign-ins (the owner, or a listener on the node's).
+    pub fn on_node(&self) -> bool {
+        matches!(self, Who::Owner | Who::ListenerOnNode(_))
     }
 
     /// What a queue item records about who queued it.
     pub fn by(&self) -> Option<String> {
         match self {
-            Who::Listener(k) => Some(k.clone()),
+            Who::Listener(k) | Who::ListenerOnNode(k) => Some(k.clone()),
             _ => None,
         }
     }
@@ -200,17 +305,19 @@ impl Who {
     pub fn tag(&self) -> &str {
         match self {
             Who::Owner => "owner",
-            Who::Listener(k) => k,
+            Who::Listener(k) | Who::ListenerOnNode(k) => k,
             Who::Nobody => "nobody",
         }
     }
 
     /// This person's copy of a setting: the owner's is `base` itself, a listener's
-    /// `person.<key>.<base>`; none for [`Who::Nobody`].
+    /// `person.<key>.<base>`; a listener on the node's sign-ins reads and refreshes those at the
+    /// node's keys and everything else at their own; none for [`Who::Nobody`].
     pub fn setting(&self, base: &str) -> Option<String> {
         match self {
             Who::Owner => Some(base.to_string()),
-            Who::Listener(k) => Some(format!("{PERSON_PREFIX}{k}.{base}")),
+            Who::ListenerOnNode(_) if SIGNIN_KEYS.contains(&base) => Some(base.to_string()),
+            Who::Listener(k) | Who::ListenerOnNode(k) => Some(format!("{PERSON_PREFIX}{k}.{base}")),
             Who::Nobody => None,
         }
     }
@@ -232,7 +339,7 @@ impl Who {
                 "sign in to the node first: sign-ins are kept per person",
             ));
         };
-        if let (Who::Listener(k), Some(_)) = (self, value) {
+        if let (Who::Listener(k) | Who::ListenerOnNode(k), Some(_)) = (self, value) {
             if !crate::people::listed_for_music(lib, k) {
                 return Err(ApiError::new(
                     StatusCode::FORBIDDEN,
@@ -536,6 +643,29 @@ const LISTENER_OWN: &[&str] = &[
     "/sources/spotify/play",
 ];
 
+/// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
+const LISTENER_OWN_ALWAYS: &[&str] = &[
+    "/play-order",
+    "/sources/tidal/stream",
+    "/sources/qobuz/stream",
+    "/sources/spotify/devices",
+    "/sources/spotify/play",
+];
+
+/// Inside [`LISTENER_OWN`], a listener's own sign-in state, which they may still read (GET) when the
+/// node plays through its own sign-ins.
+const LISTENER_OWN_STATUS: &[&str] = &[
+    "/sources/tidal/signin",
+    "/sources/qobuz/signin",
+    "/sources/spotify/signin",
+    "/sources/tidal/status",
+    "/sources/spotify/status",
+];
+
+/// Why a listener can't sign in to their own service under [`SourcePolicy::Node`].
+pub const NODE_SOURCES_ONLY: &str =
+    "this node plays everyone's music through its own sign-ins (its owner chose so in Settings)";
+
 /// Inside [`LISTENER_OWN`], still the owner's: checking the node's TIDAL device client and Qobuz app.
 const LISTENER_OWN_EXCEPTIONS: &[&str] = &[
     "/sources/tidal/unofficial/client",
@@ -587,7 +717,18 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     }
     // Their own streaming accounts
     if under(path, LISTENER_OWN) {
-        return under(path, LISTENER_OWN_EXCEPTIONS).then_some("that is the owner's");
+        if under(path, LISTENER_OWN_EXCEPTIONS) {
+            return Some("that is the owner's");
+        }
+        // The node plays through its own sign-ins: a listener can't sign in to their own (what
+        // they had stays; reads of their own status, plays and streams go on)
+        if !under(path, LISTENER_OWN_ALWAYS)
+            && !(*method == Method::GET && LISTENER_OWN_STATUS.iter().any(|p| path == *p))
+            && source_policy(&s.library.lock().expect("library poisoned")) == SourcePolicy::Node
+        {
+            return Some(NODE_SOURCES_ONLY);
+        }
+        return None;
     }
     if *method == Method::GET || *method == Method::HEAD {
         if !under(path, LISTENER_READS) || LISTENER_READ_EXCEPTIONS.iter().any(|x| path.contains(x)) {
@@ -1081,4 +1222,85 @@ mod tests {
             ["x.flac", "y.flac", "track:4", "https://radio.example.org/s.mp3"]
         );
     }
+}
+
+/// Whose sign-ins a person plays TIDAL, Qobuz and Spotify with (`GET/PUT /v1/me/sources`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MySources {
+    /// The node's policy: `node`, `own` or `choice`.
+    pub policy: SourcePolicy,
+    /// The person's own choice (`node` or `own`), kept whatever the policy.
+    #[serde(rename = "use")]
+    pub choice: String,
+    /// Whose sign-ins plays use now: `node` or `own`.
+    pub plays_with: String,
+    /// Whether the person may switch (a listener, under `choice`).
+    pub may_choose: bool,
+}
+
+/// What a person may change: their own choice.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MySourcesUpdate {
+    #[serde(rename = "use")]
+    pub choice: String,
+}
+
+fn my_sources_view(lib: &pm_library::Library, who: &Who) -> MySources {
+    let policy = source_policy(lib);
+    match who {
+        Who::Listener(k) | Who::ListenerOnNode(k) => MySources {
+            policy,
+            choice: listener_use(lib, k).into(),
+            plays_with: if plays_on_node(lib, k) { "node" } else { "own" }.into(),
+            may_choose: policy == SourcePolicy::Choice,
+        },
+        // The owner's sign-ins are the node's
+        Who::Owner => MySources {
+            policy,
+            choice: "node".into(),
+            plays_with: "node".into(),
+            may_choose: false,
+        },
+        // A party guest or a LAN controller plays with no one's
+        Who::Nobody => MySources {
+            policy,
+            choice: "node".into(),
+            plays_with: "none".into(),
+            may_choose: false,
+        },
+    }
+}
+
+/// `GET /v1/me/sources`.
+pub(crate) async fn my_sources(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+) -> ApiResult<MySources> {
+    let lib = s.library.lock().expect("library poisoned");
+    Ok(Json(my_sources_view(&lib, &Who::of(&c))))
+}
+
+/// `PUT /v1/me/sources {use: "node"|"own"}`: a listener's choice, under the `choice` policy. Their own
+/// sign-ins and the node's both stay as they are; only which one plays changes.
+pub(crate) async fn set_my_sources(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+    Json(b): Json<MySourcesUpdate>,
+) -> ApiResult<MySources> {
+    let who = Who::of(&c);
+    let Who::Listener(_) = &who else {
+        return Err(ApiError::bad_request("the owner's sign-ins are the node's"));
+    };
+    if !matches!(b.choice.as_str(), "node" | "own") {
+        return Err(ApiError::bad_request("use is `node` or `own`"));
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    if source_policy(&lib) != SourcePolicy::Choice {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this node's owner decides whose sign-ins everyone plays with",
+        ));
+    }
+    who.put(&lib, SOURCE_USE_KEY, Some(&b.choice))?;
+    Ok(Json(my_sources_view(&lib, &who)))
 }
