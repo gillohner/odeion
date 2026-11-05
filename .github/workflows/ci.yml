@@ -467,6 +467,7 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-review-fixes.js $GITHUB_WORKSPACE /tmp/pm/review-fixes-shots
           node $GITHUB_WORKSPACE/tools/ui-personal-play-share.js $GITHUB_WORKSPACE /tmp/pm/personal-play-share-shots
           node $GITHUB_WORKSPACE/tools/ui-tablet.js $GITHUB_WORKSPACE /tmp/pm/tablet-shots
+          node $GITHUB_WORKSPACE/tools/ui-topbar.js $GITHUB_WORKSPACE /tmp/pm/topbar-shots
           node $GITHUB_WORKSPACE/tools/ui-busy.js $GITHUB_WORKSPACE /tmp/pm/busy-shots
           node $GITHUB_WORKSPACE/tools/ui-source-policy.js $GITHUB_WORKSPACE /tmp/pm/source-policy-shots
           node $GITHUB_WORKSPACE/tools/ui-versions.js $GITHUB_WORKSPACE /tmp/pm/versions-shots
@@ -496,6 +497,12 @@ jobs:
         with:
           name: tablet-layout-shots
           path: /tmp/pm/tablet-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: topbar-shots
+          path: /tmp/pm/topbar-shots
           if-no-files-found: ignore
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
