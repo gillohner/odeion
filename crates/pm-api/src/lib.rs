@@ -3269,17 +3269,17 @@ async fn controller_login_start(
     let body = axum::body::to_bytes(req.into_body(), 1024)
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let renew_asked = if body.iter().all(u8::is_ascii_whitespace) {
-        false
+    let asked = if body.iter().all(u8::is_ascii_whitespace) {
+        ControllerLoginStart::default()
     } else {
         serde_json::from_slice::<ControllerLoginStart>(&body)
             .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
-            .renewal
-            .is_some_and(|code| renewal_good(&s, &code))
     };
+    let renew_asked = asked.renewal.is_some_and(|code| renewal_good(&s, &code));
+    let device = asked.device;
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -3300,7 +3300,7 @@ async fn controller_login_start(
     loop {
         let waiting: Vec<(String, std::time::Instant, String)> = logins
             .iter()
-            .map(|(id, (_, at, o))| (id.clone(), *at, o.clone()))
+            .map(|(id, (_, at, o, _))| (id.clone(), *at, o.clone()))
             .collect();
         match make_room(&waiting, &origin) {
             Some(old) => {
@@ -3309,7 +3309,7 @@ async fn controller_login_start(
             None => break,
         }
     }
-    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
+    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin, device));
     drop(logins);
     let qr_svg = qr_svg(&url);
     let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
@@ -3333,9 +3333,10 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at, _)) = logins.get(&id) else {
+    let Some((flow, at, _, device)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus::of("expired")));
     };
+    let device = *device;
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
         return Ok(Json(ControllerLoginStatus::of("expired")));
@@ -3390,8 +3391,12 @@ async fn controller_login_poll(
                 // Renewed: the codes for it are used up
                 s.renewals.lock().expect("renewals lock").clear();
             }
-            let token = accounts::mint_owner(&s, &who)?;
-            tracing::info!(%who, renew, "controller signed in with Pubky Ring");
+            let token = if device {
+                accounts::mint_device(&s, &who)?
+            } else {
+                accounts::mint_owner(&s, &who)?
+            };
+            tracing::info!(%who, renew, device, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
                 token: Some(token),
                 user: Some(who),
@@ -20219,5 +20224,179 @@ exec sleep 300
             assert!(csp.contains("frame-ancestors 'none'"), "{page}: {csp}");
             assert_eq!(h.get(header::X_FRAME_OPTIONS).unwrap(), "DENY", "{page}");
         }
+    }
+
+    /// A token the node record once held stops working, once, and the note of it survives until
+    /// it has: a node-made token is replaced and the note goes (a second retirement replaces
+    /// nothing); a token set in the config stays, and Health asks for a change until it changes;
+    /// one already changed before the update needs nothing (ADR 0008).
+    #[tokio::test]
+    async fn a_token_the_node_record_held_is_retired_once() {
+        let fake = |n: &str| ["older", "credential", n].join("-");
+        // Made by the node
+        let dir = tempfile::tempdir().unwrap();
+        let old = fake("made");
+        let s = state(dir.path(), Some(&old)).await;
+        let file = dir.path().join("api-token");
+        std::fs::write(&file, &old).unwrap();
+        s.set_token_file(file.clone());
+        access_token::note_published(&s, &old).unwrap();
+        access_token::retire_published(&s).await;
+        let now = s.token().unwrap();
+        assert_ne!(now, old, "replaced");
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), now);
+        assert!(!access_token::config_token_published(&s));
+        access_token::retire_published(&s).await;
+        assert_eq!(s.token().unwrap(), now, "once only");
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(access_token::PUBLISHED_TOKEN_KEY)
+                .unwrap(),
+            None
+        );
+
+        // Set in the config: kept, and Health says so until it changes
+        let dir2 = tempfile::tempdir().unwrap();
+        let conf = fake("config");
+        let c = state(dir2.path(), Some(&conf)).await;
+        access_token::note_published(&c, &conf).unwrap();
+        access_token::retire_published(&c).await;
+        assert_eq!(c.token().unwrap(), conf);
+        assert!(access_token::config_token_published(&c));
+        let (st, health) = call_auth(&router(c.clone()), "GET", "/v1/health", &conf).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            health
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == "api-token" && p["state"] == "change"),
+            "{health}"
+        );
+        *c.token.write().unwrap() = Some(fake("new-config"));
+        assert!(
+            !access_token::config_token_published(&c),
+            "changed: no more warning"
+        );
+        access_token::retire_published(&c).await;
+        assert_eq!(
+            c.library
+                .lock()
+                .unwrap()
+                .get_setting(access_token::PUBLISHED_TOKEN_KEY)
+                .unwrap(),
+            None,
+            "the note goes once the token no longer works"
+        );
+
+        // Changed in the config before the update: the record held another one, nothing to do
+        let dir3 = tempfile::tempdir().unwrap();
+        let d = state(dir3.path(), Some(&fake("current"))).await;
+        access_token::note_published(&d, &fake("before")).unwrap();
+        assert!(!access_token::config_token_published(&d));
+    }
+
+    async fn call_auth(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        let st = r.status();
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        (st, serde_json::from_slice(&b).unwrap_or_default())
+    }
+
+    /// The app's sign-in is a device's, not a browser session: a browser's Log out leaves it
+    /// (the page in the app forgets it, the app keeps it, as with the API token), and so does the
+    /// browsers' cap; Make a new token and a change of the node's identity end it.
+    #[tokio::test]
+    async fn a_devices_sign_in_outlives_browser_log_outs_but_not_a_new_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        const OWNER: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        const OTHER: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        let hashed = |t: &str| blake3::hash(t.as_bytes()).to_hex().to_string();
+        let set = |setting: &str, entries: &[(&str, &str)]| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    setting,
+                    &serde_json::to_string(
+                        &entries
+                            .iter()
+                            .map(|(key, t)| serde_json::json!({"hash": hashed(t), "key": key, "created_at": 1}))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        let keys = |setting: &str| -> Vec<String> {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(setting)
+                .unwrap()
+                .map(|j| serde_json::from_str::<Vec<serde_json::Value>>(&j).unwrap())
+                .unwrap_or_default()
+                .iter()
+                .map(|t| t["key"].as_str().unwrap().to_string())
+                .collect()
+        };
+        set("accounts.owner_sessions", &[(OWNER, "pmo_browser")]);
+        set(
+            "accounts.device_sessions",
+            &[(OWNER, "pmo_laptop"), (OTHER, "pmo_phone-of-other")],
+        );
+        let send = |method: &'static str, token: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri("/v1/me/token")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+                )
+            }
+        };
+        // Log out with the device's sign-in ends nothing; with the browser's, that session
+        let (st, v) = send("DELETE", "pmo_laptop").await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+        assert_eq!(
+            keys("accounts.device_sessions"),
+            [OWNER, OTHER],
+            "the device is still signed in"
+        );
+        let (st, v) = send("DELETE", "pmo_browser").await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
+        assert!(keys("accounts.owner_sessions").is_empty());
+        // The node takes on an identity: the other identity's device goes, the owner's stays
+        accounts::keep_owner_sessions_of(&s, OWNER).unwrap();
+        assert_eq!(keys("accounts.device_sessions"), [OWNER]);
+        // A new API token ends every device sign-in too
+        accounts::end_owner_sessions(&s).unwrap();
+        assert!(
+            keys("accounts.device_sessions").is_empty(),
+            "Make a new token signs the devices out"
+        );
     }
 }

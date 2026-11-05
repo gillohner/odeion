@@ -137,6 +137,24 @@ const TAGS_NOT_MUSIC: &str = "pubky.tags_not_music";
 /// What the owner reads when the session cannot reach every folder the node uses.
 pub const RESIGN_NOTICE: &str = "This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.";
 
+/// The record that tells the owner's devices where this node is (ADR 0008): name, addresses and
+/// version. Never a credential.
+pub fn node_record(
+    name: &str,
+    api_url: &str,
+    version: &str,
+    iroh: Option<&str>,
+) -> pm_pubky::homeserver::NodeRecord {
+    pm_pubky::homeserver::NodeRecord {
+        name: name.to_string(),
+        api_url: api_url.to_string(),
+        token: String::new(),
+        version: version.to_string(),
+        updated_at: now_micros(),
+        iroh: iroh.unwrap_or("").to_string(),
+    }
+}
+
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
     pub async fn connect(network: Network, secret: &str) -> Result<Self, HomeserverError> {
@@ -195,36 +213,38 @@ impl PubkySync {
     }
 
     /// Tell the user's other devices where this node is (ADR 0008), starting remote access first
-    /// when it is configured, so the record carries the node's iroh key (ADR 0013).
+    /// when it is configured, so the record carries the node's iroh key (ADR 0013). The record holds
+    /// no credential. One an older version wrote with the node's API token in it is replaced, and
+    /// that token is then replaced too ([`crate::access_token::retire_published`]).
     pub async fn publish_node_for(&self, s: &crate::state::NodeState) -> Result<(), SyncError> {
+        // One at a time: the record's old token is noted, the record rewritten and the token
+        // retired as one step, so two publishes never replace the token twice
+        static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _one = ONE.lock().await;
         let iroh = s.ensure_remote().await;
-        self.publish_node(
-            &s.name,
-            &s.public_url,
-            s.token().as_deref(),
-            &s.version,
-            iroh.as_deref(),
-        )
-        .await
+        // Read first: the old record is overwritten only once what it held is noted
+        if let Some(old) = self.homeserver.read_node_record(&self.session).await? {
+            if !old.token.is_empty() {
+                crate::access_token::note_published(s, &old.token)?;
+            }
+        }
+        self.publish_node(&s.name, &s.public_url, &s.version, iroh.as_deref())
+            .await?;
+        // Also after a failure or a restart since the note was made
+        crate::access_token::retire_published(s).await;
+        Ok(())
     }
 
-    /// Tell the user's other devices where this node is (ADR 0008).
+    /// Tell the user's other devices where this node is (ADR 0008): its name, addresses and
+    /// version, never a token.
     pub async fn publish_node(
         &self,
         name: &str,
         api_url: &str,
-        token: Option<&str>,
         version: &str,
         iroh: Option<&str>,
     ) -> Result<(), SyncError> {
-        let record = pm_pubky::homeserver::NodeRecord {
-            name: name.to_string(),
-            api_url: api_url.to_string(),
-            token: token.unwrap_or("").to_string(),
-            version: version.to_string(),
-            updated_at: now_micros(),
-            iroh: iroh.unwrap_or("").to_string(),
-        };
+        let record = node_record(name, api_url, version, iroh);
         Ok(self
             .homeserver
             .publish_node_record(&self.session, &record)
@@ -1546,5 +1566,28 @@ mod tests {
         for secret in [refresh.as_str(), access.as_str(), pass.as_str()] {
             assert!(!json.contains(secret), "{json}");
         }
+    }
+
+    /// The node record says where the node is and never holds a credential: what the
+    /// homeserver stores has no token, even when the record value carries one (ADR 0008).
+    #[test]
+    fn the_node_record_holds_no_credential() {
+        let r = node_record("Living room", "http://192.168.1.10:7788", "0.3.0", Some("abc"));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("token"), "{json}");
+        let fake = ["node", "api", "credential"].join("-");
+        let mut old = r.clone();
+        old.token = fake.clone();
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(
+            !json.contains(&fake),
+            "a token never reaches the homeserver: {json}"
+        );
+        assert!(json.contains("192.168.1.10") && json.contains("Living room") && json.contains("abc"));
+        // A record an older version wrote is still read, so the node can replace its token
+        let written =
+            serde_json::json!({"name": "n", "api_url": "u", "token": fake, "version": "0", "updated_at": 1});
+        let read: pm_pubky::homeserver::NodeRecord = serde_json::from_value(written).unwrap();
+        assert_eq!(read.token, fake);
     }
 }

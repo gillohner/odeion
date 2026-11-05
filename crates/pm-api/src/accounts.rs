@@ -24,6 +24,16 @@ use std::sync::Arc;
 
 const TOKENS: &str = "accounts.tokens";
 const OWNER_SESSIONS: &str = "accounts.owner_sessions";
+/// The owner's devices (the desktop and Android app), signed in with Pubky Ring: tokens with the
+/// same `pmo_` start as browser sessions, kept apart so a browser's Log out and the browsers' cap
+/// leave them. Make a new token and a change of the node's identity end them too.
+const DEVICE_SESSIONS: &str = "accounts.device_sessions";
+/// Browser sessions of the owner kept at once; the oldest goes first.
+const OWNER_SESSIONS_CAP: usize = 20;
+/// Devices of the owner kept at once (an app signing in again and again, say reinstalled).
+const DEVICE_SESSIONS_CAP: usize = 50;
+// Room for more devices than browsers: a device signs in once and stays
+const _: () = assert!(DEVICE_SESSIONS_CAP > OWNER_SESSIONS_CAP);
 /// A hash of the API token the owner's browser sessions were made under: one changed in the config
 /// ends them at the next start, as Make a new token does.
 /// Never in a backup (`backup::NODE_OWN`).
@@ -341,26 +351,41 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 }
 
 /// A new browser session for the owner (key `key`), from a Pubky Ring sign-in: returned once,
-/// the node keeps its hash. At most 20; the oldest goes first.
+/// the node keeps its hash. At most [`OWNER_SESSIONS_CAP`]; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
+    mint_owners(s, key, OWNER_SESSIONS, OWNER_SESSIONS_CAP)
+}
+
+/// A sign-in for one of the owner's devices (the app), from a Pubky Ring sign-in the owner
+/// approved: as [`mint_owner`], in the devices' own list ([`DEVICE_SESSIONS`]).
+pub fn mint_device(s: &NodeState, key: &str) -> Result<String, ApiError> {
+    mint_owners(s, key, DEVICE_SESSIONS, DEVICE_SESSIONS_CAP)
+}
+
+/// `token`, `key`'s, into `all`, within `cap` (the oldest goes first).
+fn remember(all: &mut Vec<PersonToken>, key: &str, token: &str, cap: usize) {
+    while all.len() >= cap {
+        all.remove(0);
+    }
+    all.push(PersonToken {
+        hash: hash(token),
+        key: key.to_string(),
+        created_at: now(),
+    });
+}
+
+fn mint_owners(s: &NodeState, key: &str, list: &str, cap: usize) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
     let key = key.trim_start_matches("pubky").to_string();
     let lib = s.library.lock().expect("library poisoned");
-    let made = update_in(&lib, OWNER_SESSIONS, |all| {
+    let made = update_in(&lib, list, |all| {
         // Still the node's identity, checked under the same hold as the cleanup when it takes on
         // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
         let current = s
             .sync_handle()
             .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
         if current {
-            if all.len() >= 20 {
-                all.remove(0);
-            }
-            all.push(PersonToken {
-                hash: hash(&token),
-                key: key.clone(),
-                created_at: now(),
-            });
+            remember(all, &key, &token, cap);
         }
         current
     })?;
@@ -381,24 +406,27 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
 /// the 401 that makes the page log in again: the session works again once the identity is).
 pub const IDENTITY_NOT_LOADED: &str = "this node couldn't load its Pubky identity (its homeserver didn't answer when it started), and browser sessions wait for it: restart the node once the homeserver answers. Until then the node's API token logs in";
 
-/// An owner's browser session that is still open, for `owner`: the identity the node has loaded
-/// now (a node signed in as someone else no longer lets the old owner's browsers in).
+/// An owner's browser session or device sign-in that is still open, for `owner`: the identity the
+/// node has loaded now (a node signed in as someone else no longer lets the old owner's in).
 fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
     let h = hash(token);
-    load(s, OWNER_SESSIONS)
+    [OWNER_SESSIONS, DEVICE_SESSIONS]
         .iter()
-        .any(|t| t.hash == h && t.key == owner)
+        .any(|list| load(s, list).iter().any(|t| t.hash == h && t.key == owner))
 }
 
 /// The node took on the identity `owner` (restored at start, or a log in renewed or changed it):
-/// browser sessions of any other identity end, so none can come back later.
+/// browser sessions and device sign-ins of any other identity end, so none can come back later.
 pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
     let owner = owner.trim_start_matches("pubky");
-    update(s, OWNER_SESSIONS, |all| all.retain(|t| t.key == owner))
+    update(s, OWNER_SESSIONS, |all| all.retain(|t| t.key == owner))?;
+    update(s, DEVICE_SESSIONS, |all| all.retain(|t| t.key == owner))
 }
 
 /// Ends one owner's browser session (Log out); whether it was open. Also while the node has no
-/// identity loaded, when the session is otherwise refused: Log out must still work then.
+/// identity loaded, when the session is otherwise refused: Log out must still work then. A
+/// device's sign-in is not a browser session: the page in the app forgets it, the app keeps it
+/// (as with the API token), and `false` says so.
 pub fn end_owner_session(s: &NodeState, token: &str) -> Result<bool, ApiError> {
     let h = hash(token);
     update(s, OWNER_SESSIONS, |all| {
@@ -416,11 +444,19 @@ pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
     let mark = token_mark(s);
     let was = lib.get_setting(OWNER_SESSIONS_TOKEN).ok().flatten();
     let ended = match was.as_deref() {
-        Some(w) if w != mark => update_in(&lib, OWNER_SESSIONS, |all| {
-            let any = !all.is_empty();
-            all.clear();
-            any
-        })?,
+        Some(w) if w != mark => {
+            let browsers = update_in(&lib, OWNER_SESSIONS, |all| {
+                let any = !all.is_empty();
+                all.clear();
+                any
+            })?;
+            let devices = update_in(&lib, DEVICE_SESSIONS, |all| {
+                let any = !all.is_empty();
+                all.clear();
+                any
+            })?;
+            browsers || devices
+        }
         _ => false,
     };
     if was.as_deref() != Some(mark.as_str()) {
@@ -429,9 +465,11 @@ pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
     Ok(ended)
 }
 
-/// Ends every browser session of the owner (a new API token: the answer to a leak).
+/// Ends every browser session and device sign-in of the owner (a new API token: the answer to a
+/// leak). The app signs in again by itself, with one approval in Pubky Ring.
 pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
-    update(s, OWNER_SESSIONS, Vec::clear)
+    update(s, OWNER_SESSIONS, Vec::clear)?;
+    update(s, DEVICE_SESSIONS, Vec::clear)
 }
 
 /// Whose token this is, when it is a listener's that still has music access.
@@ -701,7 +739,8 @@ pub(crate) async fn sign_out(
             update(&s, TOKENS, |all| all.retain(|t| t.hash != h))?;
         }
         Role::Owner if token.starts_with(OWNER_PREFIX) => {
-            end_owner_session(&s, &token)?;
+            let ended = end_owner_session(&s, &token)?;
+            return Ok(Json(serde_json::json!({"signed_out": true, "ended": ended})));
         }
         _ => return Ok(Json(serde_json::json!({"signed_out": true, "ended": false}))),
     }
@@ -1080,5 +1119,16 @@ mod tests {
             uris,
             ["x.flac", "y.flac", "track:4", "https://radio.example.org/s.mp3"]
         );
+    }
+
+    /// Sessions are kept within their cap, the oldest going first; devices have a cap of their own.
+    #[test]
+    fn sessions_stay_within_their_cap_oldest_first() {
+        let mut all = Vec::new();
+        for i in 0..OWNER_SESSIONS_CAP + 3 {
+            remember(&mut all, "k", &format!("pmo_{i}"), OWNER_SESSIONS_CAP);
+        }
+        assert_eq!(all.len(), OWNER_SESSIONS_CAP);
+        assert_eq!(all[0].hash, hash("pmo_3"), "the three oldest went");
     }
 }

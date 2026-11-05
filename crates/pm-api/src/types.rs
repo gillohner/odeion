@@ -1850,6 +1850,11 @@ pub struct ControllerLoginStart {
     /// folders too, as the node needs new ones. Good until a renewal succeeds; ignored while the node needs none.
     #[serde(default)]
     pub renewal: Option<String>,
+    /// The desktop or Android app: the owner's approval makes a sign-in for the device, kept apart
+    /// from browser sessions (a browser's Log out and the browsers' cap leave it; Make a new token
+    /// and a change of the node's identity end it).
+    #[serde(default)]
+    pub device: bool,
 }
 
 /// `POST /v1/auth/pubky/renewal`.

@@ -13,6 +13,11 @@ Newest first. Dates are when the change landed on `main`.
   - Its live updates open only from its own pages, and other sites' pages reach it only by opening one of its pages (a GET; a form another site posts is refused, and so are the zones' UPnP routes).
   - The node's pages can't be shown inside another site.
 
+- **The node's address record on your homeserver no longer holds the node's API token.**
+  - The record keeps the node's name, addresses and version. The desktop and Android app finds the node through it as before, then asks you to approve a sign-in to the node itself in Pubky Ring, so each device has a sign-in of its own. Connecting a new device therefore takes two approvals in Ring, both by you: the app takes the node's sign-in only from the identity whose record named the node, approved as its owner, and refuses a node that says it belongs to someone else. A device's sign-in is kept apart from browser sessions: logging out of the page inside the app, or many browser log-ins, leave it. Make a new token ends it, and the app then signs in again by itself with one approval. A node that refuses the app's sign-in for any other reason gets the same: one approval, not Forget and two.
+  - On its first start after the update, a node that had written its token there replaces that token. Apps and browsers then sign in to the node again, once.
+  - A token you set in the node's config (`[api] token`, `PM_TOKEN`) can't be replaced by the node: Health asks you to change it.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
