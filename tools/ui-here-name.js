@@ -83,7 +83,8 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     const queuePage = await text(page, '#main'); seen.push(queuePage);
     check(queuePage.includes(name), `${at}: the Queue page is headed "${name}"`);
     await fx.go(page, '/zones'); await page.waitForSelector('#main'); await sleep(400);
-    seen.push(await page.$eval('#main', (el) => `${el.innerText} ${[...el.querySelectorAll('[aria-label]')].map((e) => e.getAttribute('aria-label')).join(' ')}`));
+    const zonesPage = await page.$eval('#main', (el) => `${el.innerText} ${[...el.querySelectorAll('[aria-label]')].map((e) => e.getAttribute('aria-label')).join(' ')}`); seen.push(zonesPage);
+    check(zonesPage.includes(`Volume of ${name}`), `${at}: the Zones page has the player's card and slider ("Volume of ${name}")`);
     // Now playing with the saved song in the bar: its Details line says who plays it
     await fx.go(page, '/library'); await page.waitForSelector('#npart'); await sleep(500);
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
@@ -100,34 +101,70 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
-  // app.js's own text: every string literal with the word "browser" is one of the helpers' own, sits
-  // in the web branch of `appPlatform() ? … : …`, is the player's id or an API path, or is one of the
-  // sentences about real browsers named here in full. A new "this browser" literal fails here.
+  // app.js's own text: every string literal with the word "browser", at any depth (a template's
+  // ${…} holes are walked too), is one of the helpers' own, the else branch of an `appPlatform() ?`
+  // conditional (found structurally: the literal follows that conditional's own `:`), the player's
+  // id, a selector or an API path (whole literals), or one of the sentences about real browsers
+  // named here whole. A new "this browser" literal fails here.
   const srcText = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
   const lines = srcText.split('\n');
+  const lineOf = (pos) => srcText.slice(0, pos).split('\n').length;
   const helperLines = new Set(lines.map((l, i) => (/const (hereName|hereIn|hereOnly|playedBy|decodedBy|decodeNote|wordHere) =/.test(l) ? i + 1 : 0)).filter(Boolean));
-  const ID = [/^['"`]browser['"`]$/, /^['"`]#browser['"`]$/, /\/browser\b/, /radio-browser\.info/, /pm\.browser/, /browser_(pending|available|url)/i];
+  // ('your browser': the app branch of the TIDAL sign-in hint, which really opens the system browser)
+  const WHOLE = new Set(["'browser'", '"browser"', "'#browser'", "'your browser'", "'/sources/tidal/unofficial/browser'", "'/sources/tidal/unofficial/browser/finish'", "'internet radio via radio-browser.info'", "'pm.browserQueue'", "'pm.browserAt'", "'browser'"]);
   const SENTENCES = [
-    'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out',
-    'The old token stops working at once. Every app and Subsonic app then needs the new one, and your other browsers are logged out',
-    'To download what you bought: sign in on bandcamp.com in your browser, open its cookies',
-    'Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in)',
+    "'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you ",
+    "'The old token stops working at once. Every app and Subsonic app then needs the new one, and your other browsers are logged out; this one switches to the new token now.'",
+    "'To download what you bought: sign in on bandcamp.com in your browser, open its cookies for bandcamp.com and copy the value of the one named identity. The node checks",
+    "'Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in). The node checks it once with SoundCloud and keeps it",
   ];
+  // Every literal with its position: strings and templates, recursing into a template's holes
+  const found = [];
+  const scan = (text, base) => {
+    let i = 0;
+    while (i < text.length) {
+      const c = text[i];
+      if (c === '/' && text[i + 1] === '/') { i = text.indexOf('\n', i); if (i < 0) break; continue; }
+      if (c === '/' && text[i + 1] === '*') { i = text.indexOf('*/', i); if (i < 0) break; i += 2; continue; }
+      if (c === "'" || c === '"') { let k = i + 1; while (k < text.length && text[k] !== c) { if (text[k] === '\\') k++; if (text[k] === '\n') break; k++; } found.push([base + i, text.slice(i, k + 1)]); i = k + 1; continue; }
+      if (c === '`') {
+        let k = i + 1; let depth = 0; let holeStart = -1;
+        while (k < text.length) {
+          if (text[k] === '\\') { k += 2; continue; }
+          if (depth === 0 && text[k] === '`') break;
+          if (text[k] === '$' && text[k + 1] === '{') { if (depth === 0) holeStart = k + 2; depth++; k += 2; continue; }
+          if (text[k] === '}' && depth > 0) { depth--; if (depth === 0) scan(text.slice(holeStart, k), base + holeStart); }
+          k++;
+        }
+        // The template's own words, holes blanked (their literals were scanned above)
+        let own = text.slice(i, k + 1); let d = 0; let out = '';
+        for (let q = 0; q < own.length; q++) { if (own[q] === '$' && own[q + 1] === '{') { d++; q++; continue; } if (own[q] === '}' && d > 0) { d--; continue; } if (!d) out += own[q]; }
+        found.push([base + i, out]); i = k + 1; continue;
+      }
+      i++;
+    }
+  };
+  scan(srcText, 0);
+  // The literal is the else branch of an `appPlatform() ?` conditional: before it (over spaces) a `:`
+  // that belongs, counting nested `?`/`:` pairs backwards, to that conditional
+  const elseOfApp = (pos) => {
+    let k = pos - 1; while (k >= 0 && /\s/.test(srcText[k])) k--;
+    if (srcText[k] !== ':') return false;
+    let depth = 0;
+    for (let q = k - 1; q >= Math.max(0, k - 2000); q--) {
+      const ch = srcText[q];
+      if (ch === ':' && srcText[q - 1] !== ':') depth++;
+      else if (ch === '?' && srcText[q + 1] !== '.' && srcText[q + 1] !== '?' && srcText[q - 1] !== '?') { if (depth === 0) return srcText.slice(Math.max(0, q - 16), q).includes('appPlatform()'); depth--; }
+      else if (ch === '\n' && /^\s*$/.test(srcText.slice(q + 1, pos).split('\n')[0] || '') === false && srcText.slice(q, pos).includes(';')) return false;
+    }
+    return false;
+  };
   const bad = [];
-  const lit = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
-  let m;
-  while ((m = lit.exec(srcText))) {
-    // A template's ${…} holes hold code (BROWSER, isBrowser(), nested literals in their own ternaries), not words
-    let str = m[0]; if (str[0] === '`') for (let n = 0; n < 6 && /\$\{[^{}]*\}/.test(str); n++) str = str.replace(/\$\{[^{}]*\}/g, '');
+  for (const [pos, str] of found) {
     if (!/\b[Bb]rowsers?\b/.test(str)) continue;
-    const before = srcText.slice(0, m.index); const line = before.split('\n').length; const col = m.index - before.lastIndexOf('\n') - 1;
-    const l = lines[line - 1];
-    if (helperLines.has(line) || /^\s*(\/\/|\*|\/\*)/.test(l)) continue;
-    if (ID.some((re) => re.test(str))) continue;
-    // The web branch of a ternary: the literal after the ` : ` that follows `appPlatform() ?`
-    const q = l.indexOf('appPlatform() ?'); const colon = q >= 0 ? l.indexOf(' : ', q) : -1;
-    if (q >= 0 && colon >= 0 && col > colon && col - colon < 4) continue;
-    if (SENTENCES.some((s) => str.slice(1).startsWith(s))) continue;
+    const line = lineOf(pos);
+    if (helperLines.has(line) || WHOLE.has(str) || SENTENCES.some((s) => str.startsWith(s) && str.length - s.length < 400 && !/this browser|the browser/i.test(str.slice(s.length)))) continue;
+    if (elseOfApp(pos)) continue;
     bad.push(`${line}: ${str.slice(0, 70)}`);
   }
   check(!bad.length, `app.js: every "browser" the page can show goes through the helpers${bad.length ? ': ' + bad.slice(0, 5).join(' | ') : ''}`);
