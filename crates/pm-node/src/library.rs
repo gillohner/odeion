@@ -476,6 +476,8 @@ mod tests {
             people.contains("\"i1\""),
             "the invite stays, without its link: {people}"
         );
+        // Closed before looking beside the copy: an open connection has its own -wal and -shm there
+        drop(copy);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -667,6 +669,8 @@ mod tests {
         }
         let copy = Library::open(&file).unwrap();
         assert_eq!(copy.get_setting("tidal.user").unwrap(), None);
+        // Closed before its journal files are written to: they would be this connection's
+        drop(copy);
         // Without --force an existing target and its files stay as they are
         std::fs::write(out.join("copy.sqlite-wal"), b"someone's").unwrap();
         assert!(backup(&cfg, &file, false).is_err());
