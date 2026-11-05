@@ -311,14 +311,15 @@ struct SlimSink {
     base: u64,
 }
 
+/// The highest percent at or below `db` when percent is a squared gain (`(p/100)²`). Only the
+/// top is clamped: a limit under -60 dB still caps below it.
+fn squared_percent(db: f32) -> u8 {
+    (10f64.powf(f64::from(db.min(0.0)) / 40.0) * 100.0).floor() as u8
+}
+
 /// How far the node runs ahead of what the player has played. Socket and player buffers would
 /// take a minute or more at once; this keeps the position live, `drain` short, and bounds what
 /// a flush throws away.
-/// The highest percent at or below `db` when percent is a squared gain (`(p/100)²`).
-fn squared_percent(db: f32) -> u8 {
-    (10f64.powf(f64::from(db.clamp(-60.0, 0.0)) / 40.0) * 100.0).floor() as u8
-}
-
 const AHEAD: std::time::Duration = std::time::Duration::from_secs(5);
 /// A player that plays nothing for this long while audio waits has stopped taking it.
 const STALLED: std::time::Duration = std::time::Duration::from_secs(30);
@@ -524,7 +525,9 @@ mod tests {
         // 17 % is a gain of 0.0289, -30.8 dB: under a -30 dB limit (the linear 50 % was -12 dB)
         assert_eq!(squared_percent(-30.0), 17);
         assert_eq!(squared_percent(0.0), 100);
-        assert_eq!(squared_percent(-80.0), 3, "clamped at the -60 dB floor");
+        // Under -60 dB too: -80 dB is 1 % (a gain of 1e-4), never the 3 % of -60 dB
+        assert!(squared_percent(-80.0) <= 1);
+        assert_eq!(squared_percent(-90.0), 0);
     }
     use std::io::Write;
     use std::net::TcpListener;

@@ -722,6 +722,13 @@ mod tests {
         assert_eq!(wide.percent_for_db(-45.0), 25);
         assert_eq!(narrow.percent_for_db(-45.0), 0);
         assert_eq!(narrow.percent_for_db(-15.0), 50, "its own range, not -60..0");
+        // A mute step reported as the floor (-99999 dB, as ALSA mixers do) is no range: -60..0
+        let muted_floor = NullOutput::with_volume(VolumeKind::Db {
+            min: -99999.99,
+            max: 0.0,
+            step: 1.0,
+        });
+        assert_eq!(muted_floor.percent_for_db(-30.0), 50);
         let g = GroupOutput::new("g", vec![wide, narrow]).unwrap();
         assert_eq!(g.percent_for_db(-45.0), 0);
         assert_eq!(g.percent_for_db(-15.0), 50);

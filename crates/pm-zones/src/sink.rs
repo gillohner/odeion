@@ -270,13 +270,14 @@ pub trait Output: Send + Sync {
 
     /// The highest percent level this output plays at or below `db` (a zone's volume limit caps
     /// percent requests with it, so it rounds down). The default: linear over the output's own dB
-    /// range when it reports one (ALSA's mixer, an endpoint's output), else over -60…0 dB (UPnP,
+    /// range when it reports a plausible one (ALSA's mixer, an endpoint's output; a mixer whose
+    /// lowest step is mute reports about -99999 dB, which says nothing), else over -60…0 dB (UPnP,
     /// Snapcast). Outputs that map dB as an amplitude (BluOS, MPD, Cast) use
     /// [`amplitude_percent`]; Squeezebox (a squared gain) and AirPlay (-30…0 dB) their own; a
     /// group its strictest member's.
     fn percent_for_db(&self, db: f32) -> u8 {
         match self.caps().hw_volume {
-            Some(pm_model::VolumeKind::Db { min, max, .. }) if max > min => {
+            Some(pm_model::VolumeKind::Db { min, max, .. }) if max > min && min > -200.0 => {
                 ((db.clamp(min, max) - min) / (max - min) * 100.0).floor() as u8
             }
             _ => ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).floor() as u8,
