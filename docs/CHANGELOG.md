@@ -31,6 +31,8 @@ Newest first. Dates are when the change landed on `main`.
   - `odeiond restore` keeps this node's own settings (its id, stream key, backup schedule and files jobs), and the sign-ins (yours and listeners'), invite links, signup token and parties a plain copy doesn't carry. Settings › Backup does the same: a backup without a passphrase restored on the node it came from keeps the invite links, signup token and parties the node has.
   - `odeiond backup --force` over an old database also removes that database's journal files beside it.
 
+- **Workflows use each action at a fixed commit** (with its version beside it), checkouts keep no credentials, and `ci.yml` and `compat.yml` read the repository only. `tools/workflow-pins-check.py` runs in CI and fails on an action used by tag; Dependabot proposes the updates.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
