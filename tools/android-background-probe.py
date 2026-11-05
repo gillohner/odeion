@@ -98,7 +98,7 @@ def node_toml():
         w.setsampwidth(2)
         w.setframerate(44100)
         frame = [struct.pack("<hh", v, v) for v in (int(2000 * math.sin(2 * math.pi * 440 * n / 44100)) for n in range(100))]
-        w.writeframes(b"".join(frame) * (441 * 180))
+        w.writeframes(b"".join(frame) * (441 * 600))
     (out / "node.toml").write_text(f"""data_dir = "{out}/data"
 [library]
 folders = ["{out}/music"]
@@ -306,6 +306,47 @@ def part_b():
     return ok1 and ok2
 
 
+def part_c():
+    """The mechanism, shown: the in-app player with the player service stopped (as when the app
+    reaches the node through the tunnel, where show_node never starts it). Expected to stop within
+    seconds of HOME; when it does, the cause is the missing foreground service."""
+    r = subprocess.run(["adb", "root"], capture_output=True, text=True, timeout=60)
+    log(f"C: adb root: {(r.stdout + r.stderr).strip()}")
+    time.sleep(5)
+    subprocess.run(["adb", "wait-for-device"], timeout=120)
+    stopped = adb("shell", "am", "stopservice", "-n", f"{PKG}/.PlayerService", check=False)
+    time.sleep(3)
+    fg = service_foreground()
+    log(f"C: stopservice: {stopped.strip()[:120]}; service foreground now {fg}")
+    if fg:
+        log("C inconclusive: the service could not be stopped here")
+        results["C mechanism (in-app player without the service)"] = None
+        return None
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    time.sleep(2)
+    # The in-app player playing, Now playing open (Play if it shows)
+    if not any('text="Now playing' in n for n in ui_nodes() if 'Button' in n) or True:
+        try:
+            tap_text(["Now playing"], "the mini player (Now playing)", timeout=10)
+        except RuntimeError:
+            pass
+    time.sleep(2)
+    for n in ui_nodes():
+        if re.search(r'(text|content-desc)="Play"', n):
+            x, y = center(n)
+            adb("shell", "input", "tap", str(x), str(y))
+            log("C: pressed Play")
+            break
+    time.sleep(4)
+    log(f"C foreground: Now playing {mini_time()}, players {players()}")
+    moved, wall = away(60)
+    shot("c-back")
+    stops = moved is not None and moved < wall - 20
+    log(f"C verdict: without the service the in-app player {'STOPPED' if stops else 'kept playing'} in the background ({moved} of {wall:.0f} s)")
+    results["C mechanism: without the service the in-app player stops (expected)"] = stops if moved is not None else None
+    return stops
+
+
 def main():
     node_toml()
     node = subprocess.Popen([node_bin, "--config", str(out / "node.toml"), "serve"], stdout=open(out / "node.log", "w"), stderr=subprocess.STDOUT)
@@ -330,6 +371,11 @@ def main():
         except Exception as e:  # noqa: BLE001
             log(f"A failed: {e}")
             results["A native zone, background + screen off"] = False
+        try:
+            part_c()
+        except Exception as e:  # noqa: BLE001
+            log(f"C failed: {e}")
+            results["C mechanism: without the service the in-app player stops (expected)"] = None
         dump("services-final", "activity", "services", PKG)
         dump("processes-final", "activity", "processes", PKG)
         dump("audio-final", "audio")
