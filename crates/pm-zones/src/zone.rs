@@ -343,16 +343,17 @@ impl Zone {
 
     /// Hardware volume on the output; the audio path is untouched. The level is read back into
     /// the state afterwards, so every controller shows what the device took. An output that
-    /// can't read its level (or whose read fails) keeps the last absolute level set (and the
-    /// mute), so a change still shows; up and down leave it as it was. Controllers always hear
-    /// the result, also when it equals what they had: one that showed the level it asked for
-    /// learns that the device kept another.
+    /// can't read its level keeps the last absolute level set (and the mute), so a change still
+    /// shows; up and down leave it as it was. A read that fails keeps the last level read (the
+    /// poll catches up). Controllers always hear the result, also when it equals what they had:
+    /// one that showed the level it asked for learns that the device kept another.
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let mut last = self.volume_lock.lock().await;
         self.output.set_volume(v).await?;
         let next = match self.output.volume().await {
             Ok(Some(read)) => Some(read),
-            Ok(None) | Err(_) => {
+            Err(_) => None,
+            Ok(None) => {
                 let was = *last;
                 let level = match v {
                     Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
@@ -369,10 +370,7 @@ impl Zone {
         if next.is_some() {
             *last = next;
         }
-        self.send(Command::Volume {
-            level: *last,
-            always: true,
-        });
+        self.send(Command::Volume(*last));
         Ok(())
     }
 
@@ -385,10 +383,7 @@ impl Zone {
                 // Nothing is sent when it is the level last published
                 if *last != Some(v) {
                     *last = Some(v);
-                    self.send(Command::Volume {
-                        level: Some(v),
-                        always: false,
-                    });
+                    self.send(Command::Volume(Some(v)));
                 }
                 Some(v)
             }

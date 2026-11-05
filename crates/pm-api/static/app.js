@@ -1572,7 +1572,7 @@
   const volTr = { open: () => !volPop().hidden, close: closeVolPop };
   // Where the bar has no room for the slider: the volume button opens this, the zone's one slider
   // What the open popover shows: its zone and scale (a redraw would drop the slider being moved)
-  const volPopKey = () => { const z = currentZone(); const r = zoneVolume(z); return `${z ? z.id : ''}|${r ? r.kind : ''}`; };
+  const volPopKey = () => { const z = currentZone(); const r = zoneVolume(z); return `${z ? `${z.id}|${z.name}` : ''}|${r ? r.kind : ''}`; };
   const drawVolPop = () => {
     const vp = volPop(); const z = currentZone(); const r = zoneVolume(z); vp.dataset.drawn = volPopKey();
     vp.innerHTML = `<div class="pop-title">Volume · ${esc(z ? z.name : 'Zone')}</div>` + (r && z

@@ -229,9 +229,10 @@ impl TrackMeta {
 /// library.
 pub type Describe = Arc<dyn Fn(&crate::QueueItem) -> TrackMeta + Send + Sync>;
 
-/// The percent level of `db` as an amplitude (`10^(dB/20)`), as BluOS, MPD and Cast map it.
+/// The highest percent level at or below `db` as an amplitude (`10^(dB/20)`), as BluOS, MPD and
+/// Cast map it. Rounded down: it caps a request at a volume limit.
 pub fn amplitude_percent(db: f32) -> u8 {
-    (10f64.powf(f64::from(db.clamp(-80.0, 0.0)) / 20.0) * 100.0).round() as u8
+    (10f64.powf(f64::from(db.clamp(-80.0, 0.0)) / 20.0) * 100.0).floor() as u8
 }
 
 /// One place audio can go (handoff §6.4).
@@ -267,11 +268,12 @@ pub trait Output: Send + Sync {
         Err(SinkError::NoVolume(self.id()))
     }
 
-    /// The percent level this output sets for `db` (a zone's volume limit caps percent requests
-    /// with it). The default is linear over -60…0 dB; outputs that map dB as an amplitude
-    /// (BluOS, MPD, Cast) say so with [`amplitude_percent`].
+    /// The highest percent level this output plays at or below `db` (a zone's volume limit caps
+    /// percent requests with it, so it rounds down). The default is linear over -60…0 dB (UPnP,
+    /// Snapcast); outputs that map dB as an amplitude (BluOS, MPD, Cast) use
+    /// [`amplitude_percent`], AirPlay its own -30…0 dB, a group its strictest member.
     fn percent_for_db(&self, db: f32) -> u8 {
-        ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).round() as u8
+        ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).floor() as u8
     }
 
     /// The level the output reports now, with its mute; `None` when it can't be read (the

@@ -204,6 +204,15 @@ fn lower_ceiling(a: &QualityCeiling, b: &QualityCeiling) -> QualityCeiling {
 
 #[async_trait]
 impl Output for GroupOutput {
+    /// Every member gets the same percent: the strictest member's mapping caps it.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        self.members
+            .iter()
+            .map(|m| m.percent_for_db(db))
+            .min()
+            .unwrap_or(0)
+    }
+
     fn id(&self) -> OutputId {
         let ids: Vec<String> = self.members.iter().map(|m| m.id().0).collect();
         OutputId::new("group", &ids.join("+"))

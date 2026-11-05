@@ -214,6 +214,11 @@ fn percent_to_db(p: u8) -> f32 {
 
 #[async_trait]
 impl Output for AirPlayOutput {
+    /// Percent is linear over -30…0 dB here (`percent_to_db`); rounded down for a cap.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        ((db.clamp(-30.0, 0.0) + 30.0) / 30.0 * 100.0).floor() as u8
+    }
+
     fn id(&self) -> OutputId {
         OutputId::new("airplay", &self.device.id)
     }

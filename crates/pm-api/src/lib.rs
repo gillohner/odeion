@@ -6701,7 +6701,7 @@ mod tests {
         assert_eq!(cfg["max_volume_db"], -20.0);
         // Requests are capped before they reach the output.
         use pm_model::Volume;
-        let linear = |db: f32| ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).round() as u8;
+        let linear = |db: f32| ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).floor() as u8;
         assert_eq!(
             cap_volume(Volume::Db(-3.0), Some(-20.0), linear),
             Volume::Db(-20.0)
@@ -6725,6 +6725,21 @@ mod tests {
         assert_eq!(
             cap_volume(Volume::Percent(2), Some(-30.0), pm_zones::amplitude_percent),
             Volume::Percent(2)
+        );
+        // Rounded down, never past the limit: -46 dB is 0.5 % as an amplitude (1 % would be -40 dB)
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-46.0), pm_zones::amplitude_percent),
+            Volume::Percent(0)
+        );
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-46.0), linear),
+            Volume::Percent(23)
+        );
+        // An output's own mapping: the default (linear) on an output that doesn't override it
+        let plain = pm_zones::outputs::NullOutput::with_volume(pm_model::VolumeKind::Percent);
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-30.0), |db| plain.percent_for_db(db)),
+            Volume::Percent(50)
         );
         // The null output has no volume control at all: the request is refused as before.
         let (st, body) = call(

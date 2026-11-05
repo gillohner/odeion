@@ -31,13 +31,9 @@ pub(crate) enum Command {
     Previous,
     Seek(u64),
     QueueChanged,
-    /// The output's level as read back; published in the state. `always`: controllers hear
-    /// of it even when it is unchanged (after a set, so a page showing the level it asked for
-    /// learns the device kept another one).
-    Volume {
-        level: Option<pm_model::ZoneVolume>,
-        always: bool,
-    },
+    /// The output's level as read back; published in the state (controllers hear of it after
+    /// every command, as of every other).
+    Volume(Option<pm_model::ZoneVolume>),
     Shutdown,
 }
 
@@ -360,13 +356,7 @@ impl Engine {
                 }
             }
             Command::Seek(ms) => self.seek(ms),
-            Command::Volume { level, always } => {
-                self.state.send_if_modified(|s| {
-                    let changed = s.volume != level;
-                    s.volume = level;
-                    changed || always
-                });
-            }
+            Command::Volume(level) => self.state.send_modify(|s| s.volume = level),
         }
         Flow::Continue
     }
