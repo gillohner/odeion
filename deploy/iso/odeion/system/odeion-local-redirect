@@ -1,0 +1,38 @@
+#!/bin/sh
+# Owner, 2026-10-31: when the homeserver is published through a tunnel or a proxy, the address it
+# advertises (public_ip:public_pubky_tls_port in its config) is not this machine. A NAT OUTPUT rule
+# then sends that address to 127.0.0.1:6287, so the node reaches its own homeserver locally (Pubky
+# TLS checks the key, not the address). No rule when the address is this machine's or not set.
+# Runs at boot and whenever the homeserver's config changes (odeion-local-redirect.path).
+set -eu
+CONFIG=${ODEION_HOMESERVER_CONFIG:-/var/lib/docker/volumes/pubky-music_homeserver/_data/config.toml}
+# The value of a key in the config's [pkdns] section, quotes taken off
+pkdns() {
+  [ -r "$CONFIG" ] || return 0
+  awk -v k="$1" '
+    /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[pkdns\][[:space:]]*$/) ; next }
+    s && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
+      v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*(#.*)?$/, "", v); gsub(/"/, "", v); print v; exit
+    }' "$CONFIG"
+}
+addr=$(pkdns public_ip)
+port=$(pkdns public_pubky_tls_port)
+port=${port:-6287}
+rules="table ip odeion_redirect {}
+delete table ip odeion_redirect"
+valid_ip() { echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
+valid_port() { echo "$1" | grep -Eq '^[0-9]{1,5}$' && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
+local_ip() { ip -4 -o addr show | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$1"; }
+if [ -n "$addr" ] && valid_ip "$addr" && valid_port "$port" && ! local_ip "$addr"; then
+  rules="$rules
+table ip odeion_redirect {
+  chain output {
+    type nat hook output priority dstnat; policy accept;
+    ip daddr $addr tcp dport $port dnat to 127.0.0.1:6287
+  }
+}"
+  echo "odeion-local-redirect: $addr:$port goes to 127.0.0.1:6287"
+else
+  echo "odeion-local-redirect: no rule (public address ${addr:-not set} is this machine's or not usable)"
+fi
+printf '%s\n' "$rules" | nft -f -
