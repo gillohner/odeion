@@ -727,9 +727,9 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
         // The node plays through its own sign-ins: a listener can't sign in to their own (what
         // they had stays; reads of their own status, plays and streams go on)
         if !under(path, LISTENER_OWN_ALWAYS)
-            && !(*method == Method::GET && LISTENER_OWN_STATUS.iter().any(|p| path == *p))
+            && !(*method == Method::GET && LISTENER_OWN_STATUS.contains(&path))
             // Signing out of their own stays possible
-            && !(*method == Method::DELETE && LISTENER_OWN_STATUS.iter().any(|p| path == *p))
+            && !(*method == Method::DELETE && LISTENER_OWN_STATUS.contains(&path))
             && source_policy(&s.library.lock().expect("library poisoned")) == SourcePolicy::Node
         {
             return Some(NODE_SOURCES_ONLY);
