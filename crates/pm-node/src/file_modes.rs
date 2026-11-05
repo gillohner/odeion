@@ -28,6 +28,11 @@ pub fn private_files(
         "remote.key",
         "endpoint-keys.json",
         "node.restored.toml",
+        // Usage insights (made 0600; kept so by hand-made copies too) and their journal files
+        "usage.sqlite",
+        "usage.sqlite-journal",
+        "usage.sqlite-wal",
+        "usage.sqlite-shm",
     ] {
         v.push(data_dir.join(name));
     }

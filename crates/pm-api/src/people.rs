@@ -548,6 +548,8 @@ pub(crate) async fn change(
     // Music access gone: their phones and laptops go too (devices.rs)
     if b.music == Some(false) {
         crate::devices::forget_all_of(&s, &out.key);
+        // Their tokens stop working now: their usage insights end too (usage.rs)
+        s.usage.revoke_listener(&out.key);
     }
     Ok(Json(out))
 }

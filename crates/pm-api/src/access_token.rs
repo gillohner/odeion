@@ -143,6 +143,8 @@ pub(crate) async fn rotate(s: &NodeState) -> Result<String, ApiError> {
         )
     })?;
     *s.token.write().expect("token lock") = Some(token.clone());
+    // The owner's usage insights let in with the old token change nothing from now on (usage.rs)
+    s.usage.revoke_owner();
     // Event sockets opened with the old token end now
     s.token_changed.send_modify(|n| *n += 1);
     tracing::info!("API token replaced; the old one no longer works");
