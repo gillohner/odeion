@@ -611,9 +611,11 @@ async fn a_plain_backup_keeps_no_way_in() {
     let (st, r) = restore(&router(c.clone()), &locked, Some(&pass)).await;
     assert_eq!(st, StatusCode::OK, "{r}");
     let lib = c.library.lock().unwrap();
+    // The same list (a restore on the node it came from wrote it again, keys in another order)
+    let json = |t: &str| serde_json::from_str::<serde_json::Value>(t).unwrap();
     assert_eq!(
-        lib.get_setting("people").unwrap().as_deref(),
-        Some(people.as_str())
+        lib.get_setting("people").unwrap().as_deref().map(json),
+        Some(json(&people))
     );
     assert_eq!(
         lib.get_setting("homeserver.owner_signup_token").unwrap(),
