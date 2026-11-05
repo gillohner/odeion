@@ -399,3 +399,67 @@ async fn what_a_device_keeps_and_what_it_still_wants() {
         StatusCode::NOT_FOUND
     );
 }
+
+/// PR #268 review: a kept album whose files are gone for a while (a NAS share not mounted at a
+/// scan) is not deleted from the phone; its songs are not wanted until their files are back.
+#[tokio::test]
+async fn a_kept_album_with_gone_files_stays_on_the_device() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let app = router(s.clone());
+    let a1 = add(&s, "One", "Album A", 1, 1000);
+    let a2 = add(&s, "Two", "Album A", 2, 2000);
+    let album_a = s
+        .library
+        .lock()
+        .unwrap()
+        .get_track(pm_model::TrackId(a1))
+        .unwrap()
+        .unwrap()
+        .album
+        .unwrap()
+        .id
+        .unwrap();
+    let phone = "2f6c1a9e-7d4b-4c55-9a1e-8b2c3d4e5f61";
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &format!("/v1/devices/{phone}"),
+        Some(json!({"name": "iPad", "kind": "ios"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let uri = format!("/v1/devices/{phone}/downloads");
+    let (_, m) = call(
+        &app,
+        OWNER,
+        "PUT",
+        &uri,
+        Some(json!({"keep": {"albums": [album_a]}, "have": [{"track_id": a1, "bytes": 1000}]})),
+    )
+    .await;
+    assert_eq!(ids(&m["wanted"]), [a2]);
+    {
+        let lib = s.library.lock().unwrap();
+        let root = std::path::Path::new("/music");
+        let scan = lib.begin_scan(root).unwrap();
+        lib.mark_missing_under(root, scan).unwrap();
+    }
+    let (_, m) = call(&app, OWNER, "GET", &uri, None).await;
+    assert_eq!(m["unkept"], json!([]), "{m}");
+    assert_eq!(
+        ids(&m["wanted"]),
+        Vec::<i64>::new(),
+        "a gone file can't be downloaded"
+    );
+    {
+        let lib = s.library.lock().unwrap();
+        let root = std::path::Path::new("/music");
+        let scan = lib.begin_scan(root).unwrap();
+        lib.mark_file_seen(std::path::Path::new("/music/Album A/02 Two.flac"), scan)
+            .unwrap();
+    }
+    let (_, m) = call(&app, OWNER, "GET", &uri, None).await;
+    assert_eq!(ids(&m["wanted"]), [a2]);
+}
