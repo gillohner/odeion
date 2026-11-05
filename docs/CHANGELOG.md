@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **The node's owner chooses whose TIDAL, Qobuz and Spotify sign-ins people play with** (owner's ask: "can we have both and node admin can set if user use node or own sources"). Settings › This node › Service apps › Sources for everyone:
+  - **This node's:** everyone plays through the sign-ins made on the node; listeners can't sign in to their own.
+  - **Each person's own:** as until now, and still the setting for every node that hasn't chosen.
+  - **Each person chooses:** the node's by default; each listener switches in their Settings.
+  - Switching keeps every sign-in, the node's and each person's. A play still uses one account, and a listener's own sign-in page never shows the node's account.
+
 ### 2026-11-04
 
 - **Every press answers at once and acts once** (owner, iPad: "every click shows loader and fires once").
