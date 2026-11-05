@@ -231,10 +231,21 @@ jobs:
           PM_TIDAL_PKCE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_PKCE_CLIENT_SECRET }}
           PM_TIDAL_DEVICE_CLIENT_ID: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_ID }}
           PM_TIDAL_DEVICE_CLIENT_SECRET: ${{ secrets.PM_TIDAL_DEVICE_CLIENT_SECRET }}
+          # The feed the app checks at start, as on desktops (src/update.rs)
+          ODEION_UPDATE_CHANNEL: ${{ needs.meta.outputs.update_channel }}
+        # The APKs update themselves from the release page; the .aab is built without the updater
+        # (tools/release/android-patch.py --without-updater, and no update channel): an app from
+        # Google Play may update only through Play. The version is the desktop app's, so an edge
+        # build's update question names two different versions (0.3.0-412, not 0.3.0 twice).
         run: |
-          echo '{"version":"${{ needs.meta.outputs.version }}","bundle":{"android":{"versionCode":${{ needs.meta.outputs.android_version_code }}}}}' > release.conf.json
-          npx tauri android build --ci --apk --aab \
+          echo '{"version":"${{ needs.meta.outputs.app_version }}","bundle":{"android":{"versionCode":${{ needs.meta.outputs.android_version_code }}}}}' > release.conf.json
+          npx tauri android build --ci --apk \
             --target aarch64 --target armv7 --target x86_64 --config release.conf.json
+          python3 -I ../../tools/release/android-patch.py . --without-updater
+          ODEION_UPDATE_CHANNEL= npx tauri android build --ci --aab \
+            --target aarch64 --target armv7 --target x86_64 --config release.conf.json
+          python3 -I ../../tools/release/aab-check.py gen/android/app/build/outputs \
+            "$(find gen/android/app/build/outputs/apk -name '*universal-release*.apk' | head -1)"
       - name: sign
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -463,7 +474,7 @@ jobs:
         run: |
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/${{ needs.meta.outputs.channel }}"
           python3 -I tools/release/updater-manifest.py dist "${{ needs.meta.outputs.app_version }}" "$base" \
-            > dist/latest.json
+            "${{ needs.meta.outputs.android_version_code }}" > dist/latest.json
           cat dist/latest.json
       - name: checksums
         working-directory: dist

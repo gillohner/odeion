@@ -111,6 +111,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      # The update feed the apps read (latest.json): the Android entry, desktop entries unchanged
+      - run: python3 -I ../../tools/release/updater-manifest-check.py
   docker:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
