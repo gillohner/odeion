@@ -189,7 +189,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 }
 .topbar .menu-btn { display: inline-flex; }
 .search {
-  display: flex; align-items: center; gap: 8px; flex: 0 1 420px;
+  display: flex; align-items: center; gap: 8px; flex: 0 1 420px; min-width: 44px;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 0 12px; height: 38px;
   transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
 }
@@ -1257,11 +1257,17 @@ html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-te
 html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
 html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
-/* The search gives way to the buttons beside it (an input keeps its own width otherwise): 375 px has no sideways scroll.
-   It keeps its magnifier (44 px), so a crowded bar never paints it over the status beside it */
-html[data-shell="phone"] .search { flex: 1 1 auto; min-width: 44px; }
+/* The search gives way to the buttons beside it (an input keeps its own width otherwise, also in the
+   desktop layout on a narrow window), down to its magnifier (44 px, .search) */
+html[data-shell="phone"] .search { flex: 1 1 auto; }
 html[data-shell="phone"] .topbar-right:empty { display: none; }
-html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none; max-width: 40%; }
+/* A crowded bar (a scan running and a part not answering) keeps every button on screen: the scan shows
+   as its spinner (the words stay for screen readers, and the library page says it too), and the
+   warning gives way, cut with an ellipsis (its dot stays) */
+html[data-shell="phone"] .topbar-right { position: relative; flex: none; }
+html[data-shell="phone"] .topbar-right .scan-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: 0 1 auto; min-width: 28px; max-width: 40%; }
+html[data-shell="phone"] .topbar .upstreams .up-text { min-width: 0; }
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
 /* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
 html[data-shell="phone"] .player { grid-template-columns: minmax(150px, 1fr) fit-content(48%) auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }

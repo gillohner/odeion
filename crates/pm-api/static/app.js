@@ -6882,7 +6882,7 @@
   };
   // Scan indicator: while the node says it is scanning, poll /info until it is done.
   let scanTimer = null;
-  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
+  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning" title="Scanning library…"><span class="spin"></span><span class="scan-text">Scanning library…</span></span>` : ''; };
   // ---- identify library (Settings card and the review view) ----
   let idTimer = null;
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
