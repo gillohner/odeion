@@ -2268,7 +2268,7 @@ async fn tracks(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiRe
         .lock()
         .expect("library poisoned")
         .list_tracks(p.after.map(TrackId), limit)?;
-    Ok(Json(Tracks { tracks }))
+    Ok(Json(Tracks::plain(tracks)))
 }
 
 async fn track(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<pm_model::Track> {
@@ -2629,8 +2629,8 @@ async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> R
 }
 
 async fn artist_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
-    let tracks = s.library.lock().expect("library poisoned").artist_tracks(id)?;
-    Ok(Json(Tracks { tracks }))
+    let songs = s.library.lock().expect("library poisoned").artist_songs(id)?;
+    Ok(Json(Tracks::songs(songs)))
 }
 
 async fn albums(State(s): State<Arc<NodeState>>, Query(p): Query<Page>) -> ApiResult<Vec<pm_model::Album>> {
@@ -2682,8 +2682,8 @@ async fn genre(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResul
 }
 
 async fn album_tracks(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> ApiResult<Tracks> {
-    let tracks = s.library.lock().expect("library poisoned").album_tracks(id)?;
-    Ok(Json(Tracks { tracks }))
+    let songs = s.library.lock().expect("library poisoned").album_songs(id)?;
+    Ok(Json(Tracks::songs(songs)))
 }
 
 async fn history(State(s): State<Arc<NodeState>>, Query(p): Query<Limit>) -> ApiResult<History> {
@@ -15754,6 +15754,88 @@ exec sleep 300
         assert_eq!(*seen.lock().unwrap(), ["Bearer owner-token", "Bearer anna-token"]);
     }
 
+    #[tokio::test]
+    async fn personal_play_order_http_writes_never_change_another_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let a = accounts::mint(&s, anna).unwrap();
+        let b = accounts::mint(&s, ben).unwrap();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("play.provider_order", r#"["spotify"]"#)
+            .unwrap();
+        let send = |method: &str, uri: &str, token: &str, body: serde_json::Value| {
+            let app = app.clone();
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            async move {
+                let r = app.oneshot(req).await.unwrap();
+                let st = r.status();
+                let bytes = r.into_body().collect().await.unwrap().to_bytes();
+                (st, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap())
+            }
+        };
+        let (st, v) = send(
+            "PUT",
+            "/v1/play-order",
+            &a,
+            serde_json::json!({"order":["tidal"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["order"][0], "tidal");
+        let (st, v) = send(
+            "PUT",
+            "/v1/play-order",
+            &b,
+            serde_json::json!({"order":["jamendo"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["order"][0], "jamendo");
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "tidal");
+        let (_, v) = send("GET", "/v1/play-order", "s3cret", serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "spotify", "only owner retains legacy default");
+        let (_, v) = send("GET", "/v1/me/prefs", &a, serde_json::json!(null)).await;
+        assert_eq!(v["play_order"]["value"][0], "tidal");
+        let (st, _) = send(
+            "PUT",
+            "/v1/me/prefs",
+            &a,
+            serde_json::json!({"play_order":["unknown"]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "tidal", "invalid update is non-destructive");
+        let (st, _) = send("PUT", "/v1/me/prefs", &a, serde_json::json!({"play_order":null})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, v) = send("GET", "/v1/play-order", &a, serde_json::json!(null)).await;
+        assert_eq!(
+            v["order"][0], "library",
+            "listener reset never borrows legacy owner order"
+        );
+        let (_, v) = send("GET", "/v1/play-order", &b, serde_json::json!(null)).await;
+        assert_eq!(v["order"][0], "jamendo");
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("play.provider_order")
+                .unwrap()
+                .unwrap(),
+            r#"["spotify"]"#
+        );
+    }
+
     /// Settings › You › Services: each person sees their own sign-ins.
     #[tokio::test]
     async fn me_services_are_the_callers_own() {
@@ -19869,5 +19951,135 @@ exec sleep 300
         );
         let (_, si) = call(&app, "GET", signin, None).await;
         assert!(si["in_use"].is_null(), "{si}");
+    }
+
+    /// Owner report (iPad, 2026-11-04): an album showed every song twice, the NAS file and an old
+    /// homeserver copy whose file is gone. The album page and its tracks show each song once,
+    /// play-all gets one per song, and a song kept in two present copies lists them as `versions`.
+    #[tokio::test]
+    async fn album_shows_one_row_per_song_with_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (aid, nas, kept, home) = {
+            let lib = s.library.lock().unwrap();
+            let album = pm_model::Album {
+                id: None,
+                title: "Crossroad: Unplugged Live".into(),
+                album_artist: Some("Calvin Russell".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(1997),
+                upc: None,
+                total_discs: None,
+            };
+            let mut ids = Vec::new();
+            for (no, path) in [
+                (1, "music/Roon/01.flac"),
+                (
+                    1,
+                    "homeserver/data/files/u/priv/pubky.music/files/aaaaaaaaaaaaaaaa-01.flac",
+                ),
+                (2, "music/Roon/02.flac"),
+                (
+                    2,
+                    "homeserver/data/files/u/priv/pubky.music/files/bbbbbbbbbbbbbbbb-02.flac",
+                ),
+            ] {
+                let mut tr = untagged_track(dir.path().join(path), &format!("Song {no}"), "Calvin Russell");
+                tr.album = Some(album.clone());
+                tr.track_no = Some(no);
+                tr.duration_ms = Some(60_000);
+                ids.push(lib.upsert_track(&tr).unwrap().0);
+            }
+            // The copy of song 1 was deleted; the copy of song 2 is still there
+            let gone = dir
+                .path()
+                .join("homeserver/data/files/u/priv/pubky.music/files/aaaaaaaaaaaaaaaa-01.flac");
+            let root = dir.path().join("homeserver/data/files/u/priv/pubky.music/files");
+            let scan = lib.begin_scan(&root).unwrap();
+            lib.mark_file_seen(&root.join("bbbbbbbbbbbbbbbb-02.flac"), scan)
+                .unwrap();
+            assert_eq!(lib.mark_missing_under(&root, scan).unwrap(), 1, "{gone:?}");
+            let aid = lib
+                .get_track(pm_model::TrackId(ids[0]))
+                .unwrap()
+                .unwrap()
+                .album
+                .unwrap()
+                .id
+                .unwrap();
+            (aid, ids[0], ids[2], ids[3])
+        };
+        let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        let songs = al["songs"].as_array().unwrap();
+        assert_eq!(songs.len(), 2, "{al}");
+        assert_eq!(songs[0]["track_id"], nas);
+        assert!(
+            songs[0].get("versions").is_none(),
+            "one present copy: no versions {al}"
+        );
+        assert_eq!(
+            songs[1]["track_id"], kept,
+            "the NAS file over the homeserver copy"
+        );
+        let v = songs[1]["versions"].as_array().unwrap();
+        assert_eq!(v.len(), 2, "{al}");
+        assert_eq!(
+            (v[0]["track_id"].as_i64(), v[0]["best"].as_bool()),
+            (Some(kept), Some(true))
+        );
+        assert_eq!(v[1]["track_id"], home);
+        assert_eq!(v[1]["source"], "homeserver");
+        assert!(v[1].get("path").is_none(), "no file paths in versions");
+        let (st, tr) = call(&app, "GET", &format!("/v1/library/albums/{aid}/tracks"), None).await;
+        assert_eq!(st, StatusCode::OK, "{tr}");
+        assert_eq!(
+            tr["tracks"].as_array().unwrap().len(),
+            2,
+            "play-all queues one per song"
+        );
+        assert_eq!(
+            tr["versions"][kept.to_string()].as_array().unwrap().len(),
+            2,
+            "{tr}"
+        );
+    }
+
+    /// PR #268 review (Claude H1): a node-only favourite of a song whose file is gone for a while
+    /// (a NAS share not mounted at a scan) is kept, and is there again when the file is back.
+    #[tokio::test]
+    async fn a_favourite_survives_its_file_going_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let nas = dir.path().join("nas");
+        let id = {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(nas.join("01.flac"), "Song", "Someone"))
+                .unwrap()
+                .0
+        };
+        let body = serde_json::json!({ "track_id": id });
+        let (st, b) = call(&app, "PUT", "/v1/bookmarks", Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+        {
+            let lib = s.library.lock().unwrap();
+            let scan = lib.begin_scan(&nas).unwrap();
+            lib.mark_missing_under(&nas, scan).unwrap();
+        }
+        // Reading the favourites tidies node-only ones: the gone song must stay
+        let (st, _) = call(&app, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+        {
+            let lib = s.library.lock().unwrap();
+            let scan = lib.begin_scan(&nas).unwrap();
+            lib.mark_file_seen(&nas.join("01.flac"), scan).unwrap();
+        }
+        let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
 }

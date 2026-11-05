@@ -20,7 +20,13 @@ vc.on('error', (...a) => errors.push('console.error: ' + a.join(' ')));
 const dom = new JSDOM(html.replace('<script src="/app.js"></script>', ''), { url: BASE + '/', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc });
 const w = dom.window;
 w.localStorage.setItem('pm.token', TOKEN);
-w.fetch = (path, init) => fetch(path.startsWith('http') ? path : BASE + path, init);
+// jsdom's AbortSignal isn't Node's: hand Node's fetch a signal of its own that follows the page's
+const pageFetch = (path, init = {}) => {
+  const { signal, ...rest } = init; let own;
+  if (signal) { const c = new AbortController(); if (signal.aborted) c.abort(); else signal.addEventListener('abort', () => c.abort()); own = c.signal; }
+  return fetch(path.startsWith('http') ? path : BASE + path, own ? { ...rest, signal: own } : rest);
+};
+w.fetch = pageFetch;
 w.HTMLMediaElement.prototype.play = async function () {};
 w.HTMLMediaElement.prototype.pause = function () {};
 w.HTMLDialogElement = w.HTMLDialogElement || class {};
@@ -28,7 +34,7 @@ if (!w.HTMLDialogElement.prototype.showModal) w.HTMLDialogElement.prototype.show
 w.addEventListener('error', (e) => errors.push('window.error: ' + e.message));
 w.addEventListener('unhandledrejection', (e) => errors.push('unhandled: ' + e.reason));
 process.on('unhandledRejection', (e) => errors.push('node unhandled: ' + (e && e.stack || e)));
-Object.defineProperty(w, 'innerWidth', { value: 1280, configurable: true }); // the desktop arrangement (jsdom is 1024 wide: a tablet)
+Object.defineProperty(w, 'innerWidth', { value: 1280, configurable: true }); // the desktop arrangement, wide (jsdom is 1024 wide)
 w.eval(js);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 (async () => {
@@ -184,7 +190,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const dl = new JSDOM(html.replace('<script src="/app.js"></script>', ''), { url: BASE + '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole: vc });
   const w2 = dl.window;
   w2.localStorage.setItem('pm.token', TOKEN);
-  w2.fetch = (path, init) => fetch(path.startsWith('http') ? path : BASE + path, init);
+  w2.fetch = pageFetch;
   w2.HTMLMediaElement.prototype.play = async function () {};
   w2.HTMLMediaElement.prototype.pause = function () {};
   w2.matchMedia = (q) => ({ matches: /max-width: (720|1100)px/.test(q), media: q, addEventListener() {}, removeEventListener() {} });
@@ -194,8 +200,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (!dh) errors.push('deep link to a song page did not render');
   // Phone arrangement (Layout: Compact): tabs Home, Search, Library, Zones; Library opens the library
   // with its sections as chips; the account button's menu has Settings (and Log out); back returns.
-  w2.localStorage.setItem('pm.layout', 'compact'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
-  const tabs = [...w2.document.querySelectorAll('.bnav')].filter((b) => !b.classList.contains('rail-only')).map((b) => b.dataset.bnav).join(',');
+  w2.localStorage.setItem('pm.layout', 'phone'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
+  const tabs = [...w2.document.querySelectorAll('.bnav')].map((b) => b.dataset.bnav).join(',');
   w2.document.querySelector('[data-bnav="library"]').click(); await sleep(1500);
   const libChips = [...w2.document.querySelectorAll('#main .libnav [data-libnav]')].map((b) => b.dataset.libnav);
   const chip = w2.document.querySelector('#main .libnav [data-libnav="artists"]'); if (chip) chip.click(); await sleep(1500);
