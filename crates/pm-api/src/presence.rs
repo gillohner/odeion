@@ -425,6 +425,7 @@ async fn move_music(from: &Zone, to: &Zone, empty_from: bool) -> ZoneState {
         position_ms,
         st.transport,
         st.repeat,
+        st.shuffle,
         st.radio,
     )
     .await

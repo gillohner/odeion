@@ -134,6 +134,9 @@ pub struct LoadRequest {
     pub transport: pm_zones::Transport,
     #[serde(default)]
     pub repeat: pm_zones::Repeat,
+    /// Shuffle mode on: `index`'s item plays first, every other item shuffled after it.
+    #[serde(default)]
+    pub shuffle: bool,
     #[serde(default)]
     pub radio: bool,
 }
@@ -162,6 +165,11 @@ pub struct SetRadio {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetRepeat {
     pub repeat: Repeat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetShuffle {
+    pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

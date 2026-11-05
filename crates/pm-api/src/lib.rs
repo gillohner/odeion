@@ -248,7 +248,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
         .route("/zones/{id}/crossfade", axum::routing::put(crossfade))
-        .route("/zones/{id}/shuffle", post(shuffle_queue))
+        .route("/zones/{id}/shuffle", post(shuffle_queue).put(set_shuffle))
         .route("/zones/{id}/transfer", post(transfer))
         .route("/zones/{id}/load", post(load))
         .route("/zones/{id}/sleep", get(sleep_get).put(sleep_set))
@@ -2022,7 +2022,8 @@ async fn crossfade(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Shuffle the upcoming part of the queue; the playing item is untouched.
+/// `POST /v1/zones/{id}/shuffle` (older clients): shuffle mode on, the playing item untouched;
+/// when it is on already, the upcoming items are shuffled again.
 async fn shuffle_queue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
@@ -2031,6 +2032,20 @@ async fn shuffle_queue(
     zone.shuffle_upcoming();
     settle(&zone).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /v1/zones/{id}/shuffle {shuffle}`: shuffle mode on (the upcoming items are shuffled, the
+/// current one stays) or off (every item back in its original order, the current one in its
+/// place). The zone's state.
+async fn set_shuffle(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetShuffle>,
+) -> ApiResult<ZoneState> {
+    let zone = zone_of(&s, &id)?;
+    zone.set_shuffle(body.shuffle);
+    settle(&zone).await;
+    Ok(Json(zone.state()))
 }
 
 fn sleep_view(s: &NodeState, zone: &ZoneId) -> SleepView {
@@ -2102,6 +2117,7 @@ async fn transfer(
         position_ms,
         st.transport,
         st.repeat,
+        st.shuffle,
         st.radio,
     )
     .await;
@@ -2109,9 +2125,11 @@ async fn transfer(
     Ok(Json(moved))
 }
 
-/// Fills `to` the way a move leaves it: stopped and emptied, then `queue`, `repeat` and `radio`;
-/// `index` plays from `position_ms` (paused when the source was paused; nothing starts when it
-/// was stopped). Seeking needs the track open, so it waits for that (bounded) first.
+/// Fills `to` the way a move leaves it: stopped and emptied, then `queue`, `repeat`, `shuffle`
+/// and `radio`; `index` plays from `position_ms` (paused when the source was paused; nothing
+/// starts when it was stopped). With `shuffle`, `index`'s item comes first and the rest is
+/// shuffled after it. Seeking needs the track open, so it waits for that (bounded) first.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn load_zone(
     to: &Zone,
     queue: Vec<QueueItem>,
@@ -2119,16 +2137,23 @@ pub(crate) async fn load_zone(
     position_ms: u64,
     transport: pm_zones::Transport,
     repeat: pm_zones::Repeat,
+    shuffle: bool,
     radio: bool,
 ) -> ZoneState {
     to.stop();
     to.clear();
     to.set_repeat(repeat);
     to.set_radio(radio);
+    // Off until the items are in: a queue loaded in order with shuffle off is in order
+    to.set_shuffle(false);
     let mut events = to.subscribe();
     let len = queue.len();
     to.enqueue(queue, Insert::End);
-    let index = index.filter(|i| *i < len);
+    let mut index = index.filter(|i| *i < len);
+    if shuffle {
+        to.shuffle_from(index);
+        index = index.map(|_| 0);
+    }
     if let (Some(i), true) = (index, transport != pm_zones::Transport::Stopped) {
         to.play_index(i);
         let started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2194,6 +2219,7 @@ async fn load(
             body.position_ms,
             body.transport,
             body.repeat,
+            body.shuffle,
             body.radio,
         )
         .await,
@@ -15738,6 +15764,7 @@ exec sleep 300
             pm_zones::Transport::Playing,
             pm_zones::Repeat::Off,
             false,
+            false,
         )
         .await;
         assert_eq!(zone.queue()[1].by.as_deref(), Some(anna));
@@ -20073,5 +20100,293 @@ exec sleep 300
         }
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
+    }
+
+    /// Shuffle is a mode: on shuffles what comes after the current item and keeps the order;
+    /// off puts every item back, the current one in its place and items added meanwhile in theirs.
+    /// The state says so (on `/v1/events` too), the older POST turns it on, a transfer carries it.
+    #[tokio::test]
+    async fn shuffle_is_a_mode_that_restores_the_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..8)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": items, "replace": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Loop the third item so the current index holds still on the null output
+        call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/repeat"),
+            Some(serde_json::json!({"repeat": "one"})),
+        )
+        .await;
+        call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transport"),
+            Some(serde_json::json!({"action": "play", "index": 2})),
+        )
+        .await;
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        for _ in 0..500 {
+            if zone.state().queue_index == Some(2) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(zone.state().queue_index, Some(2));
+        let titles = |z: &serde_json::Value| -> Vec<String> {
+            z["queue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let original: Vec<String> = (0..8).map(|i| format!("t{i}")).collect();
+        let mut events = s.events.subscribe();
+        let put = |on: bool| {
+            let app = app.clone();
+            let zid = zid.clone();
+            async move {
+                call(
+                    &app,
+                    "PUT",
+                    &format!("/v1/zones/{zid}/shuffle"),
+                    Some(serde_json::json!({"shuffle": on})),
+                )
+                .await
+            }
+        };
+        // On: the playing item and the ones before it stay, the rest is shuffled (tried again
+        // when a shuffle happened to leave the order as it was)
+        let mut on = serde_json::Value::Null;
+        for _ in 0..5 {
+            let (st, z) = put(true).await;
+            assert_eq!(st, StatusCode::OK, "{z}");
+            assert_eq!(
+                (z["shuffle"].as_bool(), z["queue_index"].as_u64()),
+                (Some(true), Some(2)),
+                "{z}"
+            );
+            on = z;
+            if titles(&on)[3..] != original[3..] {
+                break;
+            }
+            put(false).await;
+        }
+        let t = titles(&on);
+        assert_eq!(&t[..3], &original[..3], "played and current stay");
+        let (mut rest, mut want) = (t[3..].to_vec(), original[3..].to_vec());
+        rest.sort();
+        want.sort();
+        assert_eq!(rest, want, "the same items");
+        assert_ne!(&t[3..], &original[3..], "five shuffles never moved anything");
+        // The zone state on /v1/events says so
+        let mut seen = false;
+        while let Ok(Ok(ev)) = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await {
+            if let ApiEvent::Zone { state } = ev {
+                if state.id == ZoneId::new(&zid) && state.shuffle {
+                    assert_eq!(serde_json::to_value(&state).unwrap()["shuffle"], true);
+                    seen = true;
+                    break;
+                }
+            }
+        }
+        assert!(seen, "no zone state with shuffle on arrived");
+        // Added while on: "Play next" is next, "Add to queue" goes to the end
+        let titled = |t: &str| {
+            let mut it = QueueItem::new(wav.to_string_lossy());
+            it.title = Some(t.into());
+            it
+        };
+        zone.enqueue(vec![titled("next")], Insert::Next);
+        zone.enqueue(vec![titled("end")], Insert::End);
+        settle(zone.as_ref()).await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(titles(&z)[3], "next");
+        assert_eq!(titles(&z).last().map(String::as_str), Some("end"));
+        // Off: the original order, the current item in its place, the added items in theirs
+        let (st, z) = put(false).await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(
+            (z["shuffle"].as_bool(), z["queue_index"].as_u64()),
+            (Some(false), Some(2)),
+            "{z}"
+        );
+        let mut want = original.clone();
+        want.insert(3, "next".into());
+        want.push("end".into());
+        assert_eq!(titles(&z), want);
+        // The older POST turns it on
+        let (st, _) = call(&app, "POST", &format!("/v1/zones/{zid}/shuffle"), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(z["shuffle"], true);
+        // A transfer carries the mode
+        let (st, k) = call(
+            &app,
+            "POST",
+            "/v1/zones",
+            Some(serde_json::json!({"name": "Kitchen", "output": "null"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{k}");
+        let (st, moved) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/transfer"),
+            Some(serde_json::json!({"to": k["id"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{moved}");
+        assert_eq!(moved["shuffle"], true, "{moved}");
+        assert_eq!(moved["queue"].as_array().unwrap().len(), 10);
+    }
+
+    /// A queue loaded with shuffle on plays the chosen item first and the rest shuffled after it;
+    /// off puts the loaded order back. Loaded without shuffle, it is in order.
+    #[tokio::test]
+    async fn a_queue_loaded_with_shuffle_starts_from_the_chosen_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        write_wav(&wav, 441);
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let items: Vec<_> = (0..6)
+            .map(|i| serde_json::json!({"uri": wav.to_string_lossy(), "title": format!("t{i}")}))
+            .collect();
+        let titles = |z: &serde_json::Value| -> Vec<String> {
+            z["queue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let original: Vec<String> = (0..6).map(|i| format!("t{i}")).collect();
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": items, "index": 3, "transport": "stopped", "shuffle": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(
+            (z["shuffle"].as_bool(), z["queue_index"].as_u64()),
+            (Some(true), Some(0)),
+            "{z}"
+        );
+        let t = titles(&z);
+        assert_eq!(t[0], "t3", "the chosen item first");
+        let mut rest = t[1..].to_vec();
+        rest.sort();
+        assert_eq!(rest, ["t0", "t1", "t2", "t4", "t5"]);
+        let (st, z) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(titles(&z), original);
+        assert_eq!(z["queue_index"], 3);
+        // In order, shuffle off, after a shuffled queue
+        let (st, z) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some(serde_json::json!({"items": items, "index": 1, "transport": "stopped"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        assert_eq!(z["shuffle"], false);
+        assert_eq!(titles(&z), original);
+    }
+
+    /// A shuffled queue comes back after a restart shuffled, with its original order kept, so
+    /// shuffle off still puts it back.
+    #[tokio::test]
+    async fn a_shuffled_queue_is_restored_with_its_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("short.wav");
+        write_wav(&wav, 441);
+        let zid;
+        let original: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
+        {
+            let s = state(dir.path(), None).await;
+            let app = router(s.clone());
+            let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+            zid = zones[0]["id"].as_str().unwrap().to_string();
+            let items: Vec<_> = original
+                .iter()
+                .map(|t| serde_json::json!({"uri": wav.to_string_lossy(), "title": t}))
+                .collect();
+            let (st, _) = call(
+                &app,
+                "POST",
+                &format!("/v1/zones/{zid}/queue"),
+                Some(serde_json::json!({"items": items, "replace": true})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, z) = call(
+                &app,
+                "PUT",
+                &format!("/v1/zones/{zid}/shuffle"),
+                Some(serde_json::json!({"shuffle": true})),
+            )
+            .await;
+            assert_eq!((st, z["shuffle"].as_bool()), (StatusCode::OK, Some(true)), "{z}");
+            let key = format!("queue.{zid}");
+            let mut saved = None;
+            for _ in 0..200 {
+                saved = s.library.lock().unwrap().get_setting(&key).unwrap();
+                if saved.as_deref().is_some_and(|j| j.contains("\"shuffle\":true")) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(
+                saved.is_some_and(|j| j.contains("\"shuffle\":true")),
+                "the mode was not saved"
+            );
+        }
+        let s2 = state(dir.path(), None).await;
+        let app2 = router(s2.clone());
+        let (_, z) = call(&app2, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(z["shuffle"], true, "{z}");
+        let (st, z) = call(
+            &app2,
+            "PUT",
+            &format!("/v1/zones/{zid}/shuffle"),
+            Some(serde_json::json!({"shuffle": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        let titles: Vec<String> = z["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["title"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(titles, original);
     }
 }
