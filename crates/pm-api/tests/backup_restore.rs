@@ -661,3 +661,40 @@ async fn a_plain_backup_keeps_no_way_in() {
         Some(parties.as_str())
     );
 }
+
+/// The owner's browser sessions and device sign-ins never go into a backup, and a restore keeps
+/// the node's own: a backup from before Make a new token can't bring back a sign-in that ended.
+#[tokio::test]
+async fn a_restore_never_brings_back_ended_sign_ins() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let hash = |n: &str| ["fixture", "session", "hash", n].join("-");
+    let list = |n: &str| format!("[{{\"hash\":\"{}\",\"key\":\"k\",\"created_at\":1}}]", hash(n));
+    {
+        let lib = a.library.lock().unwrap();
+        lib.set_setting("accounts.owner_sessions", &list("browser"))
+            .unwrap();
+        lib.set_setting("accounts.device_sessions", &list("device"))
+            .unwrap();
+    }
+    let pass = ["fixture", "passphrase"].join("-");
+    let (plain, _) = pm_api::backup::make(&a, None).unwrap();
+    let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
+    for (name, b) in [("plain", &plain), ("locked", &locked)] {
+        let raw = String::from_utf8_lossy(&library_db_of(b)).into_owned();
+        for n in ["browser", "device"] {
+            assert!(!raw.contains(&hash(n)), "{n} sign-in in the {name} backup");
+        }
+    }
+    // Make a new token ended them; the older backup is restored: they stay ended
+    {
+        let lib = a.library.lock().unwrap();
+        lib.delete_setting("accounts.owner_sessions").unwrap();
+        lib.delete_setting("accounts.device_sessions").unwrap();
+    }
+    let (st, r) = restore(&router(a.clone()), &locked, Some(&pass)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let lib = a.library.lock().unwrap();
+    assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
+    assert_eq!(lib.get_setting("accounts.device_sessions").unwrap(), None);
+}

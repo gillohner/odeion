@@ -30,6 +30,7 @@ Newest first. Dates are when the change landed on `main`.
   - `odeiond backup` writes its copy readable by you only. It is made and cleaned in a private folder in the node's data folder; only the cleaned copy is written where you asked.
   - `odeiond restore` keeps this node's own settings (its id, stream key, backup schedule and files jobs), and the sign-ins (yours and listeners'), invite links, signup token and parties a plain copy doesn't carry. Settings › Backup does the same: a backup without a passphrase restored on the node it came from keeps the invite links, signup token and parties the node has.
   - `odeiond backup --force` over an old database also removes that database's journal files beside it.
+  - Your browser sessions and the apps' sign-ins are never in a backup, and a restore keeps the node's own: a backup from before Make a new token can't bring back a sign-in that ended.
 
 - **Workflows use each action at a fixed commit** (with its version beside it), checkouts keep no credentials, and `ci.yml` and `compat.yml` read the repository only. `tools/workflow-pins-check.py` runs in CI and fails on an action used by tag; Dependabot proposes the updates.
 

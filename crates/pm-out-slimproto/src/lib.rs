@@ -480,6 +480,17 @@ fn session(
     // one player don't both offer it; undone (`unannounce`) if it fails or the node says no.
     let (output, announce) = {
         let mut p = players.lock().expect("players");
+        // Full, and this player is new: one the node never took (turned away, or its start
+        // failed) and that has no connection now makes room
+        if !p.contains_key(&hello.mac) && p.len() >= limits.players {
+            let idle = p
+                .iter()
+                .find(|(_, k)| !k.announced && !k.output.link().connected())
+                .map(|(mac, _)| *mac);
+            if let Some(mac) = idle {
+                p.remove(&mac);
+            }
+        }
         let known = p.len();
         match p.get_mut(&hello.mac) {
             Some(k) => {
@@ -1049,6 +1060,42 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "closed at {:?}",
             started.elapsed()
+        );
+    }
+
+    /// A full table makes room for a new player by dropping one the node never took that has no
+    /// connection now; players the node took keep their places.
+    #[test]
+    fn a_full_table_drops_a_player_never_taken() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The node turns the first player away and takes the others
+        let offers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new({
+            let offers = offers.clone();
+            move |_| offers.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+        });
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
+        std::thread::spawn(move || serve_with(listener, 7788, stream_path, on_player, tight()).unwrap());
+
+        // Player 1 is turned away and its connection ends: the table (1 place) holds it, unannounced
+        let mut one = TcpStream::connect(addr).unwrap();
+        one.write_all(&hello(1)).unwrap();
+        assert!(closed_within(&mut one, Duration::from_secs(2)), "turned away");
+        std::thread::sleep(Duration::from_millis(200));
+        // Player 2 takes its place
+        let mut two = TcpStream::connect(addr).unwrap();
+        two.write_all(&hello(2)).unwrap();
+        assert!(
+            !closed_within(&mut two, Duration::from_millis(400)),
+            "the new player is taken"
+        );
+        // A third while player 2 (taken) holds the one place: refused
+        let mut three = TcpStream::connect(addr).unwrap();
+        three.write_all(&hello(3)).unwrap();
+        assert!(
+            closed_within(&mut three, Duration::from_secs(2)),
+            "a taken player keeps its place"
         );
     }
 }

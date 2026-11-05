@@ -72,6 +72,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 /// backup schedule with its passphrase, and the hashes of its API token: the one the owner's
 /// browser sessions were made under and the mark of a token an older node record held. A short
 /// token set in the config could be guessed from either offline).
+/// The owner's browser sessions and device sign-ins (their hashes) are this node's too: a backup
+/// from before Make a new token never brings back a sign-in that ended with it.
 /// Also the files jobs this node is running or keeps for its next start (copies to the
 /// homeserver, bringing files here, uploads it left half written): a restored backup never starts
 /// one nobody asked for, and the node's own carry on (#237 review, M2).
@@ -80,6 +82,8 @@ const NODE_OWN: &[&str] = &[
     "node.id",
     SCHEDULE_KEY,
     crate::accounts::OWNER_SESSIONS_TOKEN,
+    crate::accounts::OWNER_SESSIONS,
+    crate::accounts::DEVICE_SESSIONS,
     crate::access_token::PUBLISHED_TOKEN_KEY,
     crate::copy_jobs::JOBS_KEY,
     crate::files::BRING_RESUME_KEY,
@@ -737,6 +741,9 @@ async fn restore_locked(
         expected: m.counts.clone(),
         ..Default::default()
     };
+    // The people list is replaced and merged below: no roster change runs meanwhile
+    // (`people::update`), so none is lost or made to an older copy
+    let roster = s.roster.lock().await;
     let done = (|| -> Result<(), BackupError> {
         let lib = s.library.lock().expect("library poisoned");
         let keep: Vec<(&str, Option<String>)> = NODE_OWN
@@ -804,6 +811,7 @@ async fn restore_locked(
             .collect();
         Ok(())
     })();
+    drop(roster);
     remove_db(&staged);
     done?;
     s.reload_sources_off();

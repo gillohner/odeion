@@ -72,7 +72,7 @@ impl Link {
         }
     }
 
-    fn connected(&self) -> bool {
+    pub(crate) fn connected(&self) -> bool {
         self.conn.lock().expect("conn").is_some()
     }
 

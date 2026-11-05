@@ -23,11 +23,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const TOKENS: &str = "accounts.tokens";
-const OWNER_SESSIONS: &str = "accounts.owner_sessions";
+pub(crate) const OWNER_SESSIONS: &str = "accounts.owner_sessions";
 /// The owner's devices (the desktop and Android app), signed in with Pubky Ring: tokens with the
 /// same `pmo_` start as browser sessions, kept apart so a browser's Log out and the browsers' cap
 /// leave them. Make a new token and a change of the node's identity end them too.
-const DEVICE_SESSIONS: &str = "accounts.device_sessions";
+pub(crate) const DEVICE_SESSIONS: &str = "accounts.device_sessions";
 /// Browser sessions of the owner kept at once; the oldest goes first.
 const OWNER_SESSIONS_CAP: usize = 20;
 /// Devices of the owner kept at once (an app signing in again and again, say reinstalled).

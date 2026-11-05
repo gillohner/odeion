@@ -70,20 +70,26 @@ pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
                 ProbeError::Unreachable(format!("Can't reach {}: {e}", s.node_url))
             }
         })?;
-    match resp.status().as_u16() {
-        200..=299 => Ok(resp.json::<Info>().await.unwrap_or_default()),
-        // A node without a token answers only at 127.0.0.1 or localhost, and says so
-        403 if s.token.is_empty() => {
-            let why = resp.text().await.unwrap_or_default();
-            if why.contains("no API token") {
-                Err(ProbeError::Other(why.chars().take(200).collect()))
-            } else {
-                Err(ProbeError::NeedsSignIn)
-            }
+    let code = resp.status().as_u16();
+    if (200..=299).contains(&code) {
+        return Ok(resp.json::<Info>().await.unwrap_or_default());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    Err(refusal(code, s.token.is_empty(), &body))
+}
+
+/// Why the node didn't take this request: `code`, whether this device sent no token, and what
+/// the node said. A node without a token answers only at 127.0.0.1 or localhost and says so
+/// ("no API token"); without a token anything else refused asks for a sign-in; a token it
+/// refuses is [`ProbeError::Refused`].
+fn refusal(code: u16, no_token: bool, body: &str) -> ProbeError {
+    match code {
+        403 if no_token && body.contains("no API token") => {
+            ProbeError::Other(body.chars().take(200).collect())
         }
-        401 if s.token.is_empty() => Err(ProbeError::NeedsSignIn),
-        401 | 403 => Err(ProbeError::Refused),
-        code => Err(ProbeError::Other(format!("The node answered {code}"))),
+        401 | 403 if no_token => ProbeError::NeedsSignIn,
+        401 | 403 => ProbeError::Refused,
+        code => ProbeError::Other(format!("The node answered {code}")),
     }
 }
 
@@ -276,6 +282,33 @@ mod tests {
         assert!(ring_request_is_a_sign_in(&none).is_err(), "no caps");
         let other = with(caps).replace("pubkyauth:", "https:");
         assert!(ring_request_is_a_sign_in(&other).is_err(), "not a Ring request");
+    }
+
+    /// The node's refusals as the app reads them: a tokenless node's own reason, a sign-in it
+    /// asks for, a token it refuses, anything else as is.
+    #[test]
+    fn the_nodes_refusals_are_read_apart() {
+        let tokenless = "this node has no API token, so it answers only at 127.0.0.1 or localhost";
+        match refusal(403, true, tokenless) {
+            ProbeError::Other(m) => assert!(m.contains("no API token"), "{m}"),
+            e => panic!("{e:?}"),
+        }
+        assert!(matches!(refusal(403, true, "forbidden"), ProbeError::NeedsSignIn));
+        assert!(matches!(refusal(401, true, ""), ProbeError::NeedsSignIn));
+        assert!(matches!(refusal(401, false, ""), ProbeError::Refused));
+        assert!(
+            matches!(refusal(403, false, tokenless), ProbeError::Refused),
+            "with a token, a refusal"
+        );
+        match refusal(503, false, "") {
+            ProbeError::Other(m) => assert_eq!(m, "The node answered 503"),
+            e => panic!("{e:?}"),
+        }
+        let long = "no API token ".repeat(40);
+        match refusal(403, true, &long) {
+            ProbeError::Other(m) => assert_eq!(m.chars().count(), 200, "cut to 200"),
+            e => panic!("{e:?}"),
+        }
     }
 
     /// Only the owner's approval ends the sign-in with a credential: a listener's `ok`, an owner
