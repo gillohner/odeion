@@ -4823,7 +4823,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK);
-            assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..4], magic);
+            assert_eq!(
+                &resp.into_body().collect().await.unwrap().to_bytes()[..magic.len()],
+                magic
+            );
         }
         // Playlists import by MusicBrainz recording
         let (_, pls) = call(&app, "GET", "/v1/sources/jellyfin/playlists", None).await;
@@ -5108,7 +5111,10 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{path}");
-            assert_eq!(&resp.into_body().collect().await.unwrap().to_bytes()[..4], magic);
+            assert_eq!(
+                &resp.into_body().collect().await.unwrap().to_bytes()[..magic.len()],
+                magic
+            );
         }
         let (_, v) = call(&app, "DELETE", "/v1/sources/plex/server", None).await;
         assert_eq!(v["connected"], false);
