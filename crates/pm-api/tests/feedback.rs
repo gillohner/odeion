@@ -720,8 +720,6 @@ async fn a_resent_report_never_tells_a_guess_from_the_owners_token() {
     );
 }
 
-// ---- helpers ----
-
 /// Claude review of b015b991, L2: People › Remove takes everything the node keeps for a
 /// listener, their problem reports too; everyone else's stay.
 #[tokio::test]
@@ -751,6 +749,35 @@ async fn removing_a_listener_takes_their_reports() {
     left.sort();
     assert_eq!(left, ["ben's", "owner's"]);
 }
+
+/// Under "This node's sign-ins" (the source policy `node`) a listener still reports problems and
+/// sees their own: a report isn't a sign-in.
+#[tokio::test]
+async fn a_listener_reports_under_the_nodes_sign_ins() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::accounts::SOURCE_POLICY_KEY, "node")
+        .unwrap();
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s.clone());
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's, on the node's")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    let (st, r) = call(&app, Some(&ann), "GET", "/v1/feedback/mine", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r.as_array().map(Vec::len), Some(1), "{r}");
+}
+
+// ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {
     send(&app, req).await
