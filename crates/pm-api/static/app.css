@@ -200,6 +200,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
 .search input::-webkit-search-cancel-button { appearance: none; }
 .search kbd { font: 11px ui-monospace, monospace; color: var(--muted); border: 1px solid var(--line-strong); border-radius: 5px; padding: 1px 6px; }
 .topbar-right { margin-left: auto; font-size: 12px; color: var(--muted); }
+.topbar-help { display: inline-flex; flex: none; }
 .scanning { display: inline-flex; align-items: center; gap: 8px; }
 .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1256,7 +1257,8 @@ html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-te
 html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
 html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
-html[data-shell="phone"] .search { flex: 1 1 auto; }
+/* The search gives way to the buttons beside it (an input keeps its own width otherwise): 375 px has no sideways scroll */
+html[data-shell="phone"] .search { flex: 1 1 auto; min-width: 0; }
 html[data-shell="phone"] .topbar-right:empty { display: none; }
 html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none; max-width: 40%; }
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
