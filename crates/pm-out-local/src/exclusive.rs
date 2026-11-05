@@ -211,6 +211,8 @@ struct UnitState {
 struct Held {
     dac_id: i32,
     dac_name: String,
+    /// The DAC's USB ids (with its name: which [`Listener`] is its).
+    usb: Option<UsbIds>,
     t: Arc<dyn Transport>,
     dev: UsbAudioDevice,
     /// Each playback clock's rates (its `RANGE`).
@@ -257,6 +259,40 @@ impl Held {
 }
 
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+/// The listener's mute and level for a DAC (by its name and USB ids), kept when the app gives it
+/// back (a refused format, another mode, an unplug) and taken up again when it takes it again:
+/// a give-back and a new take never unmute it or make it louder.
+#[derive(Debug, Clone, PartialEq)]
+struct Listener {
+    dac: (String, Option<UsbIds>),
+    muted: bool,
+    db: Option<f32>,
+}
+
+static LISTENER: Mutex<Option<Listener>> = Mutex::new(None);
+
+/// [`Listener`] for the DAC held, as it is now (kept only when the listener chose anything).
+fn remember_listener(h: &Held) {
+    let mut l = LISTENER.lock().unwrap_or_else(|e| e.into_inner());
+    if h.listener_muted || h.listener_db.is_some() {
+        *l = Some(Listener {
+            dac: (h.dac_name.clone(), h.usb),
+            muted: h.listener_muted,
+            db: h.listener_db,
+        });
+    } else if l.as_ref().is_some_and(|x| x.dac == (h.dac_name.clone(), h.usb)) {
+        *l = None;
+    }
+}
+
+/// The listener's mute and level kept for this DAC ([`remember_listener`]): unmuted, none.
+fn remembered_listener(name: &str, usb: Option<UsbIds>) -> (bool, Option<f32>) {
+    match LISTENER.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some(l) if l.dac.0 == name && l.dac.1 == usb => (l.muted, l.db),
+        _ => (false, None),
+    }
+}
 
 fn with_held<T>(f: impl FnOnce(&mut Option<Held>) -> T) -> T {
     f(&mut HELD.lock().unwrap_or_else(|e| e.into_inner()))
@@ -665,6 +701,7 @@ fn hand_back(t: &dyn Transport, dev: &UsbAudioDevice) {
 /// connection closed. `attached`: the DAC is still there (Android's paths wait for it to be
 /// listed again).
 fn give_back(mut h: Held, attached: bool) {
+    remember_listener(&h);
     // Each unit the driver set goes back as it was before the take (also one whose hand-over
     // failed half-way), not the hand-over's attenuation: but no louder than the listener's own
     // level, and muted when the listener muted
@@ -874,10 +911,13 @@ fn acquire(dac: &Dac, media_db: Option<f32>) -> Result<(), ExclusiveError> {
         .speed()
         .unwrap_or(if uac == Uac::V2 { Speed::High } else { Speed::Full });
     tracing::info!(dac = %dac.device.name, ?uac, ?speed, clocks = ?clock_rates, units = ?units.iter().map(|u| (u.unit.id, u.before)).collect::<Vec<_>>(), ?media_db, "Exclusive USB: the app holds the DAC");
+    // The listener's mute and level from the last time the app held it: kept
+    let (listener_muted, listener_db) = remembered_listener(&dac.device.name, dac.device.usb);
     with_held(|h| {
         *h = Some(Held {
             dac_id: dac.id,
             dac_name: dac.device.name.clone(),
+            usb: dac.device.usb,
             t,
             dev,
             clock_rates,
@@ -886,8 +926,8 @@ fn acquire(dac: &Dac, media_db: Option<f32>) -> Result<(), ExclusiveError> {
             units,
             active: None,
             opened: false,
-            listener_muted: false,
-            listener_db: None,
+            listener_muted,
+            listener_db,
             media_db_at_take: media_db,
             driver: None,
             in_use: false,
@@ -1149,13 +1189,24 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
                 if !u.can_mute {
                     return Err("the DAC can't be muted".into());
                 }
-                // Unmuted: heard at this level from now (a hand-over mute on it ended), unless it
-                // can't go as low as the listener's level (it stays muted then: never louder)
-                if !m && st.chosen.is_none() {
+                // Unmuted: heard at the level applied (a hand-over mute on it ended), unless it
+                // can't go as low as the listener's level (it stays muted then: never louder).
+                // Only a level applied and then heard counts as the listener's: none before any
+                // song, none on a unit that stays muted
+                let applied = st.level.is_some();
+                let heard = !m && applied;
+                let listener_db = listener_db.or(heard.then(|| vol::cur_to_db(now.cur)));
+                let own = match st.chosen {
+                    None if heard => Level {
+                        cur: now.cur,
+                        mute: false,
+                    },
+                    _ => own_level(st, media_db),
+                };
+                let mute = path_level(own, listener_db, m, &u.range).mute;
+                if heard && !mute && st.chosen.is_none() {
                     st.chosen = Some(now.cur);
                 }
-                let listener_db = listener_db.or((!m).then(|| vol::cur_to_db(now.cur)));
-                let mute = path_level(own_level(st, media_db), listener_db, m, &u.range).mute;
                 driver::set_mute(&*t, u.id, u.ac, mute).map_err(err)?;
                 st.level = Some(Level { mute, ..now });
                 h.listener_muted = m;
@@ -1822,6 +1873,7 @@ pub(crate) mod tests {
     impl Drop for Phone {
         fn drop(&mut self) {
             with_held(|h| *h = None);
+            *LISTENER.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *GIVEN_BACK.lock().unwrap_or_else(|e| e.into_inner()) = None;
             *BACKEND.write().unwrap_or_else(|e| e.into_inner()) = None;
             usb_dac::set_dac(None);
@@ -1844,6 +1896,7 @@ pub(crate) mod tests {
     fn phone(permission: bool, media: Option<u8>) -> (Phone, Arc<FakeApp>) {
         let guard = Phone;
         with_held(|h| *h = None);
+        *LISTENER.lock().unwrap_or_else(|e| e.into_inner()) = None;
         usb_dac::set_settings(DeviceSettings::default());
         usb_dac::set_dac(None);
         let app = FakeApp::new(permission);
@@ -3114,5 +3167,79 @@ pub(crate) mod tests {
         assert_eq!(unit(&app, 5), (-20 * 256, true), "never louder than -50 dB");
         drop(open_ok(fast));
         assert_eq!(unit(&app, 0x0b), (-50 * 256, false));
+    }
+
+    /// Codex M (306f): a path refused because the listener muted (or turned down) gives the DAC
+    /// back; Android lists it again, Play: the take after keeps the listener's mute and level, so
+    /// nothing plays through the path at full level and no unit plays unmuted or louder.
+    #[test]
+    fn a_retake_after_a_refused_switch_keeps_the_listeners_mute_and_level() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (fast, slow) = (AudioFormat::pcm(192_000, 24, 2), AudioFormat::pcm(48_000, 16, 2));
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(paths_dac_with(true, true, true));
+        *app.media_db.lock().unwrap() = Some(0.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(fast));
+        set_volume(Volume::Mute(true)).unwrap();
+        // The bypass path: refused, the DAC goes back
+        match open_phone(id(), slow) {
+            PhoneOpen::Failed(why) => assert!(why.contains("muted"), "{why}"),
+            _ => panic!("played muted at full level"),
+        }
+        assert!(!holding());
+        assert_eq!(*app.released.lock().unwrap(), 1);
+        // Android lists it again; Play again, never unmuted: still refused, nothing sent
+        usb_dac::apply_report(&ka17_report(33, ""));
+        app.dac.state().out.clear();
+        match open_phone(id(), slow) {
+            PhoneOpen::Failed(why) => assert!(why.contains("muted"), "{why}"),
+            _ => panic!("the take after the give-back forgot the mute"),
+        }
+        assert!(app.dac.state().out.is_empty(), "not a sample sent");
+        // And the path with a unit, taken again: muted
+        usb_dac::apply_report(&ka17_report(33, ""));
+        drop(open_ok(fast));
+        assert_eq!(volume_of(&app).1, Some(true), "muted after the take");
+        drop(_p);
+
+        // Turned down to -30 dB, then the refused switch: the take after plays at -30, not 0
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(paths_dac_with(true, true, true));
+        *app.media_db.lock().unwrap() = Some(0.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(fast));
+        set_volume(Volume::Db(-30.0)).unwrap();
+        assert!(matches!(open_phone(id(), slow), PhoneOpen::Failed(_)));
+        assert!(!holding());
+        usb_dac::apply_report(&ka17_report(33, ""));
+        app.dac.state().unit_writes.clear();
+        drop(open_ok(fast));
+        assert_eq!(app.dac.state().unit_writes, [(0x0b, -30 * 256)]);
+    }
+
+    /// Claude L2 (306f): an unmute on a path that stays muted (it can't go as low as the
+    /// listener's level) records no level as heard: once the listener raises the level on another
+    /// path, this one follows it, not the minimum it never played at.
+    #[test]
+    fn an_unmute_that_stays_muted_records_no_level() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (fast, slow) = (AudioFormat::pcm(192_000, 24, 2), AudioFormat::pcm(48_000, 16, 2));
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(two_path_dac());
+        own_units(&app, &[(0x0b, 0, false, -127), (5, 0, false, -20)]);
+        *app.media_db.lock().unwrap() = Some(0.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(fast));
+        set_volume(Volume::Db(-50.0)).unwrap();
+        set_volume(Volume::Mute(true)).unwrap();
+        drop(open_ok(slow));
+        set_volume(Volume::Mute(false)).unwrap();
+        assert_eq!(unit(&app, 5), (-20 * 256, true), "can't go to -50 dB");
+        // The listener raises it to -10 dB on the 32-bit path; the 16-bit path follows
+        drop(open_ok(fast));
+        set_volume(Volume::Db(-10.0)).unwrap();
+        drop(open_ok(slow));
+        assert_eq!(unit(&app, 5), (-10 * 256, false));
     }
 }

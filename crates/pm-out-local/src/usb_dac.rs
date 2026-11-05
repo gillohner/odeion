@@ -923,7 +923,10 @@ pub fn apply_report(json: &str) -> bool {
         }
     };
     tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
-    set_dac_because(dac, why) || media_changed
+    // Android's volume decides only a DAC's mode: without one, a volume step is no change (the
+    // app doesn't register again at every step of the slider)
+    let volume_counts = media_changed && dac.is_some();
+    set_dac_because(dac, why) || volume_counts
 }
 
 #[cfg(test)]

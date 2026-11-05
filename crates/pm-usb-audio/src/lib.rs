@@ -592,6 +592,11 @@ pub struct Summary {
     pub hardware_volume: bool,
 }
 
+/// The most steps a search of the audio topology takes before it gives up (nothing told): a
+/// hostile descriptor's chain of mixers, each fed twice by the one before, would otherwise take
+/// 2^31.
+const ROUTE_STEPS: u32 = 4096;
+
 impl UsbAudioDevice {
     fn entity(&self, id: u8) -> Option<&Entity> {
         self.entities.iter().find(|e| {
@@ -613,23 +618,27 @@ impl UsbAudioDevice {
             _ => return None,
         }
         let mut found: Vec<Vec<u8>> = Vec::new();
+        let mut steps = ROUTE_STEPS;
         for e in &self.entities {
             let Entity::OutputTerminal { id, source, .. } = e else {
                 continue;
             };
             let mut path = vec![*id];
-            if self.walk_back(*source, link, &mut path, 0) {
+            if self.walk_back(*source, link, &mut path, 0, &mut steps) {
                 found.push(path);
             }
         }
-        (found.len() == 1).then(|| found.remove(0))
+        // Out of steps (a hostile topology): nothing is told
+        (found.len() == 1 && steps > 0).then(|| found.remove(0))
     }
 
-    /// Follow sources back from `at` to `link`, appending the entities passed.
-    fn walk_back(&self, at: u8, link: u8, path: &mut Vec<u8>, depth: usize) -> bool {
-        if depth > 32 || path.contains(&at) {
+    /// Follow sources back from `at` to `link`, appending the entities passed; each call takes a
+    /// step from `steps` (none left: not found).
+    fn walk_back(&self, at: u8, link: u8, path: &mut Vec<u8>, depth: usize, steps: &mut u32) -> bool {
+        if *steps == 0 || depth > 32 || path.contains(&at) {
             return false;
         }
+        *steps -= 1;
         path.push(at);
         if at == link {
             return true;
@@ -641,7 +650,7 @@ impl UsbAudioDevice {
         };
         for s in sources {
             let keep = path.len();
-            if self.walk_back(s, link, path, depth + 1) {
+            if self.walk_back(s, link, path, depth + 1, steps) {
                 return true;
             }
             path.truncate(keep);
@@ -681,14 +690,26 @@ impl UsbAudioDevice {
         };
         let mut all = Vec::new();
         let mut path = vec![out];
-        self.all_back(*source, link, &mut path, &mut all).then_some(all)
+        let mut steps = ROUTE_STEPS;
+        self.all_back(*source, link, &mut path, &mut all, &mut steps)
+            .then_some(all)
     }
 
-    /// [`Self::routes`] from `at`: `false` when they can't all be told (over 64, or deeper than 32).
-    fn all_back(&self, at: u8, link: u8, path: &mut Vec<u8>, all: &mut Vec<Vec<u8>>) -> bool {
-        if all.len() > 64 || path.len() > 32 {
+    /// [`Self::routes`] from `at`: `false` when they can't all be told (over 64 routes, deeper
+    /// than 32, more than [`ROUTE_STEPS`] steps, or a source that is no entity parsed: a unit the
+    /// parser doesn't know could carry the stream around).
+    fn all_back(
+        &self,
+        at: u8,
+        link: u8,
+        path: &mut Vec<u8>,
+        all: &mut Vec<Vec<u8>>,
+        steps: &mut u32,
+    ) -> bool {
+        if all.len() > 64 || path.len() > 32 || *steps == 0 {
             return false;
         }
+        *steps -= 1;
         if path.contains(&at) {
             return true; // a loop: no route this way
         }
@@ -701,9 +722,17 @@ impl UsbAudioDevice {
         let sources: Vec<u8> = match self.entity(at) {
             Some(Entity::Feature { source, .. }) => vec![*source],
             Some(Entity::Unit { sources, .. }) => sources.clone(),
-            _ => Vec::new(),
+            // Another terminal (a line input): no route from `link` this way
+            Some(_) => Vec::new(),
+            // Not parsed (an unknown or truncated unit): can't tell where it leads
+            None => {
+                path.pop();
+                return false;
+            }
         };
-        let told = sources.into_iter().all(|s| self.all_back(s, link, path, all));
+        let told = sources
+            .into_iter()
+            .all(|s| self.all_back(s, link, path, all, steps));
         path.pop();
         told
     }
