@@ -4097,11 +4097,13 @@ dependencies = [
  "alsa-sys",
  "async-trait",
  "cpal",
+ "pm-audio",
  "pm-model",
  "pm-usb-audio",
  "pm-zones",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
 ]

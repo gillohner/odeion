@@ -5,12 +5,14 @@
 //!
 //! Nothing here talks to the JVM, so it is built and tested on every host: the app hands the
 //! report over as text ([`parse_poll`], [`parse_report`]), [`describe`] turns it into the
-//! [`OutputDevice`] the phone's output reports, and [`set_current`] keeps it for that output.
+//! [`OutputDevice`] the phone's output reports, and [`apply_report`] keeps it for that output.
 //!
-//! The phone's output still plays through Android's mixer here ([`DeviceMode::Shared`]): the DAC
-//! is described, never claimed bit-perfect.
+//! On Android 14 and later the report also lists the DAC's mixer attributes
+//! (`getSupportedMixerAttributes`), from which [`crate::bit_perfect`] plays it bit-perfect; the
+//! description itself ([`describe`]) always says shared, and [`current`] says what the last open
+//! got, confirmed or not, with why.
 
-use pm_zones::{DeviceKind, DeviceMode, DsdKind, OutputDevice, UsbIds};
+use pm_zones::{DeviceKind, DeviceMode, DeviceSettings, DsdKind, OutputDevice, UsbIds};
 use serde::Deserialize;
 use std::sync::Mutex;
 
@@ -75,7 +77,34 @@ pub struct ReportDevice {
     /// The matching `UsbDevice`, when one was found.
     #[serde(default)]
     pub usb: Option<ReportUsb>,
+    /// `AudioManager.getSupportedMixerAttributes(device)` (API 34): the formats Android can set
+    /// its mixer to for this device, and how.
+    #[serde(default)]
+    pub mixer: Vec<MixerEntry>,
 }
+
+/// One `AudioMixerAttributes`: its `AudioFormat` and mixer behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+pub struct MixerEntry {
+    /// `AudioFormat.getEncoding()`.
+    #[serde(default)]
+    pub encoding: i32,
+    /// `AudioFormat.getSampleRate()`.
+    #[serde(default)]
+    pub rate: u32,
+    /// `AudioFormat.getChannelMask()`.
+    #[serde(default)]
+    pub channel_mask: i32,
+    /// `AudioFormat.getChannelCount()`.
+    #[serde(default)]
+    pub channels: u8,
+    /// `getMixerBehavior()`: [`MIXER_BEHAVIOR_BIT_PERFECT`] or default.
+    #[serde(default)]
+    pub behavior: i32,
+}
+
+/// `AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT`.
+pub const MIXER_BEHAVIOR_BIT_PERFECT: i32 = 1;
 
 /// The `UsbDevice` behind an audio device.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -110,6 +139,7 @@ pub fn parse_report(json: &str) -> Result<Report, String> {
         d.rates.truncate(MAX_ITEMS);
         d.encodings.truncate(MAX_ITEMS);
         d.channel_counts.truncate(MAX_ITEMS);
+        d.mixer.truncate(4 * MAX_ITEMS);
     }
     Ok(r)
 }
@@ -185,7 +215,7 @@ fn descriptors_summary(d: &ReportDevice, name: &str) -> Option<pm_usb_audio::Sum
 }
 
 /// The Android major version for an SDK level, for words people know ("Android 13").
-fn android_version(sdk: u32) -> String {
+pub(crate) fn android_version(sdk: u32) -> String {
     match sdk {
         36.. => (sdk - 20).to_string(),
         35 => "15".into(),
@@ -205,13 +235,43 @@ fn android_version(sdk: u32) -> String {
 /// first one only when Android does not say where media goes (before API 33). `None` when no USB
 /// audio sink is attached, or media goes elsewhere (Bluetooth, the speaker).
 pub fn describe(report: &Report) -> Option<OutputDevice> {
+    describe_device(report, pick(report)?)
+}
+
+/// The USB sink [`describe`] is about.
+fn pick(report: &Report) -> Option<&ReportDevice> {
     let sinks: Vec<&ReportDevice> = report.devices.iter().filter(|d| is_usb_sink(d)).collect();
     // With Android's routing (API 33+) only the sink media goes to; without it, the first one
-    let d = if sinks.iter().any(|d| d.routed.is_some()) {
+    Some(if sinks.iter().any(|d| d.routed.is_some()) {
         *sinks.iter().find(|d| d.routed == Some(true))?
     } else {
         *sinks.first()?
-    };
+    })
+}
+
+/// The DAC the phone plays through: its description, Android's id for it, its mixer attributes
+/// and the phone's Android.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dac {
+    pub device: OutputDevice,
+    /// `AudioDeviceInfo.getId()`.
+    pub id: i32,
+    pub mixer: Vec<MixerEntry>,
+    pub sdk: u32,
+}
+
+/// The [`Dac`] of a report, when there is one.
+pub fn dac(report: &Report) -> Option<Dac> {
+    let d = pick(report)?;
+    Some(Dac {
+        device: describe_device(report, d)?,
+        id: d.id,
+        mixer: d.mixer.clone(),
+        sdk: report.sdk,
+    })
+}
+
+fn describe_device(report: &Report, d: &ReportDevice) -> Option<OutputDevice> {
     let name = display_name(d);
     let desc = descriptors_summary(d, &name);
     let mut rates: Vec<u32> = d
@@ -296,40 +356,155 @@ pub fn describe(report: &Report) -> Option<OutputDevice> {
                 vendor_id: u.vendor_id,
                 product_id: u.product_id,
             }),
+        format: None,
+        settings: None,
     })
 }
 
-/// The USB DAC the phone's output plays through now (`None`: the speaker, headphones, Bluetooth).
-static CURRENT: Mutex<Option<OutputDevice>> = Mutex::new(None);
-
-/// Keep `d` as the phone's DAC. Returns whether it changed (the app then registers its player
-/// again, so the node and the UI learn it).
-pub fn set_current(d: Option<OutputDevice>) -> bool {
-    let mut cur = CURRENT.lock().unwrap_or_else(|e| e.into_inner());
-    if *cur == d {
-        return false;
-    }
-    *cur = d;
-    true
+/// What the phone's output knows about its DAC: the DAC, the listener's settings, what the last
+/// open got, and how often a DAC went away.
+#[derive(Default)]
+struct Phone {
+    dac: Option<Dac>,
+    settings: DeviceSettings,
+    last: Option<LastOpen>,
+    /// Counts DACs that went away: a sink opened on a DAC stops when it changes.
+    gone: u64,
+    /// Where the settings are kept (the app's data folder), once known.
+    settings_file: Option<std::path::PathBuf>,
 }
 
-/// The phone's DAC, as last set.
+/// What an open of the phone's output got, on which DAC.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LastOpen {
+    pub dac_id: i32,
+    pub format: pm_model::AudioFormat,
+    pub mode: DeviceMode,
+    pub confirmed: bool,
+    /// Why it is not bit-perfect, when it is not.
+    pub note: Option<String>,
+}
+
+static PHONE: Mutex<Option<Phone>> = Mutex::new(None);
+
+fn with_phone<T>(f: impl FnOnce(&mut Phone) -> T) -> T {
+    let mut p = PHONE.lock().unwrap_or_else(|e| e.into_inner());
+    f(p.get_or_insert_with(Phone::default))
+}
+
+/// The phone's DAC as the output reports it: described, with the modes it allows, the settings,
+/// and what the last open got (confirmed bit-perfect, or shared with why).
 pub fn current() -> Option<OutputDevice> {
-    CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    with_phone(|p| view(p))
+}
+
+fn view(p: &Phone) -> Option<OutputDevice> {
+    let d = p.dac.as_ref()?;
+    let mut dev = d.device.clone();
+    let offer = crate::bit_perfect::offer(d);
+    dev.modes = if offer.is_ok() {
+        vec![DeviceMode::Shared, DeviceMode::BitPerfect]
+    } else {
+        vec![DeviceMode::Shared]
+    };
+    dev.settings = Some(p.settings);
+    match p.last.as_ref().filter(|l| l.dac_id == d.id) {
+        Some(l) => {
+            dev.mode = l.mode;
+            dev.confirmed = l.confirmed && l.mode != DeviceMode::Shared;
+            dev.note = l.note.clone();
+            dev.format = Some(l.format);
+        }
+        // Nothing played on it yet: why it can't be bit-perfect, when it can't
+        None => {
+            if let Err(why) = offer {
+                dev.note = dev.note.or(Some(why));
+            }
+        }
+    }
+    Some(dev)
+}
+
+/// The DAC itself, for the bit-perfect player.
+pub fn current_dac() -> Option<Dac> {
+    with_phone(|p| p.dac.clone())
+}
+
+/// The listener's settings for the phone's DAC.
+pub fn settings() -> DeviceSettings {
+    with_phone(|p| p.settings)
+}
+
+/// Keep the listener's settings (and save them when the app said where). Returns whether they
+/// changed.
+pub fn set_settings(s: DeviceSettings) -> bool {
+    let (changed, file) = with_phone(|p| {
+        let changed = p.settings != s;
+        p.settings = s;
+        (changed, p.settings_file.clone())
+    });
+    if let (true, Some(f)) = (changed, file) {
+        if let Err(e) = std::fs::write(&f, serde_json::to_vec(&s).expect("serializes")) {
+            tracing::warn!(path = %f.display(), "cannot save the DAC settings: {e}");
+        }
+    }
+    changed
+}
+
+/// Where the settings are kept: read them from there now, save them there from now on.
+pub fn keep_settings_in(path: std::path::PathBuf) {
+    let saved = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<DeviceSettings>(&b).ok());
+    with_phone(|p| {
+        if let Some(s) = saved {
+            p.settings = s;
+        }
+        p.settings_file = Some(path);
+    });
+}
+
+/// What an open got (the bit-perfect player or the shared path records it).
+pub fn record_open(last: LastOpen) {
+    with_phone(|p| p.last = Some(last));
+}
+
+/// How many DACs went away so far: a sink opened on one stops when this changes.
+pub fn gone_count() -> u64 {
+    with_phone(|p| p.gone)
+}
+
+/// Keep `dac` as the phone's DAC. Returns whether what the output reports changed (the app then
+/// registers its player again, so the node and the UI learn it).
+pub fn set_dac(dac: Option<Dac>) -> bool {
+    with_phone(|p| {
+        let before = view(p);
+        let other =
+            p.dac.as_ref().map(|d| (d.id, &d.device.name)) != dac.as_ref().map(|d| (d.id, &d.device.name));
+        if other && p.dac.is_some() {
+            // The DAC an open sink plays on went away (or another took its place)
+            p.gone += 1;
+        }
+        if other {
+            p.last = None;
+        }
+        p.dac = dac;
+        view(p) != before
+    })
 }
 
 /// A report from the app, kept as the phone's DAC: a report that can't be read (too large,
 /// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
 pub fn apply_report(json: &str) -> bool {
     let dac = match parse_report(json) {
-        Ok(r) => describe(&r),
+        Ok(r) => dac(&r),
         Err(e) => {
             tracing::warn!("USB DAC detection: {e}");
             None
         }
     };
-    tracing::info!(dac = ?dac.as_ref().map(|d| &d.summary), "USB audio devices changed");
-    set_current(dac)
+    tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
+    set_dac(dac)
 }
 
 #[cfg(test)]
@@ -337,7 +512,7 @@ mod tests {
     use super::*;
 
     /// The tests that set the phone's DAC (one process-wide value) run one at a time.
-    static SERIAL: Mutex<()> = Mutex::new(());
+    use crate::PHONE_TESTS as SERIAL;
 
     /// What UsbAudio.kt reports for a FiiO KA17 on an Android 14 phone (rates and encodings as
     /// Android lists them for the KA17's UAC2 interface).
@@ -536,12 +711,22 @@ mod tests {
     #[test]
     fn the_current_dac() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let d = describe(&parse_report(KA17).unwrap());
-        assert!(set_current(d.clone()));
-        assert!(!set_current(d.clone()), "the same DAC again is no change");
-        assert_eq!(current(), d);
-        assert!(set_current(None));
+        let d = dac(&parse_report(KA17).unwrap());
+        set_dac(None);
+        assert!(set_dac(d.clone()));
+        assert!(!set_dac(d.clone()), "the same DAC again is no change");
+        let v = current().unwrap();
+        assert_eq!(v.name, "FiiO KA17");
+        assert_eq!(
+            v.modes,
+            [DeviceMode::Shared],
+            "no mixer attributes listed: shared only"
+        );
+        assert_eq!(v.settings, Some(DeviceSettings::default()));
+        let g = gone_count();
+        assert!(set_dac(None));
         assert_eq!(current(), None);
+        assert_eq!(gone_count(), g + 1, "a DAC went away");
     }
 
     /// The Kotlin side (tools/release/android/UsbAudio.kt) writes every key read here, and nothing
@@ -570,6 +755,12 @@ mod tests {
             "manufacturer",
             "product",
             "descriptors",
+            "mixer",
+            "encoding",
+            "rate",
+            "channel_mask",
+            "channels",
+            "behavior",
         ];
         assert_eq!(
             written,
@@ -593,7 +784,7 @@ mod tests {
     #[test]
     fn a_report_that_cannot_be_read_means_no_dac() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        set_current(None);
+        set_dac(None);
         assert!(apply_report(KA17));
         assert_eq!(current().map(|d| d.name), Some("FiiO KA17".into()));
         assert!(!apply_report(KA17), "the same report again is no change");

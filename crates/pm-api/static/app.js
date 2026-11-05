@@ -2156,6 +2156,28 @@
   const dacShort = (d) => ({ bit_perfect: 'bit-perfect', exclusive: 'exclusive USB', shared: 'shared' })[dacMode(d)];
   const dacUnconfirmed = (d) => (d.mode === 'bit_perfect' && d.confirmed !== true ? 'Android has not confirmed bit-perfect for this format.' : d.mode === 'exclusive' && d.confirmed !== true ? 'Exclusive USB mode is not confirmed for this format.' : '');
   const dacWords = (d) => `${d.name} · ${dacShort(d)}`;
+  // What the zone's DAC does with what plays now: bit-perfect only when the phone confirmed it for
+  // this very format (the device's `format`) and the node's own path changes nothing (no volume,
+  // DSP or conversion); otherwise shared, and why when the node knows
+  const dacNow = (z) => {
+    const d = deviceOf(z); if (!d) return null;
+    const np = z && z.now_playing; const f = np && np.output_format;
+    if (!f) return { bp: false, d, why: '' };
+    const same = !!(d.format && d.format.rate_hz === f.rate_hz && d.format.bits === f.bits && d.format.channels === f.channels);
+    const clean = !!(np.signal_path && headline(np.signal_path) === 'bit_perfect');
+    if (dacMode(d) === 'bit_perfect' && same && clean) return { bp: true, d, f };
+    const why = !same ? '' : dacMode(d) === 'bit_perfect' ? 'the node changes the samples (volume, DSP or a conversion)'
+      : (dacUnconfirmed(d) || d.note || '').replace(/\.$/, '');
+    return { bp: false, d, f, why };
+  };
+  // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
+  const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? 'bit-perfect' : 'shared'}` : ''; };
+  // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"
+  const dacLine = (z) => {
+    const n = dacNow(z); if (!n) return '';
+    if (n.bp) return `Bit-perfect · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
+    return `Shared · ${n.d.name}${n.why ? ` · ${n.why}` : ''}`;
+  };
   const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? ({ native: 'DSD (native)', dop: 'DSD (DoP)' })[d.dsd] || 'DSD' : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
   // This app's own output (the app tells the page after it registers its player), with its device
   const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
@@ -2181,7 +2203,7 @@
   window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
     if (z.id === BROWSER) return 'Streams the files to this browser';
-    const dv = deviceOf(z); if (dv) return dacWords(dv);
+    if (deviceOf(z)) return dacWordsFor(z);
     const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
     return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
   };
@@ -2760,6 +2782,8 @@
     // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
     // its title there); with a mouse the bar's title and artist are links of their own
     if (!waitHtml && !errHtml && !barPlain()) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+    // Paused because its device went away (a USB DAC unplugged): said where the artist is
+    if (!waitHtml && !errHtml && z.transport === 'paused' && z.error) { const sub = $('#np .np-sub'); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(z.error)}</span>`; }
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -2770,7 +2794,7 @@
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
     $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
     const dv = deviceOf(z);
-    const words = (np.signal_path || np.format ? pathSummary(np) : 'Played by this browser') + (dv ? ` → ${dacWords(dv)}` : '');
+    const words = (np.signal_path || np.format ? pathSummary(np) : 'Played by this browser') + (dv ? ` → ${dacWordsFor(z)}` : '');
     $('.qtext', q).textContent = words;
     $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
@@ -2823,7 +2847,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; const dv = z ? deviceOf(z) : null; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${dv ? dacWords(dv) : ''}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -2877,7 +2901,7 @@
     const vmin = hv ? hv.min : -60; const vmax = hv ? hv.max : 0; const vstep = hv ? hv.step || 1 : 1; const vval = Math.min(vmax, Math.max(vmin, Number(bar.value)));
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
-      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? 'Decoded by this browser' : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
@@ -6481,12 +6505,22 @@
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
           // This phone: the USB DAC this app plays through, what it takes and how it is played (no choices yet)
-          const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(`${DAC_MODE[dacMode(dv)]}.${dacMode(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
+          // The zone on this output: what its DAC does with what plays now
+          const dz = myOut ? zoneList().find((z) => z.output === myOut.id) : null;
+          const dline = dz && dz.now_playing ? dacLine(dz) : '';
+          const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(dline ? `${dline}.${/^Shared/.test(dline) ? ` ${DAC_HELP.shared}` : ''}` : `${DAC_MODE[dacMode(dv)]}.${dacMode(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
             + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
-            + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''));
+            + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''))
+            // The choices, from apps that take them (they report `settings`)
+            + (dv.settings ? group('Settings', row('Preferred mode', 'Auto plays bit-perfect where Android allows it, and shared otherwise. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${v === 'bit_perfect' && !(dv.modes || []).includes('bit_perfect') ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)
+              + row('Use the DAC’s volume', 'On: the zone’s volume is the phone’s media volume, which the DAC applies itself in bit-perfect mode where it can, and the music stays untouched. Off: the node turns the music down itself, which changes the samples (not bit-perfect).', `<label><input type="checkbox" id="dvvol" ${dv.settings.dac_volume !== false ? 'checked' : ''}> On</label>`)) : '');
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
+          // This phone: the choices go to the node, which passes them to the app's player
+          const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
+          const dvm = $('#dvmode', main); if (dvm) dvm.onchange = () => putDev({ mode: dvm.value }, 'Mode saved');
+          const dvv = $('#dvvol', main); if (dvv) dvv.onchange = () => putDev({ dac_volume: dvv.checked }, dvv.checked ? 'The DAC’s volume' : 'The node’s volume');
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };

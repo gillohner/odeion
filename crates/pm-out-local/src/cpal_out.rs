@@ -156,15 +156,83 @@ impl Output for CpalOutput {
         &self.caps
     }
 
+    /// On Android with a USB DAC that plays bit-perfect: the DAC's rates and sizes (the node stops
+    /// converting to 44.1/48), its volume through Android's media volume.
+    fn live_caps(&self) -> OutputCaps {
+        #[cfg(target_os = "android")]
+        return crate::bit_perfect::live_caps(
+            crate::usb_dac::current_dac().as_ref(),
+            crate::usb_dac::settings(),
+            &self.caps,
+        );
+        #[cfg(not(target_os = "android"))]
+        self.caps.clone()
+    }
+
+    /// The phone's DAC settings (bit-perfect or shared, the DAC's volume), kept by the app.
+    async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
+        #[cfg(target_os = "android")]
+        {
+            crate::usb_dac::set_settings(settings);
+            Ok(())
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = settings;
+            Err(SinkError::Unavailable(
+                self.id(),
+                "it has no device settings".into(),
+            ))
+        }
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        if fmt.kind != SampleKind::Pcm || !self.caps.pcm_rates.contains(&fmt.rate_hz) || fmt.channels < 1 {
+        // A phone with a USB DAC: bit-perfect where Android allows it for this format; otherwise
+        // shared, and the device says why. The bit-perfect player failing to start is no error:
+        // Android's shared path plays it at its own rate then (Android converts, the device says so)
+        #[cfg(target_os = "android")]
+        let any_rate = match crate::bit_perfect::plan(fmt) {
+            crate::bit_perfect::Plan::BitPerfect(dac, choice) => {
+                match crate::bit_perfect::open(self.id(), &dac, choice, fmt) {
+                    Ok(s) => return Ok(Box::new(s)),
+                    Err(why) => {
+                        tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
+                        crate::bit_perfect::record_shared(&dac, fmt, why);
+                        true
+                    }
+                }
+            }
+            crate::bit_perfect::Plan::Shared(Some((dac, why))) => {
+                crate::bit_perfect::record_shared(&dac, fmt, why);
+                false
+            }
+            crate::bit_perfect::Plan::Shared(None) => false,
+        };
+        #[cfg(not(target_os = "android"))]
+        let any_rate = false;
+        if fmt.kind != SampleKind::Pcm
+            || (!any_rate && !self.caps.pcm_rates.contains(&fmt.rate_hz))
+            || fmt.channels < 1
+        {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         CpalSink::open(&self.device_name, self.device_id.clone(), self.id(), fmt)
             .map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 
-    async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
+    /// On Android with the DAC's volume in use: Android's media volume (the DAC applies it in
+    /// bit-perfect mode where it can). Otherwise none, as before.
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        if self.live_caps().hw_volume.is_some() {
+            if let Some(b) = crate::bit_perfect::backend() {
+                let percent = match v {
+                    Volume::Percent(p) => p.min(100),
+                    Volume::Mute(true) => 0,
+                    _ => return Err(SinkError::NoVolume(self.id())),
+                };
+                return b.set_volume(percent).map_err(SinkError::Device);
+            }
+        }
         Err(SinkError::NoVolume(self.id()))
     }
 }
@@ -186,6 +254,9 @@ pub struct CpalSink {
     capacity_frames: u64,
     written: u64,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Opened with a phone's USB DAC attached: its name and the count of DACs gone then. When it
+    /// goes, the sink stops (the zone pauses) instead of playing on from the phone's speaker.
+    dac_at_open: Option<(String, u64)>,
 }
 
 impl CpalSink {
@@ -275,6 +346,7 @@ impl CpalSink {
             capacity_frames,
             written: 0,
             thread: Some(thread),
+            dac_at_open: crate::usb_dac::current_dac().map(|d| (d.device.name, crate::usb_dac::gone_count())),
         })
     }
 
@@ -305,6 +377,12 @@ impl AudioSink for CpalSink {
                 expected: self.fmt,
                 found: block.format,
             });
+        }
+        if let Some((name, gone)) = self.dac_at_open.clone() {
+            if crate::usb_dac::gone_count() != gone {
+                self.flush()?;
+                return Err(SinkError::Gone(self.id.clone(), format!("{name} was unplugged")));
+            }
         }
         let scale = 1.0 / (1u64 << (self.fmt.bits.saturating_sub(1).min(31))) as f32;
         let samples: Vec<f32> = match &block.samples {

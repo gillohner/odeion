@@ -193,6 +193,8 @@ struct Recorder {
     resumes: Mutex<u64>,
     /// Each sink's stream carries this many frames at most (a renderer's stream of fixed size).
     room: Mutex<Option<u64>>,
+    /// The device goes away once this many frames were written (a USB DAC unplugged).
+    gone_after: Mutex<Option<u64>>,
 }
 
 struct RecOutput {
@@ -236,6 +238,14 @@ impl AudioSink for RecSink {
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         pm_zones::sink::check_block(self.fmt, block)?;
+        if let Some(n) = *self.rec.gone_after.lock().unwrap() {
+            if self.written + block.frames() as u64 > n {
+                return Err(SinkError::Gone(
+                    OutputId::new("rec", ""),
+                    "FiiO KA17 was unplugged".into(),
+                ));
+            }
+        }
         // A stream of fixed size takes nothing past its end (the HTTP answer would cut it off)
         if let Some(room) = *self.rec.room.lock().unwrap() {
             if self.written + block.frames() as u64 > room {
@@ -1044,4 +1054,43 @@ async fn a_panic_stops_the_zone_with_an_error_and_the_zone_plays_again() {
     // The queue is usable from outside after the panic (its lock is not poisoned).
     zone.enqueue(vec![QueueItem::new("a")], Insert::End);
     wait_for(|| zone.state().queue.len() == 2).await;
+}
+
+/// The device goes away mid-track (a phone's USB DAC unplugged): the zone pauses where the listener
+/// was, with the reason, writes nothing anywhere else, and Play opens the output again from there.
+#[tokio::test]
+async fn a_device_gone_mid_track_pauses_the_zone() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    *r.rec.gone_after.lock().unwrap() = Some(300);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(4);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    let st = r.zone.state();
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(
+        st.now_playing.as_ref().unwrap().position_ms,
+        30,
+        "where the listener was"
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "no other device opened");
+    assert_eq!(r.rec.samples.lock().unwrap().len(), 300);
+    // Plugged in again; Play carries on from there on a fresh sink
+    *r.rec.gone_after.lock().unwrap() = None;
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    assert_eq!(r.zone.state().error, None, "playing again: the reason is gone");
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2);
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        frames(0, 1000),
+        "nothing lost, nothing twice"
+    );
+    let k = kinds(&drain_events(&mut r.events));
+    assert!(k.contains(&"pause:30".to_string()), "{k:?}");
+    assert!(k.iter().any(|e| e.starts_with("error")), "{k:?}");
 }

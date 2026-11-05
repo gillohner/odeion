@@ -20,7 +20,12 @@
 //   * answers out of order: an older GET /v1/outputs answer never restores an unplugged DAC, and
 //     Settings, drawn after slow requests, never writes back the outputs it fetched before them;
 //   * a change missed while disconnected: the snapshot on reconnecting fetches the outputs again;
-//   * DSD: native and DoP by name, anything else just "DSD".
+//   * DSD: native and DoP by name, anything else just "DSD";
+//   * step 2: "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit" only when the device confirmed bit-perfect
+//     for the format playing now and the node's path changes nothing; a confirmation for another
+//     format, or a path with a conversion or DSP, reads shared (with why); Settings › This phone
+//     offers Preferred mode and Use the DAC's volume when the app takes them, and sends them with
+//     PUT /v1/outputs/{id}/device; a zone paused because the DAC was unplugged says so in the bar.
 // At 390 and 1280 px. Screenshots go to the shots folder.
 //   node tools/ui-usb-dac.js [repo] [shots]     (ONLY=web: the web UI part alone)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -39,6 +44,11 @@ const zone = { id: 'pixel-8-net', name: 'Pixel 8 · Speaker or headphones (Andro
   now_playing: { item: { id: 1, uri: 'track:1', title: 'Journey Through Time', artist: 'Sefa', album: 'Journey', duration_ms: 240000 }, index: 0, position_ms: 30000, duration_ms: 240000, source_format: src, output_format: out,
     signal_path: { stages: [{ name: 'decode', in_format: src, out_format: src, quality: 'bit_perfect', note: null }, { name: 'resample', in_format: src, out_format: out, quality: 'high', note: 'the output takes 44.1 and 48 kHz' }, { name: 'output', in_format: out, out_format: out, quality: 'lossless', note: null }] },
     format: { codec: 'FLAC', lossless: true, service: 'library', preview: false } } };
+// The same zone playing 96/24 bit-perfect all the way (the phone's output takes the DAC's rates)
+const bpZone = { ...zone, now_playing: { ...zone.now_playing, output_format: src, signal_path: { stages: [{ name: 'decode', in_format: src, out_format: src, quality: 'bit_perfect', note: null }, { name: 'output', in_format: src, out_format: src, quality: 'bit_perfect', note: null }] } } };
+// ... with a software volume stage (the node changes the samples)
+const dspZone = { ...bpZone, now_playing: { ...bpZone.now_playing, signal_path: { stages: [...bpZone.now_playing.signal_path.stages, { name: 'volume', in_format: src, out_format: src, quality: 'lossless', note: 'software volume -6.0 dB in 64-bit float' }] } } };
+const setZone = async (run, z) => { run.nodeEvent({ type: 'zone', state: z }); await sleep(400); };
 // What the node answers with the KA17 in (crates/pm-out-local/src/usb_dac.rs, the KA17 report)
 const KA17 = { name: 'FiiO KA17', kind: 'usb_dac', summary: 'FiiO KA17 · PCM up to 768 kHz / 32 bit', rates: [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000, 705600, 768000], bits: [16, 24, 32], max_rate: 768000, max_bits: 32, channels: 2, hardware_volume: false, mode: 'shared', modes: ['shared'], confirmed: false, usb: { vendor_id: 10610, product_id: 147 } };
 const caps = { pcm_rates: [44100, 48000], max_pcm_bits: 24, pcm_bits: [16, 24], max_channels: 2, dsd: null, hw_volume: null, standby: false, source_switch: false, gapless: true, groupable: false, fixed_latency_ms: null, quality_ceiling: { lossless_up_to: { rate_hz: 48000, bits: 24 } } };
@@ -59,6 +69,12 @@ async function open(browser, w, inApp) {
     const body = JSON.stringify(run.state.fixtures['/outputs'].body); run.state.hits.push({ v: '/outputs', m: 'GET', at: Date.now() });
     const d = run.outQueue.shift() || 0; if (d) await sleep(d);
     return route.fulfill({ status: 200, contentType: 'application/json', body });
+  });
+  // PUT /v1/outputs/{id}/device: the node answers the output, as listed
+  await run.context.route('**/v1/outputs/*/device', async (route) => {
+    const req = route.request(); const u = new URL(req.url());
+    run.state.hits.push({ v: u.pathname.slice(3), m: req.method(), body: req.postData(), at: Date.now() });
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(run.state.fixtures['/outputs'].body[0]) });
   });
   // Settings' other requests, slowed down on demand
   run.slowSettings = 0;
@@ -104,22 +120,38 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     // The open Sound panel follows the node: unplugged and plugged while it is open
     await page.click('#quality'); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(300);
     const pl = await panelLine(page);
-    check(pl === 'FiiO KA17 · shared', `${at}: the open Sound panel's Playing on line ("${pl}")`);
+    check(pl === 'Shared · FiiO KA17', `${at}: the open Sound panel's Playing on line ("${pl}")`);
     await nodePlug(run, null);
     const pl2 = await panelLine(page);
     check(pl2 !== null && !/FiiO/.test(pl2), `${at}: unplugged (the node's event), the open panel names no DAC ("${pl2}")`);
     await nodePlug(run, KA17);
-    check(await panelLine(page) === 'FiiO KA17 · shared', `${at}: plugged again, it does ("${await panelLine(page)}")`);
+    check(await panelLine(page) === 'Shared · FiiO KA17', `${at}: plugged again, it does ("${await panelLine(page)}")`);
+    // Bit-perfect confirmed for 96/24, and 96/24 plays bit-perfect all the way: the full line
+    const BP = { ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true, format: src, settings: { mode: 'auto', dac_volume: true } };
+    await setZone(run, bpZone); await nodePlug(run, BP);
+    check(await panelLine(page) === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit', `${at}: confirmed for what plays: "${await panelLine(page)}"`);
+    await page.screenshot({ path: path.join(SHOTS, `panel-bit-perfect-${w}.png`) });
+    // Confirmed for another format (the confirmation of this open not in yet): not claimed
+    await nodePlug(run, { ...BP, format: { ...src, rate_hz: 44100 } });
+    check(await panelLine(page) === 'Shared · FiiO KA17', `${at}: confirmed for another format: shared ("${await panelLine(page)}")`);
+    // The node turns it down itself: not bit-perfect, and why
+    await setZone(run, dspZone); await nodePlug(run, BP);
+    check(await panelLine(page) === 'Shared · FiiO KA17 · the node changes the samples (volume, DSP or a conversion)', `${at}: with the node's volume: "${await panelLine(page)}"`);
+    // Shared with Android's reason
+    await setZone(run, bpZone); await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, note: 'Android refused bit-perfect for this format' });
+    check(await panelLine(page) === 'Shared · FiiO KA17 · Android refused bit-perfect for this format', `${at}: refused: "${await panelLine(page)}"`);
+    await setZone(run, zone); await nodePlug(run, KA17);
     await page.keyboard.press('Escape'); await sleep(200);
 
     // Bit-perfect only when confirmed: unconfirmed and unknown modes read as shared
-    for (const [dev, word, what] of [[{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: false }, 'shared', 'bit_perfect, not confirmed'], [{ ...KA17, mode: 'unknown', confirmed: true }, 'shared', 'an unknown mode, "confirmed"'], [{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true }, 'bit-perfect', 'bit_perfect, confirmed']]) {
+    for (const [dev, word, what] of [[{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: false }, 'shared', 'bit_perfect, not confirmed'], [{ ...KA17, mode: 'unknown', confirmed: true }, 'shared', 'an unknown mode, "confirmed"'], [{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true }, 'shared', 'bit_perfect, confirmed for no format the path plays as is'], [{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true, format: src }, 'bit-perfect', 'bit_perfect, confirmed for 96/24 playing bit-perfect']]) {
+      if (word === 'bit-perfect') await setZone(run, bpZone);
       await plug(run, dev);
       const pp = await pill(page); const pk = await pickerLine(page); await closePicker(page);
       check(pp.endsWith(`→ FiiO KA17 · ${word}`) && pk === `FiiO KA17 · ${word}`, `${at}: ${what} → "${word}" (pill "${pp}", picker "${pk}")`);
       if (word === 'shared') check(!/bit.?perfect/i.test(pp + pk), `${at}: ${what}: the pill and picker never say bit-perfect`);
     }
-    await nodePlug(run, KA17);
+    await setZone(run, zone); await nodePlug(run, KA17);
 
     // Settings › This phone
     // The app's script comes after the page drew Settings (on_page_load can be late): it draws again
@@ -128,9 +160,9 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     await page.evaluate(appScript([OUT])); await page.waitForSelector('#set-dac'); await sleep(300);
     const tab = await page.evaluate(() => { const t = document.querySelector('[data-stab="dac"]'); const p = document.querySelector('#set-dac'); return { tab: t && t.textContent.trim(), shown: !!p && !p.hidden, text: p ? p.innerText : '', controls: p ? p.querySelectorAll('input,select,textarea,button:not([data-tabs-back])').length : -1, group: t ? (t.closest('[aria-labelledby]') || t).getAttribute('aria-labelledby') : null }; });
     check(/This phone/.test(tab.tab || '') && tab.shown, `${at}: Settings has This phone, shown at /settings/dac ("${tab.tab}")`);
-    check(/FiiO KA17/i.test(tab.text) && /Shared\. Android plays it through its own mixer/.test(tab.text), `${at}: it names the DAC and says it plays shared, and why`);
+    check(/FiiO KA17/i.test(tab.text) && /Shared · FiiO KA17\. Android plays it through its own mixer/.test(tab.text), `${at}: it names the DAC and says it plays shared, and why`);
     check(/PCM up to 768 kHz · 16, 24, 32 bit · 2 channels/.test(tab.text), `${at}: what it takes ("${(tab.text.match(/PCM[^\n]*/) || [''])[0]}")`);
-    check(tab.controls === 0, `${at}: and offers nothing to choose yet (${tab.controls} controls)`);
+    check(tab.controls === 0, `${at}: an app that takes no settings: nothing to choose (${tab.controls} controls)`);
     const grp = await page.evaluate(() => { const t = document.querySelector('[data-stab="dac"]'); let e = t; while (e && e.previousElementSibling) { e = e.previousElementSibling; if (e.classList.contains('set-group-h')) return e.textContent; } const g = t && t.closest('[role="group"]'); return g ? g.getAttribute('aria-label') || g.textContent : ''; });
     check(/This device/.test(grp || ''), `${at}: under This device ("${(grp || '').slice(0, 40)}")`);
     await page.screenshot({ path: path.join(SHOTS, `settings-${w}.png`), fullPage: true });
@@ -147,11 +179,26 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     await nodePlug(run, { ...KA17, mode: 'bit_perfect', confirmed: false });
     await page.waitForFunction(() => /not confirmed/.test((document.querySelector('#set-dac') || {}).innerText || ''));
     const unc = await dacTab(page);
-    check(/Playing through it\s+Shared\./.test(unc) && /Android has not confirmed bit-perfect for this format\./.test(unc), `${at}: Settings, unconfirmed: "Shared." and the note`);
-    await nodePlug(run, { ...KA17, mode: 'bit_perfect', confirmed: true });
-    await page.waitForFunction(() => /Bit-perfect\./.test((document.querySelector('#set-dac') || {}).innerText || ''));
+    check(/Playing through it\s+Shared · FiiO KA17/.test(unc) && /Android has not confirmed bit-perfect for this format\./.test(unc), `${at}: Settings, unconfirmed: shared and the note`);
+    await setZone(run, bpZone);
+    await nodePlug(run, { ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true, format: src, settings: { mode: 'auto', dac_volume: true } });
+    await page.waitForFunction(() => /Bit-perfect · /.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
     const con = await dacTab(page);
-    check(/Playing through it\s+Bit-perfect\./.test(con) && !/not confirmed/.test(con), `${at}: Settings, confirmed: "Bit-perfect."`);
+    check(/Playing through it\s+Bit-perfect · FiiO KA17 · 96 kHz \/ 24 bit\./.test(con) && !/not confirmed/.test(con), `${at}: Settings, confirmed for what plays: "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit."`);
+    // The choices: Preferred mode and the DAC's volume, sent to the node
+    const ctl = await page.evaluate(() => { const s = document.querySelector('#dvmode'); const c = document.querySelector('#dvvol'); return s && c ? { opts: [...s.options].map((o) => `${o.value}${o.disabled ? '(off)' : ''}`), value: s.value, vol: c.checked } : null; });
+    check(ctl && ctl.opts.join(',') === 'auto,bit_perfect,shared' && ctl.value === 'auto' && ctl.vol === true, `${at}: Settings offers Preferred mode (Auto, Bit-perfect, Shared) and Use the DAC's volume (${JSON.stringify(ctl)})`);
+    const h0 = state.hits.length;
+    await page.selectOption('#dvmode', 'shared'); await sleep(400);
+    await page.click('#dvvol'); await sleep(400);
+    const puts = state.hits.slice(h0).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => `${decodeURIComponent(h.v)} ${h.body}`);
+    check(puts.length === 2 && puts[0] === `/outputs/${OUT}/device {"mode":"shared"}` && puts[1] === `/outputs/${OUT}/device {"dac_volume":false}`, `${at}: each choice is a PUT /v1/outputs/{id}/device (${JSON.stringify(puts)})`);
+    // An app without bit-perfect here (Android 13): Bit-perfect can't be picked
+    await nodePlug(run, { ...KA17, modes: ['shared'], settings: { mode: 'auto', dac_volume: true }, note: 'Android 13: bit-perfect needs Android 14' });
+    await page.waitForFunction(() => /Android 13/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
+    const off = await page.evaluate(() => { const o = document.querySelector('#dvmode option[value="bit_perfect"]'); return o ? o.disabled : null; });
+    check(off === true, `${at}: Android 13: Bit-perfect is not offered (${off})`);
+    await setZone(run, zone);
     // Unplugged with the node's event only (no app event): This phone goes
     await nodePlug(run, null);
     await page.waitForFunction(() => !document.querySelector('[data-stab="dac"]')).catch(() => {});
@@ -227,6 +274,11 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     for (const s of run.sockets) { try { s.ws.close(); } catch { /* gone */ } }
     await page.waitForFunction(() => !/FiiO/.test(document.querySelector('#quality .qtext').textContent), null, { timeout: 8000 }).catch(() => {});
     check(!/FiiO/.test(await pill(page)), `web UI: reconnected, the change missed meanwhile shows ("${await pill(page)}")`);
+    // Unplugged mid-track: the zone is paused, and the bar says why
+    await setZone(run, { ...zone, transport: 'paused', error: 'FiiO KA17 was unplugged: paused' });
+    const sub = await page.evaluate(() => (document.querySelector('#np .np-sub') || {}).textContent || '');
+    check(sub === 'FiiO KA17 was unplugged: paused', `web UI: a zone paused because its DAC went says so in the bar ("${sub}")`);
+    await setZone(run, zone);
     await fx.go(page, '/settings'); await sleep(800);
     check(await page.evaluate(() => !!document.querySelector('[data-stab="appearance"]') && !document.querySelector('[data-stab="dac"]')), 'web UI: no This phone tab');
     check(run.state.errors.length === 0, `web UI: no page errors ${JSON.stringify(run.state.errors)}`);

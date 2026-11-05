@@ -523,6 +523,26 @@ pub fn watch_usb_audio(app: &tauri::AppHandle, changed: impl Fn() + Send + 'stat
                     return;
                 }
             };
+            // The bit-perfect player (BitPerfect.kt), for the phone's output
+            match crate::crash::guarded("the bit-perfect player", || {
+                app_class(env, activity, "BitPerfect")
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")))
+            {
+                Ok(bp) => match env.get_java_vm() {
+                    Ok(vm2) => pm_out_local::bit_perfect::set_backend(std::sync::Arc::new(JniBitPerfect {
+                        vm: std::sync::Arc::new(vm2),
+                        class: bp,
+                    })),
+                    Err(e) => tracing::warn!("no bit-perfect player: {e}"),
+                },
+                Err(e) => {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                    tracing::warn!("no bit-perfect player ({e})");
+                }
+            }
             let spawned = std::thread::Builder::new()
                 .name("usb-audio".into())
                 .spawn(move || usb_audio_loop(vm, class, changed));
@@ -573,6 +593,208 @@ fn start_usb_audio(
         &[JValue::Object(activity)],
     )?;
     Ok((env.get_java_vm()?, env.new_global_ref(&class)?))
+}
+
+/// `<package>.<name>` through the activity's class loader, as a global reference.
+fn app_class(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    name: &str,
+) -> jni021::errors::Result<jni021::objects::GlobalRef> {
+    use jni021::objects::JValue;
+    let cls = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let full = env
+        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let full: String = env.get_string(&full.into())?.into();
+    let full = match full.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.{name}"),
+        None => name.to_string(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&full)?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    env.new_global_ref(class)
+}
+
+/// The bit-perfect player (`BitPerfect.kt`) for pm-out-local's `bit_perfect`: its calls run on the
+/// zone's audio thread, attached to the JVM for good (it plays for as long as the app runs).
+struct JniBitPerfect {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+}
+
+/// Run `f` with the JVM on this thread and a local frame, a pending Java exception cleared.
+fn with_jvm<T>(
+    vm: &jni021::JavaVM,
+    f: impl FnOnce(&mut jni021::JNIEnv) -> jni021::errors::Result<T>,
+) -> Result<T, String> {
+    let mut env = vm
+        .attach_current_thread_permanently()
+        .map_err(|e| e.to_string())?;
+    let r = env.with_local_frame(16, |env| f(env));
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    r.map_err(|e| e.to_string())
+}
+
+impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
+    fn open(
+        &self,
+        dac_id: i32,
+        entry: &pm_out_local::usb_dac::MixerEntry,
+    ) -> Result<
+        (
+            Box<dyn pm_out_local::bit_perfect::Track>,
+            pm_out_local::bit_perfect::OpenReport,
+        ),
+        String,
+    > {
+        use jni021::objects::{JClass, JValue};
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(
+                    class,
+                    "open",
+                    "(IIII)Ljava/lang/String;",
+                    &[
+                        JValue::Int(dac_id),
+                        JValue::Int(entry.encoding),
+                        JValue::Int(entry.rate as i32),
+                        JValue::Int(entry.channel_mask),
+                    ],
+                )?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })?;
+        let (handle, buffer_frames, report) = pm_out_local::bit_perfect::parse_open_answer(&answer)?;
+        let track = JniTrack {
+            vm: self.vm.clone(),
+            class: self.class.clone(),
+            handle,
+            buffer_frames,
+        };
+        Ok((Box::new(track), report))
+    }
+
+    fn set_volume(&self, percent: u8) -> Result<(), String> {
+        use jni021::objects::{JClass, JValue};
+        let ok = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "setVolume", "(I)Z", &[JValue::Int(i32::from(percent))])?
+                .z()
+        })?;
+        if ok {
+            Ok(())
+        } else {
+            Err("Android's media volume is not available".into())
+        }
+    }
+}
+
+/// One `AudioTrack` of `BitPerfect.kt`, by its handle.
+struct JniTrack {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+    handle: i64,
+    buffer_frames: u64,
+}
+
+impl JniTrack {
+    fn call(&self, method: &str) {
+        use jni021::objects::{JClass, JValue};
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, method, "(J)V", &[JValue::Long(self.handle)])?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("bit-perfect player {method}: {e}");
+        }
+    }
+}
+
+/// `BitPerfect.GONE`.
+const TRACK_GONE: i32 = -1000;
+
+impl pm_out_local::bit_perfect::Track for JniTrack {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), pm_out_local::bit_perfect::TrackError> {
+        use jni021::objects::{JClass, JValue};
+        use pm_out_local::bit_perfect::TrackError;
+        let mut at = 0;
+        while at < bytes.len() {
+            let rest = &bytes[at..];
+            let n = with_jvm(&self.vm, |env| {
+                // SAFETY: `rest` outlives the call, and Java only reads from the buffer.
+                let buf = unsafe { env.new_direct_byte_buffer(rest.as_ptr() as *mut u8, rest.len())? };
+                let class: &JClass = self.class.as_obj().into();
+                env.call_static_method(
+                    class,
+                    "write",
+                    "(JLjava/nio/ByteBuffer;I)I",
+                    &[
+                        JValue::Long(self.handle),
+                        JValue::Object(&buf),
+                        JValue::Int(rest.len() as i32),
+                    ],
+                )?
+                .i()
+            })
+            .map_err(TrackError::Other)?;
+            match n {
+                TRACK_GONE => return Err(TrackError::Gone),
+                n if n < 0 => return Err(TrackError::Other(format!("AudioTrack error {n}"))),
+                0 => std::thread::sleep(std::time::Duration::from_millis(5)),
+                n => at += n as usize,
+            }
+        }
+        Ok(())
+    }
+
+    fn played_frames(&self) -> u64 {
+        use jni021::objects::{JClass, JValue};
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "played", "(J)J", &[JValue::Long(self.handle)])?
+                .j()
+        })
+        .map(|n| n.max(0) as u64)
+        .unwrap_or(0)
+    }
+
+    fn buffer_frames(&self) -> u64 {
+        self.buffer_frames
+    }
+
+    fn pause(&mut self) {
+        self.call("pause");
+    }
+
+    fn play(&mut self) {
+        self.call("play");
+    }
+
+    fn flush(&mut self) {
+        self.call("flush");
+    }
+
+    fn stop(&mut self) {
+        self.call("stop");
+    }
 }
 
 /// Waits for `UsbAudio.next` reports for as long as the app runs.

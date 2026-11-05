@@ -16,6 +16,51 @@ use std::sync::{Arc, Mutex};
 struct Phone {
     inner: NullOutput,
     dac: Mutex<Option<OutputDevice>>,
+    /// What it takes now, when not its caps (bit-perfect to the DAC)
+    live: Mutex<Option<OutputCaps>>,
+    /// Its sinks find the device gone (the DAC unplugged)
+    gone: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Phone {
+    fn new() -> Self {
+        Self {
+            inner: NullOutput::new(),
+            dac: Mutex::new(None),
+            live: Mutex::new(None),
+            gone: Arc::default(),
+        }
+    }
+}
+
+/// The phone's sink: the null output's, until the DAC goes.
+struct PhoneSink(Box<dyn AudioSink>, Arc<std::sync::atomic::AtomicBool>);
+
+impl AudioSink for PhoneSink {
+    fn format(&self) -> AudioFormat {
+        self.0.format()
+    }
+    fn write(&mut self, block: &pm_model::AudioBlock) -> Result<(), SinkError> {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("cpal", "Speaker or headphones"),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
+        self.0.write(block)
+    }
+    fn buffer_level(&self) -> pm_zones::BufferLevel {
+        self.0.buffer_level()
+    }
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.0.flush()
+    }
+    fn drain(&mut self) -> Result<(), SinkError> {
+        self.0.drain()
+    }
+    fn frames_written(&self) -> u64 {
+        self.0.frames_written()
+    }
 }
 
 #[async_trait::async_trait]
@@ -32,8 +77,22 @@ impl Output for Phone {
     fn caps(&self) -> &OutputCaps {
         self.inner.caps()
     }
+    fn live_caps(&self) -> OutputCaps {
+        self.live
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| self.caps().clone())
+    }
+    async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
+        if let Some(d) = self.dac.lock().unwrap().as_mut() {
+            d.settings = Some(settings);
+        }
+        Ok(())
+    }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        self.inner.open(fmt).await
+        let s = self.inner.open(fmt).await?;
+        Ok(Box::new(PhoneSink(s, self.gone.clone())))
     }
 }
 
@@ -54,10 +113,7 @@ fn ka17() -> OutputDevice {
 
 /// The phone's player on loopback, and the node's key cell for it.
 fn phone() -> (Arc<Phone>, pm_endpoint::Serving, KeyCell) {
-    let phone = Arc::new(Phone {
-        inner: NullOutput::new(),
-        dac: Mutex::new(None),
-    });
+    let phone = Arc::new(Phone::new());
     let registry = OutputRegistry::new();
     registry.register(phone.clone());
     let key = Key::random();
@@ -135,10 +191,7 @@ mod fake {
 
     /// The phone output's info as a Welcome carries it, with `device` as raw JSON.
     pub fn output(device: serde_json::Value) -> serde_json::Value {
-        let phone = super::Phone {
-            inner: super::NullOutput::new(),
-            dac: super::Mutex::new(None),
-        };
+        let phone = super::Phone::new();
         let mut v = serde_json::to_value(pm_zones::Output::info(&phone)).unwrap();
         v["device"] = device;
         v
@@ -335,4 +388,61 @@ async fn a_silent_session_holds_up_nothing_else() {
     assert!(a.is_err(), "no Welcome, no outputs");
     assert!(started.elapsed() < pm_out_net::HANDSHAKE_TIMEOUT + std::time::Duration::from_secs(3));
     drop(server.join().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn what_the_phone_takes_now_reaches_the_zone_and_settings_reach_the_phone() {
+    let (phone, serving, cell) = phone();
+    let held = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    let base = held.caps().clone();
+    // Bit-perfect to the KA17: the phone takes the DAC's rates now
+    let bit_perfect = OutputCaps {
+        pcm_rates: vec![44_100, 48_000, 88_200, 96_000, 176_400, 192_000],
+        pcm_bits: vec![16, 24, 32],
+        max_pcm_bits: 32,
+        quality_ceiling: pm_model::QualityCeiling::BitPerfect,
+        ..base.clone()
+    };
+    *phone.live.lock().unwrap() = Some(bit_perfect.clone());
+    *phone.dac.lock().unwrap() = Some(ka17());
+    NetOutput::connect(serving.addr(), &cell).unwrap();
+    assert_eq!(
+        held.live_caps(),
+        bit_perfect,
+        "the output a zone holds plans with them"
+    );
+    assert_eq!(held.caps(), &base, "caps stay what they were when found");
+    assert_eq!(held.info().caps, bit_perfect, "GET /v1/outputs shows them");
+    for fmt in [AudioFormat::pcm(96_000, 24, 2), AudioFormat::pcm(192_000, 24, 2)] {
+        assert!(held.live_caps().accepts(&fmt), "{fmt} goes to the DAC as it is");
+        drop(held.open(fmt).await.expect("opens"));
+    }
+    // Settings from the node reach the phone, and the node sees them at once
+    let s = pm_zones::DeviceSettings {
+        mode: pm_zones::PreferredMode::Shared,
+        dac_volume: false,
+    };
+    held.configure_device(s).await.unwrap();
+    assert_eq!(held.device().unwrap().settings, Some(s));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dac_unplugged_on_the_phone_reaches_the_zone_as_gone() {
+    let (phone, serving, cell) = phone();
+    let out = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    let fmt = AudioFormat::pcm(48_000, 24, 2);
+    let mut sink = out.open(fmt).await.unwrap();
+    let block = pm_model::AudioBlock::pcm_i32(fmt, vec![0; 480 * 2]);
+    sink.write(&block).unwrap();
+    phone.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut err = None;
+    for _ in 0..500 {
+        if let Err(e) = sink.write(&block) {
+            err = Some(e);
+            break;
+        }
+    }
+    let e = err.expect("the write fails once the endpoint's sink found the DAC gone");
+    assert!(matches!(e, SinkError::Gone(..)), "{e}");
+    assert_eq!(e.gone_reason().as_deref(), Some("FiiO KA17 was unplugged"));
 }

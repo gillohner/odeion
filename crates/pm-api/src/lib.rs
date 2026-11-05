@@ -234,6 +234,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/outputs/endpoints", post(add_endpoint))
         .route("/outputs/endpoints/{address}", delete(remove_endpoint))
         .route("/outputs/pull", post(create_pull))
+        .route("/outputs/{id}/device", axum::routing::put(put_output_device))
         .route("/outputs/pull/{name}/url", get(pull_url))
         .route("/zones", get(zones).post(create_zone))
         .route("/zones/{id}", get(zone).delete(delete_zone))
@@ -1266,6 +1267,45 @@ async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
             })
             .collect(),
     )
+}
+
+/// `PUT /v1/outputs/{id}/device {mode?, dac_volume?}`: the listener's choices for the hardware
+/// behind an output (a phone's USB DAC: `auto`, `bit_perfect` or `shared`, and whether the zone's
+/// volume is the DAC's). The output's app keeps them; the answer is the output as listed.
+async fn put_output_device(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<DeviceSettingsPatch>,
+) -> ApiResult<OutputInfo> {
+    let out = s
+        .outputs
+        .get(&OutputId(id.clone()))
+        .ok_or_else(|| ApiError::not_found(format!("no output {id}")))?;
+    let Some(device) = out.device() else {
+        return Err(ApiError::bad_request(format!("{id} has no device to set")));
+    };
+    let mut settings = device.settings.unwrap_or_default();
+    if let Some(m) = body.mode {
+        if m == pm_zones::PreferredMode::Unknown {
+            return Err(ApiError::bad_request("mode is auto, bit_perfect or shared"));
+        }
+        settings.mode = m;
+    }
+    if let Some(v) = body.dac_volume {
+        settings.dac_volume = v;
+    }
+    out.configure_device(settings)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(Json(out.info()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeviceSettingsPatch {
+    #[serde(default)]
+    mode: Option<pm_zones::PreferredMode>,
+    #[serde(default)]
+    dac_volume: Option<bool>,
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -20095,6 +20135,15 @@ exec sleep 300
             fn device(&self) -> Option<pm_zones::OutputDevice> {
                 self.dac.lock().unwrap().clone()
             }
+            async fn configure_device(
+                &self,
+                settings: pm_zones::DeviceSettings,
+            ) -> Result<(), pm_zones::SinkError> {
+                if let Some(d) = self.dac.lock().unwrap().as_mut() {
+                    d.settings = Some(settings);
+                }
+                Ok(())
+            }
             fn caps(&self) -> &pm_model::OutputCaps {
                 self.inner.caps()
             }
@@ -20155,6 +20204,41 @@ exec sleep 300
         };
         let (st, body) = register().await;
         assert_eq!(st, StatusCode::OK, "{body}");
+        // The owner's choices reach the phone, and the answer shows them
+        let id = body[0]["id"].as_str().unwrap().to_string();
+        let enc = id
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(':', "%3A")
+            .replace(' ', "%20");
+        let (st, out) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "shared", "dac_volume": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert_eq!(
+            out["device"]["settings"],
+            serde_json::json!({"mode": "shared", "dac_volume": false})
+        );
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "loudest"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a mode this node doesn't know");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/outputs/null/device",
+            Some(serde_json::json!({"mode": "shared"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "an output without a device");
         *phone.dac.lock().unwrap() = None;
         let (st, _) = register().await;
         assert_eq!(st, StatusCode::OK);
@@ -20162,13 +20246,22 @@ exec sleep 300
         let seen = tokio::task::spawn_blocking(move || seen.join().unwrap())
             .await
             .unwrap();
-        assert_eq!(seen.len(), 2, "plugged in at the first registration, then out");
+        assert_eq!(
+            seen.len(),
+            3,
+            "plugged in at the first registration, the settings, then out"
+        );
         assert_eq!(
             seen[0].1,
             Some(Some("FiiO KA17".to_string())),
             "listed, with its device, when announced"
         );
-        assert_eq!(seen[1].1, Some(None), "listed, without a device, when unplugged");
+        assert_eq!(
+            seen[1].1,
+            Some(Some("FiiO KA17".to_string())),
+            "its settings changed"
+        );
+        assert_eq!(seen[2].1, Some(None), "listed, without a device, when unplugged");
         let listener = accounts::Caller {
             role: accounts::Role::Listener,
             key: Some("o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy".into()),

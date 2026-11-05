@@ -61,11 +61,17 @@ pub struct KeyCell {
     on_change: Arc<RwLock<Option<DeviceChanged>>>,
 }
 
-/// The devices last applied, and the number of the session they came from.
+/// What the outputs last said, and the number of the session that said it.
 #[derive(Default)]
 struct Devices {
     applied: u64,
-    by_output: HashMap<OutputId, Option<OutputDevice>>,
+    by_output: HashMap<OutputId, Reported>,
+}
+
+/// One output's device and what it takes now, as its last applied `Welcome` said.
+struct Reported {
+    device: Option<OutputDevice>,
+    caps: OutputCaps,
 }
 
 type DeviceChanged = Arc<dyn Fn(&OutputId) + Send + Sync>;
@@ -105,7 +111,15 @@ impl KeyCell {
             d.applied = seq;
             let known = &mut d.by_output;
             for o in outputs {
-                let before = known.insert(o.id.clone(), o.device.clone());
+                let before = known
+                    .insert(
+                        o.id.clone(),
+                        Reported {
+                            device: o.device.clone(),
+                            caps: o.caps.clone(),
+                        },
+                    )
+                    .map(|r| r.device);
                 if before.as_ref() != Some(&o.device) {
                     tracing::info!(output = %o.id, device = ?o.device.as_ref().map(|d| &d.name), "endpoint output device");
                     // A new output without a device is no change anyone shows
@@ -129,7 +143,16 @@ impl KeyCell {
             .expect("endpoint devices")
             .by_output
             .get(id)
-            .cloned()
+            .map(|r| r.device.clone())
+    }
+
+    fn caps(&self, id: &OutputId) -> Option<OutputCaps> {
+        self.devices
+            .read()
+            .expect("endpoint devices")
+            .by_output
+            .get(id)
+            .map(|r| r.caps.clone())
     }
 
     /// A session with the endpoint (blocking, at most [`CONNECT_TIMEOUT`] plus
@@ -260,8 +283,46 @@ impl Output for NetOutput {
         &self.remote.caps
     }
 
+    /// What the endpoint last said the output takes (a phone's output takes its USB DAC's rates in
+    /// bit-perfect mode).
+    fn live_caps(&self) -> OutputCaps {
+        self.key
+            .caps(&self.remote.id)
+            .unwrap_or_else(|| self.remote.caps.clone())
+    }
+
+    /// Pass the listener's choices to the endpoint, then read its outputs again, so the node (and
+    /// every controller) sees the device as it is now.
+    async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
+        let (addr, key, remote) = (self.addr, self.key.clone(), self.remote.id.0.clone());
+        blocking(move || {
+            {
+                let (mut c, _) = key.session(addr)?;
+                write_frame(
+                    &mut c.w,
+                    &Frame::Configure {
+                        output: remote,
+                        settings,
+                    },
+                )
+                .map_err(io_err)?;
+                match expect_control(&mut c.r) {
+                    Ok(Frame::Done) => {}
+                    Ok(other) => return Err(SinkError::Device(format!("unexpected {other:?}"))),
+                    Err(e) => {
+                        return Err(SinkError::Device(format!(
+                            "the app did not take the setting ({e}); update the Odeion app"
+                        )))
+                    }
+                }
+            }
+            key.session(addr).map(|_| ())
+        })
+        .await
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        if !self.remote.caps.accepts(&fmt) {
+        if !self.live_caps().accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         let (addr, key, remote, id) = (self.addr, self.key.clone(), self.remote.id.0.clone(), self.id());
@@ -317,6 +378,7 @@ fn open_session(
 ) -> Result<NetSink, SinkError> {
     // Each session starts with the endpoint's outputs as they are now (a DAC plugged in since)
     let (mut c, _welcome) = key.session(addr)?;
+    let remote_id = remote.clone();
     write_frame(
         &mut c.w,
         &Frame::Open {
@@ -329,6 +391,18 @@ fn open_session(
         Frame::Opened { buffer_frames } => buffer_frames,
         other => return Err(SinkError::Device(format!("unexpected {other:?} after Open"))),
     };
+    // An output with a device (a phone's USB DAC) decided at this open whether it plays
+    // bit-perfect, and the endpoint says so in its next Welcome: read it now, apart from the audio
+    if matches!(key.device(&OutputId(remote_id)), Some(Some(_))) {
+        let k = key.clone();
+        let _ = std::thread::Builder::new()
+            .name("pm-net-device".into())
+            .spawn(move || {
+                if let Err(e) = k.session(addr) {
+                    tracing::debug!("the endpoint's device after an open: {e}");
+                }
+            });
+    }
     // The endpoint's answers, read on their own thread so a write need not wait for them
     let Conn { mut r, w } = c;
     let stream = w.get_ref().try_clone()?;
@@ -456,6 +530,33 @@ impl NetSink {
         per_s * IN_FLIGHT.as_millis() as u64 / 1000
     }
 
+    /// A write that failed because the endpoint closed: what it said first (its device went away,
+    /// say), once its answers are read; else the write's own error.
+    fn after_failed_write(&self, e: SinkError) -> SinkError {
+        let mut st = self.answers.state.lock().expect("answers");
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while st.closed.is_none() {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            st = self
+                .answers
+                .changed
+                .wait_timeout(st, deadline - now)
+                .expect("answers")
+                .0;
+        }
+        let said = st
+            .closed
+            .as_ref()
+            .map(|why| SinkError::Device(format!("{}: {why}", self.id)));
+        match said.and_then(|s| s.gone_reason()) {
+            Some(r) => SinkError::Gone(self.id.clone(), r),
+            None => e,
+        }
+    }
+
     /// Wait on the answers until `done` says so; an ended connection or [`ANSWER_TIMEOUT`]
     /// without a word is an error.
     fn wait<T>(&self, mut done: impl FnMut(&mut AckState) -> Option<T>) -> Result<T, SinkError> {
@@ -466,7 +567,12 @@ impl NetSink {
                 return Ok(v);
             }
             if let Some(why) = &st.closed {
-                return Err(SinkError::Device(format!("{}: {why}", self.id)));
+                let e = SinkError::Device(format!("{}: {why}", self.id));
+                // The endpoint's device went away (a USB DAC unplugged): the zone pauses
+                return Err(match e.gone_reason() {
+                    Some(r) => SinkError::Gone(self.id.clone(), r),
+                    None => e,
+                });
             }
             let now = Instant::now();
             if now >= deadline {
@@ -513,7 +619,10 @@ impl AudioSink for NetSink {
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         check_block(self.fmt, block)?;
         // A block larger than a frame goes out in parts, each acknowledged
-        let parts = write_audio(&mut self.w, block).map_err(io_err)? as u64;
+        let parts = match write_audio(&mut self.w, block) {
+            Ok(n) => n as u64,
+            Err(e) => return Err(self.after_failed_write(io_err(e))),
+        };
         self.parts += parts;
         self.sent.push_back(Sent {
             end: self.parts,

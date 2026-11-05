@@ -102,6 +102,50 @@ pub struct OutputDevice {
     /// USB ids, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usb: Option<UsbIds>,
+    /// The format it was last opened in (what `mode` and `confirmed` are about).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<AudioFormat>,
+    /// The listener's choices for it (`PUT /v1/outputs/{id}/device`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<DeviceSettings>,
+}
+
+/// The listener's choices for an [`OutputDevice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceSettings {
+    /// The mode to use: `auto` takes bit-perfect where the phone allows it, else shared.
+    #[serde(default)]
+    pub mode: PreferredMode,
+    /// The zone's volume sets the device's own (Android's media volume, applied by the DAC in
+    /// bit-perfect mode). Off: the node's software volume, which changes the samples.
+    #[serde(default = "yes")]
+    pub dac_volume: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for DeviceSettings {
+    fn default() -> Self {
+        Self {
+            mode: PreferredMode::Auto,
+            dac_volume: true,
+        }
+    }
+}
+
+/// [`DeviceSettings::mode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PreferredMode {
+    #[default]
+    Auto,
+    BitPerfect,
+    Shared,
+    /// A choice this node does not know yet: as `auto`.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What kind of hardware an [`OutputDevice`] is.
@@ -187,8 +231,31 @@ pub enum SinkError {
     NoStandby(OutputId),
     #[error("device error: {0}")]
     Device(String),
+    /// The device the output played through went away mid-stream (a USB DAC unplugged from a
+    /// phone): the zone pauses where it was instead of failing, and plays on no other device.
+    /// Its text carries [`GONE`], so it survives an endpoint's error message.
+    #[error("output {0}: device gone: {1}")]
+    Gone(OutputId, String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+/// The words [`SinkError::Gone`] puts in its text, so a node can tell it from an endpoint's
+/// error message.
+pub const GONE: &str = "device gone: ";
+
+impl SinkError {
+    /// [`SinkError::Gone`], or an error whose text says a device went away (an endpoint's).
+    pub fn gone_reason(&self) -> Option<String> {
+        match self {
+            SinkError::Gone(_, why) => Some(why.clone()),
+            other => {
+                let text = other.to_string();
+                text.find(GONE)
+                    .map(|at| text[at + GONE.len()..].trim().to_string())
+            }
+        }
+    }
 }
 
 /// How full the sink's buffer is; the zone paces itself on this.
@@ -372,10 +439,25 @@ pub trait Output: Send + Sync {
             id: self.id(),
             name: self.name(),
             protocol: self.id().protocol().to_string(),
-            caps: self.caps().clone(),
+            caps: self.live_caps(),
             model: self.model(),
             device: self.device(),
         }
+    }
+
+    /// What the output takes now, when that changes while it is registered (a phone's output with
+    /// a USB DAC in bit-perfect mode takes the DAC's rates): the zone plans each track with it.
+    /// [`Output::caps`] stays what it was when the output was found.
+    fn live_caps(&self) -> OutputCaps {
+        self.caps().clone()
+    }
+
+    /// Apply the listener's choices for the hardware behind the output (see [`DeviceSettings`]).
+    async fn configure_device(&self, _settings: DeviceSettings) -> Result<(), SinkError> {
+        Err(SinkError::Unavailable(
+            self.id(),
+            "it has no device settings".into(),
+        ))
     }
 
     /// The hardware behind this output, when it knows (see [`OutputDevice`]).

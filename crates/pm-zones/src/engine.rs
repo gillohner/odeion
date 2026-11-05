@@ -402,6 +402,28 @@ impl Engine {
         self.stop();
     }
 
+    /// The output's device went away mid-track (a USB DAC unplugged from a phone): pause where the
+    /// listener was, with the reason, and play on no other device. Play opens the output again
+    /// (on the DAC once it is back).
+    fn device_gone(&mut self, why: String) {
+        let pos = self.position_ms();
+        tracing::warn!(zone = %self.id, "device gone, pausing: {why}");
+        self.cancel_crossfade();
+        // Its buffer was for a device that is not there: the next play opens a fresh sink
+        self.sink = None;
+        self.sink_paused = false;
+        if let Some(c) = self.current.as_mut() {
+            c.paused_at_ms = Some(pos);
+        }
+        self.transport = Transport::Paused;
+        self.error = Some(format!("{why}: paused"));
+        self.dirty = true;
+        self.emit(ZoneEvent::Paused { position_ms: pos });
+        self.emit(ZoneEvent::Error {
+            message: format!("{why}: paused"),
+        });
+    }
+
     fn pause(&mut self) {
         let pos = self.position_ms();
         self.cancel_crossfade();
@@ -431,6 +453,22 @@ impl Engine {
         if !self.unpause_sink(fmt) {
             return;
         }
+        // The output takes other formats now (its USB DAC went away during the pause): the track
+        // is planned again for it, from where the listener was
+        if self.sink.is_none() && !self.output.live_caps().accepts(&fmt) {
+            if let Some((index, at)) = self
+                .current
+                .as_ref()
+                .map(|c| (c.index, c.paused_at_ms.unwrap_or(0)))
+            {
+                self.error = None;
+                self.start_index(index);
+                if at > 0 && self.current.is_some() {
+                    self.seek(at);
+                }
+                return;
+            }
+        }
         // A seek while paused closed the paused device's sink: a fresh one starts here
         if self.sink.is_none() && !self.ensure_sink(fmt, false) {
             return;
@@ -447,6 +485,8 @@ impl Engine {
         c.base_ms = at;
         c.start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
         self.transport = Transport::Playing;
+        // Playing again: a "device gone" pause is over
+        self.error = None;
         self.dirty = true;
         self.emit(ZoneEvent::Resumed);
     }
@@ -604,7 +644,7 @@ impl Engine {
         let source = self.factory.open(item)?;
         let proc = self
             .factory
-            .plan(source.as_ref(), self.output.caps(), &self.output.id())?;
+            .plan(source.as_ref(), &self.output.live_caps(), &self.output.id())?;
         Ok((source, proc))
     }
 
@@ -726,6 +766,9 @@ impl Engine {
                         return self.fail("sink closed while playing".into());
                     };
                     if let Err(e) = sink.write(&out) {
+                        if let Some(why) = e.gone_reason() {
+                            return self.device_gone(why);
+                        }
                         return self.fail(format!("write to {}: {e}", self.output.id()));
                     }
                 }

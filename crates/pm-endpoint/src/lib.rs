@@ -405,6 +405,20 @@ impl Endpoint {
                     };
                     write_frame(w, &reply)?;
                 }
+                Frame::Configure { output, settings } => {
+                    let reply = match self.outputs.get(&OutputId(output.clone())) {
+                        Some(o) => match block_on(o.configure_device(settings)) {
+                            Ok(()) => Frame::Done,
+                            Err(e) => Frame::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        None => Frame::Error {
+                            message: format!("no output {output}"),
+                        },
+                    };
+                    write_frame(w, &reply)?;
+                }
                 Frame::Open { output, format } => {
                     let id = OutputId(output.clone());
                     let Some(out) = self.outputs.get(&id) else {
@@ -438,6 +452,14 @@ impl Endpoint {
                                     message: e.to_string(),
                                 },
                             );
+                            // Say it, then close cleanly: closing with the node's audio unread
+                            // would reset the connection, and the node might never read why (a
+                            // USB DAC unplugged: it pauses the zone on that)
+                            let _ = std::io::Write::flush(w);
+                            let _ = w.get_ref().shutdown(std::net::Shutdown::Write);
+                            let _ = r.get_ref().set_read_timeout(Some(Duration::from_secs(1)));
+                            let _ =
+                                std::io::copy(&mut r.by_ref().take(64 * 1024 * 1024), &mut std::io::sink());
                             return Err(e);
                         }
                     }

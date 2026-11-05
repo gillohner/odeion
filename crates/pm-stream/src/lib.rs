@@ -73,6 +73,12 @@ pub enum Frame {
         output: String,
         volume: Volume,
     },
+    /// The listener's choices for an output's device (a phone's USB DAC: bit-perfect or shared,
+    /// the DAC's volume), answered by `Done`. An endpoint from before it answers `Error`.
+    Configure {
+        output: String,
+        settings: pm_zones::DeviceSettings,
+    },
     Done,
     Close,
     Error {

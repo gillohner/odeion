@@ -8,7 +8,8 @@
 // waits for the next change with next(). The matching UsbDevice adds its ids and, only
 // when the app already has permission for it, its raw descriptors: this never asks.
 //
-// Playback is unchanged: Android's mixer still plays the DAC (shared mode).
+// On Android 14+ the report also lists the DAC's mixer attributes, and BitPerfect.kt plays
+// to it bit-perfect; removing a device stops its bit-perfect tracks at once.
 package to.synonym.pubkymusic
 
 import android.app.Activity
@@ -29,7 +30,11 @@ import org.json.JSONObject
 class UsbAudio private constructor(private val context: Context) : AudioDeviceCallback() {
     override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = refresh()
 
-    override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) = refresh()
+    override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+        // A bit-perfect track on a DAC that went stops at once, before anything else
+        BitPerfect.removed(removedDevices.map { it.id }.toSet())
+        refresh()
+    }
 
     private fun refresh() {
         val text = try {
@@ -65,6 +70,19 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             if (watcher != null) return
             val context = activity.applicationContext
             val am = context.getSystemService(AudioManager::class.java) ?: return
+            BitPerfect.init(context)
+            // The app closing: the DAC's mixer back to Android's choice (system sounds come back)
+            activity.application.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
+                override fun onActivityDestroyed(a: Activity) {
+                    if (a.isFinishing) BitPerfect.clear()
+                }
+                override fun onActivityCreated(a: Activity, b: android.os.Bundle?) {}
+                override fun onActivityStarted(a: Activity) {}
+                override fun onActivityResumed(a: Activity) {}
+                override fun onActivityPaused(a: Activity) {}
+                override fun onActivityStopped(a: Activity) {}
+                override fun onActivitySaveInstanceState(a: Activity, b: android.os.Bundle) {}
+            })
             val w = UsbAudio(context)
             watcher = w
             // Registering reports the devices already attached through onAudioDevicesAdded too
@@ -159,6 +177,23 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
                 o.put("encodings", JSONArray(d.encodings.toList()))
                 o.put("channel_counts", JSONArray(d.channelCounts.toList()))
                 if (routed != null) o.put("routed", d.id in routed)
+                // Android 14: the formats its mixer can be set to for this DAC, and how (bit-perfect)
+                if (Build.VERSION.SDK_INT >= 34) {
+                    runCatching { am.getSupportedMixerAttributes(d) }.getOrNull()?.let { list ->
+                        val mixer = JSONArray()
+                        for (m in list) {
+                            mixer.put(
+                                JSONObject()
+                                    .put("encoding", m.format.encoding)
+                                    .put("rate", m.format.sampleRate)
+                                    .put("channel_mask", m.format.channelMask)
+                                    .put("channels", m.format.channelCount)
+                                    .put("behavior", m.mixerBehavior)
+                            )
+                        }
+                        o.put("mixer", mixer)
+                    }
+                }
                 if (um != null) usbFor(d, usb)?.let { o.put("usb", usbJson(um, it)) }
                 devices.put(o)
             }
