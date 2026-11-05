@@ -4718,7 +4718,7 @@ mod tests {
                 "/Items/{id}/Images/Primary",
                 get(|h: axum::http::HeaderMap, q: Q| async move {
                     assert!(authed(&h, &q));
-                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG\r\n\x1a\n".to_vec())
                 }),
             )
             .route("/Sessions/Logout", post(|| async { StatusCode::NO_CONTENT }));
@@ -4785,7 +4785,10 @@ mod tests {
         // Browsers and covers go through the node
         for (path, magic) in [
             (format!("/v1/sources/jellyfin/stream/{SONG}"), &b"fLaC"[..]),
-            (format!("/v1/sources/jellyfin/cover/{ALBUM}"), &b"\x89PNG"[..]),
+            (
+                format!("/v1/sources/jellyfin/cover/{ALBUM}"),
+                &b"\x89PNG\r\n\x1a\n"[..],
+            ),
         ] {
             let resp = app
                 .clone()
@@ -4943,7 +4946,7 @@ mod tests {
                 "/library/metadata/{id}/thumb/{ver}",
                 get(|h: axum::http::HeaderMap, q: Q| async move {
                     assert!(authed(&h, &q));
-                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG".to_vec())
+                    ([(header::CONTENT_TYPE, "image/png")], b"\x89PNG\r\n\x1a\n".to_vec())
                 }),
             )
             .route(
@@ -5070,7 +5073,7 @@ mod tests {
         // Browsers and covers go through the node
         for (path, magic) in [
             ("/v1/sources/plex/stream/1201", &b"fLaC"[..]),
-            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG"[..]),
+            ("/v1/sources/plex/cover/1200/1", &b"\x89PNG\r\n\x1a\n"[..]),
         ] {
             let resp = app
                 .clone()
@@ -5674,7 +5677,13 @@ mod tests {
         profiles::cache_view(BOB, Some(view(BOB, "Bob")));
         let people = s.art_dir.join("people");
         std::fs::create_dir_all(&people).unwrap();
-        let png = |n: usize| [&[0x89, b'P', b'N', b'G'][..], &vec![0u8; n]].concat();
+        let png = |n: usize| {
+            [
+                &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..],
+                &vec![0u8; n],
+            ]
+            .concat()
+        };
         std::fs::write(people.join(ALICE), png(100)).unwrap();
         std::fs::write(people.join(BOB), png(300 * 1024)).unwrap();
         // Someone who approved: name and a small picture inline (the screen has no token)
@@ -7833,7 +7842,7 @@ mod tests {
                 }),
             )
             .route("/nexus/v0/user/{id}", get(move |Path(id): Path<String>| async move { Json(user(&id)) }))
-            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 1, 2, 3]) }))
+            .route("/nexus/static/avatar/{id}", get(|| async { ([(header::CONTENT_TYPE, "image/png")], vec![0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]) }))
             .route(
                 "/nexus/v0/resource/by-uri",
                 get(|| async { Json(serde_json::json!({"resource": {"id": "r1", "uri": "https://musicbrainz.org/isrc/USAAA1111111"}, "tags": [{"label": "chill", "taggers": [A, B], "taggers_count": 2}]})) }),
@@ -11028,7 +11037,7 @@ exec sleep 300
         let mbid = "056e4f3e-d505-4dad-8ec1-d04f521cbb56";
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0, 1, 2, 3];
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
         let b2 = base.clone();
         let mock = Router::new()
             .route(&format!("/ws/2/artist/{mbid}"), get(|| async { Json(serde_json::json!({"id": "x", "relations": []})) }))
@@ -20148,5 +20157,55 @@ exec sleep 300
             );
         }
         assert_eq!(art::safe_media_type(None, "audio/flac"), "audio/flac");
+    }
+
+    /// A picture another server relays is answered by its bytes, whatever its headers say: an SVG
+    /// or a page sent as a picture is not served; a picture sent as a page is served as a picture.
+    #[tokio::test]
+    async fn relayed_pictures_are_served_by_their_bytes() {
+        let png = b"\x89PNG\r\n\x1a\n-relayed".to_vec();
+        let p2 = png.clone();
+        let mock = Router::new()
+            .route(
+                "/svg",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/png")],
+                        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+                    )
+                }),
+            )
+            .route(
+                "/page",
+                get(|| async {
+                    (
+                        [(header::CONTENT_TYPE, "image/jpeg")],
+                        "<html><body>x</body></html>",
+                    )
+                }),
+            )
+            .route(
+                "/png",
+                get(move || {
+                    let b = p2.clone();
+                    async move { ([(header::CONTENT_TYPE, "text/html")], b) }
+                }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, mock).await.unwrap() });
+        let fetch = |path: &str| {
+            let url = format!("{base}{path}");
+            async move { art::relayed_picture(reqwest::get(url).await.unwrap(), "private").await }
+        };
+        for bad in ["/svg", "/page"] {
+            let r = fetch(bad).await;
+            assert_eq!(r.err().map(|e| e.status), Some(StatusCode::NOT_FOUND), "{bad}");
+        }
+        let r = fetch("/png").await.unwrap();
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(r.headers()[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        let body = r.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], &png[..]);
     }
 }

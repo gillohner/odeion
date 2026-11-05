@@ -42,7 +42,7 @@ fn write_wav(path: &std::path::Path, title: &str, artist: &str, album: &str, no:
             mime_type: "image/jpeg".into(),
             picture_type: id3::frame::PictureType::CoverFront,
             description: String::new(),
-            data: vec![0xff, 0xd8, 1, 2, 3],
+            data: vec![0xff, 0xd8, 0xff, 1, 2, 3],
         });
     }
     t.write_to_path(path, id3::Version::Id3v24).unwrap();
@@ -260,7 +260,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let (st, h, art) = get(&app, &format!("/rest/getCoverArt?id={album_id}&{auth}"), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(h["content-type"], "image/jpeg");
-    assert_eq!(art, vec![0xff, 0xd8, 1, 2, 3]);
+    assert_eq!(art, vec![0xff, 0xd8, 0xff, 1, 2, 3]);
 
     // Playlists: create with the tagged song; the untagged one is kept on this node only
     // (Music Assistant failed on every other song of an untagged library).

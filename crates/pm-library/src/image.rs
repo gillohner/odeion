@@ -6,8 +6,8 @@
 /// The picture's MIME type by its first bytes, or `None` when it is no picture the node serves.
 pub fn image_type(bytes: &[u8]) -> Option<&'static str> {
     match bytes {
-        [0xFF, 0xD8, ..] => Some("image/jpeg"),
-        [0x89, b'P', b'N', b'G', ..] => Some("image/png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("image/jpeg"),
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => Some("image/png"),
         [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("image/webp"),
         [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => Some("image/gif"),
         _ => None,
@@ -40,6 +40,8 @@ mod tests {
     #[test]
     fn only_pictures_are_pictures() {
         assert_eq!(image_type(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0]), Some("image/jpeg"));
+        assert_eq!(image_type(b"\xFF\xD8garbage"), None, "a near-match is no picture");
+        assert_eq!(image_type(b"\x89PNGgarbage"), None, "a near-match is no picture");
         assert_eq!(image_type(b"\x89PNG\r\n\x1a\n...."), Some("image/png"));
         assert_eq!(image_type(b"RIFF\0\0\0\0WEBPVP8 "), Some("image/webp"));
         assert_eq!(image_type(b"GIF89a.."), Some("image/gif"));

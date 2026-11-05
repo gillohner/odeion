@@ -984,7 +984,7 @@ mod tests {
         write_album_wav(&d.join("Mix/CD1/01.wav"), "One", "Sefa", "Mix", false);
         write_album_wav(&d.join("Mix/CD1/02.wav"), "Two", "Dr. Peacock", "Mix", false);
         write_album_wav(&d.join("Mix/CD 2/01.wav"), "Three", "Cyclon", "Mix", false);
-        fs::write(d.join("Mix/cover.jpg"), b"\xff\xd8jpeg").unwrap();
+        fs::write(d.join("Mix/cover.jpg"), b"\xff\xd8\xffjpeg").unwrap();
         // A compilation flag alone is enough.
         write_album_wav(&d.join("Comp/01.wav"), "Four", "Angerfist", "Comp", true);
         // One artist with a guest: the album stays the artist's.
@@ -1081,7 +1081,7 @@ mod tests {
             mime_type: "image/png".into(),
             picture_type: id3::frame::PictureType::CoverFront,
             description: String::new(),
-            data: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+            data: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3],
         });
         t.write_to_path(&wav, id3::Version::Id3v24).unwrap();
         // Album B: no picture, a Folder.jpg beside the file.
@@ -1090,7 +1090,7 @@ mod tests {
         let mut t = id3::Tag::read_from_path(&wav_b).unwrap();
         t.set_album("Album B");
         t.write_to_path(&wav_b, id3::Version::Id3v24).unwrap();
-        fs::write(b.join("Folder.jpg"), b"\xff\xd8jpeg").unwrap();
+        fs::write(b.join("Folder.jpg"), b"\xff\xd8\xffjpeg").unwrap();
         fs::write(b.join("back.png"), b"png").unwrap();
 
         let lib = Library::open_in_memory().unwrap();
@@ -1104,7 +1104,7 @@ mod tests {
         assert!(art_a.file.starts_with(&art));
         assert_eq!(
             fs::read(&art_a.file).unwrap(),
-            vec![0x89, b'P', b'N', b'G', 1, 2, 3]
+            vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]
         );
         let art_b = lib.album_art(find("Album B")).unwrap().unwrap();
         assert_eq!(art_b.source, "folder");

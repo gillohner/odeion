@@ -265,6 +265,36 @@ pub(crate) fn picture(bytes: Vec<u8>, cache: &str) -> Result<axum::response::Res
         .into_response())
 }
 
+/// The most a relayed picture may be.
+const RELAYED_PICTURE_MAX: usize = 16 << 20;
+
+/// A picture another server sent, answered as [`picture`] does: by its bytes, whatever type the
+/// server gave it, and none at all when it is no picture (or larger than any cover).
+pub(crate) async fn relayed_picture(
+    resp: reqwest::Response,
+    cache: &str,
+) -> Result<axum::response::Response, crate::ApiError> {
+    use futures_util::StreamExt;
+    let too_big = || crate::ApiError::not_found("that picture is too large");
+    if resp
+        .content_length()
+        .is_some_and(|n| n as usize > RELAYED_PICTURE_MAX)
+    {
+        return Err(too_big());
+    }
+    let mut bytes = Vec::new();
+    let mut body = resp.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        let chunk =
+            chunk.map_err(|e| crate::ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+        if bytes.len() + chunk.len() > RELAYED_PICTURE_MAX {
+            return Err(too_big());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    picture(bytes, cache)
+}
+
 /// The type to relay a file from another server as: what it said when that is audio, video or a
 /// raster picture, else `fallback` (what the node asked it for).
 pub(crate) fn safe_media_type(said: Option<&str>, fallback: &str) -> String {

@@ -432,7 +432,11 @@ async fn relay(
             upstream(format!("answered {}", resp.status()))
         });
     }
-    // Audio, video or a raster picture as the server said, else what was asked for
+    // A picture is answered by what its bytes are
+    if fallback_type.starts_with("image/") {
+        return crate::art::relayed_picture(resp, "private, max-age=3600").await;
+    }
+    // Audio or video as the server said, else what was asked for
     let ctype = crate::art::safe_media_type(
         resp.headers()
             .get(reqwest::header::CONTENT_TYPE)

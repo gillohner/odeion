@@ -52,7 +52,7 @@ fn write_wav(path: &std::path::Path, title: &str, mbid: Option<&str>) {
             mime_type: "image/png".into(),
             picture_type: id3::frame::PictureType::CoverFront,
             description: String::new(),
-            data: b"\x89PNG-not-really".to_vec(),
+            data: b"\x89PNG\r\n\x1a\n-not-really".to_vec(),
         });
     }
     t.write_to_path(path, id3::Version::Id3v24).unwrap();
@@ -157,7 +157,7 @@ async fn playlist_lifecycle() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers()["content-type"], "image/png");
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], b"\x89PNG-not-really");
+    assert_eq!(&bytes[..], b"\x89PNG\r\n\x1a\n-not-really");
     let (st, _) = call(&app, "GET", "/v1/library/albums/999/cover", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
 
@@ -910,7 +910,7 @@ async fn covers_fall_back_to_the_cover_art_archive() {
                     (
                         StatusCode::OK,
                         [("content-type", "image/png")],
-                        b"\x89PNG-fake".to_vec(),
+                        b"\x89PNG\r\n\x1a\n-fake".to_vec(),
                     )
                 } else {
                     (
@@ -1010,7 +1010,7 @@ async fn covers_fall_back_to_the_cover_art_archive() {
         assert_eq!(resp.status(), StatusCode::OK, "round {round}");
         assert_eq!(resp.headers()["content-type"], "image/png");
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"\x89PNG-fake");
+        assert_eq!(&body[..], b"\x89PNG\r\n\x1a\n-fake");
     }
     assert_eq!(
         hits.load(Ordering::SeqCst),
@@ -1738,7 +1738,7 @@ async fn album_cover_falls_back_to_itunes_on_an_exact_match() {
                 |axum::extract::Path((which, size)): axum::extract::Path<(String, String)>| async move {
                     assert_eq!(which, "right", "only the matching result is fetched");
                     assert_eq!(size, "600x600bb.jpg");
-                    ([("content-type", "image/jpeg")], b"\xff\xd8itunes".to_vec())
+                    ([("content-type", "image/jpeg")], b"\xff\xd8\xffitunes".to_vec())
                 },
             ),
         );
@@ -1825,7 +1825,7 @@ async fn album_cover_falls_back_to_itunes_on_an_exact_match() {
         assert_eq!(resp.status(), StatusCode::OK, "round {round}");
         assert_eq!(resp.headers()["content-type"], "image/jpeg");
         let body = resp.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(&body[..], b"\xff\xd8itunes");
+        assert_eq!(&body[..], b"\xff\xd8\xffitunes");
     }
     assert_eq!(
         searches.load(Ordering::SeqCst),

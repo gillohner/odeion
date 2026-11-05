@@ -167,8 +167,16 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     let lib = pm_library::Library::open(&db_path)?;
     // Sign-ins, keys and the token live in these: the node's alone
     let private = file_modes::private_files(&cfg.data_dir, &db_path, config_file.as_deref());
-    for (path, was, now) in file_modes::tighten(&cfg.data_dir, &private) {
+    let modes = file_modes::tighten(&cfg.data_dir, &private);
+    for (path, was, now) in modes.changed {
         tracing::info!(path = %path.display(), "made the node's own: {was:o} to {now:o}");
+    }
+    for (path, why, should) in modes.left {
+        tracing::warn!(
+            path = %path.display(),
+            "others may be able to read this and the node can't change it ({why}): run `sudo chmod {should:o} {}`",
+            path.display()
+        );
     }
     let registry = outputs::discover_all(&cfg.outputs);
     pm_api::tidal_unofficial::set_config_client(
