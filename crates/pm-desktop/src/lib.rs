@@ -100,6 +100,22 @@ fn token_sync_script(token: &str) -> String {
     )
 }
 
+/// Whether reaching the node failed because it wants a new sign-in from this device (it refused
+/// the saved one, or there is none): trying again won't help, signing in again does.
+fn needs_new_sign_in(error: &str) -> bool {
+    error == node::REFUSED || error == node::NEEDS_SIGN_IN
+}
+
+/// The app's connect page (`ui/index.html`), where the window starts.
+fn connect_page() -> url::Url {
+    let page = if cfg!(any(windows, target_os = "android")) {
+        "http://tauri.localhost/index.html"
+    } else {
+        "tauri://localhost/index.html"
+    };
+    url::Url::parse(page).expect("a fixed URL")
+}
+
 /// The app's own pages: `tauri://localhost` on macOS and Linux,
 /// `http(s)://tauri.localhost` on Windows and Android.
 fn is_app_page(u: &url::Url) -> bool {
@@ -233,11 +249,26 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let state = app.state::<AppState>();
                 let Some(s) = state.current() else { break };
-                if let Ok((s, info)) = reach(&app, &state, s).await {
-                    if let Err(e) = connected(&app, &state, s, &info) {
-                        tracing::warn!("back from offline: {e}");
+                match reach(&app, &state, s).await {
+                    Ok((s, info)) => {
+                        if let Err(e) = connected(&app, &state, s, &info) {
+                            tracing::warn!("back from offline: {e}");
+                        }
+                        break;
                     }
-                    break;
+                    // The node answers but no longer takes this device's sign-in (a new token, the
+                    // one-time change after the update): trying again never helps. Back to the
+                    // connect page, which reconnects and signs in again (`open_saved`)
+                    Err(e) if needs_new_sign_in(&e) => {
+                        tracing::info!("back from offline: the node asks for a new sign-in");
+                        if let Some(w) = app.get_webview_window(MAIN) {
+                            if let Err(e) = w.navigate(connect_page()) {
+                                tracing::warn!("back from offline: {e}");
+                            }
+                        }
+                        break;
+                    }
+                    Err(_) => {}
                 }
             }
             RETURNING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -278,13 +309,32 @@ fn saved(state: State<'_, AppState>) -> Option<Saved> {
     state.current().map(|s| Saved { node_url: s.node_url })
 }
 
-/// Reconnect to the remembered node: check it answers, then show it.
+/// Reconnect to the remembered node: check it answers, then show it. A node that refuses this
+/// device's sign-in (it ended there: Make a new token, or the node signed in as someone else) gets
+/// a new one, with one approval in Pubky Ring, instead of a dead end.
 #[tauri::command]
 async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let s = state.current().ok_or("No node yet")?;
-    let (s, info) = reach(&app, &state, s).await?;
-    connected(&app, &state, s, &info)?;
-    Ok(info.name)
+    let again = s.clone();
+    match reach(&app, &state, s).await {
+        Ok((s, info)) => {
+            connected(&app, &state, s, &info)?;
+            Ok(info.name)
+        }
+        // The node refused this device's sign-in, or now asks for one it never had: a new one
+        Err(e) if needs_new_sign_in(&e) => {
+            if again.owner.is_empty() {
+                // Saved before the app knew whose node it is (or connected by address): find the
+                // node through the owner's record again, so its sign-in is checked against them
+                return ring_connect(app, state).await;
+            }
+            let mut s = again;
+            s.token.clear();
+            s.via.clear();
+            sign_in_and_connect(&app, &state, s).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Reach the node: at its address; else through the iroh tunnel when its record carries a key
@@ -421,14 +471,30 @@ async fn connect_manual(
     state: State<'_, AppState>,
     node_url: String,
     token: String,
+    expect_id: Option<String>,
 ) -> Result<String, String> {
     if node_url.trim().is_empty() {
         return Err("Enter the node's address".into());
     }
     let s = Settings::new(&node_url, &token);
     let info = node::probe(&s).await?;
+    // The node found on the network, tried at 127.0.0.1: only when the node there is that one
+    if let Some(want) = expect_id.as_deref() {
+        if !same_node(want, &info.id) {
+            return Err(NOT_THAT_NODE.into());
+        }
+    }
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// What `connect_manual` answers when the node at the address isn't the one asked for.
+const NOT_THAT_NODE: &str = "Another node answers on this computer";
+
+/// Whether the node that answered (`got`, its `/v1/info` id) is the one found on the network
+/// (`want`). A node without an id is never taken for another.
+fn same_node(want: &str, got: &str) -> bool {
+    !want.is_empty() && want == got
 }
 
 #[derive(Clone, Serialize)]
@@ -485,11 +551,92 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
-    let mut s = Settings::new(&record.api_url, &record.token);
+    // The record says where the node is, never how to sign in to it: this device signs in to the
+    // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
+    let mut s = Settings::new(&record.api_url, "");
     s.iroh = record.iroh;
-    let (s, info) = reach(&app, &state, s).await?;
-    connected(&app, &state, s, &info)?;
+    // The identity whose record named this node: the node must say it is theirs, and only their
+    // approval signs this device in
+    s.owner = session.public_key().to_string();
+    sign_in_and_connect(&app, &state, s).await
+}
+
+/// Reach the node at `s` (its address, else through the iroh tunnel) without a token, sign this
+/// device in with Pubky Ring, and show it. A node that asks for no token (on this computer) is
+/// shown at once.
+async fn sign_in_and_connect(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<String, String> {
+    match node::probe(&s).await {
+        Ok(info) => {
+            state.tunnel.lock().await.take();
+            connected(app, state, s, &info)?;
+            return Ok(info.name);
+        }
+        Err(node::ProbeError::NeedsSignIn) => {
+            state.tunnel.lock().await.take();
+        }
+        Err(node::ProbeError::Unreachable(msg)) => s = tunnel_for_sign_in(state, s, msg).await?,
+        Err(e) => return Err(e.into()),
+    }
+    s.token = sign_in_at_node(app, &s).await?;
+    let info = node::probe(&s).await?;
+    connected(app, state, s, &info)?;
     Ok(info.name)
+}
+
+/// The node found through the homeserver, reached over iroh when its address doesn't answer from
+/// here, before this device has signed in to it ([`through_tunnel`] for a device that has).
+async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> Result<Settings, String> {
+    if s.iroh.is_empty() {
+        return Err(msg);
+    }
+    let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
+    let tunnel = pm_remote::ClientTunnel::start(id, &pm_remote::Relays::Public)
+        .await
+        .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
+    tunnel
+        .connect()
+        .await
+        .map_err(|e| format!("{msg}, and the node did not answer remotely either: {e}"))?;
+    s.via = format!("http://{}", tunnel.local_addr());
+    match node::probe(&s).await {
+        Ok(_) | Err(node::ProbeError::NeedsSignIn) => {}
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(old) = state.tunnel.lock().await.replace(tunnel) {
+        old.close().await;
+    }
+    Ok(s)
+}
+
+/// Signs this device in to the node with Pubky Ring (the node's own sign-in, as its web page
+/// does): the QR and link go to the page as a `ring-url` event, like the homeserver step's. Waits
+/// until the owner approves, the page's Cancel, or [`ring_wait::DEADLINE`]; polls only while the
+/// app is on screen (Android cuts a backgrounded app's network).
+async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String> {
+    let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
+    let started = node::start_sign_in(s, &s.owner).await?;
+    let _ = app.emit(
+        "ring-url",
+        RingUrl {
+            qr_svg: qr_svg(&started.url),
+            url: started.url.clone(),
+        },
+    );
+    loop {
+        if let Some(why) = stop.reason() {
+            return Err(why.to_string());
+        }
+        if ring_wait::on_screen() {
+            if let Some(token) = node::poll_sign_in(s, &started).await? {
+                // Cancel pressed while that answer was on its way: not connected
+                if let Some(why) = stop.reason() {
+                    return Err(why.to_string());
+                }
+                return Ok(token);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// A Ring sign-in in progress, for [`ring_wait::approval`].
@@ -807,5 +954,27 @@ mod tests {
             assert!(is_app_page(&url::Url::parse(u).unwrap()), "{u}");
         }
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
+    }
+
+    /// The node found on the network is taken at 127.0.0.1 only when the node there has its id;
+    /// a node without an id is never taken for another.
+    #[test]
+    fn only_the_found_node_is_taken_at_this_computers_address() {
+        assert!(same_node("node-1", "node-1"));
+        assert!(!same_node("node-1", "node-2"), "another node on this computer");
+        assert!(!same_node("node-1", ""), "a node that names no id");
+        assert!(!same_node("", ""), "nothing to compare");
+    }
+
+    /// Back from offline: a refused or missing sign-in sends the app to its connect page, which
+    /// signs in again; a node that doesn't answer is tried again later.
+    #[test]
+    fn a_refused_sign_in_ends_the_offline_wait() {
+        assert!(needs_new_sign_in(node::REFUSED));
+        assert!(needs_new_sign_in(node::NEEDS_SIGN_IN));
+        assert!(!needs_new_sign_in("Can't reach http://192.168.1.10:7788"));
+        assert!(!needs_new_sign_in("The node answered 503"));
+        assert!(is_app_page(&connect_page()), "the connect page is the app's own");
+        assert!(connect_page().path().ends_with("/index.html"));
     }
 }

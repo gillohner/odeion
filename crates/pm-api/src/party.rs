@@ -23,7 +23,7 @@ use pm_zones::{Insert, Transport, ZoneId};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
-const PARTIES: &str = "party.parties";
+pub(crate) const PARTIES: &str = "party.parties";
 /// Guest tokens start with this, so the auth layer can tell them apart cheaply.
 pub const GUEST_PREFIX: &str = "pmg_";
 const MAX_GUESTS: usize = 200;

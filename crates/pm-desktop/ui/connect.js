@@ -64,7 +64,29 @@
       return;
     }
     btn.disabled = true;
-    try { await invoke('connect_manual', { nodeUrl: n.url, token: '' }); } catch (e) { fail(e); } finally { btn.disabled = false; }
+    try {
+      await invoke('connect_manual', { nodeUrl: n.url, token: '' });
+    } catch (e) {
+      // A node without a token answers only at 127.0.0.1: the node on this computer, else it
+      // needs a token (its config, [api] token) to be reached from here
+      if (/no API token/.test(String(e))) {
+        // Only the node that was found: one with another id (or none) at 127.0.0.1 is not taken
+        if (n.id) {
+          const here = new URL(n.url);
+          here.hostname = '127.0.0.1';
+          try {
+            await invoke('connect_manual', { nodeUrl: here.toString().replace(/\/$/, ''), token: '', expectId: n.id });
+            return;
+          } catch (e2) { /* not on this computer, or another node is */ }
+        }
+        $('url').value = n.url;
+        $('manual-box').open = true;
+        show('tok-hint');
+        $('tok').focus();
+        $('manual-box').scrollIntoView({ block: 'nearest' });
+      }
+      fail(e);
+    } finally { btn.disabled = false; }
   }
   $('lan-again').onclick = () => searchLan();
 
@@ -147,6 +169,9 @@
   $('other').onclick = async () => { attempt++; await invoke('forget'); connectView(); };
 
   listen('ring-url', (ev) => {
+    // Also while reconnecting: a node that refused this device's sign-in asks for a new one
+    show('saved', false);
+    show('connect');
     ringUrl = ev.payload.url;
     $('qr').innerHTML = ev.payload.qr_svg;
     $('ring').textContent = 'Waiting for Pubky Ring…';

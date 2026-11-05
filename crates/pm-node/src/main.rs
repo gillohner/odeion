@@ -6,6 +6,7 @@
 mod api_token;
 mod config;
 mod feedback;
+mod file_modes;
 mod library;
 mod outputs;
 mod play;
@@ -198,6 +199,25 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
     let db_path = cfg.db_path();
+    // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
+    // (and migrated) and before anything reads them
+    let private = file_modes::private_files(
+        &cfg.data_dir,
+        &db_path,
+        config_file.as_deref(),
+        &session_secret_path(cfg),
+    );
+    let modes = file_modes::tighten(&cfg.data_dir, &private);
+    for (path, was, now) in modes.changed {
+        tracing::info!(path = %path.display(), "made the node's own: {was:o} to {now:o}");
+    }
+    for (path, why, should) in modes.left {
+        tracing::warn!(
+            path = %path.display(),
+            "others may be able to read this and the node can't change it ({why}): run `sudo chmod {should:o} {}`",
+            path.display()
+        );
+    }
     let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
     pm_api::tidal_unofficial::set_config_client(
@@ -320,7 +340,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
     // A busy port turns Squeezebox players off; the node runs on
-    if let Err(e) = state.start_slimproto() {
+    if let Err(e) = state.start_slimproto_on(cfg.outputs.slimproto_bind) {
         let port = cfg.outputs.slimproto_port;
         if e.kind() == std::io::ErrorKind::AddrInUse {
             tracing::warn!(
