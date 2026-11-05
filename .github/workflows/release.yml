@@ -424,7 +424,10 @@ jobs:
       - id: tags
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          images: ghcr.io/${{ github.repository }}
+          # Both names, the same image: installs from before the rename pull the old one
+          images: |
+            ghcr.io/gillohner/odeion
+            ghcr.io/gillohner/pubky-music-node
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -432,7 +435,7 @@ jobs:
             type=raw,value=edge,enable=${{ needs.meta.outputs.channel == 'edge' }}
             type=sha
           # metadata-action sets the OCI title and description from the repository, and these labels
-          # override the Dockerfile's: say Odeion here (the image keeps its name)
+          # override the Dockerfile's: say Odeion here
           labels: |
             org.opencontainers.image.title=Odeion node
             org.opencontainers.image.description=Odeion node (odeiond): your music library and zones, served by your own node
@@ -465,6 +468,23 @@ jobs:
             PM_PROJECT_AUDIODB_KEY=${{ vars.PM_PROJECT_AUDIODB_KEY }}
             PM_PROJECT_ONEDRIVE_CLIENT_ID=${{ vars.PM_PROJECT_ONEDRIVE_CLIENT_ID }}
             PM_PROJECT_GOOGLE_CLIENT_ID=${{ vars.PM_PROJECT_GOOGLE_CLIENT_ID }}
+      # Releases from before the rename were published under the old name only: each version tag
+      # (and latest) the new name lacks is copied there once, by digest (nothing rebuilt), so an
+      # install pinned to one still pulls with the new default name. Tags it has are left alone.
+      - name: copy older version tags to the new name
+        if: needs.meta.outputs.publish == 'true'
+        run: |
+          tags() {
+            local tok
+            tok=$(curl -fsS "https://ghcr.io/token?scope=repository:$1:pull" | jq -r .token)
+            curl -fsS -H "Authorization: Bearer $tok" "https://ghcr.io/v2/$1/tags/list?n=1000" | jq -r '.tags[]?'
+          }
+          have=$(tags gillohner/odeion)
+          for t in $(tags gillohner/pubky-music-node | grep -E '^(latest|[0-9]+\.[0-9]+(\.[0-9]+)?)$'); do
+            if grep -qxF "$t" <<<"$have"; then continue; fi
+            echo "copying $t"
+            docker buildx imagetools create -t "ghcr.io/gillohner/odeion:$t" "ghcr.io/gillohner/pubky-music-node:$t"
+          done
 
   publish:
     needs: [meta, app, android, binaries, image]
