@@ -156,7 +156,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await route.fulfill({ response: r, json: j });
     });
     await lp.goto(BASE + '/album/lib-1'); await lp.waitForSelector('#main #iabout', { timeout: 30000 }).catch(() => {});
-    const hrefs = await lp.$$eval('#iabout a', (as) => as.map((a) => a.getAttribute('href') || ''));
+    const hrefs = await lp.$$eval('#iabout a, #idetails a', (as) => as.map((a) => a.getAttribute('href') || ''));
     const bad = hrefs.filter((h) => !/^https?:/i.test(h));
     const evil = await lp.$('#iabout a:text("evil")'); if (evil) { await evil.click({ modifiers: [] }).catch(() => {}); await sleep(300); }
     console.log('about links:', hrefs.join(' | '), '| a script link ran:', ran);

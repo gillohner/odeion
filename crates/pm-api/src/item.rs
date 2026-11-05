@@ -1095,12 +1095,9 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         None => None,
     };
     let mut about = Vec::new();
-    if let Some(y) = a.year {
-        about.push(fact("Year", y.to_string()));
-    }
-    about.push(fact("Songs", tracks.len().to_string()));
+    about.push(reference("Songs", tracks.len().to_string()));
     if let Some(t) = tracks.first() {
-        about.push(fact("Format", t.file.format.to_string()));
+        about.push(reference("Format", t.file.format.to_string()));
     }
     if let Some(m) = a.release_mbid {
         about.push(mb_fact("MusicBrainz release", "release", &m.to_string()));
@@ -1113,7 +1110,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         ));
     }
     if let Some(u) = &a.upc {
-        about.push(fact("UPC", u.to_string()));
+        about.push(reference("UPC", u.to_string()));
     }
     // Label, release date, the Wikipedia article and "Also on" by the release group
     let (more, about_pending) = match mb_match {
@@ -1124,6 +1121,12 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
     // Its links become sources like the rest: "Also on" and "Open on"
     if let Some(m) = more {
         versions.extend(m.links);
+        // The library's year when the release group brings no release date (one of the two)
+        if !m.facts.iter().any(|f| f.label == "Released") {
+            if let Some(y) = a.year {
+                about.push(fact("Year", y.to_string()));
+            }
+        }
         about.extend(m.facts);
     }
     let first_artist = tracks.first().and_then(|t| t.artists.first().cloned());
@@ -1417,13 +1420,13 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         }
         let isrcs = r.isrcs();
         if !isrcs.is_empty() {
-            about.push(fact(
+            about.push(reference(
                 "ISRC",
                 isrcs.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
             ));
         }
         if let Some(u) = r.upc() {
-            about.push(fact("UPC", u));
+            about.push(reference("UPC", u));
         }
         if let Some(d) = f.duration_secs() {
             about.push(fact("Length", format!("{}:{:02}", d / 60, d % 60)));

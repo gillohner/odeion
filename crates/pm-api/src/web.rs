@@ -63,7 +63,7 @@ fn inline_scripts(page: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Fact;
+    use crate::types::{Fact, FactKind};
 
     #[test]
     fn only_web_links_pass() {

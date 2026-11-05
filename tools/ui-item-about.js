@@ -32,7 +32,7 @@ const base = { uri: null, source: 'library', source_id: '31', plays_from: { serv
 const pages = {
   artist: { ...base, kind: 'artist', id: 'lib-31', target: { artist_id: 31 }, title: 'Calvin Russell', artist: null, album: null, year: null, songs, about: artistAbout, about_text, image_credit, albums: [{ id: 'lib-7', title: 'Crossroad', artist: 'Calvin Russell', year: 1997, image: null }] },
   album: { ...base, kind: 'album', id: 'lib-7', target: { album_id: 7 }, title: 'Crossroad', artist: { name: 'Calvin Russell', id: 'lib-31' }, album: null, year: 1997, songs, about: [ref('MusicBrainz', MBID, `https://musicbrainz.org/release-group/${MBID}`), fact('Released', '1997-03-01'), fact('Label', 'SPV'), ref('Wikipedia', WIKI, WIKI)], about_text, image_credit: null },
-  song: { ...base, kind: 'song', id: 'lib-100', target: { track_id: 100 }, title: 'Song 1', artist: { name: 'Calvin Russell', id: 'lib-31' }, album: { title: 'Crossroad', id: 'lib-7' }, year: 1997, songs: [], about: [ref('Format', 'FLAC'), ref('File', '/music/calvin/song1.flac'), ref('MusicBrainz', MBID, `https://musicbrainz.org/recording/${MBID}`), ref('Identified by', 'tags')], about_text, image_credit: null },
+  song: { ...base, kind: 'song', id: 'lib-100', target: { track_id: 100 }, title: 'Song 1', artist: { name: 'Calvin Russell', id: 'lib-31' }, album: { title: 'Crossroad', id: 'lib-7' }, year: 1997, songs: [], albums: [{ id: 'lib-7', title: 'Crossroad', artist: 'Calvin Russell', year: 1997, image: null }], about: [ref('Format', 'FLAC'), ref('File', '/music/calvin/song1.flac'), ref('MusicBrainz', MBID, `https://musicbrainz.org/recording/${MBID}`), ref('Identified by', 'tags')], about_text, image_credit: null },
   plain: { ...base, kind: 'artist', id: 'lib-32', target: { artist_id: 32 }, title: 'No Article', artist: null, album: null, year: null, songs, about: [ref('MusicBrainz', MBID, `https://musicbrainz.org/artist/${MBID}`), fact('In your library', '1 album · 8 songs')], about_text: null, image_credit: null, blurb: null },
 };
 const fixtures = {};
@@ -55,7 +55,8 @@ const RAW = new RegExp(`https?://|${MBID}|/music/calvin`);
         const q = (s) => document.querySelector(s); const top = (el) => (el ? Math.round(el.getBoundingClientRect().top + scrollY) : null);
         const sections = [...document.querySelectorAll('#main > .section, #main > details.section, #main > [id$="-slot"]')].map((s) => s.id).filter(Boolean);
         const hero = q('.hero'); const about = q('#iabout'); const songsEl = q('#isongs') || q('#ialbums'); const details = q('#idetails');
-        const aboveSongs = songsEl ? [...document.querySelectorAll('#main *')].filter((el) => el.getBoundingClientRect().top + scrollY < top(songsEl) && el.children.length === 0).map((el) => el.textContent).join(' | ') : '';
+        // (only what is drawn: a closed Details' content has no box and would count as "above")
+        const aboveSongs = songsEl ? [...document.querySelectorAll('#main *')].filter((el) => el.getClientRects().length && el.getBoundingClientRect().top + scrollY < top(songsEl) && el.children.length === 0).map((el) => el.textContent).join(' | ') : '';
         const facts = q('#iabout .facts-line'); const lib = q('#iabout .libline'); const wiki = q('#iabout .wikilink');
         return {
           sections, aboutTop: top(about), songsTop: top(songsEl), heroBottom: hero ? Math.round(hero.getBoundingClientRect().bottom + scrollY) : null, detailsTop: top(details),

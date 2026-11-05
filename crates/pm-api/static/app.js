@@ -6126,7 +6126,8 @@
           const factValue = (f) => (webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : fileFact(f));
           const aboutTopHtml = (p) => {
             const at = p.about_text;
-            const wiki = at && at.url && at.source === 'Wikipedia' && webUrl(at.url) ? ` <a class="small wikilink" href="${esc(webUrl(at.url))}" target="_blank" rel="noopener">Wikipedia</a>` : '';
+            // The text's source right after it (Wikipedia, TheAudioDB…); its licence sits in Details
+            const wiki = at && at.url && at.source && webUrl(at.url) ? ` <a class="small wikilink" href="${esc(webUrl(at.url))}" target="_blank" rel="noopener">${esc(at.source)}</a>` : '';
             const facts = p.about.filter((f) => !isRef(f) && f.label !== 'In your library');
             const lib = p.about.find((f) => f.label === 'In your library');
             return `<section class="section about-top" id="iabout"><div class="section-head"><h3>About</h3></div><p class="blurb clamp" id="iblurb"${at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(at.text)}</p><p class="blurb-foot"><button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>${wiki}</p>${facts.length ? `<p class="facts-line">${facts.map((f) => `<span class="fact" title="${esc(f.label)}">${f.label === 'Active' ? 'Active ' : ''}${esc(f.value)}</span>`).join('<span class="dot" aria-hidden="true"> · </span>')}</p>` : ''}${lib ? `<p class="muted small libline">In your library: ${esc(lib.value)}</p>` : ''}</section>`;
@@ -6277,7 +6278,15 @@
               if (isListener()) np.about = (np.about || []).filter((f) => f.label !== 'File');
               // With an article now: the top part in place and Details at the foot; else About whole, as drawn
               const sec = $('#iabout', main); const got = { ...np, about: np.about || [] };
-              if (sec) { if (got.about_text && got.about_text.text) { sec.outerHTML = aboutTopHtml(got); const old = $('#idetails', main); if (old) old.remove(); main.insertAdjacentHTML('beforeend', aboutDetailsHtml(got)); } else sec.outerHTML = aboutHtml(got); bindBlurb(); }
+              if (sec) {
+                if (got.about_text && got.about_text.text) {
+                  // The music first: the top part goes under the hero (About was at the foot while pending)
+                  sec.remove(); const old = $('#idetails', main); if (old) old.remove();
+                  const hero = $('.hero', main); if (hero) hero.insertAdjacentHTML('afterend', aboutTopHtml(got)); else main.insertAdjacentHTML('afterbegin', aboutTopHtml(got));
+                  main.insertAdjacentHTML('beforeend', aboutDetailsHtml(got));
+                } else sec.outerHTML = aboutHtml(got);
+                bindBlurb();
+              }
               const ph = np.image && !pg.image && $('.hero .art.placeholder', main);
               if (ph) ph.outerHTML = `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(np.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>`;
               Object.assign(pg, { about: np.about, blurb: np.blurb, about_text: np.about_text, image_credit: np.image_credit, image: np.image || pg.image, about_pending: false });

@@ -821,7 +821,7 @@ html[data-shell="phone"] .idbar { max-width: none; }
    without labels, the library line; the ids, links and credits in Details at the foot */
 .about-top .blurb { margin-bottom: 6px; }
 .blurb-foot { display: flex; align-items: baseline; gap: 12px; margin: 0 0 10px; }
-.facts-line .fact { white-space: nowrap; }
+.facts-line .fact { overflow-wrap: anywhere; }
 .wikilink { color: var(--muted); }
 .facts-line { color: var(--fg-2); font-size: 14px; line-height: 1.5; margin: 0 0 4px; }
 .facts-line .dot { color: var(--muted); }
