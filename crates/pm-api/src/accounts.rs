@@ -284,11 +284,6 @@ impl Who {
         }
     }
 
-    /// Whether this plays with the node's sign-ins (the owner, or a listener on the node's).
-    pub fn on_node(&self) -> bool {
-        matches!(self, Who::Owner | Who::ListenerOnNode(_))
-    }
-
     /// What a queue item records about who queued it.
     pub fn by(&self) -> Option<String> {
         match self {
@@ -665,6 +660,10 @@ const LISTENER_OWN_STATUS: &[&str] = &[
     "/sources/spotify/signin",
     "/sources/tidal/status",
     "/sources/spotify/status",
+    "/sources/tidal/session",
+    "/sources/spotify/session",
+    "/sources/tidal/unofficial",
+    "/sources/qobuz/unofficial",
 ];
 
 /// Why a listener can't sign in to their own service under [`SourcePolicy::Node`].
@@ -729,6 +728,8 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
         // they had stays; reads of their own status, plays and streams go on)
         if !under(path, LISTENER_OWN_ALWAYS)
             && !(*method == Method::GET && LISTENER_OWN_STATUS.iter().any(|p| path == *p))
+            // Signing out of their own stays possible
+            && !(*method == Method::DELETE && LISTENER_OWN_STATUS.iter().any(|p| path == *p))
             && source_policy(&s.library.lock().expect("library poisoned")) == SourcePolicy::Node
         {
             return Some(NODE_SOURCES_ONLY);
@@ -1165,76 +1166,6 @@ fn replace_paths(v: &mut serde_json::Value, paths: &[String]) -> bool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A library song's open error names its file only in its text: under the library's folders
-    /// it is cut to the file name, links are left alone (review of #177).
-    #[test]
-    fn paths_under_the_library_folders_become_file_names() {
-        let roots = vec!["/srv/music".to_string(), "C:\\Music\\".to_string()];
-        let mut v = serde_json::json!({
-            "error": "cannot open /srv/music/My Album/01 x.flac: no decoder",
-            "reason": "C:\\Music\\A\\y.flac",
-            "links": ["https://musicbrainz.org/srv/music/z", "http://nas/srv/music/a.mp3", "/srv/musical/b.flac"],
-        });
-        assert!(hide_paths_under(&mut v, &roots));
-        assert_eq!(v["error"], "cannot open 01 x.flac: no decoder");
-        assert_eq!(v["reason"], "y.flac");
-        assert_eq!(
-            v["links"],
-            serde_json::json!([
-                "https://musicbrainz.org/srv/music/z",
-                "http://nas/srv/music/a.mp3",
-                "/srv/musical/b.flac"
-            ])
-        );
-    }
-
-    #[test]
-    fn listeners_see_file_names_only() {
-        let mut v = serde_json::json!({"tracks": [
-            {"title": "A", "file": {"path": "/srv/music/Owner/A.flac", "container": "flac", "size_bytes": 1}},
-            {"title": "B", "file": {"path": "webdav://nas/share/B.mp3", "container": "mp3", "size_bytes": 2}},
-            {"title": "C", "file": {"path": "C:\\Music\\C.flac", "container": "flac", "size_bytes": 3}},
-            {"title": "D", "file": {"path": "D.flac", "container": "flac", "size_bytes": 4}},
-        ], "folder": {"path": "/srv/music"},
-           "about": [{"label": "Format", "value": "FLAC 16/44.1"}, {"label": "File", "value": "/srv/music/Owner/A.flac"}]});
-        assert!(hide_file_paths(&mut v));
-        let names: Vec<_> = v["tracks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["file"]["path"].clone())
-            .collect();
-        assert_eq!(names, ["A.flac", "B.mp3", "C.flac", "D.flac"]);
-        // The song page's File fact too; other facts stay
-        assert_eq!(v["about"][1]["value"], "A.flac");
-        assert_eq!(v["about"][0]["value"], "FLAC 16/44.1");
-        // Only library files: another object's `path` stays
-        assert_eq!(v["folder"]["path"], "/srv/music");
-        let mut plain = serde_json::json!({"file": {"path": "x.flac", "container": "flac", "size_bytes": 1}});
-        assert!(!hide_file_paths(&mut plain));
-        // A zone: queue items that are files, and its error naming one (security review
-        // 2026-10-30, low)
-        let mut zone = serde_json::json!({"id": "z", "error": "cannot open /srv/music/My Album/x.flac: broken",
-            "queue": [{"id": 1, "uri": "/srv/music/My Album/x.flac"}, {"id": 2, "uri": "C:\\Music\\y.flac"},
-                      {"id": 3, "uri": "track:4"}, {"id": 4, "uri": "https://radio.example.org/s.mp3"}]});
-        assert!(hide_file_paths(&mut zone));
-        assert_eq!(zone["error"], "cannot open x.flac: broken");
-        let uris: Vec<_> = zone["queue"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|q| q["uri"].clone())
-            .collect();
-        assert_eq!(
-            uris,
-            ["x.flac", "y.flac", "track:4", "https://radio.example.org/s.mp3"]
-        );
-    }
-}
 
 /// Whose sign-ins a person plays TIDAL, Qobuz and Spotify with (`GET/PUT /v1/me/sources`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1315,4 +1246,75 @@ pub(crate) async fn set_my_sources(
     }
     who.put(&lib, SOURCE_USE_KEY, Some(&b.choice))?;
     Ok(Json(my_sources_view(&lib, &who)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A library song's open error names its file only in its text: under the library's folders
+    /// it is cut to the file name, links are left alone (review of #177).
+    #[test]
+    fn paths_under_the_library_folders_become_file_names() {
+        let roots = vec!["/srv/music".to_string(), "C:\\Music\\".to_string()];
+        let mut v = serde_json::json!({
+            "error": "cannot open /srv/music/My Album/01 x.flac: no decoder",
+            "reason": "C:\\Music\\A\\y.flac",
+            "links": ["https://musicbrainz.org/srv/music/z", "http://nas/srv/music/a.mp3", "/srv/musical/b.flac"],
+        });
+        assert!(hide_paths_under(&mut v, &roots));
+        assert_eq!(v["error"], "cannot open 01 x.flac: no decoder");
+        assert_eq!(v["reason"], "y.flac");
+        assert_eq!(
+            v["links"],
+            serde_json::json!([
+                "https://musicbrainz.org/srv/music/z",
+                "http://nas/srv/music/a.mp3",
+                "/srv/musical/b.flac"
+            ])
+        );
+    }
+
+    #[test]
+    fn listeners_see_file_names_only() {
+        let mut v = serde_json::json!({"tracks": [
+            {"title": "A", "file": {"path": "/srv/music/Owner/A.flac", "container": "flac", "size_bytes": 1}},
+            {"title": "B", "file": {"path": "webdav://nas/share/B.mp3", "container": "mp3", "size_bytes": 2}},
+            {"title": "C", "file": {"path": "C:\\Music\\C.flac", "container": "flac", "size_bytes": 3}},
+            {"title": "D", "file": {"path": "D.flac", "container": "flac", "size_bytes": 4}},
+        ], "folder": {"path": "/srv/music"},
+           "about": [{"label": "Format", "value": "FLAC 16/44.1"}, {"label": "File", "value": "/srv/music/Owner/A.flac"}]});
+        assert!(hide_file_paths(&mut v));
+        let names: Vec<_> = v["tracks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["file"]["path"].clone())
+            .collect();
+        assert_eq!(names, ["A.flac", "B.mp3", "C.flac", "D.flac"]);
+        // The song page's File fact too; other facts stay
+        assert_eq!(v["about"][1]["value"], "A.flac");
+        assert_eq!(v["about"][0]["value"], "FLAC 16/44.1");
+        // Only library files: another object's `path` stays
+        assert_eq!(v["folder"]["path"], "/srv/music");
+        let mut plain = serde_json::json!({"file": {"path": "x.flac", "container": "flac", "size_bytes": 1}});
+        assert!(!hide_file_paths(&mut plain));
+        // A zone: queue items that are files, and its error naming one (security review
+        // 2026-10-30, low)
+        let mut zone = serde_json::json!({"id": "z", "error": "cannot open /srv/music/My Album/x.flac: broken",
+            "queue": [{"id": 1, "uri": "/srv/music/My Album/x.flac"}, {"id": 2, "uri": "C:\\Music\\y.flac"},
+                      {"id": 3, "uri": "track:4"}, {"id": 4, "uri": "https://radio.example.org/s.mp3"}]});
+        assert!(hide_file_paths(&mut zone));
+        assert_eq!(zone["error"], "cannot open x.flac: broken");
+        let uris: Vec<_> = zone["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| q["uri"].clone())
+            .collect();
+        assert_eq!(
+            uris,
+            ["x.flac", "y.flac", "track:4", "https://radio.example.org/s.mp3"]
+        );
+    }
 }
