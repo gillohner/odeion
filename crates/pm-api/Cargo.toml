@@ -37,8 +37,9 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 blake3 = { workspace = true }
-# Usage insights keep their own small file (usage.rs); tests also use it for a library write
-# made to fail (a trigger), for the identify job's error paths
+# Usage insights (usage.rs) and the problem-report inbox (feedback.rs) keep their own small
+# files; tests also use it for a library write made to fail (a trigger), for the identify job's
+# error paths
 rusqlite = { workspace = true }
 quick-xml = "0.42" # podcast feeds, DASH manifests (TIDAL full tracks)
 md-5 = "0.10"
@@ -54,8 +55,6 @@ time = { workspace = true }
 url = { workspace = true }
 notify = "8"
 futures-util = { workspace = true }
-# The private problem-report inbox, its own file beside the library (feedback.rs)
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
