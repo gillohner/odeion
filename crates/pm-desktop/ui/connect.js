@@ -150,8 +150,14 @@
     ringUrl = ev.payload.url;
     $('qr').innerHTML = ev.payload.qr_svg;
     $('ring').textContent = 'Waiting for Pubky Ring…';
+    $('ring-cancel').disabled = false;
+    $('ring-cancel').textContent = 'Cancel';
     show('ring-out');
   });
+
+  // While the sign-in waits for the app to be on screen and online (ring_wait.rs).
+  // Only while a sign-in runs (the button is disabled then): a late event must not relabel it.
+  listen('ring-state', (ev) => { if ($('ring').disabled) $('ring').textContent = String(ev.payload); });
 
   $('ring').onclick = async () => {
     clearErr();
@@ -160,7 +166,8 @@
     try {
       await invoke('ring_connect');
     } catch (e) {
-      if (!askMoved(e)) fail(e);
+      // Cancel (ring_wait::CANCELLED) is not an error.
+      if (String(e) !== 'Sign-in cancelled' && !askMoved(e)) fail(e);
       show('ring-out', false);
     } finally {
       $('ring').disabled = false;
@@ -168,6 +175,13 @@
     }
   };
   $('ring-open').onclick = () => { if (ringUrl) invoke('open_ring', { url: ringUrl }).catch(fail); };
+  // Stops the running sign-in; ring_connect then ends with 'Sign-in cancelled'.
+  // An approval already being finished is not cut off: the button says so until the sign-in ends.
+  $('ring-cancel').onclick = () => {
+    $('ring-cancel').disabled = true;
+    $('ring-cancel').textContent = 'Cancelling…';
+    invoke('ring_cancel').catch(fail);
+  };
 
   $('manual').onsubmit = async (ev) => {
     ev.preventDefault();

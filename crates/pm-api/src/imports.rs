@@ -140,8 +140,66 @@ fn tidal_paths(home: &Path) -> Vec<Place> {
         .collect()
 }
 
+/// A client id, kept as its SHA-256 only: enough to tell two apart, and nothing to show or log.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ClientTag([u8; 32]);
+
+impl ClientTag {
+    pub(crate) fn of(id: &str) -> Self {
+        use sha2::Digest;
+        ClientTag(sha2::Sha256::digest(id.trim().as_bytes()).into())
+    }
+}
+
+impl std::fmt::Debug for ClientTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClientTag(..)")
+    }
+}
+
+/// Which TIDAL clients this node has: an imported session renews here only with the kind of
+/// client that made it (python-tidal's browser sessions with this build's browser client, the
+/// others with a device client), and never when the node has none of that kind.
+///
+/// A browser (PKCE) session's refresh token renews only with the client that made it. The
+/// browser client a release build carries is python-tidal's PKCE client, the one python-tidal
+/// (tidal-dl-ng, beets) signs in with, so its browser sessions are taken as renewing with it.
+/// python-tidal's session file names no client: that is an assumption about the file, not
+/// checked. When a file does name its client, it renews here only if that is this build's.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Renewers {
+    pub device: bool,
+    /// This build's browser client, when it carries one.
+    pub browser: Option<ClientTag>,
+}
+
+impl Renewers {
+    pub(crate) fn of(s: &crate::state::NodeState) -> Self {
+        let device =
+            crate::tidal_unofficial::client_of(&s.library.lock().expect("library poisoned")).is_some();
+        Renewers {
+            device,
+            browser: crate::tidal_unofficial::browser_client(s).map(|c| ClientTag::of(&c.id)),
+        }
+    }
+
+    /// A browser session whose file names another client than this build's browser client.
+    fn other_browser_client(&self, session: &Session) -> bool {
+        !session.client.is_device()
+            && matches!((self.browser, session.named_client), (Some(ours), Some(theirs)) if ours != theirs)
+    }
+
+    fn renews(&self, session: &Session) -> bool {
+        if session.client.is_device() {
+            self.device
+        } else {
+            self.browser.is_some() && !self.other_browser_client(session)
+        }
+    }
+}
+
 /// Every TIDAL sign-in in the known places, usable or not (the chooser says why not).
-pub(crate) fn scan_tidal() -> Vec<Import> {
+pub(crate) fn scan_tidal(clients: Renewers) -> Vec<Import> {
     let Some(home) = home() else {
         return Vec::new();
     };
@@ -152,7 +210,7 @@ pub(crate) fn scan_tidal() -> Vec<Import> {
                 .into_iter()
                 .find_map(|(path, shown)| Some((std::fs::read_to_string(&path).ok()?, shown)))?;
             Some(match parse_tidal(id, &text) {
-                Ok(session) => import_of(id, app, &shown, session),
+                Ok(session) => import_of(id, app, &shown, session, clients),
                 Err(e) => Import {
                     found: Found {
                         id: id.into(),
@@ -173,19 +231,22 @@ pub(crate) fn scan_tidal() -> Vec<Import> {
 }
 
 /// A pasted token file or bare token, as `import {text}` takes it.
-pub(crate) fn pasted_tidal(text: &str) -> Result<Import, String> {
+pub(crate) fn pasted_tidal(text: &str, clients: Renewers) -> Result<Import, String> {
     let session = parse_tidal("pasted", text)?;
-    let imp = import_of("pasted", "Pasted token", "pasted here", session);
+    let imp = import_of("pasted", "Pasted token", "pasted here", session, clients);
     match &imp.found.reason {
         Some(why) => Err(why.clone()),
         None => Ok(imp),
     }
 }
 
-pub(crate) fn import_of(id: &str, app: &str, place: &str, session: Session) -> Import {
-    let renews = session.refresh_token.as_deref().is_some_and(|r| !r.is_empty())
-        && session.from.as_deref() != Some("tidal-dl")
-        && session.from.as_deref() != Some("streamrip");
+pub(crate) fn import_of(id: &str, app: &str, place: &str, session: Session, clients: Renewers) -> Import {
+    let has_refresh = session.refresh_token.as_deref().is_some_and(|r| !r.is_empty());
+    // tidal-dl's and streamrip's refresh tokens belong to those apps' own clients
+    let apps_own_client = matches!(session.from.as_deref(), Some("tidal-dl" | "streamrip"));
+    // A device session's refresh token needs a device client here, a browser sign-in's this
+    // build's browser client
+    let renews = has_refresh && !apps_own_client && clients.renews(&session);
     let expired = session.expires_at > 0 && session.expires_at <= now();
     let reason = if session.access_token.trim().is_empty() {
         Some("no access token in it".to_string())
@@ -193,10 +254,16 @@ pub(crate) fn import_of(id: &str, app: &str, place: &str, session: Session) -> I
         Some(format!(
             "expired on {}{}",
             day(session.expires_at),
-            if session.refresh_token.is_some() {
-                ", and its refresh token belongs to that app's client, so this node cannot renew it"
-            } else {
+            if !has_refresh {
                 ", with no refresh token"
+            } else if apps_own_client {
+                ", and its refresh token belongs to that app's client, so this node cannot renew it"
+            } else if clients.other_browser_client(&session) {
+                ", and it was made with another client than this build's Sign in with TIDAL, so this node cannot renew it"
+            } else if session.client.is_device() {
+                ", and this node has no device client to renew it"
+            } else {
+                ", and this build has no client for Sign in with TIDAL to renew it"
             }
         ))
     } else {
@@ -312,6 +379,19 @@ fn python_tidal(v: &Value) -> Option<Session> {
         country: String::new(),
         session_id: field("session_id").and_then(Value::as_str).map(str::to_string),
         from: None,
+        // A python-tidal browser (PKCE) sign-in is renewed with that client, not the device one
+        client: if field("is_pkce").and_then(Value::as_bool) == Some(true) {
+            crate::tidal_unofficial::ClientKind::Pkce
+        } else {
+            crate::tidal_unofficial::ClientKind::Device
+        },
+        // python-tidal's own file names no client; one that does (`client_id`, as `{"data": …}`
+        // or a plain string) is compared with this build's at the import
+        named_client: field("client_id")
+            .or_else(|| v.get("client_id"))
+            .and_then(Value::as_str)
+            .filter(|c| !c.trim().is_empty())
+            .map(ClientTag::of),
     })
 }
 
@@ -332,6 +412,8 @@ fn tidal_dl(v: &Value) -> Option<Session> {
         country: v["countryCode"].as_str().unwrap_or_default().to_string(),
         session_id: None,
         from: None,
+        client: Default::default(),
+        named_client: None,
     })
 }
 
@@ -369,6 +451,8 @@ fn streamrip(text: &str) -> Option<Session> {
         country: got.get("country_code").cloned().unwrap_or_default(),
         session_id: None,
         from: None,
+        client: Default::default(),
+        named_client: None,
     })
 }
 
@@ -387,6 +471,8 @@ fn bare_token(text: &str) -> Option<Session> {
         country: String::new(),
         session_id: None,
         from: None,
+        client: Default::default(),
+        named_client: None,
     })
 }
 
@@ -917,6 +1003,12 @@ pub(crate) fn check_cookies(text: &str) -> Result<usize, String> {
 mod tests {
     use super::*;
 
+    /// A node with both kinds of TIDAL client.
+    const BOTH: Renewers = Renewers {
+        device: true,
+        browser: Some(ClientTag([7; 32])),
+    };
+
     #[cfg(unix)]
     #[test]
     fn replacing_a_private_copy_preserves_an_original_behind_a_symlink() {
@@ -962,7 +1054,7 @@ mod tests {
         assert_eq!(s.session_id.as_deref(), Some("s-1"));
         assert_eq!(s.expires_at, iso_to_unix("2096-10-25T12:34:56").unwrap());
         assert_eq!(s.from.as_deref(), Some("tidal-dl-ng"));
-        let f = import_of("tidal-dl-ng", "tidal-dl-ng", "~/x", s).found;
+        let f = import_of("tidal-dl-ng", "tidal-dl-ng", "~/x", s, BOTH).found;
         assert!(f.usable && f.renews, "{f:?}");
     }
 
@@ -977,7 +1069,7 @@ mod tests {
         let s = parse_tidal("tidal-dl", &b64).unwrap();
         assert_eq!(s.user_id.as_deref(), Some("7"));
         assert_eq!(s.country, "US");
-        let f = import_of("tidal-dl", "tidal-dl", "~/.tidal-dl.token.json", s).found;
+        let f = import_of("tidal-dl", "tidal-dl", "~/.tidal-dl.token.json", s, BOTH).found;
         assert!(!f.usable && !f.renews, "{f:?}");
         assert!(
             f.reason.as_deref().unwrap().contains("expired on 1970-01-01")
@@ -998,7 +1090,7 @@ mod tests {
         assert_eq!(s.user_id.as_deref(), Some("99"));
         assert_eq!(s.country, "NL");
         assert_eq!(s.expires_at, 4_000_000_000);
-        let f = import_of("streamrip", "streamrip", "~/x", s).found;
+        let f = import_of("streamrip", "streamrip", "~/x", s, BOTH).found;
         assert!(f.usable && !f.renews, "{f:?}");
         let s = parse_tidal("pasted", &format!("{}\n", jwt(5, "GB", 4_000_000_000))).unwrap();
         assert_eq!(s.user_id.as_deref(), Some("5"));
@@ -1096,5 +1188,146 @@ mod tests {
         assert!(check_cookies(".example.com\tTRUE\t/\tFALSE\t0\tx\ty\n").is_err());
         assert!(check_cookies("not\tenough\tcolumns\n").is_err());
         assert!(check_cookies("").is_err());
+    }
+
+    /// An imported session says it renews only when the node has the kind of client that made
+    /// it: a device client for a device session, this build's browser client for python-tidal's
+    /// browser (PKCE) one; an expired one without it isn't usable.
+    #[test]
+    fn imports_renew_only_with_the_client_of_their_kind() {
+        let file = |pkce: bool, exp: i64| {
+            format!(
+                r#"{{"token_type": {{"data": "Bearer"}}, "access_token": {{"data": "{}"}}, "refresh_token": {{"data": "r-1"}}, "is_pkce": {{"data": {pkce}}}, "expiry_time": {{"data": "{}"}}}}"#,
+                jwt(4242, "DE", exp),
+                if exp > 2_000_000_000 {
+                    "2096-10-25T12:34:56"
+                } else {
+                    "2001-01-01T00:00:00"
+                }
+            )
+        };
+        let found = |pkce: bool, exp: i64, clients: Renewers| {
+            import_of(
+                "tidal-dl-ng",
+                "tidal-dl-ng",
+                "~/x",
+                parse_tidal("tidal-dl-ng", &file(pkce, exp)).unwrap(),
+                clients,
+            )
+            .found
+        };
+        let device_only = Renewers {
+            device: true,
+            browser: None,
+        };
+        let browser_only = Renewers {
+            device: false,
+            browser: Some(ClientTag::of("fake-browser-client")),
+        };
+        let neither = Renewers::default();
+        let later = 4_000_000_000;
+        let past = 978_307_200;
+        // A device session: renews with a device client, not with only a browser client
+        assert!(found(false, later, device_only).renews);
+        let f = found(false, later, browser_only);
+        assert!(f.usable && !f.renews, "{f:?}");
+        let f = found(false, past, browser_only);
+        assert!(!f.usable && !f.renews, "{f:?}");
+        assert!(f.reason.as_deref().unwrap().contains("no device client"), "{f:?}");
+        // A browser session: renews with this build's browser client only
+        assert!(found(true, later, browser_only).renews);
+        let f = found(true, later, device_only);
+        assert!(f.usable && !f.renews, "{f:?}");
+        let f = found(true, past, device_only);
+        assert!(!f.usable && !f.renews, "{f:?}");
+        assert!(
+            f.reason
+                .as_deref()
+                .unwrap()
+                .contains("no client for Sign in with TIDAL"),
+            "{f:?}"
+        );
+        // Neither: nothing renews
+        assert!(!found(false, later, neither).renews && !found(true, later, neither).renews);
+        // A pasted one the same way
+        let pasted = format!("{}\nrefresh-1", jwt(5, "GB", later));
+        assert!(pasted_tidal(&pasted, device_only).unwrap().found.renews);
+        assert!(!pasted_tidal(&pasted, browser_only).unwrap().found.renews);
+    }
+
+    /// A browser session's file that names its client renews only with that client: this
+    /// build's browser client, not another one (fake ids).
+    #[test]
+    fn a_browser_import_naming_another_client_does_not_renew() {
+        let file = |client: Option<&str>, exp: i64, expiry: &str| {
+            let named = client
+                .map(|c| format!(r#", "client_id": {{"data": "{c}"}}"#))
+                .unwrap_or_default();
+            format!(
+                r#"{{"token_type": {{"data": "Bearer"}}, "access_token": {{"data": "{}"}}, "refresh_token": {{"data": "r-1"}}, "is_pkce": {{"data": true}}, "expiry_time": {{"data": "{expiry}"}}{named}}}"#,
+                jwt(4242, "DE", exp),
+            )
+        };
+        let ours = Renewers {
+            device: true,
+            browser: Some(ClientTag::of("fake-browser-client-ours")),
+        };
+        let found = |client: Option<&str>, later: bool| {
+            let text = if later {
+                file(client, 4_000_000_000, "2096-10-25T12:34:56")
+            } else {
+                file(client, 978_307_200, "2001-01-01T00:00:00")
+            };
+            let session = parse_tidal("tidal-dl-ng", &text).unwrap();
+            import_of("tidal-dl-ng", "tidal-dl-ng", "~/x", session, ours).found
+        };
+        // python-tidal's own file names none: taken as made with this build's client
+        assert!(found(None, true).renews);
+        // Naming this build's client (spaces around it don't matter): renews
+        assert!(found(Some("fake-browser-client-ours"), true).renews);
+        assert!(found(Some(" fake-browser-client-ours "), true).renews);
+        // Naming another client: usable while it lasts, never renewed, and refused once expired
+        let f = found(Some("fake-browser-client-theirs"), true);
+        assert!(f.usable && !f.renews, "{f:?}");
+        let f = found(Some("fake-browser-client-theirs"), false);
+        assert!(!f.usable && !f.renews, "{f:?}");
+        assert!(
+            f.reason
+                .as_deref()
+                .unwrap()
+                .contains("another client than this build's"),
+            "{f:?}"
+        );
+        // A plain string is read the same way; the device client plays no part for a browser one
+        let text = file(None, 4_000_000_000, "2096-10-25T12:34:56").replace(
+            r#""is_pkce""#,
+            r#""client_id": "fake-browser-client-theirs", "is_pkce""#,
+        );
+        let session = parse_tidal("tidal-dl-ng", &text).unwrap();
+        assert!(session.named_client.is_some());
+        assert!(
+            !import_of("tidal-dl-ng", "tidal-dl-ng", "~/x", session, ours)
+                .found
+                .renews
+        );
+        // The tag shows no part of the id, and the session it came with doesn't keep it
+        assert_eq!(
+            format!("{:?}", ClientTag::of("fake-browser-client-theirs")),
+            "ClientTag(..)"
+        );
+        let session = parse_tidal(
+            "tidal-dl-ng",
+            &file(
+                Some("fake-browser-client-theirs"),
+                4_000_000_000,
+                "2096-10-25T12:34:56",
+            ),
+        )
+        .unwrap();
+        let kept = serde_json::to_string(&session).unwrap();
+        assert!(
+            !kept.contains("fake-browser-client") && !kept.contains("named_client"),
+            "{kept}"
+        );
     }
 }

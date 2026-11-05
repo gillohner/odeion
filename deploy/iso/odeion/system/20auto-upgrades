@@ -1,0 +1,3 @@
+// Odeion: security updates install by themselves (Debian's default origins: security only)
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";

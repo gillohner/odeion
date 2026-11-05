@@ -15,6 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static TLS_READY: AtomicBool = AtomicBool::new(false);
 
+#[cfg(feature = "ring-transport-probe")]
+#[path = "ring_probe.rs"]
+mod ring_probe;
+
 /// Waits (at most 5 s) for [`init_tls`] to have run on the UI thread, so the first handshake
 /// never finds the verifier missing (it panics then).
 pub async fn tls_ready() {
@@ -43,6 +47,8 @@ pub fn init_tls(window: &tauri::WebviewWindow) {
                 tracing::error!("TLS platform verifier failed to initialise; Pubky Ring sign-in will fail");
             }
             TLS_READY.store(true, Ordering::Release);
+            #[cfg(feature = "ring-transport-probe")]
+            tauri::async_runtime::spawn(ring_probe::run());
         });
     });
     if let Err(e) = scheduled {
