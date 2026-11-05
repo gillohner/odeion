@@ -388,7 +388,7 @@ struct Phone {
     last_close: Option<std::time::Instant>,
     /// A DAC went while a sink was open for it or moments after one closed, and nothing has
     /// reported it yet: the next open pauses instead of opening the default route.
-    gone_unseen: Option<String>,
+    gone_unseen: Option<(String, std::time::Instant)>,
 }
 
 /// [`gone_count`] without the lock, for the audio callback.
@@ -405,7 +405,7 @@ pub fn on_change(f: impl Fn() + Send + 'static) {
     *ON_CHANGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(f));
 }
 
-fn notify_change() {
+pub(crate) fn notify_change() {
     if let Some(f) = ON_CHANGE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         f();
     }
@@ -488,7 +488,20 @@ pub fn may_reach_now(gone_at: u64) -> bool {
 /// An unplug no sink has reported yet (see [`DacUse`]): taken once, by the next open, which
 /// pauses the zone with it instead of opening the default route.
 pub fn take_gone_unseen() -> Option<String> {
+    // Only as long as it can be the boundary it was kept for: a Play hours later is the listener's
     with_phone(|p| p.gone_unseen.take())
+        .filter(|(_, at)| at.elapsed() < UNSEEN_WINDOW)
+        .map(|(why, _)| why)
+}
+
+/// Make the kept unplug `by` older (tests).
+#[cfg(test)]
+pub(crate) fn age_gone_unseen(by: std::time::Duration) {
+    with_phone(|p| {
+        if let Some((_, at)) = p.gone_unseen.as_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
+    });
 }
 
 /// A sink or an open reported the DAC gone: the zone knows (the next open is the listener's).
@@ -643,9 +656,23 @@ pub fn keep_settings_in(path: std::path::PathBuf) {
     });
 }
 
-/// What an open got (the bit-perfect player or the shared path records it).
+/// What an open got (the bit-perfect player or the shared path records it). When the mode or the
+/// confirmation changes (a sink replaced internally, bit-perfect falling back to shared), the
+/// node is told at once ([`on_change`]): the UI never keeps claiming what no longer plays.
 pub fn record_open(last: LastOpen) {
-    with_phone(|p| p.last = Some(last));
+    let changed = with_phone(|p| {
+        let was = p
+            .last
+            .as_ref()
+            .filter(|l| l.dac_id == last.dac_id)
+            .map(|l| (l.mode, l.confirmed));
+        let changed = was.is_some_and(|w| w != (last.mode, last.confirmed));
+        p.last = Some(last);
+        changed
+    });
+    if changed {
+        notify_change();
+    }
 }
 
 /// The open on `dac_id` in `format` is no longer what was confirmed (Android's mixer for the DAC
@@ -692,7 +719,7 @@ fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
             p.gone_why = why.unwrap_or_else(|| format!("{name} was unplugged"));
             let armed = p.sinks_open > 0 || p.last_close.is_some_and(|t| t.elapsed() < UNSEEN_WINDOW);
             if armed {
-                p.gone_unseen = Some(p.gone_why.clone());
+                p.gone_unseen = Some((p.gone_why.clone(), std::time::Instant::now()));
             }
         }
         if other {

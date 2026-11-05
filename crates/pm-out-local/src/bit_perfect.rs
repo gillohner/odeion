@@ -1498,6 +1498,8 @@ mod tests {
         };
         let mut sink = open(OutputId::new("cpal", "phone"), &d, c, w, fmt).unwrap();
         assert!(usb_dac::current().unwrap().confirmed);
+        // (Opening bit-perfect after shared was news too: counted from here)
+        told.store(0, std::sync::atomic::Ordering::SeqCst);
         *player.unconfirmed.lock().unwrap() = Some("Android's mixer for the DAC was changed".into());
         sink.write(&block).unwrap();
         let v = usb_dac::current().unwrap();
@@ -1903,5 +1905,65 @@ mod tests {
             drop(sink);
             usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
         }
+    }
+
+    /// Codex H3 (round 4): confirmed bit-perfect, then the phone falls back to shared on its own
+    /// (paused, the volume down, the next write opens afresh): the node is told at once, and the
+    /// device says shared, not bit-perfect.
+    #[test]
+    fn falling_back_to_shared_tells_the_node() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+        let told = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let t = told.clone();
+        usb_dac::on_change(move || {
+            t.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        let PhoneOpen::BitPerfect(mut sink) = open_phone(OutputId::new("cpal", "phone"), fmt) else {
+            panic!("bit-perfect at 100%")
+        };
+        assert!(usb_dac::current().unwrap().confirmed);
+        let before = told.load(std::sync::atomic::Ordering::SeqCst);
+        sink.flush().unwrap();
+        *player.volume.lock().unwrap() = Some(40);
+        assert!(sink.reopen_now());
+        drop(sink);
+        assert!(matches!(
+            open_phone(OutputId::new("cpal", "phone"), fmt),
+            PhoneOpen::Shared { any_rate: true, .. }
+        ));
+        assert!(
+            told.load(std::sync::atomic::Ordering::SeqCst) > before,
+            "the node hears of it"
+        );
+        let d = usb_dac::current().unwrap();
+        assert_eq!((d.mode, d.confirmed), (DeviceMode::Shared, false));
+        assert!(d.note.unwrap_or_default().contains("40%"));
+        usb_dac::on_change(|| {});
+    }
+
+    /// Claude L3 (round 4): an unplug kept for the next open counts only as long as it can be a
+    /// song boundary; a Play long after is the listener's and opens the phone's own output.
+    #[test]
+    fn an_old_unplug_does_not_pause_a_later_play() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        drop(open_phone(OutputId::new("cpal", "phone"), fmt));
+        usb_dac::set_dac(None);
+        usb_dac::age_gone_unseen(std::time::Duration::from_secs(3600));
+        assert!(matches!(
+            open_phone(OutputId::new("cpal", "phone"), fmt),
+            PhoneOpen::Shared { opened_for: None, .. }
+        ));
     }
 }

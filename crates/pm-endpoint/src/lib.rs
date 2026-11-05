@@ -513,8 +513,10 @@ impl Endpoint {
                     // as it is now (shared), the old one closed first
                     if sink.reopen_now() {
                         before += sink.frames_written();
-                        let _ = sink.flush();
-                        sink = Box::new(Closed(format));
+                        // Its device gone meanwhile: said (the zone pauses), never replaced by
+                        // another device
+                        sink.flush().map_err(|e| StreamError::Remote(e.to_string()))?;
+                        drop(std::mem::replace(&mut sink, Box::new(Closed(format))));
                         sink = block_on(out.open(format)).map_err(|e| StreamError::Remote(e.to_string()))?;
                     }
                     sink.write(&block)
@@ -524,6 +526,7 @@ impl Endpoint {
                         &Frame::Ack {
                             level: sink.buffer_level(),
                             frames_written: before + sink.frames_written(),
+                            reopen: sink.reopen_at_track(),
                         },
                     )?;
                 }
