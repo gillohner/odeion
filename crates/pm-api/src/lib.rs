@@ -112,6 +112,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod usage;
 pub mod vault;
 pub mod vault_cache;
 pub mod watch;
@@ -226,6 +227,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/node/apps/{id}", put(apps::put))
         .route("/node/settings", get(node_settings).put(update_node_settings))
         .route("/node/token", post(access_token::replace))
+        // Usage insights, the owner's side (usage.rs; listeners are refused under /node too)
+        .route("/node/usage", get(usage::status).put(usage::set_gate))
+        .route("/node/usage/clear", post(usage::clear_all))
+        .route("/node/usage/summary", get(usage::summary))
+        .route("/node/usage/export", get(usage::export))
         .route("/node/settings/backup", post(settings_backup_now))
         .route("/node/settings/restore", post(settings_restore_now))
         .route("/outputs", get(outputs))
@@ -745,6 +751,14 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/me/homeserver/connect", post(personal::connect_start))
         .route("/me/homeserver/connect/poll", get(personal::connect_poll))
+        // Usage insights, each person's own side (usage.rs: owner and listeners, never guests or
+        // a node without a token; the handlers read bodies themselves, within their own limits)
+        .route("/usage/me", get(usage::me).put(usage::choose))
+        .route("/usage/me/notice", post(usage::notice))
+        .route("/usage/me/clear", post(usage::clear_mine))
+        .route("/usage/sessions", post(usage::open))
+        .route("/usage/sessions/close", post(usage::close))
+        .route("/usage/events", post(usage::ingest))
         .route("/auth/pubky/renewal", post(login_renewal))
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))

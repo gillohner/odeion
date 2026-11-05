@@ -321,7 +321,8 @@ fn load_tokens(s: &NodeState) -> Vec<PersonToken> {
 pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
     let key = key.trim_start_matches("pubky").to_string();
     let token = format!("pml_{}", crate::tidal::random_urlsafe(32));
-    update(s, TOKENS, |all| {
+    let mut evicted = false;
+    let done = update(s, TOKENS, |all| {
         // A person signing in again on another device keeps their other sessions; at most 10
         let mine: Vec<usize> = all
             .iter()
@@ -331,13 +332,20 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
             .collect();
         if mine.len() >= 10 {
             all.remove(mine[0]);
+            evicted = true;
         }
         all.push(PersonToken {
             hash: hash(&token),
-            key,
+            key: key.clone(),
             created_at: now(),
         });
-    })?;
+    });
+    // Their oldest session ended: a request let in with it changes no usage insights (usage.rs),
+    // also when the write failed after
+    if evicted {
+        s.usage.revoke_listener(&key);
+    }
+    done?;
     Ok(token)
 }
 
@@ -347,6 +355,7 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
     let key = key.trim_start_matches("pubky").to_string();
     let lib = s.library.lock().expect("library poisoned");
+    let mut evicted = false;
     let made = update_in(&lib, OWNER_SESSIONS, |all| {
         // Still the node's identity, checked under the same hold as the cleanup when it takes on
         // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
@@ -356,6 +365,7 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
         if current {
             if all.len() >= 20 {
                 all.remove(0);
+                evicted = true;
             }
             all.push(PersonToken {
                 hash: hash(&token),
@@ -364,7 +374,12 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
             });
         }
         current
-    })?;
+    });
+    // The oldest session ended: its usage insights end too, also when a write failed after
+    if evicted {
+        s.usage.revoke_owner();
+    }
+    let made = made?;
     if made {
         lib.set_setting(OWNER_SESSIONS_TOKEN, &token_mark(s))?;
     }
@@ -395,18 +410,34 @@ fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
 /// browser sessions of any other identity end, so none can come back later.
 pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
     let owner = owner.trim_start_matches("pubky");
-    update(s, OWNER_SESSIONS, |all| all.retain(|t| t.key == owner))
+    let mut ended = false;
+    let done = update(s, OWNER_SESSIONS, |all| {
+        let before = all.len();
+        all.retain(|t| t.key == owner);
+        ended = all.len() < before;
+    });
+    if ended {
+        s.usage.revoke_owner();
+    }
+    done
 }
 
 /// Ends one owner's browser session (Log out); whether it was open. Also while the node has no
 /// identity loaded, when the session is otherwise refused: Log out must still work then.
 pub fn end_owner_session(s: &NodeState, token: &str) -> Result<bool, ApiError> {
     let h = hash(token);
-    update(s, OWNER_SESSIONS, |all| {
+    let mut ended = false;
+    let done = update(s, OWNER_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.hash != h);
-        all.len() < before
-    })
+        ended = all.len() < before;
+        ended
+    });
+    // Its usage insights end too, and a request let in with it changes nothing (usage.rs)
+    if ended {
+        s.usage.revoke_owner();
+    }
+    done
 }
 
 /// At start: the API token differs from the one the owner's browser sessions were made under (it
@@ -427,12 +458,18 @@ pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
     if was.as_deref() != Some(mark.as_str()) {
         lib.set_setting(OWNER_SESSIONS_TOKEN, &mark)?;
     }
+    drop(lib);
+    if ended {
+        s.usage.revoke_owner();
+    }
     Ok(ended)
 }
 
 /// Ends every browser session of the owner (a new API token: the answer to a leak).
 pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
-    update(s, OWNER_SESSIONS, Vec::clear)
+    let done = update(s, OWNER_SESSIONS, Vec::clear);
+    s.usage.revoke_owner();
+    done
 }
 
 /// Whose token this is, when it is a listener's that still has music access.
@@ -521,6 +558,8 @@ const LISTENER_READS: &[&str] = &[
 /// acts on the caller's own account, reads included; the apps and clients behind them stay the
 /// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
 const LISTENER_OWN: &[&str] = &[
+    // Usage insights: their own choice, aliases and events (usage.rs checks the person itself)
+    "/usage",
     "/play-order",
     "/sources/tidal/signin",
     "/sources/qobuz/signin",
@@ -712,7 +751,11 @@ pub(crate) async fn sign_out(
     match c.role {
         Role::Listener => {
             let h = hash(&token);
-            update(&s, TOKENS, |all| all.retain(|t| t.hash != h))?;
+            let done = update(&s, TOKENS, |all| all.retain(|t| t.hash != h));
+            if let Some(key) = &c.key {
+                s.usage.revoke_listener(key);
+            }
+            done?;
         }
         Role::Owner if token.starts_with(OWNER_PREFIX) => {
             end_owner_session(&s, &token)?;
@@ -754,14 +797,20 @@ pub fn sessions_of(s: &NodeState, key: &str) -> usize {
 
 /// Forgets every token of `key` (People › remove).
 pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
-    update(s, TOKENS, |all| all.retain(|t| t.key != key))
+    let done = update(s, TOKENS, |all| all.retain(|t| t.key != key));
+    s.usage.revoke_listener(key);
+    done
 }
 
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
 /// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
-    sign_out_everywhere(s, key)?;
+    let signed_out = sign_out_everywhere(s, key);
+    // Their usage choice and what is still linked to them go (usage.rs), also when the token list
+    // could not be written: they are already off the roster, so a retried remove never comes
+    s.usage.forget_listener(key);
+    signed_out?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
     crate::tidal::pending()
