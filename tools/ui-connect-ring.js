@@ -4,8 +4,8 @@
 // script fails at once; the states are set in the DOM), at 360 and 412 px, dark and light:
 //   * "Open Pubky Ring" is the one accent-filled button; the waiting button isn't filled;
 //   * the two buttons are at least 10 px apart, with room to the text above and below;
-//   * a secondary button's border is at least 3:1 against the page and the card, white on the
-//     accent at least 3:1 (WCAG 1.4.11, 1.4.3 for the text);
+//   * a secondary button's border is at least 3:1 against the page and the card (WCAG 1.4.11), the
+//     text on every button at least 4.5:1 (1.4.3);
 // and the saved-node, crash and address-form screens at 412 px, for the eye (their borders changed too).
 //   node tools/ui-connect-ring.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -27,9 +27,10 @@ const WAITING = () => {
   $('lan-status').textContent = 'None found.';
 };
 const SCREENS = {
-  saved: () => { const $ = (id) => document.getElementById(id); $('connect').hidden = true; $('saved').hidden = false; $('saved-msg').textContent = 'Your node moved to 192.168.1.12:7788.'; $('moved-yes').hidden = false; $('other').hidden = false; },
+  // (the saved and address screens with their main button at work, disabled, as the task asks to see)
+  saved: () => { const $ = (id) => document.getElementById(id); $('connect').hidden = true; $('saved').hidden = false; $('saved-msg').textContent = 'Your node moved to 192.168.1.12:7788.'; $('moved-yes').hidden = false; $('moved-yes').disabled = true; $('other').hidden = false; },
   crash: () => { const $ = (id) => document.getElementById(id); $('connect').hidden = true; $('crash').hidden = false; $('crash-first').textContent = 'thread main panicked at src/lib.rs:12'; $('crash-text').textContent = 'stack:\n  0: odeion::main\n  1: std::rt::lang_start'; },
-  address: () => { const $ = (id) => document.getElementById(id); $('connect').hidden = false; $('manual-box').open = true; $('tok-hint').hidden = false; $('lan-status').textContent = 'None found.'; },
+  address: () => { const $ = (id) => document.getElementById(id); $('connect').hidden = false; $('manual-box').open = true; $('tok-hint').hidden = false; $('lan-status').textContent = 'None found.'; $('url').value = '192.168.1.10:7788'; document.querySelector('#manual button').disabled = true; },
 };
 const REPORT = () => {
   const $ = (id) => document.getElementById(id);
@@ -43,7 +44,8 @@ const REPORT = () => {
   const page = cs(document.body).backgroundColor; const card = cs(cancel).backgroundColor; const line = cs(cancel).borderTopColor;
   return {
     gap: Math.round(c.top - o.bottom), above: Math.round(o.top - above.bottom), below: Math.round(below.top - c.bottom),
-    openFill: cs(open).backgroundColor, ringFill: cs(ring).backgroundColor, cancelFill: card, accent: cs(document.documentElement).getPropertyValue('--accent').trim(),
+    openFill: cs(open).backgroundColor, ringFill: cs(ring).backgroundColor, cancelFill: card, accent: cs(document.documentElement).getPropertyValue('--accent-fill').trim(),
+    heights: [ring.getBoundingClientRect().height, open.getBoundingClientRect().height, cancel.getBoundingClientRect().height].map(Math.round),
     lineVsPage: ratio(line, page), lineVsCard: ratio(line, card), openText: ratio(cs(open).color, cs(open).backgroundColor), ringText: ratio(cs(ring).color, cs(ring).backgroundColor),
     ringOpacity: cs(ring).opacity, inputLine: ratio(cs($('url')).borderTopColor, page),
   };
@@ -62,7 +64,8 @@ const hex = (rgb) => '#' + rgb.match(/\d+/g).slice(0, 3).map((n) => Number(n).to
       check(hex(r.openFill) === r.accent.toLowerCase() && hex(r.ringFill) !== r.accent.toLowerCase() && hex(r.cancelFill) !== r.accent.toLowerCase(), `${at}: "Open Pubky Ring" is the one accent-filled button (open ${hex(r.openFill)}, waiting ${hex(r.ringFill)}, cancel ${hex(r.cancelFill)}, accent ${r.accent})`);
       check(r.gap >= 10 && r.above >= 10 && r.below >= 10, `${at}: the buttons are apart (${r.gap} px), with room above (${r.above}) and below (${r.below})`);
       check(r.lineVsPage >= 3 && r.lineVsCard >= 3 && r.inputLine >= 3, `${at}: borders at least 3:1 against the page and the card (${r.lineVsPage.toFixed(2)}, ${r.lineVsCard.toFixed(2)}; the address field ${r.inputLine.toFixed(2)})`);
-      check(r.openText >= 3 && r.ringText >= 4.5 && r.ringOpacity === '1', `${at}: text on the buttons reads (open ${r.openText.toFixed(2)}, waiting ${r.ringText.toFixed(2)} at full opacity)`);
+      check(r.openText >= 4.5 && r.ringText >= 4.5 && r.ringOpacity === '1', `${at}: text on the buttons at least 4.5:1 (open ${r.openText.toFixed(2)}, waiting ${r.ringText.toFixed(2)} at full opacity)`);
+      check(r.heights[0] === r.heights[1] && r.heights[1] === r.heights[2], `${at}: a waiting, a main and a plain button are the same height (${r.heights.join(', ')})`);
       await page.screenshot({ path: path.join(SHOTS, `waiting-${scheme}-${w}.png`), fullPage: true });
       if (w === 412) for (const [name, fn] of Object.entries(SCREENS)) { await page.goto(PAGE); await page.evaluate(fn); await page.waitForTimeout(100); await page.screenshot({ path: path.join(SHOTS, `${name}-${scheme}.png`), fullPage: true }); }
       await ctx.close();
