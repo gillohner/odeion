@@ -514,6 +514,14 @@ fn slug(name: &str) -> String {
     }
 }
 
+/// A seed for a shuffle: the clock, never the same twice in a row.
+fn seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x5eed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,12 +532,4 @@ mod tests {
         assert_eq!(slug("  Küche / DAC #2 "), "k-che-dac-2");
         assert_eq!(slug("***"), "zone");
     }
-}
-
-/// A seed for a shuffle: the clock, never the same twice in a row.
-fn seed() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x5eed)
 }
