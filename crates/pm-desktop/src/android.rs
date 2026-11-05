@@ -846,6 +846,18 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         }
     }
 
+    fn held_identity(&self) -> Option<String> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "heldIdentity", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer.ok().filter(|a| !a.is_empty())
+    }
+
     fn claims(&self) -> pm_out_local::exclusive::Claims {
         use jni021::objects::JClass;
         let answer = with_jvm(&self.vm, |env| {

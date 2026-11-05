@@ -272,6 +272,17 @@ class UsbExclusive private constructor() {
             forget()
         }
 
+        /// The DAC the app holds now, as one physical device, for the Rust side's memory of the
+        /// listener's mute and level: "serial:<serial number>" when it has one (readable with the
+        /// permission Exclusive USB has), else "path:<device name>" (this attachment only: a
+        /// replug or another identical DAC is another path). Empty: none held.
+        @JvmStatic
+        fun heldIdentity(): String {
+            val d = synchronized(lock) { device } ?: return ""
+            val serial = runCatching { d.serialNumber }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            return if (serial != null) "serial:$serial" else "path:${d.deviceName}"
+        }
+
         /// The app holds a DAC now.
         fun holding(): Boolean = synchronized(lock) { conn != null }
 
