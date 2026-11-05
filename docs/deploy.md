@@ -1,7 +1,8 @@
 # Deploying the node
 
 The reference for every way to deploy the node. For step-by-step installs, start with the
-[guides](guides/): [Docker](guides/install-docker.md),
+[guides](guides/): [the installer ISO](guides/install-iso.md) (a whole Odeion box from a USB stick;
+built from `deploy/iso`), [Docker](guides/install-docker.md),
 [Linux without Docker](guides/install-linux.md). Umbrel isn't supported right now; on an Umbrel
 box, use Docker.
 

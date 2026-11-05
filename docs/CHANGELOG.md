@@ -11,6 +11,14 @@ Newest first. Dates are when the change landed on `main`.
   - Every picture, and every file the node relays from Jellyfin, Plex, Audiobookshelf or a Subsonic server, is marked to be shown only as what it is.
 - **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, before the library opens, the node makes its library and its journal files, its config, its Pubky session secret, its remote-access key, the app players' keys and a restored config its own if a group or anyone else could read them, and logs that. It changes only regular files in its data folder, never through a link; a config kept elsewhere (`/etc`) is left to its installer. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
 
+- **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
+  - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
+  - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
+  - Then open http://odeion.local:7788 for the usual web setup.
+  - The box gets Debian 13 with security updates by themselves, a nightly backup (with the homeserver), a firewall that opens only Odeion's ports to the outside (speakers on the home network get what they need), and a watchdog. No SSH.
+  - When the homeserver is published through a tunnel, the box reaches it directly.
+  - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
