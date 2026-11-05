@@ -229,13 +229,13 @@ impl TrackMeta {
 /// library.
 pub type Describe = Arc<dyn Fn(&crate::QueueItem) -> TrackMeta + Send + Sync>;
 
-/// One place audio can go (handoff §6.4).
-#[async_trait]
 /// The percent level of `db` as an amplitude (`10^(dB/20)`), as BluOS, MPD and Cast map it.
 pub fn amplitude_percent(db: f32) -> u8 {
     (10f64.powf(f64::from(db.clamp(-80.0, 0.0)) / 20.0) * 100.0).round() as u8
 }
 
+/// One place audio can go (handoff §6.4).
+#[async_trait]
 pub trait Output: Send + Sync {
     fn id(&self) -> OutputId;
     fn name(&self) -> String;
