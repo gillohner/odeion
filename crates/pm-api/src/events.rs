@@ -179,6 +179,8 @@ pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<Api
         ApiEvent::LibraryChanged => Some(ev.clone()),
         // The owner's copies: file names and folders on their machine
         ApiEvent::Jobs { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
+        // Outputs are the owner's, as `GET /v1/outputs` is
+        ApiEvent::OutputsChanged { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
     }
 }
 
@@ -455,6 +457,19 @@ mod tests {
         assert_eq!(
             v["event"],
             serde_json::json!({"type": "error", "message": "boom"})
+        );
+    }
+
+    /// A phone's USB DAC came or went: controllers read `outputs_changed` with the node's id.
+    #[test]
+    fn an_output_device_change_is_an_event() {
+        let ev = ApiEvent::OutputsChanged {
+            output: pm_zones::OutputId("net:192.168.1.20:7790/cpal:Speaker or headphones".into()),
+        };
+        let v = serde_json::to_value(EventMsg { seq: 9, event: &ev }).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"seq": 9, "type": "outputs_changed", "output": "net:192.168.1.20:7790/cpal:Speaker or headphones"})
         );
     }
 }

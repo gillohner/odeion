@@ -619,15 +619,8 @@ fn usb_audio_loop(vm: jni021::JavaVM, class: jni021::objects::GlobalRef, changed
             continue;
         }
         seen = version;
-        let dac = match pm_out_local::usb_dac::parse_report(report) {
-            Ok(r) => pm_out_local::usb_dac::describe(&r),
-            Err(e) => {
-                tracing::warn!("USB DAC detection: {e}");
-                continue;
-            }
-        };
-        tracing::info!(dac = ?dac.as_ref().map(|d| &d.summary), "USB audio devices changed");
-        if pm_out_local::usb_dac::set_current(dac) {
+        // A report that can't be read clears the DAC rather than keeping the last one
+        if pm_out_local::usb_dac::apply_report(report) {
             changed();
         }
     }

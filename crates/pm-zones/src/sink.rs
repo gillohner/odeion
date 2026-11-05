@@ -41,8 +41,14 @@ pub struct OutputInfo {
     /// The device as its maker names it (`Klimax DSM`, `HomePod`), when the protocol tells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// The hardware behind it, when the output knows: a USB DAC on a phone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The hardware behind it, when the output knows: a USB DAC on a phone. Read leniently: a
+    /// device a newer app describes in a way this node does not understand is `None`, never an
+    /// error (it travels in every endpoint `Welcome`, and the output must keep working).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_device"
+    )]
     pub device: Option<OutputDevice>,
 }
 
@@ -107,6 +113,9 @@ pub enum DeviceKind {
     UsbDac,
     /// A USB headset (Android's `TYPE_USB_HEADSET`).
     UsbHeadset,
+    /// A kind this node does not know yet (from a newer app).
+    #[serde(other)]
+    Unknown,
 }
 
 /// How an app drives an [`OutputDevice`].
@@ -120,6 +129,9 @@ pub enum DeviceMode {
     BitPerfect,
     /// The app drives the device itself (its own USB audio driver).
     Exclusive,
+    /// A mode this node does not know yet (from a newer app): shown as shared, never as more.
+    #[serde(other)]
+    Unknown,
 }
 
 /// How a device takes DSD.
@@ -130,6 +142,23 @@ pub enum DsdKind {
     Native,
     /// Packed in PCM frames (DoP).
     Dop,
+    /// A way this node does not know yet (from a newer app).
+    #[serde(other)]
+    Unknown,
+}
+
+/// `OutputInfo.device`, or `None` when it does not read as an [`OutputDevice`].
+fn lenient_device<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<OutputDevice>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Lenient {
+        Device(OutputDevice),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Option::<Lenient>::deserialize(d)? {
+        Some(Lenient::Device(dev)) => Some(dev),
+        _ => None,
+    })
 }
 
 /// A USB device's vendor and product ids.
@@ -395,4 +424,50 @@ pub fn check_block(expected: AudioFormat, block: &AudioBlock) -> Result<(), Sink
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An output's info as a Welcome carries it, with `device` as given.
+    fn info_with(device: serde_json::Value) -> serde_json::Value {
+        let mut v = serde_json::to_value(crate::outputs::NullOutput::new().info()).unwrap();
+        v["device"] = device;
+        v
+    }
+
+    #[test]
+    fn a_device_from_a_newer_app_never_breaks_the_output() {
+        // Values this node does not know: read as Unknown (shown as shared), the rest as sent
+        let v = info_with(
+            serde_json::json!({"name": "FiiO KA17", "kind": "usb_c_hub", "mode": "hyper_perfect",
+            "modes": ["shared", "hyper_perfect"], "confirmed": true, "dsd": "dsd_over_usb4", "max_rate": 768000,
+            "future_field": {"anything": [1, 2]}}),
+        );
+        let info: OutputInfo = serde_json::from_value(v).unwrap();
+        let d = info.device.unwrap();
+        assert_eq!(
+            (d.kind, d.mode, d.dsd),
+            (DeviceKind::Unknown, DeviceMode::Unknown, Some(DsdKind::Unknown))
+        );
+        assert_eq!(d.modes, [DeviceMode::Shared, DeviceMode::Unknown]);
+        assert_eq!((d.name.as_str(), d.max_rate), ("FiiO KA17", 768_000));
+        // A device this node can't read at all: no device, and the output itself still reads
+        for odd in [
+            serde_json::json!({"name": "FiiO KA17", "rates": "many"}),
+            serde_json::json!({"mode": 3}),
+            serde_json::json!("a string"),
+            serde_json::json!([1, 2]),
+            serde_json::Value::Null,
+        ] {
+            let info: OutputInfo = serde_json::from_value(info_with(odd.clone())).unwrap();
+            assert_eq!(info.device, None, "{odd}");
+            assert_eq!(info.id, OutputId::new("null", ""));
+        }
+        // Absent: none, as from an older app
+        let mut v = info_with(serde_json::Value::Null);
+        v.as_object_mut().unwrap().remove("device");
+        assert_eq!(serde_json::from_value::<OutputInfo>(v).unwrap().device, None);
+    }
 }

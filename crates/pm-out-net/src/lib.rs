@@ -44,18 +44,25 @@ fn io_err(e: StreamError) -> SinkError {
 /// It also keeps the [`OutputDevice`] each of the endpoint's outputs reported in its last
 /// `Welcome`: a phone's output describes the USB DAC plugged into it, and the app registers again
 /// when that changes. Every [`NetOutput`] of the endpoint, also those zones already hold, reads it
-/// from here. (Names stay as they were: a zone is named once, from its output's name.)
+/// from here. (Names stay as they were: a zone is named once, from its output's name.) Welcomes
+/// are taken one at a time per endpoint, each read and applied before the next connection says
+/// Hello, so an older snapshot never overwrites a newer one (a DAC unplugged meanwhile).
 #[derive(Clone, Default)]
 pub struct KeyCell {
     key: Arc<RwLock<Key>>,
     devices: Arc<RwLock<HashMap<OutputId, Option<OutputDevice>>>>,
+    /// Held from Hello until the Welcome is applied.
+    welcome: Arc<Mutex<()>>,
+    on_change: Arc<RwLock<Option<DeviceChanged>>>,
 }
+
+type DeviceChanged = Arc<dyn Fn(&OutputId) + Send + Sync>;
 
 impl KeyCell {
     pub fn new(key: Key) -> Self {
         Self {
             key: Arc::new(RwLock::new(key)),
-            devices: Arc::default(),
+            ..Self::default()
         }
     }
 
@@ -67,13 +74,32 @@ impl KeyCell {
         self.key.read().expect("endpoint key").clone()
     }
 
+    /// Call `f` with the node's id for an output (`net:<address>/<output>`) whenever it reports
+    /// another device than before (the node tells its controllers). Replaces an earlier callback.
+    pub fn on_device_change(&self, f: impl Fn(&OutputId) + Send + Sync + 'static) {
+        *self.on_change.write().expect("endpoint callback") = Some(Arc::new(f));
+    }
+
     /// Remember the devices a `Welcome` reports for the endpoint's outputs.
-    fn report(&self, outputs: &[OutputInfo]) {
-        let mut known = self.devices.write().expect("endpoint devices");
-        for o in outputs {
-            if known.get(&o.id) != Some(&o.device) {
-                tracing::info!(output = %o.id, device = ?o.device.as_ref().map(|d| &d.name), "endpoint output device");
-                known.insert(o.id.clone(), o.device.clone());
+    fn report(&self, addr: SocketAddr, outputs: &[OutputInfo]) {
+        let mut changed = Vec::new();
+        {
+            let mut known = self.devices.write().expect("endpoint devices");
+            for o in outputs {
+                let before = known.insert(o.id.clone(), o.device.clone());
+                if before.as_ref() != Some(&o.device) {
+                    tracing::info!(output = %o.id, device = ?o.device.as_ref().map(|d| &d.name), "endpoint output device");
+                    // A new output without a device is no change anyone shows
+                    if before.flatten() != o.device {
+                        changed.push(net_id(addr, &o.id));
+                    }
+                }
+            }
+        }
+        let f = self.on_change.read().expect("endpoint callback").clone();
+        if let Some(f) = f {
+            for id in &changed {
+                f(id);
             }
         }
     }
@@ -81,6 +107,21 @@ impl KeyCell {
     fn device(&self, id: &OutputId) -> Option<Option<OutputDevice>> {
         self.devices.read().expect("endpoint devices").get(id).cloned()
     }
+
+    /// A session with the endpoint, its `Welcome` applied before any later one is taken.
+    fn session(&self, addr: SocketAddr) -> Result<(Conn, Frame), SinkError> {
+        let _one = self.welcome.lock().unwrap_or_else(|e| e.into_inner());
+        let (c, welcome) = Conn::open(addr, self)?;
+        if let Frame::Welcome { outputs, .. } = &welcome {
+            self.report(addr, outputs);
+        }
+        Ok((c, welcome))
+    }
+}
+
+/// The node's id for an endpoint's output.
+fn net_id(addr: SocketAddr, remote: &OutputId) -> OutputId {
+    OutputId::new("net", &format!("{addr}/{remote}"))
 }
 
 struct Conn {
@@ -125,7 +166,7 @@ impl NetOutput {
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| SinkError::Device("endpoint address does not resolve".into()))?;
-        let (_c, welcome) = Conn::open(addr, key)?;
+        let (_c, welcome) = key.session(addr)?;
         let Frame::Welcome {
             name,
             version,
@@ -145,7 +186,6 @@ impl NetOutput {
                 pm_stream::PROTOCOL_VERSION
             )));
         }
-        key.report(&outputs);
         Ok(outputs
             .into_iter()
             .map(|mut remote| {
@@ -173,7 +213,7 @@ impl NetOutput {
 #[async_trait]
 impl Output for NetOutput {
     fn id(&self) -> OutputId {
-        OutputId::new("net", &format!("{}/{}", self.addr, self.remote.id))
+        net_id(self.addr, &self.remote.id)
     }
 
     fn name(&self) -> String {
@@ -195,11 +235,8 @@ impl Output for NetOutput {
         if !self.remote.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
-        let (mut c, welcome) = Conn::open(self.addr, &self.key)?;
         // Each session starts with the endpoint's outputs as they are now (a DAC plugged in since)
-        if let Frame::Welcome { outputs, .. } = &welcome {
-            self.key.report(outputs);
-        }
+        let (mut c, _welcome) = self.key.session(self.addr)?;
         write_frame(
             &mut c.w,
             &Frame::Open {
@@ -273,7 +310,7 @@ impl Output for NetOutput {
         if self.remote.caps.hw_volume.is_none() {
             return Err(SinkError::NoVolume(self.id()));
         }
-        let (mut c, _) = Conn::open(self.addr, &self.key)?;
+        let (mut c, _) = self.key.session(self.addr)?;
         write_frame(
             &mut c.w,
             &Frame::SetVolume {

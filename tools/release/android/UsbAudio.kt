@@ -35,9 +35,10 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
         val text = try {
             report(context)
         } catch (e: Exception) {
-            // A device that went away while it was read, a vendor's odd AudioManager: keep the last report
+            // A device that went away while it was read, a vendor's odd AudioManager: no DAC rather
+            // than the last one seen (the next callback reports again)
             android.util.Log.w("pubky-music", "USB audio report failed: $e")
-            return
+            empty()
         }
         lock.lock()
         try {
@@ -121,7 +122,8 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
                 val conn = runCatching { um.openDevice(u) }.getOrNull()
                 if (conn != null) {
                     try {
-                        conn.rawDescriptors?.let { if (it.size <= 65536) o.put("descriptors", hex(it)) }
+                        // A DAC's are a few hundred bytes; the cap keeps a report of several devices small
+                        conn.rawDescriptors?.let { if (it.size <= 16384) o.put("descriptors", hex(it)) }
                     } finally {
                         conn.close()
                     }
@@ -129,6 +131,9 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             }
             return o
         }
+
+        private fun empty(): String =
+            JSONObject().put("v", 1).put("sdk", Build.VERSION.SDK_INT).put("devices", JSONArray()).toString()
 
         private fun report(context: Context): String {
             val am = context.getSystemService(AudioManager::class.java)

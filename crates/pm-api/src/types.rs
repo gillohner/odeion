@@ -4,7 +4,7 @@
 use pm_library::ArtistSummary;
 use pm_model::{Album, Track, Volume};
 use pm_pubky::{ActivitySource, Playlist};
-use pm_zones::{QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
+use pm_zones::{OutputId, QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
 use serde::{Deserialize, Serialize};
 
 pub const API_VERSION: &str = "v1";
@@ -622,6 +622,11 @@ pub enum ApiEvent {
     /// The files jobs changed (a state, or ~2 s of progress while one runs): the owner's only.
     Jobs {
         jobs: Box<JobsView>,
+    },
+    /// An output's `device` changed (a USB DAC plugged into or out of a phone): `GET /v1/outputs`
+    /// again. The owner's only, like the outputs.
+    OutputsChanged {
+        output: OutputId,
     },
 }
 

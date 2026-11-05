@@ -1123,6 +1123,17 @@ impl NodeState {
         );
     }
 
+    /// A key cell for one endpoint: when one of its outputs reports another device (a phone's
+    /// USB DAC came or went), every owner's controller hears `outputs_changed`.
+    fn endpoint_cell(&self, key: pm_stream::Key) -> pm_out_net::KeyCell {
+        let cell = pm_out_net::KeyCell::new(key);
+        let events = self.events.clone();
+        cell.on_device_change(move |id| {
+            events.send(ApiEvent::OutputsChanged { output: id.clone() });
+        });
+        cell
+    }
+
     /// The endpoint keys, loaded on first use; run `f` with them, saving when it says so.
     fn with_endpoint_keys<T>(
         &self,
@@ -1137,7 +1148,7 @@ impl NodeState {
                 .unwrap_or_default();
             stored
                 .into_iter()
-                .filter_map(|(a, k)| Some((a, pm_out_net::KeyCell::new(pm_stream::Key::parse(&k).ok()?))))
+                .filter_map(|(a, k)| Some((a, self.endpoint_cell(pm_stream::Key::parse(&k).ok()?))))
                 .collect()
         });
         let (out, changed) = f(keys);
@@ -1175,7 +1186,7 @@ impl NodeState {
                 (c, Some(old))
             }
             (Some(c), None) => (c, None),
-            (None, Some(k)) => (pm_out_net::KeyCell::new(k.clone()), None),
+            (None, Some(k)) => (self.endpoint_cell(k.clone()), None),
             (None, None) => {
                 return Err("no key stored for it; the app registers it again on its next start".into())
             }

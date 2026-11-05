@@ -201,14 +201,17 @@ fn android_version(sdk: u32) -> String {
     }
 }
 
-/// The USB DAC the phone plays through, from a report: the USB sink Android routes media to, else
-/// the first one. `None` when no USB audio sink is attached.
+/// The USB DAC the phone plays through, from a report: the USB sink Android routes media to; the
+/// first one only when Android does not say where media goes (before API 33). `None` when no USB
+/// audio sink is attached, or media goes elsewhere (Bluetooth, the speaker).
 pub fn describe(report: &Report) -> Option<OutputDevice> {
     let sinks: Vec<&ReportDevice> = report.devices.iter().filter(|d| is_usb_sink(d)).collect();
-    let d = *sinks
-        .iter()
-        .find(|d| d.routed == Some(true))
-        .or_else(|| sinks.first())?;
+    // With Android's routing (API 33+) only the sink media goes to; without it, the first one
+    let d = if sinks.iter().any(|d| d.routed.is_some()) {
+        *sinks.iter().find(|d| d.routed == Some(true))?
+    } else {
+        *sinks.first()?
+    };
     let name = display_name(d);
     let desc = descriptors_summary(d, &name);
     let mut rates: Vec<u32> = d
@@ -315,9 +318,26 @@ pub fn current() -> Option<OutputDevice> {
     CURRENT.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
+/// A report from the app, kept as the phone's DAC: a report that can't be read (too large,
+/// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
+pub fn apply_report(json: &str) -> bool {
+    let dac = match parse_report(json) {
+        Ok(r) => describe(&r),
+        Err(e) => {
+            tracing::warn!("USB DAC detection: {e}");
+            None
+        }
+    };
+    tracing::info!(dac = ?dac.as_ref().map(|d| &d.summary), "USB audio devices changed");
+    set_current(dac)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests that set the phone's DAC (one process-wide value) run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
 
     /// What UsbAudio.kt reports for a FiiO KA17 on an Android 14 phone (rates and encodings as
     /// Android lists them for the KA17's UAC2 interface).
@@ -461,6 +481,10 @@ mod tests {
             (d.name.as_str(), d.rates.as_slice(), d.bits.as_slice()),
             ("DAC", &[44_100, 96_000][..], &[24][..])
         );
+        // Android routes media elsewhere (Bluetooth, the speaker): no DAC, though one is attached
+        let elsewhere = r#"{"sdk":34,"devices":[
+            {"type":22,"name":"Headset","routed":false},{"type":11,"name":"DAC","routed":false}]}"#;
+        assert_eq!(describe(&parse_report(elsewhere).unwrap()), None);
         // Without routing information (Android 12): the first USB sink, a headset here
         let r =
             parse_report(r#"{"sdk":31,"devices":[{"type":22,"name":"Headset"},{"type":11,"name":"DAC"}]}"#)
@@ -511,6 +535,7 @@ mod tests {
 
     #[test]
     fn the_current_dac() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let d = describe(&parse_report(KA17).unwrap());
         assert!(set_current(d.clone()));
         assert!(!set_current(d.clone()), "the same DAC again is no change");
@@ -562,5 +587,23 @@ mod tests {
             r.devices[0].usb.as_ref().unwrap().descriptors.as_deref(),
             Some("12")
         );
+    }
+
+    /// A report that can't be read clears the DAC: the app then shows none rather than the last.
+    #[test]
+    fn a_report_that_cannot_be_read_means_no_dac() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        set_current(None);
+        assert!(apply_report(KA17));
+        assert_eq!(current().map(|d| d.name), Some("FiiO KA17".into()));
+        assert!(!apply_report(KA17), "the same report again is no change");
+        // Too large (two DACs with long descriptors), or broken: none, and that is a change
+        let huge = format!(r#"{{"v":1,"devices":[],"pad":"{}"}}"#, "x".repeat(MAX_REPORT));
+        assert!(apply_report(&huge));
+        assert_eq!(current(), None);
+        assert!(apply_report(KA17));
+        assert!(apply_report("{\"devices\": [ broken"));
+        assert_eq!(current(), None);
+        assert!(!apply_report("also broken"), "still none: no change");
     }
 }

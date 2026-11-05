@@ -192,7 +192,8 @@ shows 48 for all three, as before.
 3. Play a 44.1/16, a 96/24 and a 192/24 file; note the rate the KA17's display shows for each
    (expected now: 48 kHz each time).
 4. Unplug the KA17: the picker, pill and Settings no longer name it (This phone goes away). Plug it in
-   again: it comes back. Note whether playback moved to the speaker on unplug (it may, for now).
+   again: it comes back. A laptop with the web UI open (no reload) follows within a few seconds too.
+   With the KA17 in, pick Bluetooth headphones in Android's output switcher: the DAC is no longer named. Note whether playback moved to the speaker on unplug (it may, for now).
 5. If something is missing, attach `adb logcat -s pubky-music` (USB debugging on): the lines
    "USB audio devices changed" and "player registered with the node" show what the app saw.
 ```

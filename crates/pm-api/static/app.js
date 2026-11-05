@@ -2150,16 +2150,23 @@
   const DAC_MODE = { bit_perfect: 'Bit-perfect', exclusive: 'Exclusive USB', shared: 'Shared' };
   const DAC_HELP = { shared: 'Android plays it through its own mixer, which mixes in other sounds and usually converts the music to 48 kHz.' };
   const deviceOf = (z) => { const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null; };
-  const dacShort = (d) => (d.mode === 'shared' || !DAC_MODE[d.mode] ? 'shared' : `${DAC_MODE[d.mode].toLowerCase()}${d.confirmed ? '' : ', not confirmed'}`);
+  // Anything but shared only when confirmed: bit-perfect is said only for mode bit_perfect with
+  // confirmed true; an unconfirmed or unknown mode reads as shared
+  const dacMode = (d) => (d.confirmed === true && (d.mode === 'bit_perfect' || d.mode === 'exclusive') ? d.mode : 'shared');
+  const dacShort = (d) => ({ bit_perfect: 'bit-perfect', exclusive: 'exclusive USB', shared: 'shared' })[dacMode(d)];
+  const dacUnconfirmed = (d) => (d.mode === 'bit_perfect' && d.confirmed !== true ? 'Android has not confirmed bit-perfect for this format.' : d.mode === 'exclusive' && d.confirmed !== true ? 'Exclusive USB mode is not confirmed for this format.' : '');
   const dacWords = (d) => `${d.name} · ${dacShort(d)}`;
   const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? `DSD (${d.dsd === 'native' ? 'native' : 'DoP'})` : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
   // This app's own output (the app tells the page after it registers its player), with its device
   const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
   const hereDevice = () => (window.pmDesktop && window.pmDesktop.platform === 'android' ? 'This phone' : 'This computer');
   // A DAC plugged in or out: the app registers its player again and says so
-  // (also once after each page load); Settings draws again when it shows another device than this app's
+  // (also once after each page load), and the node tells every controller (`outputs_changed`):
+  // the outputs again, then the bar, the Sound panel and the picker; Settings draws again when it
+  // shows another device than this app's
   const appDevice = () => JSON.stringify((appOutput() || {}).device || null);
-  window.addEventListener('pmdesktop:output', () => { if (isOwner()) api('GET', '/outputs').then((o) => { state.outputs = o; renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); });
+  const refreshOutputs = () => { if (isOwner()) api('GET', '/outputs').then((o) => { state.outputs = o; renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
+  window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
     if (z.id === BROWSER) return 'Streams the files to this browser';
     const dv = deviceOf(z); if (dv) return dacWords(dv);
@@ -2804,7 +2811,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; const dv = z ? deviceOf(z) : null; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${dv ? dacWords(dv) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -6461,7 +6468,8 @@
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
           // This phone: the USB DAC this app plays through, what it takes and how it is played (no choices yet)
-          const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(`${dacShort(dv).charAt(0).toUpperCase()}${dacShort(dv).slice(1)}.${dacShort(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
+          const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(`${DAC_MODE[dacMode(dv)]}.${dacMode(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
+            + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
             + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''));
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
@@ -6980,6 +6988,8 @@
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
+        // The outputs, so the bar names a zone's device (a phone's USB DAC) without the picker first
+        refreshOutputs();
       } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
@@ -7043,6 +7053,7 @@
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
+      else if (ev.type === 'outputs_changed') refreshOutputs(); // a phone's USB DAC came or went
       else if (ev.type === 'jobs') { if (isOwner()) { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); } } // the owner's jobs, as the polling
       renderBar();
     };
