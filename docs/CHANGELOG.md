@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-05
 
+- **The Identify card's bar says what each song's state is** (owner's report: half purple, half dark read as "half done, half empty" while the rest was to confirm and not found). One bar with a segment per state, identified, to confirm, not found and not checked, each as wide as its share and in the legend's colours under it, no wider than the text beside it. The AcoustID key field is a field's width, with Check, Save key and Remove beside it.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
@@ -15,8 +17,6 @@ Newest first. Dates are when the change landed on `main`.
   - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
 
 ### 2026-11-04
-
-- **The Identify card's bar says what each song's state is** (owner's report: half purple, half dark read as "half done, half empty" while the rest was to confirm and not found). One bar with a segment per state, identified, to confirm, not found and not checked, each as wide as its share and in the legend's colours under it, no wider than the text beside it. The AcoustID key field is a field's width, with Check, Save key and Remove beside it.
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
 
