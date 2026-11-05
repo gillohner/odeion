@@ -188,8 +188,12 @@ def part_a(track, address):
 
 
 def mini_time():
-    """Now playing's elapsed time as the screen shows it (the first m:ss), or None."""
-    for n in ui_nodes():
+    """Now playing's elapsed time as the screen shows it (the first m:ss), or None. The screen's
+    nodes are kept (ui-time-<n>.xml) so a miss can be read afterwards."""
+    nodes = ui_nodes()
+    k = len(list(out.glob("ui-time-*.xml")))
+    (out / f"ui-time-{k}.xml").write_text("\n".join(nodes))
+    for n in nodes:
         m = re.search(r'(?:text|content-desc)="(\d+:\d\d)', n)
         if m:
             return m.group(1)
@@ -265,10 +269,11 @@ def part_b():
         tap_text(["tone"], "the song")
     time.sleep(4)
     # Now playing shows the elapsed time: open it from the mini player
+    # (the song's title in the mini player: "Tone"; not the sound pill beside it)
     try:
-        tap_text(["~Nothing playing", "~resource-id=\"npart\"", "~text=\"tone"], "the mini player", timeout=20)
+        tap_text(["~text=\"[Tt]one\""], "the mini player's title", timeout=20)
     except RuntimeError:
-        log("B: no mini player to open")
+        log("B: no mini player title to open Now playing with")
     time.sleep(3)
     shot("b-1-playing")
     log(f"B foreground: Now playing {mini_time()}, players {players()}")
