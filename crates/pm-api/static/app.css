@@ -1494,6 +1494,9 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 .lnk.vmark { display: inline; padding: 2px 0; color: var(--muted); text-decoration: underline dotted; text-underline-offset: 3px; }
 .lnk.vmark:hover, .lnk.vmark:focus-visible { color: var(--fg); }
 @media (pointer: coarse) { .lnk.vmark { padding: 8px 0; } }
+.sub.subv { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+.sub.subv > .subtext { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub.subv > :not(.subtext) { flex: none; }
 /* Pressing play answers at once: the pressed control spins, the bar says "Starting on …" */
 /* Any control whose action is on its way (busy() in app.js): pressed once, it ignores more presses; after
    150 ms its icon becomes a spinner (a control without an icon gets one after its words). */

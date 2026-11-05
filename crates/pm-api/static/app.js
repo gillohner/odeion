@@ -4188,10 +4188,12 @@
   // A song kept in more than one copy (#268: a homeserver copy, FLAC and MP3, hi-res and CD) is one row
   // that plays the best copy; a quiet "2 versions" in its second line opens the copies to choose from
   // (owner: "maybe have some indication or version chooser, very subtle").
-  const versionMark = (t, k) => (Array.isArray(t.versions) && t.versions.length > 1 ? `<button class="lnk vmark" data-sver="${k}" aria-haspopup="menu" aria-label="${t.versions.length} versions of ${esc(t.title)}: choose which to play" title="Choose which copy plays">${t.versions.length} versions</button>` : '');
+  const versionMark = (t, k) => (Array.isArray(t.versions) && t.versions.length > 1 ? `<button class="lnk vmark" data-sver="${k}" aria-label="${t.versions.length} versions of ${esc(t.title)}: choose which to play" title="Choose which copy plays">${t.versions.length} versions</button>` : '');
+  // The row's second line; with a marker, the words shrink to an ellipsis and the marker keeps its width
+  const subLine = (html, mark) => (mark ? `<div class="sub subv"><span class="subtext">${html}</span>${html ? '<span aria-hidden="true">·</span>' : ''}${mark}</div>` : `<div class="sub">${html}</div>`);
   const VERSION_FROM = { library: 'Your library', homeserver: 'Your homeserver' };
   const versionLabel = (v) => [VERSION_FROM[v.source] || v.source, v.format || (v.container || '').toUpperCase(), v.size_bytes ? fileSize(v.size_bytes) : ''].filter(Boolean).join(' · ');
-  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist || t.artists ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : '', versionMark(t, k)].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([t.artist || t.artists ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -4264,8 +4266,9 @@
     $$('[data-sver]', box).forEach((b) => b.onclick = (e) => {
       e.stopPropagation(); const k = Number(b.dataset.sver); const t = all[k];
       const vs = [...t.versions].sort((x, y) => Number(y.best) - Number(x.best));
+      // Every listener may play any copy: { all } keeps the homeserver's copies in the list for them too
       showMenu(b, [{ title: `${t.title}: versions` }, ...vs.map((v) => ({ label: versionLabel(v) + (v.best ? ' · plays by default' : ''), icon: v.best ? 'check' : 'play',
-        run: () => playSongs(songs.map((x) => (x === t ? { ...x, track_id: v.track_id } : x)), at(k), 'replace', ctx.plays_from, b, ctx.fallback) }))]);
+        run: () => playSongs(songs.map((x) => (x === t ? { ...x, track_id: v.track_id } : x)), at(k), 'replace', ctx.plays_from, b, ctx.fallback) }))], { all: true });
     });
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     hydrateArtistCredits(box);
