@@ -538,7 +538,11 @@ pub fn open(
             "Exclusive USB plays PCM only (DSD is to come)".into(),
         ));
     }
-    let gone_at_open = usb_dac::gone_count();
+    let opened_for = usb_dac::OpenedFor {
+        dac_id: dac.id,
+        name: dac.device.name.clone(),
+        gone_at: usb_dac::gone_count(),
+    };
     let generation = usb_dac::generation();
     acquire(dac)?;
     let media = crate::bit_perfect::backend().and_then(|b| b.media_volume());
@@ -624,11 +628,34 @@ pub fn open(
         dac: dac.device.name.clone(),
         dac_id: dac.id,
         confirmed: false,
-        gone_at_open,
+        _in_use: usb_dac::DacUse::new(Some(&opened_for)),
+        opened_for,
+        flushed: false,
         generation,
         written: 0,
         bytes: Vec::new(),
     })
+}
+
+/// Rule (c) for Exclusive USB: whether the held DAC may (go on) play(ing) now. With a feature unit
+/// the hand-over keeps it never louder: always. Without one it plays at full level:
+/// [`volume_rule`] on the live settings, Android's volume now and the consent for this DAC.
+pub fn entry_gate(dac_id: i32) -> Result<Option<String>, String> {
+    let unit = with_held(|h| {
+        h.as_ref()
+            .filter(|h| h.dac_id == dac_id)
+            .map(|h| h.unit.is_some())
+    });
+    if unit != Some(false) {
+        return Ok(None);
+    }
+    let media = crate::bit_perfect::backend().and_then(|b| b.media_volume());
+    volume_rule(
+        usb_dac::settings().mode,
+        false,
+        media,
+        usb_dac::full_level_consent(),
+    )
 }
 
 /// Set the zone's volume on the held DAC's feature unit.
@@ -665,22 +692,29 @@ pub struct ExclusiveSink {
     dac: String,
     dac_id: i32,
     confirmed: bool,
-    gone_at_open: u64,
+    /// The DAC it was opened for (rule (b), [`usb_dac::may_reach`]).
+    opened_for: usb_dac::OpenedFor,
+    _in_use: usb_dac::DacUse,
+    /// Flushed (a pause, a seek) and not written since: the next write starts it again.
+    flushed: bool,
     generation: u64,
     written: u64,
     bytes: Vec<u8>,
 }
 
 impl ExclusiveSink {
+    /// Rule (b): its DAC still the phone's (held), none gone since; else Gone (the zone knows).
     fn gone(&self) -> Option<SinkError> {
-        (usb_dac::gone_count_now() != self.gone_at_open)
-            .then(|| SinkError::Gone(self.id.clone(), usb_dac::gone_reason()))
+        let why = usb_dac::may_reach(Some(&self.opened_for)).err()?;
+        usb_dac::gone_seen();
+        Some(SinkError::Gone(self.id.clone(), why))
     }
 
     fn map(&self, e: DriverError) -> SinkError {
         match e {
             DriverError::Gone => {
                 dac_changed(None);
+                usb_dac::gone_seen();
                 SinkError::Gone(self.id.clone(), format!("{} was unplugged", self.dac))
             }
             other => SinkError::Device(other.to_string()),
@@ -725,6 +759,7 @@ impl AudioSink for ExclusiveSink {
         self.bytes = bytes;
         match r {
             Ok(()) => {
+                self.flushed = false;
                 self.written += block.frames() as u64;
                 self.check_confirmed();
                 Ok(())
@@ -748,7 +783,13 @@ impl AudioSink for ExclusiveSink {
 
     fn flush(&mut self) -> Result<(), SinkError> {
         let r = self.driver()?.flush();
-        r.map_err(|e| self.map(e))
+        self.flushed = true;
+        r.map_err(|e| self.map(e))?;
+        // Emptied, and its DAC gone: said (a song boundary pauses)
+        match self.gone() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     fn drain(&mut self) -> Result<(), SinkError> {
@@ -760,9 +801,15 @@ impl AudioSink for ExclusiveSink {
         self.written
     }
 
-    /// The settings or the DAC changed since it opened: the next song opens afresh.
+    /// The settings or the DAC changed since it opened, or full level is no longer allowed (a
+    /// DAC without a volume of its own, Android's volume down since): the next song opens afresh.
     fn reopen_at_track(&self) -> bool {
-        usb_dac::generation() != self.generation
+        usb_dac::generation() != self.generation || entry_gate(self.dac_id).is_err()
+    }
+
+    /// Flushed (a pause), and full level no longer allowed: whoever writes opens afresh first.
+    fn reopen_now(&self) -> bool {
+        self.flushed && entry_gate(self.dac_id).is_err()
     }
 }
 
@@ -975,8 +1022,10 @@ pub(crate) mod tests {
             &self,
             _: i32,
             _: &MixerEntry,
-        ) -> Result<(Box<dyn Track>, crate::bit_perfect::OpenReport), String> {
-            Err("no bit-perfect player in this test".into())
+        ) -> Result<(Box<dyn Track>, crate::bit_perfect::OpenReport), crate::bit_perfect::OpenError> {
+            Err(crate::bit_perfect::OpenError::Refused(
+                "no bit-perfect player in this test".into(),
+            ))
         }
         fn media_volume(&self) -> Option<u8> {
             *self.0.lock().unwrap()

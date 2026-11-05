@@ -20,6 +20,9 @@ struct Phone {
     live: Mutex<Option<OutputCaps>>,
     /// Its sinks find the device gone (the DAC unplugged)
     gone: Arc<std::sync::atomic::AtomicBool>,
+    /// Its sink may not go on as it is (bit-perfect whose volume went down): once
+    reopen: Arc<std::sync::atomic::AtomicBool>,
+    opens: std::sync::atomic::AtomicU64,
 }
 
 impl Phone {
@@ -29,12 +32,18 @@ impl Phone {
             dac: Mutex::new(None),
             live: Mutex::new(None),
             gone: Arc::default(),
+            reopen: Arc::default(),
+            opens: Default::default(),
         }
     }
 }
 
 /// The phone's sink: the null output's, until the DAC goes.
-struct PhoneSink(Box<dyn AudioSink>, Arc<std::sync::atomic::AtomicBool>);
+struct PhoneSink(
+    Box<dyn AudioSink>,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<std::sync::atomic::AtomicBool>,
+);
 
 impl AudioSink for PhoneSink {
     fn format(&self) -> AudioFormat {
@@ -60,6 +69,9 @@ impl AudioSink for PhoneSink {
     }
     fn frames_written(&self) -> u64 {
         self.0.frames_written()
+    }
+    fn reopen_now(&self) -> bool {
+        self.2.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -91,8 +103,9 @@ impl Output for Phone {
         Ok(())
     }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let s = self.inner.open(fmt).await?;
-        Ok(Box::new(PhoneSink(s, self.gone.clone())))
+        Ok(Box::new(PhoneSink(s, self.gone.clone(), self.reopen.clone())))
     }
 }
 
@@ -455,6 +468,30 @@ async fn a_dac_unplugged_on_the_phone_reaches_the_zone_as_gone() {
     let e = err.expect("the write fails once the endpoint's sink found the DAC gone");
     assert!(matches!(e, SinkError::Gone(..)), "{e}");
     assert_eq!(e.gone_reason().as_deref(), Some("FiiO KA17 was unplugged"));
+}
+
+/// Claude H1 / Codex H2 (round 3): the phone's zone resumes with a flush, then writes. A sink that
+/// may not go on as it is (bit-perfect whose volume went down) is replaced on the phone before the
+/// write, in the same format, and the node's count of frames goes on unbroken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sink_that_may_not_go_on_is_replaced_on_the_phone() {
+    let (phone, serving, cell) = phone();
+    let out = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    let fmt = AudioFormat::pcm(48_000, 24, 2);
+    let mut sink = out.open(fmt).await.unwrap();
+    let block = pm_model::AudioBlock::pcm_i32(fmt, vec![0; 480 * 2]);
+    sink.write(&block).unwrap();
+    sink.flush().unwrap();
+    phone.reopen.store(true, std::sync::atomic::Ordering::SeqCst);
+    sink.write(&block).unwrap();
+    sink.write(&block).unwrap();
+    sink.drain().unwrap();
+    assert_eq!(
+        phone.opens.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "opened afresh"
+    );
+    assert_eq!(sink.frames_written(), 3 * 480, "the count goes on");
 }
 
 /// The node plans each source with the formats the phone's DAC lists: 96/24 stays 96/24 even when
