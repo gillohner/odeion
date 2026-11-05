@@ -86,9 +86,10 @@ sudo odeion-compose pull
 sudo odeion-compose up -d
 ```
 
-The homeserver and its database stay on the versions the ISO came with. A newer Odeion release says when they need
-updating too; take `deploy/bundle/docker-compose.yml` from that release into `/opt/odeion`, then run the same two
-commands. Back up first (`sudo /opt/odeion/backup.sh`).
+With its own homeserver, the homeserver and its database stay on the versions the ISO came with. A newer Odeion
+release says when they need updating too; take `deploy/bundle/docker-compose.yml` from that release into
+`/opt/odeion`, then run the same two commands. Back up first (`sudo /opt/odeion/backup.sh`). To stop Odeion:
+`sudo odeion-compose stop`.
 
 ## Notes
 

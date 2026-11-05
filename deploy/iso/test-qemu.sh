@@ -49,7 +49,7 @@ trap 'kill $QEMU 2>/dev/null || true' EXIT
 
 # What the VM itself says, through its serial console (the test's own login, TEST_PASSWORD)
 diagnose() {
-  [ -n "${TEST_PASSWORD:-}" ] && [ -S "$CONSOLE" ] || return 0
+  if [ -z "${TEST_PASSWORD:-}" ] || [ ! -S "$CONSOLE" ]; then return 0; fi
   echo "== inside the VM"
   timeout 600 python3 "$(dirname "$0")/vm-console.py" "$CONSOLE" odeion "$TEST_PASSWORD" \
     "systemctl --no-pager --failed; systemctl --no-pager status odeion-firstboot odeion nftables | tail -n 40" \

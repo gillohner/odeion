@@ -11,7 +11,10 @@ for _ in $(seq 1 60); do
 done
 lan_ip() { ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1; }
 # Without a network nothing is written: .env would keep an empty address for good
-[ $ok = yes ] && [ -n "$(lan_ip)" ] || { echo "no network yet; trying again" >&2; exit 1; }
+if [ "$ok" != yes ] || [ -z "$(lan_ip)" ]; then
+  echo "no network yet; trying again" >&2
+  exit 1
+fi
 mode=$(cat /etc/odeion/mode)
 tag=$(cat /etc/odeion/image-tag)
 if [ ! -s .env ]; then
