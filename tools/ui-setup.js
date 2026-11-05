@@ -706,6 +706,25 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(errs.length === 0, `${w}: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
       await cc.close();
     }
+    // An item the Internet Archive restricts: the page says so where the songs would be, with a
+    // link to the item, and Play and Shuffle are off (TASK-archive-restricted)
+    {
+      const cc = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      // The page id of a link is `u-` and the link in base64url, as the node makes it
+      const lockedId = 'u-' + Buffer.from('https://archive.org/details/locked-set').toString('base64url');
+      const locked = { kind: 'album', id: lockedId, uri: 'https://archive.org/details/locked-set', target: { uri: 'https://archive.org/details/locked-set' }, title: 'Locked Set', artist: { name: 'Someone', id: null }, album: null, year: 2020, image: null, source: 'Internet Archive', source_id: 'archive', plays_from: null, connect: [], reading: false, pending: false, songs: [], total_ms: 0, albums: [], versions: [], also_on: [], opened_as: null, plays_note: null, unavailable: 'Restricted on the Internet Archive: its recordings can’t be streamed.', song_uri: null, link: 'https://archive.org/details/locked-set', on_pubky: null, about: [], blurb: null, open_on: [], related: [], concerts: [], section: 'home' };
+      await pp.route(new RegExp(`/v1/item/album/${lockedId}$`), (r) => r.fulfill({ json: locked }));
+      await pp.route(/\/v1\/item\/[a-z]+\/[^/]+\/extras$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
+      await pp.goto(`${BASE}/album/${lockedId}`); await pp.waitForSelector('#isongs', { timeout: 20000 });
+      const txt = await pp.textContent('#isongs');
+      check(/Restricted on the Internet Archive/.test(txt) && !/No connected service lists/.test(txt), 'a restricted archive item says so instead of an empty song list');
+      check((await pp.getAttribute('#isongs a[href="https://archive.org/details/locked-set"]', 'target')) === '_blank', 'with a link to the item on the archive');
+      check(await pp.isDisabled('#iplay') && await pp.isDisabled('#ishuffle') && /Restricted/.test(await pp.getAttribute('#iplay', 'title')), 'Play and Shuffle are off, saying why');
+      check(errs.length === 0, `restricted item: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
     // The kiosk dashboard fills the screen without a scroll; a playlist whose sources can't be
     // found says so, with Try again, and drops "Still finding…"
     {

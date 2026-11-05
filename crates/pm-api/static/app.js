@@ -5780,9 +5780,16 @@
         case 'source-item': {
           loading();
           const { source, id } = state.viewArg;
-          const it = await api('GET', `/sources/${encodeURIComponent(source)}/items/${encodeURIComponent(id)}`);
-          if (state.view !== 'source-item') return;
           const srcName = ((state.sources || []).find((x) => x.id === source) || { name: source }).name;
+          let it;
+          try { it = await api('GET', `/sources/${encodeURIComponent(source)}/items/${encodeURIComponent(id)}`); }
+          catch (e) {
+            if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
+            // An item the service won't play (the archive restricts it): the plain reason, nothing to play
+            main.innerHTML = backBtn('sources', srcName) + `<div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(id)}</h1></div></div><p class="notice warn" role="status">${esc(e.message)}</p>`;
+            break;
+          }
+          if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
           const playFrom = async (i, replace = true) => {
             const items = qitems.slice(i);
@@ -5924,7 +5931,7 @@
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
             + (aboutTop ? aboutHtml(pg) : '')
-            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
+            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
@@ -6002,10 +6009,12 @@
           const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
           const iq = $('#iartistq'); if (iq) iq.onclick = () => { search.value = pg.artist.name; runSearch(); };
           const ial = $('#ialbum'); if (ial) ial.onclick = () => setView('item', { kind: 'album', id: pg.album.id });
-          const playAll = (shuffle, how = 'replace', anchorEl) => { if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
+          const playAll = (shuffle, how = 'replace', anchorEl) => { if (pg.unavailable) return toast(pg.unavailable, 'error'); if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
           $('#iplay').onclick = (e) => playAll(false, 'replace', e.currentTarget);
           stickyHead(state.itemTitle, (el) => playAll(false, 'replace', el));
           const sh = $('#ishuffle'); if (sh) sh.onclick = (e) => playAll(true, 'replace', e.currentTarget);
+          // Nothing here plays (the archive restricts the item): Play and Shuffle say why, off
+          if (pg.unavailable) for (const b of [$('#iplay'), sh]) if (b) { b.disabled = true; b.title = pg.unavailable; }
           $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
           $('#ifav').onclick = async () => {
             // A file not matched yet: "Which song is this?" first, then the heart

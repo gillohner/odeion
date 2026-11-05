@@ -1019,6 +1019,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: None,
         link: None,
         on_pubky,
         about,
@@ -1152,6 +1153,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: None,
         song_uri: None,
         link: None,
         on_pubky,
@@ -1303,6 +1305,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: None,
         song_uri: None,
         link: None,
         open_on: Vec::new(),
@@ -1461,7 +1464,12 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
                     .to_lowercase()
                     .replace(' ', "-")
             }),
-        plays_from: c.plays_from.clone().or_else(|| it.plays_from.clone()),
+        // Nothing here plays (the archive restricts the item): no "plays from" either
+        plays_from: if c.unavailable.is_some() {
+            None
+        } else {
+            c.plays_from.clone().or_else(|| it.plays_from.clone())
+        },
         connect: if c.connect.is_empty() {
             it.connect.clone()
         } else {
@@ -1481,6 +1489,7 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
+        unavailable: c.unavailable.clone(),
         song_uri: song_uri.or_else(|| it.uri.contains("://musicbrainz.org/").then(|| it.uri.clone())),
         link: Some(
             it.page
