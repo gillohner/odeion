@@ -605,10 +605,10 @@ pub(crate) fn may_keep(key: &str, approver: &str, granted: &[String]) -> Result<
 /// A Ring approval in progress. Its poll runs in a task of its own: after an approval it goes
 /// on to exchange it with the listener's homeserver, and a request that gives up (or goes
 /// away) must not cancel that, or the approval is lost.
-type Polled = (LoginFlow, Result<Option<PubkySession>, HomeserverError>);
+type Polled = (Box<LoginFlow>, Result<Option<PubkySession>, HomeserverError>);
 enum Asking {
-    /// Nobody is asking it now.
-    Waiting(LoginFlow),
+    /// Nobody is asking it now (boxed: a flow is large, the other states a pointer or nothing).
+    Waiting(Box<LoginFlow>),
     /// Being asked; a poll picks up its answer.
     Asked(tokio::task::JoinHandle<Polled>),
     /// A poll of theirs holds it this moment.
@@ -686,7 +686,7 @@ pub(crate) async fn connect_start(
     all.retain(|_, (_, at, _)| at.elapsed() < CONNECT_TTL);
     // One at a time per listener: a new one replaces theirs
     all.retain(|_, (_, _, who)| who != &key);
-    all.insert(id.clone(), (Asking::Waiting(flow), Instant::now(), key));
+    all.insert(id.clone(), (Asking::Waiting(Box::new(flow)), Instant::now(), key));
     Ok(Json(
         serde_json::json!({"id": id, "qr_svg": crate::qr_svg(&url), "url": url}),
     ))
