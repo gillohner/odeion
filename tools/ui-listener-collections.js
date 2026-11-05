@@ -80,6 +80,10 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       assert.equal(await page.locator('#hsnote').count(), 0, 'connected, nothing to say');
       assert.match(await page.locator('[data-pl]').first().innerText(), /Road trip[\s\S]*synced/i);
       await shot('collections-list');
+      // Its row's Play, in this browser: what the library has of it, never the owner's play-from
+      await page.locator('[data-plplay]').first().click(); await sleep(600);
+      assert.ok(!asked.some((x) => /play-from/.test(x)), `no play-from: ${asked.join(', ')}`);
+      assert.match(await page.locator('#toast').innerText(), /None of its songs is in this library/);
 
       // ---- her collection's page: hers to change and share, nothing of the owner's ----
       await page.locator('[data-pl] .name').first().click();

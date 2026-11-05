@@ -2058,6 +2058,18 @@
   };
   const playPlaylist = async (id) => {
     try {
+      if (isBrowser() && isListener()) {
+        // A listener's own collection plays what this library has of it (where songs play from is
+        // the owner's: no play-from here)
+        const d = await api('GET', `/playlists/${encodeURIComponent(id)}`);
+        rememberTracks(d.tracks);
+        const songs = d.tracks.filter(Boolean).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms }));
+        if (!songs.length) return toast('None of its songs is in this library', 'error');
+        const out = d.playlist.items.length - songs.length;
+        if (out > 0) toast(`${countOf(out, 'items')} not in this library; left out of this browser's queue`);
+        await playSongs(songs);
+        return;
+      }
       if (isBrowser()) {
         // The list's Play shortcut uses the same resolved sources as the detail
         // page: d.tracks alone omits all service-only entries. Only a library song or a

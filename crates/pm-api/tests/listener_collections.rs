@@ -586,3 +586,105 @@ async fn a_removed_listener_leaves_no_collections_and_disconnecting_keeps_hers()
         "People › Remove leaves no copy of hers"
     );
 }
+
+#[tokio::test]
+async fn a_change_their_homeserver_wont_take_is_read_again_from_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Kept name", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    fake.down.store(true, Ordering::SeqCst);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Never taken"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // Back, but it won't take that version: the node shows what it has, not the change as synced
+    fake.down.store(false, Ordering::SeqCst);
+    fake.rejects.lock().unwrap().insert(ANN.to_string());
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(names(&v), vec!["Kept name"], "{v}");
+    assert_eq!(v[0]["synced"], true, "{v}");
+    assert_eq!(newest(&fake, ANN, &id).1["name"], "Kept name");
+}
+
+#[tokio::test]
+async fn a_change_half_written_is_kept_and_never_made_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    // Its draft lands, its published copy is refused: kept, waiting, not a 409 to send it again
+    fake.refuse_pub.store(true, Ordering::SeqCst);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Shared", "uris": [SONG_A], "public": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["summary"]["synced"], false, "{v}");
+    let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+    assert_eq!(me["lost"], true, "{me}");
+    let ids: std::collections::BTreeSet<String> = fake
+        .paths(ANN, DRAFTS)
+        .iter()
+        .map(|p| {
+            p.trim_start_matches(DRAFTS)
+                .split('/')
+                .next()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "one collection, never two: {ids:?}");
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(names(&v), vec!["Shared"], "{v}");
+}
+
+#[tokio::test]
+async fn a_delete_waiting_removes_every_version_even_another_devices() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Going", "uris": [SONG_A], "public": true})),
+    )
+    .await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    fake.down.store(true, Ordering::SeqCst);
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    // Meanwhile another app of hers writes a newer version, drafted and published
+    let (draft, _) = newest(&fake, ANN, &id);
+    let body = fake.json(ANN, &draft);
+    let later = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 5_000_000);
+    for root in [DRAFTS, PUBLISHED] {
+        fake.files.lock().unwrap().get_mut(ANN).unwrap().insert(
+            format!("{root}{id}/{later}.json"),
+            serde_json::to_vec(&body).unwrap(),
+        );
+    }
+    fake.down.store(false, Ordering::SeqCst);
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(v, serde_json::json!([]), "{v}");
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(v, serde_json::json!([]), "{v}");
+    assert!(
+        fake.paths(ANN, DRAFTS).is_empty() && fake.paths(ANN, PUBLISHED).is_empty(),
+        "every version went, the other app's too"
+    );
+}

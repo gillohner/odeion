@@ -169,30 +169,17 @@ async fn refresh(
     key: &str,
     sh: &mut Shelf,
 ) -> Result<bool, ApiError> {
-    for k in sh.items.iter_mut().filter(|k| k.pending) {
-        match push(b, key, k).await {
-            Ok(()) => k.pending = false,
-            // Never taken: dropped (what their homeserver has, if anything, comes back below)
-            Err(PersonalError::Rejected(m)) => {
-                tracing::warn!(%key, id = %k.id, "a listener's homeserver won't take a waiting collection; dropped: {m}");
-                k.pending = false;
-            }
-            Err(e) => return read_outcome(s, key, e),
-        }
-    }
-    sh.items.retain(|k| !(k.deleted && !k.pending));
-
     // What the node knows there: an empty listing then is checked again (a gone user lists as empty)
     let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
     let had_public = sh.items.iter().any(|k| !k.pending && k.public);
-    let private = match b
+    let mut private = match b
         .list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE), had)
         .await
     {
         Ok(paths) => v1::heads(paths),
         Err(e) => return read_outcome(s, key, e),
     };
-    let public = match b
+    let mut public = match b
         .list(
             key,
             &v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE),
@@ -203,9 +190,42 @@ async fn refresh(
         Ok(paths) => v1::heads(paths),
         Err(e) => return read_outcome(s, key, e),
     };
-    // Deleted on another device: gone here too, unless changed here since. A public post is
-    // theirs only as the published copy of a draft (the rest of /pub/social/v1/ is their other posts)
-    sh.items.retain(|k| k.pending || private.contains_key(&k.id));
+    // What waited is written over every version there is (another device's too: a delete or
+    // "private again" removes those as well)
+    let mut written = std::collections::HashSet::new();
+    for k in sh.items.iter_mut().filter(|k| k.pending) {
+        for h in [private.get(&k.id), public.get(&k.id)].into_iter().flatten() {
+            for v in &h.versions {
+                if !k.versions.contains(v) {
+                    k.versions.push(v.clone());
+                }
+            }
+        }
+        match push(b, key, k).await {
+            Ok(()) => {
+                k.pending = false;
+                written.insert(k.id.clone());
+                if k.deleted {
+                    private.remove(&k.id);
+                    public.remove(&k.id);
+                }
+            }
+            // Never taken: dropped. What their homeserver has comes back below (the head is
+            // read again); one it never had goes
+            Err(PersonalError::Rejected(m)) => {
+                tracing::warn!(%key, id = %k.id, "a listener's homeserver won't take a waiting collection; dropped: {m}");
+                k.pending = false;
+                k.head.clear();
+            }
+            Err(e) => return read_outcome(s, key, e),
+        }
+    }
+    sh.items.retain(|k| !(k.deleted && !k.pending));
+    // Deleted on another device: gone here too, unless changed or written here since. A public
+    // post is theirs only as the published copy of a draft (the rest of /pub/social/v1/ is their
+    // other posts)
+    sh.items
+        .retain(|k| k.pending || written.contains(&k.id) || private.contains_key(&k.id));
     sh.other.retain(|p| private.values().any(|h| &h.path == p));
 
     let mut wanted: Vec<(&String, &v1::Head)> = Vec::new();
@@ -213,8 +233,10 @@ async fn refresh(
         let mut versions = head.versions.clone();
         versions.extend(public.get(id).map(|h| h.versions.clone()).unwrap_or_default());
         match sh.items.iter_mut().find(|k| &k.id == id) {
-            // Changed here: the copy's is written next
-            Some(k) if k.pending => {}
+            // Still waiting (their homeserver stopped answering), or just written: the node's is newer
+            Some(k) if k.pending || written.contains(&k.id) => {}
+            // Its newest version is no collection the node can hold (another app's): not read again
+            Some(_) if sh.other.contains(&head.path) => {}
             Some(k) => {
                 k.versions = versions;
                 k.public = public.contains_key(id);
@@ -226,6 +248,8 @@ async fn refresh(
             None => wanted.push((id, head)),
         }
     }
+    // The newest first: a listener with many other drafts sees their latest collections soonest
+    wanted.sort_by(|a, b| b.1.edit_id.cmp(&a.1.edit_id));
     let mut stale = false;
     for (id, head) in wanted.into_iter().take(READS_PER_REQUEST) {
         let bytes = match b.read(key, &head.path).await {
@@ -357,18 +381,37 @@ async fn change(
         edit(&lib, at.map(|i| sh.items[i].clone()))?
     };
     k.pending = true;
-    match push(b.as_ref(), key, &mut k).await {
+    let before = k.versions.clone();
+    let push = push(b.as_ref(), key, &mut k).await;
+    // Whether part of it reached their homeserver before it failed
+    let landed = k.versions != before;
+    match push {
         Ok(()) => k.pending = false,
         Err(PersonalError::NoGrant) => return Ok(personal::needs_connect(false)),
+        // Nothing written: approve the node again, then the change is sent again. Once part of it
+        // landed (the draft, before its published copy) it is kept and waits, so a resend can't
+        // make it twice
         Err(PersonalError::Refused(m)) => {
             personal::mark_lost(s, key, &m)?;
-            return Ok(personal::needs_connect(true));
+            if !landed {
+                return Ok(personal::needs_connect(true));
+            }
         }
         Err(PersonalError::Rejected(m)) => {
+            if landed {
+                // Part of it landed: the node reads what their homeserver has next time
+                k.pending = false;
+                k.head.clear();
+                match at {
+                    Some(i) => sh.items[i] = k.clone(),
+                    None => sh.items.push(k.clone()),
+                }
+                save(s, key, &sh)?;
+            }
             return Err(ApiError::new(
                 StatusCode::BAD_GATEWAY,
                 format!("Your homeserver won't keep this collection: {m}"),
-            ))
+            ));
         }
         Err(PersonalError::Unreachable(m)) => {
             tracing::info!(%key, id = %k.id, "a listener's homeserver didn't answer; the change waits: {m}");
@@ -471,10 +514,8 @@ pub(crate) async fn create(
         return Ok(playlists::create(State(s), Json(body)).await?.into_response());
     };
     change(&s, &key, None, |lib, _| {
+        // Where a song plays from (pins) is the owner's to set: a listener's `sources` are left out
         let mut items = playlists::parse_uris(&body.uris)?;
-        for (it, src) in items.iter_mut().zip(&body.sources) {
-            it.source = src.clone();
-        }
         items.extend(identified_tracks(lib, &body.track_ids)?);
         let mut p = Playlist::new(body.name, body.description, body.image, items);
         p.layout = match &body.layout {

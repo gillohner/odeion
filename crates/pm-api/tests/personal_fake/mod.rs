@@ -33,6 +33,10 @@ pub struct Fake {
     pub down: AtomicBool,
     /// Every call, as `key op uri`.
     pub calls: Mutex<Vec<String>>,
+    /// Writes it will never take (a 400 or 413), by key.
+    pub rejects: Mutex<HashSet<String>>,
+    /// Writes under /pub/ refused (a grant that lost its public folder).
+    pub refuse_pub: AtomicBool,
     /// Their files (collections), by key and path.
     pub files: Mutex<HashMap<String, BTreeMap<String, Vec<u8>>>>,
 }
@@ -147,6 +151,12 @@ impl PersonalHomeserver for Fake {
     async fn write(&self, key: &str, path: &str, body: &serde_json::Value) -> Result<(), PersonalError> {
         Self::moment().await;
         self.check(key, "write", path)?;
+        if self.rejects.lock().unwrap().contains(key) {
+            return Err(PersonalError::Rejected("413 Payload Too Large".into()));
+        }
+        if path.starts_with("/pub/") && self.refuse_pub.load(Ordering::SeqCst) {
+            return Err(PersonalError::Refused("403 Forbidden".into()));
+        }
         self.files
             .lock()
             .unwrap()
