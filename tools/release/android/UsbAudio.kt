@@ -117,7 +117,19 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             // Registering reports the devices already attached through onAudioDevicesAdded too
             // On a thread of its own, never behind the busy UI thread
             am.registerAudioDeviceCallback(w, BitPerfect.handler())
-            // A change of Android's media volume (the volume keys) reports again at once
+            // A change of Android's media volume (the volume keys) reports again at once: Android's
+            // broadcast comes right away (the settings it persists ~500 ms later, the observer below)
+            val volumeChanged = object : android.content.BroadcastReceiver() {
+                override fun onReceive(ctx: Context, intent: android.content.Intent) {
+                    w.refresh()
+                }
+            }
+            val vf = android.content.IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(volumeChanged, vf, null, BitPerfect.handler(), Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(volumeChanged, vf, null, BitPerfect.handler())
+            }
             context.contentResolver.registerContentObserver(
                 android.provider.Settings.System.CONTENT_URI,
                 true,

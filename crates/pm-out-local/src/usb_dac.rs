@@ -887,12 +887,15 @@ fn kept_while_held(r: &Report) -> Option<Dac> {
 /// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
 pub fn apply_report(json: &str) -> bool {
     let parsed = parse_report(json);
+    let mut media_changed = false;
     if let Ok(r) = parsed.as_ref() {
         let v = r
             .media_volume
             .and_then(|v| u8::try_from(v).ok())
             .filter(|v| *v <= 100);
-        with_phone(|p| p.media = v);
+        // Compared before it is kept: a volume-only report is a change too (the node re-reads
+        // the caps: Auto at 100 % plays bit-perfect again, below it shared)
+        media_changed = with_phone(|p| std::mem::replace(&mut p.media, v) != v);
     }
     let (dac, why) = match parsed {
         // Android is about to move audio off the DAC: gone now, before its removal arrives (not
@@ -920,7 +923,7 @@ pub fn apply_report(json: &str) -> bool {
         }
     };
     tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
-    set_dac_because(dac, why)
+    set_dac_because(dac, why) || media_changed
 }
 
 #[cfg(test)]

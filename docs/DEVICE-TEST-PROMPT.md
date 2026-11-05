@@ -219,7 +219,9 @@ What it does:
    song goes on shared within a moment (a short gap, from where it was; the panel says why), and from
    then on the buttons change the level. It must never get louder at any point; report how long the
    gap was and anything louder than before. The next song plays shared too. With Bit-perfect chosen
-   in Settings (and agreed to), the buttons change nothing and it stays bit-perfect.
+   in Settings (and agreed to), the buttons change nothing and it stays bit-perfect. Chosen at full
+   volume (so no question was asked), turning it down switches to shared just like Auto. Also press
+   Play right after turning the volume down during a pause: it must resume shared.
    Then, with Auto at full volume again and bit-perfect playing: pause, turn Android's volume down
    to about half, and press Play (once right away, once after waiting more than a minute). It must
    carry on shared (the panel says "Android's volume is at N%…"), never at full level. Also play two
