@@ -177,18 +177,29 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
     let stats = {
         let lib =
             Library::open(&staged).with_context(|| format!("{} is not a library backup", file.display()))?;
-        // What is this node's own (stream key, id, backup schedule, files jobs) stays, and the
-        // sign-ins, invites and parties a plain copy doesn't carry stay as they are here. A current
-        // database that won't open (damaged, or from a newer version) is the reason to restore:
-        // then nothing is carried over, and the restore goes on
-        if db.exists() {
+        // What is this node's own (stream key, id, backup schedule, files jobs, the owner's
+        // sessions) stays, and the sign-ins, invites and parties a plain copy doesn't carry stay as
+        // they are here. A current database that won't open (damaged, or from a newer version) is
+        // the reason to restore: then nothing is carried over, and the restore goes on. Without a
+        // node to keep them from, none of the backup's own settings goes in either (an older backup
+        // still holds them, its ended sessions among them)
+        let here = if db.exists() {
             match Library::open(&db) {
-                Ok(here) => pm_api::backup::keep_this_nodes(&here, &lib)?,
-                Err(e) => println!(
-                    "note: the current database can't be read ({e}); its own settings (backup schedule, \
-                     stream key, sign-ins) are not carried over"
-                ),
+                Ok(here) => Some(here),
+                Err(e) => {
+                    println!(
+                        "note: the current database can't be read ({e}); its own settings (backup schedule, \
+                         stream key, sign-ins) are not carried over"
+                    );
+                    None
+                }
             }
+        } else {
+            None
+        };
+        match here {
+            Some(here) => pm_api::backup::keep_this_nodes(&here, &lib)?,
+            None => pm_api::backup::forget_node_own(&lib)?,
         }
         lib.stats()?
     };
@@ -675,5 +686,47 @@ mod tests {
         std::fs::write(out.join("copy.sqlite-wal"), b"someone's").unwrap();
         assert!(backup(&cfg, &file, false).is_err());
         assert_eq!(std::fs::read(out.join("copy.sqlite-wal")).unwrap(), b"someone's");
+    }
+
+    /// A backup from before the node's own settings were left out, restored onto an empty data
+    /// folder: none of them goes in. The owner's sessions it holds stay ended, and the node makes
+    /// its own id and stream key; the library comes back.
+    #[test]
+    fn an_older_backup_onto_an_empty_node_brings_no_ended_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("older-backup.sqlite");
+        let hash = ["fixture", "session", "hash"].join("-");
+        {
+            let lib = Library::open(&old).unwrap();
+            let list = format!("[{{\"hash\":\"{hash}\",\"key\":\"k\",\"created_at\":1}}]");
+            lib.set_setting("accounts.owner_sessions", &list).unwrap();
+            lib.set_setting("accounts.device_sessions", &list).unwrap();
+            lib.set_setting("node.id", "the-old-node").unwrap();
+            lib.set_setting("stream.secret", "the-old-stream-key").unwrap();
+            lib.set_setting("home.layout", "kept").unwrap();
+        }
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("fresh"),
+            ..Default::default()
+        };
+        assert!(!cfg.db_path().exists(), "an empty data folder");
+        restore(&cfg, &old).unwrap();
+        let lib = open(&cfg).unwrap();
+        for k in [
+            "accounts.owner_sessions",
+            "accounts.device_sessions",
+            "node.id",
+            "stream.secret",
+        ] {
+            assert_eq!(lib.get_setting(k).unwrap(), None, "{k} came in from the backup");
+        }
+        assert_eq!(lib.get_setting("home.layout").unwrap().as_deref(), Some("kept"));
+        // A current database that can't be read is the same: nothing of the backup's own goes in
+        drop(lib);
+        std::fs::write(cfg.db_path(), b"not a database at all").unwrap();
+        restore(&cfg, &old).unwrap();
+        let lib = open(&cfg).unwrap();
+        assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
+        assert_eq!(lib.get_setting("home.layout").unwrap().as_deref(), Some("kept"));
     }
 }

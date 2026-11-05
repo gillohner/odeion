@@ -345,6 +345,18 @@ const CARRIED: &[&str] = &[
 /// before it goes in: this node's own settings ([`NODE_OWN`]) from `here`, as the web restore
 /// keeps them; and each sign-in, the people list, the signup token and parties that `staged`
 /// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays.
+/// For a restore that replaces the database file when there is no node to keep anything from
+/// (an empty data folder, or a current database that can't be read): none of a node's own
+/// settings ([`NODE_OWN`]) goes in from the backup. A backup made before they were left out
+/// still holds them, and the owner's browser sessions and device sign-ins among them would come
+/// back; the node makes its own id, stream key and the rest afresh.
+pub fn forget_node_own(staged: &Library) -> Result<(), pm_library::LibraryError> {
+    for key in NODE_OWN {
+        staged.delete_setting(key)?;
+    }
+    Ok(())
+}
+
 pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_library::LibraryError> {
     for key in NODE_OWN {
         match here.get_setting(key)? {
