@@ -480,6 +480,7 @@ fn session(
     // one player don't both offer it; undone (`unannounce`) if it fails or the node says no.
     let (output, announce) = {
         let mut p = players.lock().expect("players");
+        let known = p.len();
         match p.get_mut(&hello.mac) {
             Some(k) => {
                 if k.output.hello().max_sample_rate() != hello.max_sample_rate() {
@@ -491,8 +492,8 @@ fn session(
                 k.announced = true;
                 (k.output.clone(), announce)
             }
-            None if p.len() >= limits.players => {
-                tracing::warn!(player = %hello.mac_string(), players = p.len(),
+            None if known >= limits.players => {
+                tracing::warn!(player = %hello.mac_string(), players = known,
                     "Squeezebox player not added: the node has as many players as it takes");
                 return Err(SlimError::Protocol("no room for another player".into()));
             }
