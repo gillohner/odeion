@@ -132,6 +132,8 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
       const sent = state.hits.slice(n0).filter((h) => h.m === 'PUT' && h.v === '/node/settings').map((h) => JSON.parse(h.body).first_steps_hidden);
       // hidden = !checked: from shown, the three presses ask hidden = shown, !shown, shown
       check(JSON.stringify(sent) === JSON.stringify([shown, !shown, shown]), `three presses on a switch while each change is on its way send all three, in order (${JSON.stringify(sent)})`);
+      const at = state.hits.slice(n0).filter((h) => h.m === 'PUT' && h.v === '/node/settings').map((h) => h.at);
+      check(at.length === 3 && at[1] - at[0] >= 450 && at[2] - at[1] >= 450, `and one after another, so the node applies them in that order (${at.slice(1).map((t, i) => t - at[i]).join(', ')} ms apart)`);
     }
   }
   // ---- navigation ----
@@ -197,6 +199,19 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     check(end.path === '/tag/slowtag,fasttag' && /On tags A and B/.test(end.text) && !end.sawA && !/Only on tag A/.test(end.text), `Back then Forward at once ends on ${end.path} with its own answer, nothing of A drawn`);
   }
   {
+    // Back to a scrolled page, then another place before it is drawn: the new place starts at the top
+    state.tracks = Array.from({ length: 80 }, (_, i) => ({ ...fx.track, id: 1000 + i, title: `Song ${i}` }));
+    await p.click(nav('tracks')); await p.waitForSelector('.track:nth-child(60)', { state: 'attached' }); await sleep(300);
+    await p.evaluate(() => { document.querySelector('#main').scrollTop = 1500; }); await sleep(100);
+    await p.click(nav('genres')); await sleep(500);
+    slow['/library/tracks'] = 1200; FIXTURES['/library/genres'] = { body: Array.from({ length: 60 }, (_, i) => ({ name: `Genre ${i}`, tracks: 3 })) };
+    await p.evaluate(() => history.back()); await sleep(60); await p.click(nav('favourites'), { force: true });
+    await sleep(1800);
+    const top = await p.evaluate(() => ({ s: document.querySelector('#main').scrollTop, path: location.pathname }));
+    check(top.path.includes('favourites') && top.s === 0, `Back then another place at once: it opens at the top (${top.path}, scrolled ${top.s})`);
+    delete slow['/library/tracks']; delete FIXTURES['/library/genres']; delete state.tracks;
+  }
+  {
     // A page whose answer fails: the error, and Try again asks again
     FIXTURES['/playlists'] = { body: { error: 'the node answered 503 Service Unavailable' }, status: 503 }; state.fixtures = FIXTURES;
     await p.click(nav('genres')); await sleep(200); await p.click(nav('playlists')); await p.waitForSelector('#navretry').catch(() => {});
@@ -215,9 +230,13 @@ const FIXTURES = { '/library/albums': { body: albums }, '/item/album/lib-7': { b
     await fx.go(r2.page, '/albums'); await r2.page.waitForTimeout(800);
     const nx = await r2.page.locator('#next').boundingBox(); const n0 = r2.state.hits.length;
     await r2.page.mouse.click(nx.x + nx.width / 2, nx.y + nx.height / 2); await sleep(80); await r2.page.mouse.click(nx.x + nx.width / 2, nx.y + nx.height / 2);
+    const nb = await r2.page.evaluate(() => { const b = document.querySelector('#next'); return { busy: b.getAttribute('aria-busy'), dis: b.getAttribute('aria-disabled') }; });
+    check(nb.busy === 'true' && nb.dis === null, 'Next shows its skip on its way and still takes presses');
     await sleep(900);
     const sent = r2.state.hits.slice(n0).filter((h) => h.m === 'POST' && h.v === '/zones/z1/transport').map((h) => JSON.parse(h.body).action);
     check(sent.length === 2 && sent.every((a) => a === 'next'), `Next pressed twice skips twice (${JSON.stringify(sent)})`);
+    const at = r2.state.hits.slice(n0).filter((h) => h.m === 'POST' && h.v === '/zones/z1/transport').map((h) => h.at);
+    check(at.length === 2 && at[1] - at[0] >= 450, `the second skip is sent after the first is answered, so answers land in order (${at[1] - at[0]} ms apart)`);
     check(r2.state.errors.length === 0, `no page errors on the zone${r2.state.errors.length ? ': ' + r2.state.errors.join(' | ') : ''}`);
     await r2.context.close();
   }

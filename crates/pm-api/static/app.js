@@ -163,9 +163,11 @@
   // clicks (and says aria-disabled), and the same click bubbling on to a row's own handler is not a
   // second click. A mark made without an event (a menu's action on its ⋯) only shows the progress.
   const BUSY = new WeakMap();
+  let inHandler = 0; // a press's handler is running (its reads are its own, not a page's: navApiFor)
   const busy = (el, fn, ev = null) => {
     let out;
-    try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; }
+    inHandler++;
+    try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; } finally { inHandler--; }
     if (!out || typeof out.then !== 'function') return out;
     const failed = (e) => { if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); };
     if (!el) { out.catch(failed); return out; }
@@ -202,7 +204,8 @@
   // quickly in a row (volume steps) opt out with data-repeat.
   const viaBusy = (host, fn, self, e) => {
     const t = busyTarget(host, e);
-    if (!t || t.closest('[data-repeat]')) return fn.call(self, e);
+    if (!t) return fn.call(self, e);
+    if (t.closest('[data-repeat]')) return busy(t, () => fn.call(self, e)); // progress only: every press runs
     const was = BUSY.get(t);
     if (was && was.ev && was.ev !== e && e.type !== 'change') { e.preventDefault(); return false; }
     return busy(t, () => fn.call(self, e), e.type === 'change' ? null : e);
@@ -250,15 +253,18 @@
   };
   // A change already on its way is not sent twice: the same request again (method, path and body) while
   // it is the latest one to that address and still in flight gets its answer. Any other change to the
-  // address in between is sent, and so is a repeat after it (A, B, A sends all three). Reads are left alone.
+  // address in between is sent, and so is a repeat after it (A, B, A sends all three, one after another).
+  // Reads are left alone.
   const inFlight = new Map();
   const api = (method, path, body, opts = {}) => {
-    // opts.repeat: each one is meant (Next pressed twice skips two)
-    if (method === 'GET' || opts.repeat) return apiSend(method, path, body, opts);
+    if (method === 'GET') return apiSend(method, path, body, opts);
     let sent; try { sent = body === undefined ? '' : JSON.stringify(body); } catch { return apiSend(method, path, body, opts); }
     const key = `${method} ${path}`; const was = inFlight.get(key);
-    if (was && was.sent === sent) return was.p;
-    const entry = { sent, p: apiSend(method, path, body, opts) };
+    // opts.repeat: each one is meant (Next pressed twice skips two), so it is never shared
+    if (!opts.repeat && was && was.sent === sent) return was.p;
+    // After the one before it to the same address, so the node applies them, and their answers land, in
+    // the order they were made (a late answer to the first Next can't undo the second)
+    const entry = { sent: opts.repeat ? null : sent, p: (was ? was.p.catch(() => {}) : Promise.resolve()).then(() => apiSend(method, path, body, opts)) };
     inFlight.set(key, entry);
     const drop = () => { if (inFlight.get(key) === entry) inFlight.delete(key); };
     entry.p.then(drop, drop);
@@ -3389,10 +3395,13 @@
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
     navDepth = st.depth || 0;
-    if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); await setView('search', st.arg, 'pop'); }
-    else await setView(st.v, st.arg, 'pop');
-    // Back to where the page was scrolled, once all of it is drawn (and only if nothing newer was opened)
-    const gen = navGen; await navRendering;
+    let going;
+    if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); going = setView('search', st.arg, 'pop'); }
+    else going = setView(st.v, st.arg, 'pop');
+    // Back to where the page was scrolled, once all of it is drawn, and only if nothing newer was opened
+    // meanwhile (this navigation's generation and code, taken before anything else can start)
+    const gen = navGen; const drawnAll = navRendering;
+    await going; await drawnAll;
     if (st.scroll && gen === navGen) main.scrollTop = st.scroll;
   });
   // The back arrow: one step back when there is in-app history, else the parent page.
@@ -4695,7 +4704,8 @@
   let navGen = 0; let navCtl = new AbortController(); let navStop = () => {}; let navRendering = Promise.resolve();
   const NEVER = () => new Promise(() => {}); // a fresh one each time: nothing piles up on a shared one
   const navApiFor = (gen, ctl, drawing) => (method, path, body, opts = {}) => {
-    if (method !== 'GET') return api(method, path, body, opts);
+    // Changes, and reads a press makes (a handler's GET before its PUT), are never held back
+    if (method !== 'GET' || inHandler) return api(method, path, body, opts);
     if (gen !== navGen) return drawing.on ? NEVER() : api(method, path, body, opts);
     const forDrawing = drawing.on;
     return api(method, path, body, forDrawing ? { ...opts, signal: opts.signal || ctl.signal } : opts)
@@ -4729,7 +4739,9 @@
   // The page's code reads through its own `api`, tied to the navigation that draws it (navigate above)
   const render = () => {
     const drawing = { on: true };
-    const p = renderPage(navApiFor(navGen, navCtl, drawing));
+    // A page opened by a press is the page's own reading, not the press's
+    const outer = inHandler; inHandler = 0; let p;
+    try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
     const drawn = () => { drawing.on = false; }; p.then(drawn, drawn);
     return p;
   };

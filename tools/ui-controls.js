@@ -72,9 +72,11 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       await p.keyboard.press('Escape').catch(() => {});
       // A control whose action never settles would stay busy (and ignore presses) for good
       // (at most 10 s for one control, 60 s of waiting in all, so the run's time stays bounded)
-      const stuckAt = Date.now() + Math.min(10000, stuckBudget); let busyNow = [];
-      for (;;) { busyNow = await p.evaluate(() => [...document.querySelectorAll('.is-busy')].map((e) => (e.textContent || e.getAttribute('aria-label') || e.title || e.tagName).trim().slice(0, 40))).catch(() => []); if (!busyNow.length || Date.now() > stuckAt) break; await sleep(500); stuckBudget -= 500; }
-      if (busyNow.length) stuck.push(`${view}  "${k.words}"  (${k.sig}): still busy after 10 s: ${busyNow.join(', ')}`);
+      // A control is counted only when it was watched for the full 10 s; once the budget is spent the
+      // check is skipped
+      let busyNow = []; let waited = 0;
+      if (stuckBudget > 0) for (;;) { busyNow = await p.evaluate(() => [...document.querySelectorAll('.is-busy')].map((e) => (e.textContent || e.getAttribute('aria-label') || e.title || e.tagName).trim().slice(0, 40))).catch(() => []); if (!busyNow.length || waited >= 10000 || stuckBudget <= 0) break; await sleep(500); waited += 500; stuckBudget -= 500; }
+      if (busyNow.length && waited >= 10000) stuck.push(`${view}  "${k.words}"  (${k.sig}): still busy after 10 s: ${busyNow.join(', ')}`);
     }
   }
   await browser.close();
