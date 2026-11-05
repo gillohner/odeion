@@ -1,0 +1,7 @@
+#!/bin/sh
+# Docker Compose on Odeion's files in /opt/odeion: the plugin (`docker compose`) when there is
+# one, else Debian's docker-compose.
+set -eu
+cd /opt/odeion
+if docker compose version >/dev/null 2>&1; then exec docker compose "$@"; fi
+exec docker-compose "$@"

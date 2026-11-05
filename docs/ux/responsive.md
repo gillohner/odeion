@@ -1,12 +1,15 @@
 # One design for phone, tablet and desktop (design note, step 1)
 
+**Since 2026-11-04 there are two layouts, not three** (owner: "same features and design as desktop … 2 sizes basically but responsive"): **phone** under 600 px and **desktop** from 600 px, tablets included. See "Tablets: the desktop layout" below; the tablet rail drawn in the 10-26 note is gone.
+
 STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn.** The same note as a page, with the wireframes scaled side by side: `responsive/note.html` (published for the owner; link in ~/QUESTIONS.md). The study behind it: `mobile-study.md`.
 
 ## Rules
 - **Screens don't scroll; lists do.** Now playing and the zone picker fit the screen. Library, album, artist, playlist and search scroll; their headers fold into a compact bar.
-- **Secondary things are sheets.** Queue, Lyrics, Details (signal path, file, credits), Sources (also on) and Tags open over Now playing: a bottom sheet on a phone, a side panel on a tablet, a docked panel on a desktop.
-- **Thumbs first.** 44 px targets; transport and the secondary row in the bottom half; swipe a row for Play next, long-press for its menu.
+- **Secondary things are sheets.** Queue, Lyrics, Details (signal path, file, credits), Sources (also on) and Tags open over Now playing: a bottom sheet on a phone, a docked panel beside it in the desktop layout (tablets too).
+- **Thumbs first.** 40–44 px targets on any touch screen (`pointer: coarse`), whatever the layout; transport and the secondary row in the bottom half; swipe a row for Play next, long-press for its menu.
 - **Same parts at every width;** only the arrangement and density change. Safe areas, both themes, reduced motion, font scale 1.3.
+- **Every press answers at once and acts once** (owner, 2026-11-04). A control whose action is on its way is busy at once (`aria-busy`), shows a spinner after 150 ms and ignores more presses until it is done; a failure says what happened. A menu's action shows on the ⋯ that opened it. Moving to another page marks the place at once, runs a thin bar along the top, shows the page's skeleton if it has nothing to show within 120 ms and "Still loading…" after 2 s, and an error offers Try again. A newer page replaces an older one still loading (A → B ends on B). `busy()` and `navigate()` in app.js; checked by `tools/ui-busy.js`.
 
 ## Phone (under 600 px)
 | Library, mini player, tab bar | Now playing, one screen | A sheet over Now playing | Settings, four groups |
@@ -21,14 +24,20 @@ STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn
   - **This phone:** only on this device. The USB DAC and bit-perfect, Downloads and cache.
   - **This node (admin):** for everyone on this node. Service apps, People, Library folders, zones and outputs, Remote access and updates.
   - **This homeserver (admin, only when the node runs its own):** sign-ups and invites, users, quotas, storage, domain.
-  - Every setting sits in exactly one group. Where a node default and your own choice both exist (playback quality), the node group holds the default and You holds the override; each row says which applies. On tablets and desktops the groups are the left pane.
+  - Every setting sits in exactly one group. Where a node default and your own choice both exist (playback quality), the node group holds the default and You holds the override; each row says which applies. In the desktop layout (tablets too) the groups are the left pane.
 
-## Tablet (600–1024 px)
-![](responsive/tablet-now-playing.png)
+## Tablets: the desktop layout (600 px and up; owner, 2026-11-04)
+Tablets get the desktop layout: the sidebar with every place, the desktop player bar, dense lists, the docked panel and the desktop Now playing. Same features and design; it only reflows to fit:
+- **Sidebar:** icons with their names as tooltips under 1100 px (☰ expands it to names); every place stays, and it scrolls when the window is short.
+- **Player bar:** its three groups shrink and never overlap. The seek bar takes the free width; the sound pill is its source mark, dot and quality badge under 1800 px and whenever a files job shows its chip (the whole sound line is in the Sound panel; above 1800 px the line shows, at most 220 px); only the zone's name shrinks, to an ellipsis. Under 1280 px (under 1600 px beside a files job) the volume slider is a button that opens the Sound panel at it. Under 900 px shuffle and repeat move to Now playing and the zone button drops its chevron; under 760 px the volume button goes too (the volume stays in the Sound panel and in Now playing); under 680 px the seek bar drops its times and the pill its source mark.
+- **Hero:** the cover stays beside the words down to 600 px (140 px under 720 px). "Play on…" is its icon under 900 px, and a playlist's Delete is in its ⋯ menu up to 1024 px, so the buttons stay on one row.
+- **Touch:** on a touch screen (`pointer: coarse`) the targets stay 40 px, song rows show the heart (when on) and ⋯ without hover, and the whole player bar opens Now playing, as on a phone (with a mouse its title and artist are links).
+- **Installed (standalone):** the top bar, the sidebar and Now playing start below the status bar (`env(safe-area-inset-top)`); on a touch screen the sidebar also keeps its top corner free for iPadOS window controls (Stage Manager, windowed apps).
+- **Checked by** `tools/ui-tablet.js`: 600, 700, 820, 1024, 1180 and 1366 px, portrait and landscape, both themes, plus 390 px as the phone.
 
-A rail instead of tabs. Now playing in two columns: the player left, the sheet as a side panel right. Lists become two-column grids.
+The 10-26 tablet drawing (`responsive/tablet-now-playing.png`, a rail) is kept for the record only.
 
-## Desktop (over 1024 px)
+## Desktop (600 px and up)
 ![](responsive/desktop-album.png)
 
 - **Arrangement:** a sidebar (with a "Shared with you" group), dense lists with columns (title, artist, quality, time), the queue/lyrics/details panel docked right, and the player bar along the bottom.
@@ -56,8 +65,8 @@ A rail instead of tabs. Now playing in two columns: the player left, the sheet a
 
 ## Layout option
 Settings › Home and layout:
-- **Layout:** Automatic, Compact or Comfortable.
-- **Dense lists**, on tablets and desktops.
+- **Layout:** Automatic (phone under 600 px, desktop from there), Phone (at any width) or Desktop (from 480 px; a narrower window has no room for the sidebar and the bar). The old Compact becomes Phone; Comfortable (the rail from 600 px, a phone below) becomes Automatic.
+- **Dense lists**, in the desktop layout.
 - **Home rows.**
 
 Per person, saved on their homeserver (STEWARD-MULTI-USER.md).

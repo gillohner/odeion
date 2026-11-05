@@ -16,13 +16,15 @@ const pf = {order:{order:['library'],services:[{id:'library',name:'Your library'
 const json = (r, body, status=200) => r.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
 async function create(browser, width, opts={}) {
  const state = {role:'owner',token:'fixture-owner',offline:false,collections:[],favs:[],hits:[],errors:[],unhandled:[],...opts};
- const context = await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce'});
+ const context = await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce',hasTouch:!!opts.touch});
  await context.addInitScript(([realAudio,token]) => {localStorage.setItem('pm.token',token);localStorage.setItem('pm.zone','browser');if(realAudio){document.addEventListener('play',e=>{if(e.target instanceof HTMLMediaElement){e.target.muted=true;e.target.volume=0;}},true);}else{HTMLMediaElement.prototype.play=async function(){};HTMLMediaElement.prototype.pause=function(){};}},[!!state.realAudio,state.token]);
  await context.route('**/*', async r => {
   const req=r.request(), u=new URL(req.url()), p=u.pathname;
   if(u.origin!==ORIGIN) return r.abort();
   if(!p.startsWith('/v1/')) {const f=path.join(STATIC, p==='/'||!path.extname(p)?'index.html':p.slice(1));return fs.existsSync(f)?r.fulfill({body:fs.readFileSync(f),contentType:({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[path.extname(f)]||'application/octet-stream'}):r.fulfill({status:404,body:''});}
-  const v=p.slice(3), m=req.method();state.hits.push({v,m,q:u.search,body:req.postData()});
+  const v=p.slice(3), m=req.method();state.hits.push({v,m,q:u.search,body:req.postData(),at:Date.now()});
+  // opts.delay: ms (or (path, method) => ms) before the answer, for loading states (ui-busy.js)
+  const wait=typeof state.delay==='function'?state.delay(v,m):state.delay; if(wait) await new Promise(res=>setTimeout(res,wait));
   if(state.fixtures?.[v]) return json(r,state.fixtures[v].body,state.fixtures[v].status||200);
   if(v==='/info') return json(r,{name:'Fixture node',offline:state.offline,library:{tracks:state.tracks?.length??1,albums:1,artists:2,files:1,missing_files:0}});
   if(v==='/me') return json(r,{role:state.role,key:null,zones:null});

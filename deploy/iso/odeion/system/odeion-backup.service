@@ -1,0 +1,9 @@
+[Unit]
+Description=Odeion: nightly backup (node, homeserver, settings; never the music)
+After=odeion.service
+ConditionPathExists=/var/lib/odeion/firstboot-done
+
+[Service]
+Type=oneshot
+Environment=KEEP=7
+ExecStart=/opt/odeion/backup.sh /var/backups/odeion
