@@ -1,0 +1,11 @@
+[Unit]
+Description=Odeion: reach the own homeserver locally when it is published through a tunnel
+Wants=network-online.target
+After=network-online.target nftables.service docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/odeion-local-redirect
+
+[Install]
+WantedBy=multi-user.target
