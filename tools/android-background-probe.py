@@ -398,11 +398,13 @@ def wake_lock_held():
 def app_mode():
     """Start the service as the app does when it plays the music itself (through the tunnel, the
     offline app): `zone` false. The probe's app reaches its node directly, so it never picks this
-    mode itself (the unit test the_player_service_runs_for_every_connection covers the choice)."""
+    mode itself (the unit test the_player_service_mode_for_each_connection covers the choice)."""
     r = adb("shell", "am", "start-foreground-service", "-n", f"{PKG}/.PlayerService",
             "--es", "text", "Plays music from the probe", "--ez", "zone", "false", check=False)
     time.sleep(3)
-    log(f"E: app mode: {r.strip()[:120]}; service foreground {service_foreground()}")
+    fg = service_foreground()
+    log(f"E: app mode: {r.strip()[:120]}; service foreground {fg}")
+    return fg and "Error" not in r
 
 
 def part_e():
@@ -410,12 +412,19 @@ def part_e():
     E1: the service in app mode holds its wake lock and keeps the in-app player going 60 s away.
     E2: paused and out of sight, it ends after 5 min with nothing playing (and its lock with it),
     and starts again when the app comes back."""
-    # E1 (the app is on screen and playing, after D)
-    app_mode()
+    # E1 (the app is on screen and playing, after D): from a stopped service, so app mode takes
+    # its wake lock itself (D's resume left it running as a zone, with the zone's lock)
+    adb("shell", "am", "stopservice", "-n", f"{PKG}/.PlayerService", check=False)
+    time.sleep(2)
+    stopped = not service_foreground() and not wake_lock_held()
+    started = app_mode()
     lock1 = wake_lock_held()
+    if not (stopped and started):
+        log(f"E1: setup failed: stopped first {stopped}, app mode started {started}")
+        lock1 = False
     moved, wall = away(60)
     ok1 = lock1 and moved is not None and moved >= wall - 8
-    log(f"E1 verdict: app mode holds the wake lock {lock1}; kept playing {moved} of {wall:.0f} s")
+    log(f"E1 verdict: fresh app mode holds the wake lock {lock1}; kept playing {moved} of {wall:.0f} s")
     results["E1 app mode: wake lock, in-app player keeps playing"] = ok1
     # E2: pause on Now playing, app mode again (coming back above restarted it as a zone), HOME
     try:
@@ -425,7 +434,8 @@ def part_e():
     time.sleep(2)
     tap_text(["Pause"], "Pause", timeout=20)
     time.sleep(3)
-    app_mode()
+    if not app_mode():
+        raise RuntimeError("E2: app mode did not start")
     adb("shell", "input", "keyevent", "3")
     t0 = time.time()
     ended = None
@@ -439,8 +449,8 @@ def part_e():
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(4)
     back = service_foreground()
-    # The watch ticks every 60 s and stops at 5 min idle: between 5 and 7 min
-    ok2 = ended is not None and ended >= 4.5 * 60 and not lock2 and back
+    # The watch ticks every 60 s and stops at 5 min idle: about 5 min after HOME (polled every 30 s)
+    ok2 = ended is not None and 4.5 * 60 <= ended <= 7 * 60 and not lock2 and back
     log(f"E2 verdict: ended when idle {ended is not None} ({ended if ended is None else round(ended)} s), lock released {not lock2}, back on resume {back}")
     results["E2 app mode: ends when idle out of sight, back on resume"] = ok2
     return ok1 and ok2

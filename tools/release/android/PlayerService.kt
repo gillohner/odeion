@@ -49,10 +49,12 @@ class PlayerService : Service() {
             // paused) must not end the service just after the music starts and the app is left
             idleMs = if (am.isMusicActive || seen) 0L else idleMs + WATCH_MS
             if (idleMs >= IDLE_MS) {
-                android.util.Log.i("pubky-music", "player service: nothing played for ${IDLE_MS / 60000} min, stopping")
                 // Only if no start came since: a start still on its way keeps the service
-                stopSelfResult(lastStart)
-                return
+                if (stopSelfResult(lastStart)) {
+                    android.util.Log.i("pubky-music", "player service: nothing played for ${IDLE_MS / 60000} min, stopped")
+                    return
+                }
+                idleMs = 0L
             }
             tick.postDelayed(this, WATCH_MS)
         }

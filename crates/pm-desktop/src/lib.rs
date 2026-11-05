@@ -1033,12 +1033,13 @@ mod tests {
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
     }
 
-    /// The player service runs for every connection: as a zone of the node when the node reaches
-    /// the phone's player directly, else for the app playing the music itself, through the tunnel
-    /// too (the owner's case: TASK-android-background-playback-1105). Both modes are run on the
-    /// emulator by tools/android-background-probe.py.
+    /// The player service's mode for each connection: a zone of the node when the node reaches
+    /// the phone's player directly, else the app playing the music itself, through the tunnel too
+    /// (the owner's case: TASK-android-background-playback-1105). This checks the choice only, not
+    /// its call sites (`connected`, `open_offline`); both modes run on the emulator
+    /// (tools/android-background-probe.py, parts A, B, D and E).
     #[test]
-    fn the_player_service_runs_for_every_connection() {
+    fn the_player_service_mode_for_each_connection() {
         assert_eq!(
             player_service("NUC", true, true),
             ("This phone is a zone of NUC".to_string(), true)
