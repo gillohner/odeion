@@ -196,30 +196,47 @@ def mini_time():
     return None
 
 
-def part_b():
-    """The in-app player: pick the zone and tap a song in the app."""
-    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
-    time.sleep(2)
-    tap(lambda n: 'resource-id="zonebtn"' in n or 'content-desc="Playing on' in n, "the zone button")
-    tap(lambda n: re.search(r'text="This (browser|phone|computer)"', n), "the in-app player in the picker")
-    time.sleep(1)
-    tap(lambda n: 'text="Library"' in n and 'resource-id="main"' not in n, "Library")
-    time.sleep(2)
-    tapped = False
-    for pred, what in [(lambda n: 'text="Songs"' in n, "Songs"), (lambda n: re.search(r'text="tone"', n), "the song")]:
-        try:
-            tap(pred, what)
-            tapped = what == "the song"
-            time.sleep(2)
-        except Exception as e:  # noqa: BLE001
-            log(f"B: {what} not found ({e})")
-    shot("b-0-tapped")
-    if not tapped:
-        screen_text = " / ".join(t for t in re.findall(r'text="([^"]+)"', "\n".join(ui_nodes())) if t.strip())[:400]
-        log(f"B inconclusive: could not start a song in the app; on screen: {screen_text!r}")
-        results["B in-app player (inconclusive: no song started)"] = None
+def ui_dump(name):
+    """The screen's nodes, kept in the out dir (what B looked for and didn't find)."""
+    nodes = ui_nodes()
+    (out / f"ui-{name}.xml").write_text("\n".join(nodes))
+    return nodes
+
+
+def tap_text(words, what, timeout=30):
+    """Tap the first node whose text or content-desc contains one of `words`."""
+    def find():
+        for n in ui_nodes():
+            for w in words:
+                if f'text="{w}' in n or f'content-desc="{w}' in n or (w.startswith('~') and re.search(w[1:], n)):
+                    return n
         return None
-    time.sleep(5)
+    try:
+        n = until(what, find, timeout=timeout, every=2)
+    except RuntimeError:
+        ui_dump(what.replace(" ", "-"))
+        raise
+    x, y = center(n)
+    adb("shell", "input", "tap", str(x), str(y))
+    log(f"B: tapped {what}")
+
+
+def part_b():
+    """The in-app player (the WebView's <audio>, the app's default zone on a fresh install): play from
+    Home's "Shuffle my music" or a song in the library, then HOME. Runs first, before A, so the app's
+    zone is still its own player."""
+    time.sleep(2)
+    shot("b-0-home")
+    try:
+        tap_text(["Shuffle my music"], "Shuffle my music", timeout=40)
+    except RuntimeError:
+        tap_text(["Library"], "Library")
+        time.sleep(2)
+        tap_text(["Songs"], "Songs")
+        time.sleep(2)
+        tap_text(["tone"], "the song")
+    time.sleep(6)
+    shot("b-1-playing")
     t0 = mini_time()
     p0 = players()
     log(f"B foreground: mini player {t0}, players {p0}")
@@ -234,20 +251,20 @@ def part_b():
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(3)
     t1 = mini_time()
-    shot("b-1-back")
+    shot("b-2-back")
     log(f"B back in the app: mini player {t1} (was {t0})")
 
     def secs(t):
         if not t:
             return None
-        m, s = t.split(":")
-        return int(m) * 60 + int(s)
+        m, s_ = t.split(":")
+        return int(m) * 60 + int(s_)
 
     moved = secs(t0) is not None and secs(t1) is not None and secs(t1) - secs(t0) >= 50
     started = any(st == "started" for _, st in p2)
-    ok = moved and started
-    results["B in-app player, background 60 s"] = ok
-    return ok
+    log(f"B verdict: time moved on in the background {moved}; a started player after 60 s {started}")
+    results["B in-app player, background 60 s"] = moved and started
+    return moved and started
 
 
 def main():
@@ -263,16 +280,17 @@ def main():
 
         track = until("the scan", tracks)[0]
         lc, address = connect_app()
-        try:
-            part_a(track, address)
-        except Exception as e:  # noqa: BLE001
-            log(f"A failed: {e}")
-            results["A native zone, background + screen off"] = False
+        # B first: on a fresh install the app's zone is its own player
         try:
             part_b()
         except Exception as e:  # noqa: BLE001
             log(f"B failed: {e}")
             results["B in-app player, background 60 s"] = False
+        try:
+            part_a(track, address)
+        except Exception as e:  # noqa: BLE001
+            log(f"A failed: {e}")
+            results["A native zone, background + screen off"] = False
         dump("services-final", "activity", "services", PKG)
         dump("processes-final", "activity", "processes", PKG)
         dump("audio-final", "audio")
