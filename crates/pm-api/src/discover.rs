@@ -443,6 +443,11 @@ pub(crate) fn resolve(acc: &ServiceAccess, it: &DiscoverItem, album_id: Option<i
     // `also_on` rows are tagged-first already; a row's url is the service page.
     for v in &it.also_on {
         if let Some(l) = service_link(&v.url, v.label.contains("tagged")) {
+            // Another card's archive set or Audius song (its "also on" rows) is not this item:
+            // only one of the card's own kind may play it
+            if matches!(l.service, "archive" | "audius") && l.kind != it.kind {
+                continue;
+            }
             if !links
                 .iter()
                 .any(|x| x.service == l.service && x.kind == l.kind && x.id == l.id)
@@ -1234,7 +1239,10 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             .flatten()
             .and_then(|j| serde_json::from_str::<(i64, ItemContents)>(&j).ok())
             // Kept a day (stored in the library, so it survives restarts): a cold page took 2.3 s
-            .filter(|(at, c)| pm_library::db::now_unix() - at < 24 * 3600 && !c.tracks.is_empty())
+            .filter(|(at, c)| {
+                pm_library::db::now_unix() - at < 24 * 3600
+                    && (!c.tracks.is_empty() || c.unavailable.is_some())
+            })
             .map(|(_, c)| c)
     };
     let card = crate::pinakes_reader::card(s, &uri).await;
@@ -1271,11 +1279,15 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
         ..Default::default()
     };
     // A source switched off on Sources: its list, cached while it was on, doesn't stand in
-    let cached = cached.filter(|_| {
+    let cached = cached.filter(|c| {
         !it.page
             .as_deref()
             .and_then(|p| service_link(p, false))
             .is_some_and(|l| turned_off(&acc, l.service))
+            && !c
+                .plays_from
+                .as_ref()
+                .is_some_and(|p| turned_off(&acc, &p.service))
     });
     if let Some(c) = cached {
         return External {
@@ -1456,9 +1468,9 @@ async fn fetch_contents(
                     }
                     "album" => match svc.item(s, &svc_item_id(l)).await {
                         // The archive says an item is restricted: the page says so, and stops looking
+                        // (the next candidate may still list it)
                         Err(e) if l.service == "archive" && e.status == axum::http::StatusCode::FORBIDDEN => {
                             out.unavailable = Some(e.message);
-                            break;
                         }
                         Err(_) => {}
                         Ok(item) => {
@@ -1530,6 +1542,10 @@ async fn fetch_contents(
             out.plays_from = Some(plays_from_link(l, access(acc, l.service)));
         }
     }
+    // Another source lists it: the restricted one doesn't speak for the page
+    if !out.tracks.is_empty() || !out.albums.is_empty() {
+        out.unavailable = None;
+    }
     // No service lists it: MusicBrainz by the card's MBID (owner's scope decision:
     // Pinakes carries no tracklists or discographies). Rows open their pages;
     // they play once a connected service has them.
@@ -1546,7 +1562,7 @@ async fn fetch_contents(
         }
     }
     out.total_ms = out.tracks.iter().filter_map(|t| t.duration_ms).sum();
-    if !out.tracks.is_empty() || !out.albums.is_empty() {
+    if !out.tracks.is_empty() || !out.albums.is_empty() || out.unavailable.is_some() {
         let lib = s.library.lock().expect("library poisoned");
         let _ = lib.set_setting(
             cache_key,
@@ -2155,6 +2171,63 @@ mod archive_links {
         );
         let tidal = service_link("https://tidal.com/album/1", false).unwrap();
         assert_eq!(svc_item_id(&tidal), "album:1");
+    }
+
+    #[test]
+    fn another_cards_archive_set_or_audius_song_never_plays_for_this_item() {
+        let acc = ServiceAccess {
+            archive: Access::Full,
+            audius: Access::Full,
+            jamendo: Access::No,
+            tidal: Access::No,
+            spotify: Access::No,
+            deezer: Access::Preview,
+            off: 0,
+        };
+        let row = |url: &str| Version {
+            source: String::new(),
+            id: String::new(),
+            label: String::new(),
+            url: url.into(),
+            uri: None,
+            page: None,
+        };
+        let others = vec![
+            row("https://archive.org/details/some-live-set"),
+            row("https://audius.co/someone/a-song"),
+            row("https://www.deezer.com/track/3"),
+        ];
+        // A song's card: the archive's set (an album) is not this song; an Audius song may be
+        let song = DiscoverItem {
+            kind: "track".into(),
+            also_on: others.clone(),
+            ..Default::default()
+        };
+        let r = resolve(&acc, &song, None);
+        assert_eq!(
+            r.link.as_ref().map(|l| l.service),
+            Some("audius"),
+            "a song may play a song"
+        );
+        assert!(
+            r.link.as_ref().is_none_or(|l| l.service != "archive"),
+            "a whole archive set never plays for one song"
+        );
+        // An album's card: the archive's set may, the Audius song may not
+        let album = DiscoverItem {
+            kind: "album".into(),
+            also_on: others,
+            ..Default::default()
+        };
+        let r = resolve(&acc, &album, None);
+        assert_eq!(r.link.as_ref().map(|l| l.service), Some("archive"));
+        // Only Deezer's preview is left for a card of another kind
+        let artist = DiscoverItem {
+            kind: "artist".into(),
+            also_on: vec![row("https://archive.org/details/x"), row("https://audius.co/a/b")],
+            ..Default::default()
+        };
+        assert!(resolve(&acc, &artist, None).link.is_none());
     }
 
     #[test]

@@ -5784,12 +5784,12 @@
           let it;
           try { it = await api('GET', `/sources/${encodeURIComponent(source)}/items/${encodeURIComponent(id)}`); }
           catch (e) {
-            if (state.view !== 'source-item') return;
+            if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
             // An item the service won't play (the archive restricts it): the plain reason, nothing to play
             main.innerHTML = backBtn('sources', srcName) + `<div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(id)}</h1></div></div><p class="notice warn" role="status">${esc(e.message)}</p>`;
             break;
           }
-          if (state.view !== 'source-item') return;
+          if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
           const playFrom = async (i, replace = true) => {
             const items = qitems.slice(i);

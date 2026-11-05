@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-05
 
+- **Internet Archive and Audius items found by search play again** (owner's report: "almost all I find don't play"). A search hit opens the item page, which asked only TIDAL, Deezer and Spotify for what an item holds: an archive item showed "No connected service lists songs for this yet" and an Audius song had a row with nothing to play. The page now asks the Internet Archive for an item's recordings and Audius for a song's stream (Jamendo albums too), with "Plays from" set, so Play, Shuffle, the rows and This browser all work. Items the archive restricts (its files answer 401: mostly podcast and SoundCloud mirrors, 13 of the first 50 hits for "test") no longer appear in search, a private file is never offered, and one opened by its link says "Restricted on the Internet Archive: its recordings can't be streamed" with Play off instead of an empty list.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
@@ -15,8 +17,6 @@ Newest first. Dates are when the change landed on `main`.
   - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
 
 ### 2026-11-04
-
-- **Internet Archive and Audius items found by search play again** (owner's report: "almost all I find don't play"). A search hit opens the item page, which asked only TIDAL, Deezer and Spotify for what an item holds: an archive item showed "No connected service lists songs for this yet" and an Audius song had a row with nothing to play. The page now asks the Internet Archive for an item's recordings and Audius for a song's stream (Jamendo albums too), with "Plays from" set, so Play, Shuffle, the rows and This browser all work. Items the archive restricts (its files answer 401: mostly podcast and SoundCloud mirrors, 13 of the first 50 hits for "test") no longer appear in search, a private file is never offered, and one opened by its link says "Restricted on the Internet Archive: its recordings can't be streamed" with Play off instead of an empty list.
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
 

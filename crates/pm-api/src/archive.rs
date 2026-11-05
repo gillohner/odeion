@@ -83,14 +83,7 @@ impl StreamingService for InternetArchive {
             return Err(upstream(format!("metadata answered {}", resp.status())));
         }
         let v: serde_json::Value = resp.json().await.map_err(upstream)?;
-        match parse_item(id, &v, &base(s)) {
-            Some(it) => Ok(it),
-            // A restricted item is a plain answer, not "no audio": the pages say why it can't play
-            None => Err(match restricted_reason(&v) {
-                Some(why) => ApiError::new(StatusCode::FORBIDDEN, why),
-                None => ApiError::not_found(format!("no audio in item {id}")),
-            }),
-        }
+        item_from_metadata(id, &v, &base(s))
     }
 }
 
@@ -116,6 +109,16 @@ fn search_query(term: &str) -> String {
         return format!("{rank} AND {OPEN_ITEMS}");
     }
     format!("({}) AND {rank} AND {OPEN_ITEMS}", each.join(" AND "))
+}
+
+/// An item from its metadata. A restricted item is a plain answer, not "no audio" (the pages say
+/// why it can't play), and is checked first: a flagged item's files answer 401 even when they
+/// don't say `private`.
+fn item_from_metadata(id: &str, v: &serde_json::Value, base: &str) -> Result<SourceItem, ApiError> {
+    if let Some(why) = restricted_reason(v) {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, why));
+    }
+    parse_item(id, v, base).ok_or_else(|| ApiError::not_found(format!("no audio in item {id}")))
 }
 
 /// The part of every search query that keeps to audio items anyone may play.
@@ -386,6 +389,11 @@ mod tests {
         // The flag alone (`true` as a bool too), and private files alone, each say it
         let flagged = serde_json::json!({"metadata": {"access-restricted-item": true}, "files": [{"name": "a.mp3", "format": "VBR MP3"}]});
         assert!(restricted_reason(&flagged).is_some());
+        // A flagged item whose files don't say `private` is still refused, before its files count
+        let refused = item_from_metadata("flagged", &flagged, "b")
+            .err()
+            .expect("refused");
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
         let private_only = serde_json::json!({"metadata": {}, "files": [{"name": "a.mp3", "format": "VBR MP3", "private": true}]});
         assert!(restricted_reason(&private_only).is_some());
         // A mixed item keeps its public files only, and is not restricted
