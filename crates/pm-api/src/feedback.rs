@@ -68,6 +68,7 @@ pub const VIEWS: &[&str] = &[
     "playlist",
     "playlists",
     "queue",
+    "radio",
     "search",
     "settings",
     "shared",
@@ -887,6 +888,18 @@ pub async fn mine(
             "The node couldn't read your reports. Try again.",
         ),
     }
+}
+
+/// A removed listener's reports go (People › Remove), read or not. Nothing to do (and no inbox
+/// made) without one. How many went.
+pub fn forget_listener(dir: &Path, key: &str) -> Result<usize, InboxError> {
+    let Some(inbox) = Inbox::open_existing(dir)? else {
+        return Ok(0);
+    };
+    let reporter = inbox.reporter_of(&Sender::Listener(key.trim_start_matches("pubky").to_string()));
+    Ok(inbox
+        .conn
+        .execute("DELETE FROM report WHERE reporter = ?1", params![reporter])?)
 }
 
 /// Drop expired reports every hour, whether or not anyone sends or reads one.
