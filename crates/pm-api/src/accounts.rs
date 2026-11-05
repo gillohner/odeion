@@ -735,6 +735,9 @@ const LISTENER_OWN: &[&str] = &[
 
 /// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
 const LISTENER_OWN_ALWAYS: &[&str] = &[
+    // Problem reports aren't a sign-in either: a listener reports and sees their own whatever
+    // plays through whose sign-ins (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
     // whatever plays through whose sign-ins (usage.rs checks the person)
     "/usage",
