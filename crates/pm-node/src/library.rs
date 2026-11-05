@@ -14,13 +14,10 @@ fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
 
 /// Snapshot the library database to `file` (works while the node runs).
 pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> {
-    if force && file.exists() {
-        std::fs::remove_file(file)?;
-    }
-    let lib = open(cfg)?;
-    if file.exists() {
+    if !force && file.exists() {
         anyhow::bail!("{} exists (--force replaces it)", file.display());
     }
+    let lib = open(cfg)?;
     // Made and cleaned in a private folder beside it, then moved into place: the file is its
     // maker's alone (0600), and a copy that still holds secrets is never where it is kept
     let dir = file
@@ -52,7 +49,19 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
         }
-        std::fs::rename(&tmp, file).with_context(|| format!("writing backup {}", file.display()))?;
+        // Into place only once whole: with --force over the old one in one step (it stays until
+        // then), without it never over a file that appeared meanwhile
+        if force {
+            std::fs::rename(&tmp, file)
+        } else {
+            match std::fs::hard_link(&tmp, file) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+                // A filesystem without links (FAT, exFAT on a stick): moved, if still free
+                Err(_) if !file.exists() => std::fs::rename(&tmp, file),
+                r => r,
+            }
+        }
+        .with_context(|| format!("writing backup {}", file.display()))?;
         Ok(())
     })();
     let _ = std::fs::remove_dir_all(&work);
@@ -397,5 +406,44 @@ mod tests {
         // An existing file isn't overwritten without --force
         assert!(backup(&cfg, &file, false).is_err());
         backup(&cfg, &file, true).unwrap();
+    }
+
+    /// A backup that fails leaves the one already there as it was, with --force too; and a list
+    /// of invites in a shape the copy doesn't know is not kept rather than kept with a token.
+    #[test]
+    fn a_failed_backup_keeps_the_old_one_and_odd_invites_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        let secret = ["fixture", "value", "odd"].join("-");
+        open(&cfg)
+            .unwrap()
+            .set_setting("people", &format!("{{\"invites\":{{\"token\":\"{secret}\"}}}}"))
+            .unwrap();
+        let file = dir.path().join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        let copy = Library::open(&file).unwrap();
+        assert_eq!(copy.get_setting("people").unwrap(), None);
+        drop(copy);
+        assert!(!String::from_utf8_lossy(&std::fs::read(&file).unwrap()).contains(&secret));
+        // The target's folder can't take the work folder: the backup fails, the old file stays
+        let before = std::fs::read(&file).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+            let r = backup(&cfg, &file, true);
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            // As root the folder takes it anyway; the check means something for a service user
+            if r.is_err() {
+                assert_eq!(
+                    std::fs::read(&file).unwrap(),
+                    before,
+                    "the old backup is untouched"
+                );
+            }
+        }
     }
 }

@@ -351,17 +351,25 @@ pub fn scrub_plain_copy(copy: &Library) -> Result<(), pm_library::LibraryError> 
     copy.delete_setting(crate::bundled::OWNER_TOKEN)?;
     copy.delete_setting(crate::party::PARTIES)?;
     if let Some(j) = copy.get_setting(crate::people::SETTING)? {
-        match serde_json::from_str::<serde_json::Value>(&j) {
-            Ok(mut v) => {
-                if let Some(invites) = v.get_mut("invites").and_then(|i| i.as_array_mut()) {
-                    for i in invites.iter_mut().filter_map(|i| i.as_object_mut()) {
-                        i.remove("token");
+        // Invites without their tokens; a list in any other shape is not kept at all, rather than
+        // a token by accident
+        let scrubbed = serde_json::from_str::<serde_json::Value>(&j)
+            .ok()
+            .and_then(|mut v| {
+                match v.get_mut("invites") {
+                    None => {}
+                    Some(serde_json::Value::Array(invites)) => {
+                        for i in invites.iter_mut() {
+                            i.as_object_mut()?.remove("token");
+                        }
                     }
+                    Some(_) => return None,
                 }
-                copy.set_setting(crate::people::SETTING, &v.to_string())?;
-            }
-            // Unreadable: nothing of it is kept rather than a token by accident
-            Err(_) => {
+                v.is_object().then_some(v)
+            });
+        match scrubbed {
+            Some(v) => copy.set_setting(crate::people::SETTING, &v.to_string())?,
+            None => {
                 copy.delete_setting(crate::people::SETTING)?;
             }
         }
