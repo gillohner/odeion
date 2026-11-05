@@ -500,6 +500,9 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
     let mut s = Settings::new(&record.api_url, "");
     s.iroh = record.iroh;
+    // The identity whose record named this node: the node must say it is theirs, and only their
+    // approval signs this device in
+    s.owner = session.public_key().to_string();
     sign_in_and_connect(&app, &state, s).await
 }
 
@@ -556,7 +559,7 @@ async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> R
 /// app is on screen (Android cuts a backgrounded app's network).
 async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String> {
     let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
-    let started = node::start_sign_in(s).await?;
+    let started = node::start_sign_in(s, &s.owner).await?;
     let _ = app.emit(
         "ring-url",
         RingUrl {
@@ -569,7 +572,7 @@ async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String
             return Err(why.to_string());
         }
         if ring_wait::on_screen() {
-            if let Some(token) = node::poll_sign_in(s, &started.id).await? {
+            if let Some(token) = node::poll_sign_in(s, &started).await? {
                 // Cancel pressed while that answer was on its way: not connected
                 if let Some(why) = stop.reason() {
                     return Err(why.to_string());

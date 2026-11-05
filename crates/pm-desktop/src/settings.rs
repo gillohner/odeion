@@ -16,6 +16,10 @@ pub struct Settings {
     /// The node's iroh key (from its record, ADR 0013): reach it from anywhere.
     #[serde(default)]
     pub iroh: String,
+    /// Whose node it is (z32), from the identity whose record named it: a sign-in to the node is
+    /// only ever approved by them. Empty for a node connected by address.
+    #[serde(default)]
+    pub owner: String,
     /// This run only: the local end of the iroh tunnel (`http://127.0.0.1:<port>`) when the node is
     /// reached through it; empty when `node_url` answers directly.
     #[serde(skip)]
@@ -30,6 +34,7 @@ impl Settings {
             player_address: String::new(),
             node_id: String::new(),
             iroh: String::new(),
+            owner: String::new(),
             via: String::new(),
         }
     }

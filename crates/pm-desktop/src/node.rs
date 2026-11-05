@@ -82,22 +82,67 @@ pub struct SignInStarted {
     pub id: String,
     /// `pubkyauth://…`, for Ring.
     pub url: String,
+    /// Whose node it says it is (z32).
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// `/v1/auth/pubky/poll`'s answer.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct SignInStatus {
     status: String,
     #[serde(default)]
     token: Option<String>,
     #[serde(default)]
     reason: Option<String>,
+    /// Who approved (z32).
+    #[serde(default)]
+    user: Option<String>,
+    /// `owner` or `listener`.
+    #[serde(default)]
+    role: Option<String>,
+}
+
+/// A z32 key without the `pubky` prefix some write it with.
+fn bare(key: &str) -> &str {
+    key.trim().trim_start_matches("pubky")
+}
+
+/// The sign-in's end, for the owner's app: `Ok(Some(token))` only when the node's owner approved
+/// (role `owner`, the key the node named at the start). Anyone else's approval, a listener's
+/// included, is refused: the app is the owner's, and a credential of someone else's would show
+/// their library and keep their sign-ins.
+fn accepted(st: &SignInStatus, owner: &str) -> Result<Option<String>, String> {
+    match st.status.as_str() {
+        "ok" => {
+            let who = st.user.as_deref().map(bare).unwrap_or_default();
+            if st.role.as_deref() != Some("owner") || who.is_empty() || who != bare(owner) {
+                return Err(
+                    "That approval wasn't by this node's owner; approve as the owner in Pubky Ring".into(),
+                );
+            }
+            st.token
+                .clone()
+                .filter(|t| !t.is_empty())
+                .map(Some)
+                .ok_or_else(|| "The node sent no sign-in".to_string())
+        }
+        "pending" => Ok(None),
+        "denied" => Err(match st.reason.as_deref() {
+            Some("no_access") => "That identity has no music access on this node".into(),
+            _ => "That isn't the identity this node belongs to".into(),
+        }),
+        "expired" => Err("The sign-in expired: try again".into()),
+        other => Err(format!("The node answered {other}")),
+    }
 }
 
 /// Starts a Pubky Ring sign-in at the node: this device gets a credential of its own from the
 /// node (ADR 0008), never one stored on the homeserver. As a device's, it is kept apart from the
-/// browser sessions of the page: the page's Log out and the browsers' cap leave it.
-pub async fn start_sign_in(s: &Settings) -> Result<SignInStarted, String> {
+/// browser sessions of the page: the page's Log out and the browsers' cap leave it. With
+/// `expect_owner` (the identity whose record named this node), a node that says it belongs to
+/// someone else is refused before anything is shown.
+pub async fn start_sign_in(s: &Settings, expect_owner: &str) -> Result<SignInStarted, String> {
     let resp = client()
         .map_err(|e| e.to_string())?
         .post(api(s, "auth/pubky/start"))
@@ -114,6 +159,12 @@ pub async fn start_sign_in(s: &Settings) -> Result<SignInStarted, String> {
             .unwrap_or_else(|| format!("The node answered {code}")));
     }
     let started: SignInStarted = resp.json().await.map_err(|e| e.to_string())?;
+    if started.owner.trim().is_empty() {
+        return Err("The node didn't say whose it is; update the node".into());
+    }
+    if !expect_owner.trim().is_empty() && bare(&started.owner) != bare(expect_owner) {
+        return Err("This node says it belongs to someone else; nothing was sent to Pubky Ring".into());
+    }
     ring_request_is_a_sign_in(&started.url)?;
     Ok(started)
 }
@@ -138,10 +189,11 @@ pub fn ring_request_is_a_sign_in(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One look at a sign-in started with [`start_sign_in`]: `Ok(Some(token))` once approved,
-/// `Ok(None)` while it waits (or the node can't be reached for a moment), `Err` when it ended.
-pub async fn poll_sign_in(s: &Settings, id: &str) -> Result<Option<String>, String> {
-    let url = reqwest::Url::parse_with_params(&api(s, "auth/pubky/poll"), &[("id", id)])
+/// One look at a sign-in started with [`start_sign_in`]: `Ok(Some(token))` once the owner
+/// (`started.owner`) approved, `Ok(None)` while it waits (or the node can't be reached for a
+/// moment), `Err` when it ended or someone else approved ([`accepted`]).
+pub async fn poll_sign_in(s: &Settings, started: &SignInStarted) -> Result<Option<String>, String> {
+    let url = reqwest::Url::parse_with_params(&api(s, "auth/pubky/poll"), &[("id", &started.id)])
         .map_err(|e| e.to_string())?;
     let Ok(resp) = client().map_err(|e| e.to_string())?.get(url).send().await else {
         return Ok(None);
@@ -149,19 +201,7 @@ pub async fn poll_sign_in(s: &Settings, id: &str) -> Result<Option<String>, Stri
     let Ok(st) = resp.json::<SignInStatus>().await else {
         return Ok(None);
     };
-    match st.status.as_str() {
-        "ok" => st
-            .token
-            .map(Some)
-            .ok_or_else(|| "The node sent no sign-in".to_string()),
-        "pending" => Ok(None),
-        "denied" => Err(match st.reason.as_deref() {
-            Some("no_access") => "That identity has no music access on this node".into(),
-            _ => "That isn't the identity this node belongs to".into(),
-        }),
-        "expired" => Err("The sign-in expired: try again".into()),
-        other => Err(format!("The node answered {other}")),
-    }
+    accepted(&st, &started.owner)
 }
 
 /// Register this machine's player with its key: one zone per DAC appears in the UI.
@@ -225,5 +265,65 @@ mod tests {
         assert!(ring_request_is_a_sign_in(&none).is_err(), "no caps");
         let other = with(caps).replace("pubkyauth:", "https:");
         assert!(ring_request_is_a_sign_in(&other).is_err(), "not a Ring request");
+    }
+
+    /// Only the owner's approval ends the sign-in with a credential: a listener's `ok`, an owner
+    /// role with another key, or no key, is refused; the key may carry the `pubky` prefix.
+    #[test]
+    fn only_the_owners_approval_signs_the_app_in() {
+        const OWNER: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        const OTHER: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        let ok = |user: &str, role: &str| SignInStatus {
+            status: "ok".into(),
+            token: Some("pmo_t".into()),
+            user: Some(user.into()),
+            role: Some(role.into()),
+            ..Default::default()
+        };
+        assert_eq!(accepted(&ok(OWNER, "owner"), OWNER), Ok(Some("pmo_t".into())));
+        assert_eq!(
+            accepted(&ok(&format!("pubky{OWNER}"), "owner"), OWNER),
+            Ok(Some("pmo_t".into()))
+        );
+        assert!(
+            accepted(&ok(OTHER, "listener"), OWNER).is_err(),
+            "a listener's credential"
+        );
+        assert!(
+            accepted(&ok(OWNER, "listener"), OWNER).is_err(),
+            "role says listener"
+        );
+        assert!(
+            accepted(&ok(OTHER, "owner"), OWNER).is_err(),
+            "another key as owner"
+        );
+        assert!(accepted(&ok("", "owner"), OWNER).is_err(), "no key");
+        let no_who = SignInStatus {
+            status: "ok".into(),
+            token: Some("pmo_t".into()),
+            ..Default::default()
+        };
+        assert!(
+            accepted(&no_who, OWNER).is_err(),
+            "an older node that names nobody"
+        );
+        assert_eq!(
+            accepted(
+                &SignInStatus {
+                    status: "pending".into(),
+                    ..Default::default()
+                },
+                OWNER
+            ),
+            Ok(None)
+        );
+        assert!(accepted(
+            &SignInStatus {
+                status: "denied".into(),
+                ..Default::default()
+            },
+            OWNER
+        )
+        .is_err());
     }
 }
