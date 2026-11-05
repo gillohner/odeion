@@ -23,6 +23,14 @@ Newest first. Dates are when the change landed on `main`.
   - Every picture, and every file the node relays from Jellyfin, Plex, Audiobookshelf or a Subsonic server, is marked to be shown only as what it is.
 - **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, before the library opens, the node makes its library and its journal files, its config, its Pubky session secret, its remote-access key, the app players' keys and a restored config its own if a group or anyone else could read them, and logs that. It changes only regular files in its data folder, never through a link; a config kept elsewhere (`/etc`) is left to its installer. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
 
+- **Backups without a passphrase keep no way in.**
+  - Besides sign-ins, a backup made without a passphrase (and `odeiond backup`'s copy) now also leaves out: the homeserver's signup token, the links of unused invites, parties, the scheduled backup's passphrase and this node's own keys.
+  - Invites come back without their links, so make the link again.
+  - With a passphrase, invite links, the signup token and parties are locked in with the sign-ins and come back on restore.
+  - `odeiond backup` writes its copy readable by you only. It is made and cleaned in a private folder in the node's data folder; only the cleaned copy is written where you asked.
+  - `odeiond restore` keeps this node's own settings (its id, stream key, backup schedule and files jobs), and the sign-ins (yours and listeners'), invite links, signup token and parties a plain copy doesn't carry. Settings › Backup does the same: a backup without a passphrase restored on the node it came from keeps the invite links, signup token and parties the node has.
+  - `odeiond backup --force` over an old database also removes that database's journal files beside it.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.

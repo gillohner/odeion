@@ -564,3 +564,100 @@ async fn a_backup_leaves_out_the_published_token_mark() {
         None
     );
 }
+
+/// The library file inside a backup (the zip's `library.db`).
+fn library_db_of(backup: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(backup)).unwrap();
+    let mut f = z.by_name("library.db").unwrap();
+    let mut out = Vec::new();
+    f.read_to_end(&mut out).unwrap();
+    out
+}
+
+/// A backup's plain library keeps no way in: no homeserver signup token, no invite's token and no
+/// party code. With a passphrase they travel locked and a restore brings them back; without one
+/// the invites come back without their links.
+#[tokio::test]
+async fn a_plain_backup_keeps_no_way_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    // Fake values, put together at run time
+    let v = |n: &str| ["fixture", "value", n].join("-");
+    let people = format!(
+        "{{\"people\":[],\"invites\":[{{\"id\":\"i1\",\"access\":\"music\",\"token\":\"{}\",\"created_at\":1}}]}}",
+        v("invite")
+    );
+    let parties = format!(
+        "[{{\"id\":\"p1\",\"code\":\"{}\",\"name\":\"n\",\"zone\":\"z\",\"created_at\":1,\"expires_at\":9999999999,\"adds_per_hour\":5,\"waiting_per_guest\":2}}]",
+        v("party")
+    );
+    {
+        let lib = a.library.lock().unwrap();
+        lib.set_setting("people", &people).unwrap();
+        lib.set_setting("homeserver.owner_signup_token", &v("signup"))
+            .unwrap();
+        lib.set_setting("party.parties", &parties).unwrap();
+        lib.set_setting("vault.signed_out.tidal", &v("vault")).unwrap();
+    }
+    let (plain, manifest) = pm_api::backup::make(&a, None).unwrap();
+    let raw = String::from_utf8_lossy(&library_db_of(&plain)).into_owned();
+    for n in ["invite", "signup", "party", "vault"] {
+        assert!(!raw.contains(&v(n)), "{n} in the plain library");
+    }
+    assert!(
+        manifest.left_out.iter().any(|l| l.contains("invite links")),
+        "{:?}",
+        manifest.left_out
+    );
+    // Restored without a passphrase: the invite, without its link
+    let b = node(dir.path(), "b", None);
+    let (st, r) = restore(&router(b.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    {
+        let lib = b.library.lock().unwrap();
+        let p = lib.get_setting("people").unwrap().unwrap();
+        assert!(p.contains("\"i1\"") && !p.contains(&v("invite")), "{p}");
+        assert_eq!(lib.get_setting("homeserver.owner_signup_token").unwrap(), None);
+    }
+    // Restored without a passphrase on the node it came from: the links, signup token and parties
+    // it has now stay (the plain copy has none to replace them)
+    let (st, r) = restore(&router(a.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    {
+        let lib = a.library.lock().unwrap();
+        let p = lib.get_setting("people").unwrap().unwrap();
+        assert!(p.contains(&v("invite")), "the invite keeps its link: {p}");
+        assert_eq!(
+            lib.get_setting("homeserver.owner_signup_token").unwrap(),
+            Some(v("signup"))
+        );
+        assert_eq!(
+            lib.get_setting("party.parties").unwrap().as_deref(),
+            Some(parties.as_str())
+        );
+    }
+    // Locked with a passphrase: all of it comes back
+    let pass = ["fixture", "passphrase"].join("-");
+    let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
+    let raw = String::from_utf8_lossy(&library_db_of(&locked)).into_owned();
+    assert!(!raw.contains(&v("invite")), "not in the plain part either");
+    let c = node(dir.path(), "c", None);
+    let (st, r) = restore(&router(c.clone()), &locked, Some(&pass)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let lib = c.library.lock().unwrap();
+    // The same list (a restore on the node it came from wrote it again, keys in another order)
+    let json = |t: &str| serde_json::from_str::<serde_json::Value>(t).unwrap();
+    assert_eq!(
+        lib.get_setting("people").unwrap().as_deref().map(json),
+        Some(json(&people))
+    );
+    assert_eq!(
+        lib.get_setting("homeserver.owner_signup_token").unwrap(),
+        Some(v("signup"))
+    );
+    assert_eq!(
+        lib.get_setting("party.parties").unwrap().as_deref(),
+        Some(parties.as_str())
+    );
+}
