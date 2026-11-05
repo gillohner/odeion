@@ -217,16 +217,21 @@ impl PubkySync {
     /// no credential. One an older version wrote with the node's API token in it is replaced, and
     /// that token is then replaced too ([`crate::access_token::retire_published`]).
     pub async fn publish_node_for(&self, s: &crate::state::NodeState) -> Result<(), SyncError> {
+        // One at a time: the record's old token is noted, the record rewritten and the token
+        // retired as one step, so two publishes never replace the token twice
+        static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _one = ONE.lock().await;
         let iroh = s.ensure_remote().await;
-        let older_had_token = match self.homeserver.read_node_record(&self.session).await {
-            Ok(Some(r)) => !r.token.is_empty(),
-            _ => false,
-        };
+        // Read first: the old record is overwritten only once what it held is noted
+        if let Some(old) = self.homeserver.read_node_record(&self.session).await? {
+            if !old.token.is_empty() {
+                crate::access_token::note_published(s, &old.token)?;
+            }
+        }
         self.publish_node(&s.name, &s.public_url, &s.version, iroh.as_deref())
             .await?;
-        if older_had_token {
-            crate::access_token::retire_published(s).await;
-        }
+        // Also after a failure or a restart since the note was made
+        crate::access_token::retire_published(s).await;
         Ok(())
     }
 

@@ -551,6 +551,10 @@ async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String
         }
         if ring_wait::on_screen() {
             if let Some(token) = node::poll_sign_in(s, &started.id).await? {
+                // Cancel pressed while that answer was on its way: not connected
+                if let Some(why) = stop.reason() {
+                    return Err(why.to_string());
+                }
                 return Ok(token);
             }
         }

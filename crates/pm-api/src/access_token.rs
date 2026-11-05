@@ -43,48 +43,75 @@ pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
     Ok(Json(NewToken { token }))
 }
 
-/// A setting: the SHA-256 of a token set in the node's config that an older version wrote into the
-/// node record on the owner's homeserver. While the node still uses that token, Health asks the
-/// owner to change it ([`config_token_published`]).
-pub const PUBLISHED_CONFIG_TOKEN_KEY: &str = "api.published_config_token";
+/// A setting: the SHA-256 of an API token an older version wrote into the node record on the
+/// owner's homeserver. Kept from before the record is rewritten until that token no longer works
+/// here, so a failure or a restart in between never forgets it ([`retire_published`]).
+pub const PUBLISHED_TOKEN_KEY: &str = "api.published_token";
 
 fn sha256_hex(t: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(t.as_bytes()))
 }
 
-/// The node record an older version wrote carried the node's API token. The record no longer
-/// does; the token itself is replaced now, once, so the copy on the homeserver opens nothing.
-/// The owner's browsers and apps sign in to the node again (Pubky Ring). A token set in the
-/// node's config can't be replaced here: the node says so in the log and in Health until the
-/// owner changes it.
+fn published_hash(s: &NodeState) -> Option<String> {
+    let lib = s.library.lock().expect("library poisoned");
+    lib.get_setting(PUBLISHED_TOKEN_KEY).ok().flatten()
+}
+
+/// Notes that the node record held `token`, before the record is rewritten without it.
+pub(crate) fn note_published(s: &NodeState, token: &str) -> Result<(), pm_library::LibraryError> {
+    let lib = s.library.lock().expect("library poisoned");
+    lib.set_setting(PUBLISHED_TOKEN_KEY, &sha256_hex(token))
+}
+
+/// A token the node record once held stops working here:
+/// - the node's token is still that one and the node made it: it is replaced (once; the owner's
+///   browsers and apps sign in to the node again), and the note goes;
+/// - the node's token is another one by now (replaced, or changed in the config): the note goes;
+/// - it is still that one and set in the config, which the node can't change: the note stays and
+///   Health asks the owner to change it ([`config_token_published`]).
+///
+/// A failed replacement keeps the note; the next publish tries again. Callers serialize it.
 pub(crate) async fn retire_published(s: &NodeState) {
-    if s.token_file().is_some() {
-        match rotate(s).await {
-            Ok(_) => tracing::warn!(
-                "the node's address record from an older version held its API token; the token was replaced, so apps and browsers sign in to the node again"
-            ),
-            Err(e) => tracing::warn!("replacing the API token an older version published failed: {}", e.message),
-        }
+    let Some(published) = published_hash(s) else {
+        return;
+    };
+    let current = s.token().map(|t| sha256_hex(&t));
+    if current.as_deref() != Some(published.as_str()) {
+        let lib = s.library.lock().expect("library poisoned");
+        let _ = lib.delete_setting(PUBLISHED_TOKEN_KEY);
         return;
     }
-    if let Some(t) = s.token() {
-        let lib = s.library.lock().expect("library poisoned");
-        let _ = lib.set_setting(PUBLISHED_CONFIG_TOKEN_KEY, &sha256_hex(&t));
+    if s.token_file().is_none() {
         tracing::warn!(
-            "the node's address record from an older version held its API token, which is set in the node's config: change [api] token (or PM_TOKEN) and restart the node"
+            "an older version kept this node's API token in its address record on the homeserver, and it is set in the node's config: change [api] token (or PM_TOKEN) and restart the node"
         );
+        return;
+    }
+    match rotate(s).await {
+        Ok(_) => {
+            let lib = s.library.lock().expect("library poisoned");
+            let _ = lib.delete_setting(PUBLISHED_TOKEN_KEY);
+            tracing::warn!(
+                "an older version kept this node's API token in its address record on the homeserver; the token was replaced, so apps and browsers sign in to the node again"
+            );
+        }
+        Err(e) => tracing::warn!(
+            "replacing the API token an older version kept on the homeserver failed (tried again at the next publish): {}",
+            e.message
+        ),
     }
 }
 
-/// Whether the node still uses a config token an older version published ([`retire_published`]).
+/// Whether the node still uses a token set in its config that the node record once held.
 pub(crate) fn config_token_published(s: &NodeState) -> bool {
-    let Some(t) = s.token() else { return false };
-    let lib = s.library.lock().expect("library poisoned");
-    lib.get_setting(PUBLISHED_CONFIG_TOKEN_KEY)
-        .ok()
-        .flatten()
-        .is_some_and(|h| h == sha256_hex(&t))
+    if s.token_file().is_some() {
+        return false;
+    }
+    match (s.token(), published_hash(s)) {
+        (Some(t), Some(h)) => sha256_hex(&t) == h,
+        _ => false,
+    }
 }
 
 /// A new API token, in the file and in memory: the old one stops working at once, the owner's

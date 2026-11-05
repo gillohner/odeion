@@ -20074,4 +20074,94 @@ exec sleep 300
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
+
+    /// A token the node record once held stops working, once, and the note of it survives until
+    /// it has: a node-made token is replaced and the note goes (a second retirement replaces
+    /// nothing); a token set in the config stays, and Health asks for a change until it changes;
+    /// one already changed before the update needs nothing (ADR 0008).
+    #[tokio::test]
+    async fn a_token_the_node_record_held_is_retired_once() {
+        let fake = |n: &str| ["older", "credential", n].join("-");
+        // Made by the node
+        let dir = tempfile::tempdir().unwrap();
+        let old = fake("made");
+        let s = state(dir.path(), Some(&old)).await;
+        let file = dir.path().join("api-token");
+        std::fs::write(&file, &old).unwrap();
+        s.set_token_file(file.clone());
+        access_token::note_published(&s, &old).unwrap();
+        access_token::retire_published(&s).await;
+        let now = s.token().unwrap();
+        assert_ne!(now, old, "replaced");
+        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), now);
+        assert!(!access_token::config_token_published(&s));
+        access_token::retire_published(&s).await;
+        assert_eq!(s.token().unwrap(), now, "once only");
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(access_token::PUBLISHED_TOKEN_KEY)
+                .unwrap(),
+            None
+        );
+
+        // Set in the config: kept, and Health says so until it changes
+        let dir2 = tempfile::tempdir().unwrap();
+        let conf = fake("config");
+        let c = state(dir2.path(), Some(&conf)).await;
+        access_token::note_published(&c, &conf).unwrap();
+        access_token::retire_published(&c).await;
+        assert_eq!(c.token().unwrap(), conf);
+        assert!(access_token::config_token_published(&c));
+        let (st, health) = call_auth(&router(c.clone()), "GET", "/v1/health", &conf).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(
+            health
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == "api-token" && p["state"] == "change"),
+            "{health}"
+        );
+        *c.token.write().unwrap() = Some(fake("new-config"));
+        assert!(
+            !access_token::config_token_published(&c),
+            "changed: no more warning"
+        );
+        access_token::retire_published(&c).await;
+        assert_eq!(
+            c.library
+                .lock()
+                .unwrap()
+                .get_setting(access_token::PUBLISHED_TOKEN_KEY)
+                .unwrap(),
+            None,
+            "the note goes once the token no longer works"
+        );
+
+        // Changed in the config before the update: the record held another one, nothing to do
+        let dir3 = tempfile::tempdir().unwrap();
+        let d = state(dir3.path(), Some(&fake("current"))).await;
+        access_token::note_published(&d, &fake("before")).unwrap();
+        assert!(!access_token::config_token_published(&d));
+    }
+
+    async fn call_auth(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        token: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        let st = r.status();
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        (st, serde_json::from_slice(&b).unwrap_or_default())
+    }
 }
