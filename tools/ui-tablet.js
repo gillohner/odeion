@@ -7,7 +7,8 @@
 //   * the player bar: no two of its parts overlap (as drawn, after any clipping), nothing leaves the
 //     bar, also with a files job showing, and the title, artist and zone name each keep at least 8
 //     characters when cut;
-//   * every desktop feature reachable: the queue, the volume (bar, button or the Sound panel),
+//   * every desktop feature reachable: the queue, the volume (the bar's slider or its button, never
+//     the Sound panel),
 //     shuffle and repeat (bar or Now playing), the sound pill and the zone picker;
 //   * the album page: the cover beside the words, and "Songs · count · Select" on one baseline;
 //   * a touch screen keeps 40 px targets in the desktop layout.
@@ -124,8 +125,8 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       check(bar.quality, `${tag}: the sound pill shows the quality whole (its badge, or the whole line)`);
       const volIn = (await visible(page, '.player .volume')) ? 'bar' : (await visible(page, '#volbtn')) ? 'button' : null;
       await page.click('#quality'); await page.waitForTimeout(200);
-      const panelVol = await visible(page, '#qpanel #qpvol');
-      check(!!volIn || panelVol, `${tag}: the volume is reachable (${volIn || (panelVol ? 'Sound panel' : 'nowhere')})`);
+      const panelVol = await visible(page, '#qpanel input[type="range"]');
+      check(!!volIn && !panelVol, `${tag}: the volume is in the bar, as its slider or its button, and not in the Sound panel (${volIn || 'not in the bar'}${panelVol ? ', and in the Sound panel' : ''})`);
       check(await visible(page, '#qpanel'), `${tag}: the sound pill opens the Sound panel (signal path)`);
       await page.keyboard.press('Escape'); await page.waitForTimeout(150);
       await page.click('#zonebtn'); await page.waitForTimeout(150);

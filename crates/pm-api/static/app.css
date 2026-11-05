@@ -1288,12 +1288,25 @@ html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56p
 /* Now playing fills the screen down to the tabs */
 html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
 
+/* Volume: the slider when the bar has room, else a button that opens a small volume popover (one
+   slider for the zone in the bar area at any width; the Sound panel has none) */
+/* A zone without a volume has neither, whatever the width or a files job says */
+html .player.novol .volume, html .player.novol .volbtn { display: none !important; }
+#volpop { width: min(300px, calc(100vw - 32px)); }
+.volpop-row { display: flex; align-items: center; gap: 8px; padding: 2px 10px 8px; color: var(--muted); }
+.volpop-row input[type="range"] { flex: 1; }
+.vol-level { min-width: 56px; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+/* A level the node hasn't read yet: the track shows, the thumb doesn't (nothing made up) */
+input[type="range"].unknown::-webkit-slider-thumb { opacity: 0; }
+input[type="range"].unknown::-moz-range-thumb { opacity: 0; }
+input[type="range"].muted { opacity: 0.5; }
 /* The desktop layout down to 600 px, tablets included (owner, 2026-11-04). The player bar's three
    groups shrink and never overlap: the seek bar takes the free width, the sound pill is its source
    mark, dot and quality badge (the zone button names the device), and the zone's name ellipsizes.
    Under 900 px shuffle and repeat move to Now playing and the zone button drops its chevron; under
-   760 px the volume button goes too (the volume is the Sound panel's first control, and in Now
-   playing); under 680 px the seek bar drops its times and the pill its source mark. */
+   680 px the seek bar drops its times and the pill its source mark. The volume button stays at
+   every width without the slider (beside a files job's chip under 760 px, Now playing has it): it is
+   the bar's one way to the volume (the Sound panel has none). */
 @media (max-width: 1100px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1fr) minmax(200px, 1.3fr) auto; gap: 12px; padding: 0 16px; }
   html[data-shell="desktop"] .player-right { gap: 8px; }
@@ -1304,7 +1317,7 @@ html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-ar
 /* The sound pill as its badge (source mark, dot, "16/44.1"; the whole line is in the Sound panel)
    wherever the bar has no room for the line beside the volume and the zone: under 1800 px, and at
    any width while a files job shows its chip; the chip is its bar alone under 1367 px, and beside
-   it the volume is its button from 760 to 1599 px (narrower, the volume button is gone anyway) */
+   it the volume is its button up to 1599 px */
 @media (max-width: 1799px) {
   html[data-shell="desktop"] .player .quality { gap: 6px; padding: 5px 9px; }
   html[data-shell="desktop"] .player .quality :is(.qtext, .qdsp) { display: none; }
@@ -1333,7 +1346,8 @@ html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(>
 @media (max-width: 759px) {
   html[data-shell="desktop"] .player { grid-template-columns: minmax(150px, 1.1fr) minmax(150px, 1fr) auto; gap: 10px; padding: 0 12px; }
   html[data-shell="desktop"] .player .np-art { width: 48px; height: 48px; }
-  html[data-shell="desktop"] .player-right .volbtn { display: none; }
+  /* Beside a files job's chip there is no room for the volume button: the volume is in Now playing */
+  html[data-shell="desktop"] body:not(.offline):not(.listener) .player-right:has(> #jobchip:not([hidden])) .volbtn { display: none; }
 }
 /* The narrowest windows: the seek bar without its times (Now playing has them), the pill without the source mark */
 @media (max-width: 679px) {

@@ -283,6 +283,37 @@ impl Output for SnapcastOutput {
         Ok(Box::new(opened))
     }
 
+    /// The group's level: its first client's volume in `Server.GetStatus` (the node sets them
+    /// all alike).
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        let server = self.server.clone();
+        let Some(first) = self.group.clients.first().map(|(id, _)| id.clone()) else {
+            return Ok(None);
+        };
+        tokio::task::spawn_blocking(move || -> Result<Option<pm_model::ZoneVolume>, SnapError> {
+            let mut c = Control::connect(&server)?;
+            let status = c.call("Server.GetStatus", Value::Null)?;
+            Ok(status
+                .pointer("/server/groups")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|g| g.get("clients").and_then(Value::as_array))
+                .flatten()
+                .find(|cl| cl.get("id").and_then(Value::as_str) == Some(first.as_str()))
+                .and_then(|cl| {
+                    let vol = cl.pointer("/config/volume")?;
+                    Some(pm_model::ZoneVolume {
+                        level: pm_model::VolumeLevel::Percent(vol.get("percent")?.as_u64()?.min(100) as u8),
+                        muted: vol.get("muted").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                }))
+        })
+        .await
+        .map_err(|_| SinkError::Device("snapcast volume read panicked".into()))?
+        .map_err(snap_err)
+    }
+
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let (percent, muted) = match v {
             Volume::Percent(p) => (Some(p.min(100)), None),

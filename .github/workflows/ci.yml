@@ -601,7 +601,7 @@ jobs:
           cast = false
           slimproto_port = 0
           TOML
-          nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
+          PM_DEV_OUTPUTS=1 nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
           # The node scans its config folders at start
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
@@ -614,6 +614,9 @@ jobs:
       - name: copy the library to the homeserver (folder tree, totals, the job chip; a 20 000-file library stays quick; desktop and phone)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-copy-library.js ci-token http://127.0.0.1:7788
+      - name: one volume, one source (the bar's slider or the volume popover, never both; every slider reads the zone's level; 1345 to 390 px)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-volume.js ci-token http://127.0.0.1:7788
       - name: UX sweep follow-ups (a slow TIDAL collection, 40 px touch targets, hero rows, back or trail, tablet Now playing, file names, short notes; 390 to 1180 px)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-sweep-followups.js ci-token http://127.0.0.1:7788
