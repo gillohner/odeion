@@ -5,8 +5,8 @@ completes the transport half of M5 that ADR 0008 left open.
 
 ## Context
 
-ADR 0008 lets a controller find its node by pubkey: the node writes `{api_url, token}` into the
-owner's private homeserver folder. The wire stays HTTPS to `api_url`, so remote access still needs
+ADR 0008 lets a controller find its node by pubkey: the node writes its address (`api_url`) into the
+owner's private homeserver folder; the controller then signs in to the node itself. The wire stays HTTPS to `api_url`, so remote access still needs
 one of these:
 - port forwarding;
 - a reverse proxy with TLS;
@@ -56,9 +56,9 @@ same token the LAN uses.**
   - The HTTP API, the WebSocket, HLS and the pull streams therefore work unchanged over the tunnel.
     Auth stays the bearer token, inside the tunnel.
 - **Finding the node.** The node adds `iroh: "<EndpointId>"` (and its relay URL) to the private node
-  record of ADR 0008. Only the owner's devices, signed in with Pubky Ring, can read the record, and it
-  already carries the token. A controller that has it dials by key; iroh's pkarr lookup finds the
-  current addresses. No port is opened.
+  record of ADR 0008. Only the owner's devices, signed in with Pubky Ring, can read the record. A
+  controller that has it dials by key (iroh's pkarr lookup finds the current addresses; no port is
+  opened), then signs in to the node with Pubky Ring through the tunnel for its own credential.
 - **The app (Tauri).**
   - When the record has an `iroh` id and `api_url` does not answer, or the owner chooses "away from
     home", the app starts a local proxy on `127.0.0.1:<random>`. Each TCP connection to it becomes one

@@ -432,14 +432,24 @@ async fn relay(
             upstream(format!("answered {}", resp.status()))
         });
     }
-    let ctype = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(fallback_type)
-        .to_string();
+    // A picture is answered by what its bytes are
+    if fallback_type.starts_with("image/") {
+        return crate::art::relayed_picture(resp, "private, max-age=3600").await;
+    }
+    // Audio or video as the server said, else what was asked for
+    let ctype = crate::art::safe_media_type(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        fallback_type,
+    );
     let mut out = axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, ctype)
+        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            crate::art::PASSIVE_CSP,
+        )
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=3600");
     if let Some(n) = resp.content_length() {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);

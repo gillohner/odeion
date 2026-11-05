@@ -24,6 +24,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+# Nothing here writes to the repository
+permissions:
+  contents: read
 jobs:
   home-assistant:
     # dlna_dmr finds the zone renderers and plays to them; the Odeion integration finds the
@@ -38,9 +41,11 @@ jobs:
             newest: true
     continue-on-error: ${{ matrix.newest == true }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: docker pull -q ${{ matrix.image }}
       - run: cargo build -p pm-node
       - name: dlna_dmr against the zone renderers
@@ -57,7 +62,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
       - run: python3 -m venv /tmp/ha && /tmp/ha/bin/pip install -q aiohttp==3.14.5 voluptuous==0.16.0
       - run: /tmp/ha/bin/python -m unittest discover -v -s integrations/home-assistant/tests
   music-assistant:
@@ -73,9 +80,11 @@ jobs:
             newest: true
     continue-on-error: ${{ matrix.newest == true }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: docker pull -q ${{ matrix.image }}
       - run: cargo build -p pm-node
       - run: python3 -I tools/ma-check.py target/debug/pm-node /tmp/ma ${{ matrix.image }}
