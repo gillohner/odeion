@@ -39,7 +39,7 @@ const zone = { id: 'linn-klimax-ds3-upnp-av', name: 'Linn Klimax DS/3 (UPnP-AV)'
 const showJob = (page) => page.evaluate(() => { const c = document.querySelector('#jobchip'); c.hidden = false; c.innerHTML = '<svg class="ic"><use href="#i-upload"/></svg><span class="jc-text">1234/5678</span><span class="jc-bar"><span style="width:40%"></span></span>'; });
 async function open(browser, w, h, opts = {}) {
   if (opts.touch) return openTouch(browser, w, h);
-  const run = await fx.create(browser, w, { fixtures: { '/zones': { body: [zone] }, ...(opts.layout ? {} : { '/outputs': { body: outputs } }), '/item/album/lib-7': { body: albumPage }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } } } });
+  const run = await fx.create(browser, w, { offline: !!opts.offline, fixtures: { '/zones': { body: [zone] }, ...(opts.layout ? {} : { '/outputs': { body: outputs } }), '/item/album/lib-7': { body: albumPage }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } } } });
   await run.page.setViewportSize({ width: w, height: h });
   await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
   // The layout index.html's inline script picks, before app.js runs (the first data-shell set)
@@ -202,6 +202,15 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
       const b = await page.evaluate(barReport); const over = await page.evaluate(() => document.documentElement.scrollWidth - innerWidth);
       check(!b.overlaps.length && !b.outside.length && b.quality && over <= 0, `Desktop at 500${job ? ' with a files job' : ''}: the bar fits, no sideways scroll (${over})${b.overlaps.length || b.outside.length ? ': ' + [...b.overlaps, ...b.outside].slice(0, 4).join('; ') : ''}`);
     }
+    await context.close();
+  }
+  // The offline app (no node): no volume button (the Sound panel needs the node), so the slider stays
+  // in the bar down to 760 px (#269 review: offline at 1100-1279 px had no volume)
+  for (const w of [760, 1024, 1180, 1279]) {
+    const { page, context } = await open(browser, w, 800, { offline: true });
+    await fx.go(page, '/downloads'); await page.waitForFunction(() => document.body.classList.contains('offline')); await page.waitForTimeout(400);
+    const b = await page.evaluate(barReport); const vol = await visible(page, '.player-right .volume input');
+    check(vol && !b.overlaps.length && !b.outside.length, `offline at ${w}: the volume slider is in the bar and the bar fits${b.overlaps.length || b.outside.length ? ': ' + [...b.overlaps, ...b.outside].slice(0, 4).join('; ') : ''}`);
     await context.close();
   }
   // Settings › Appearance › Layout: Automatic / Phone / Desktop; the old choices map across

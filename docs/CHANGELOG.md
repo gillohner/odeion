@@ -6,6 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **Every press answers at once and acts once** (owner, iPad: "every click shows loader and fires once").
+  - **Buttons, chips, switches and forms:** a press on anything whose action takes a moment marks it busy at once, its icon turns into a spinner after 150 ms, and more presses are ignored until it is done, so a double tap sends one request. Then it is back; if it failed, the message shows. Keyboard focus stays where it was. This covers every control in the app, including ones added later, without each needing its own code.
+  - **Menus:** the ⋯ that opened a menu shows its action on its way, and still opens its menu.
+  - **The same change asked twice while on its way** (two places, or a menu picked twice) is sent once.
+  - **Moving to another page:** the place pressed is marked at once, a thin bar runs along the top, and a page with nothing to show within 120 ms shows its skeleton, then "Still loading…" after 2 s. A page that fails says so with Try again. Pressing another page before the first has loaded ends on the one pressed last, with nothing of the first drawn over it (also Back then Forward).
+  - **From the tablet review:** offline, a window 760–1279 px wide keeps its volume slider (it had none from 1100 px down); listeners and the offline app don't shrink the sound pill for a files job they don't show.
+
 - **Tablets get the desktop layout** (owner, iPad in a ~700 pt Stage Manager window: "same features and design as desktop … 2 sizes basically but responsive"). Two layouts now: phone under 600 px, desktop from 600 px. Tablets have the sidebar with every place, the desktop player bar, the trail on item pages and the docked panel; the tablet rail is gone.
   - **The player bar never overlaps, at any width from 600 px, also while a files job runs:** the sound pill no longer spills its device name next to Next or draws the volume button over "16/44.1". Under 1800 px (and beside a files job) the pill is the source mark, dot and quality badge, the whole sound line being in the Sound panel; only the zone's name shrinks, to an ellipsis. Under 1280 px the volume slider is its button (it was so under 1100 px); narrower windows move shuffle and repeat, then the volume button, to Now playing and the Sound panel. A long zone name with the full sound line no longer runs over the transport on a 1180 px desktop either.
   - **Album and item pages:** the cover stays beside the title down to 600 px, and "Songs · 16 songs · Select" sits on one line, the count beside the title.

@@ -9,6 +9,7 @@ STEWARD-UX-RESPONSIVE.md step 1. **Approved by the owner on 2026-10-26, as drawn
 - **Secondary things are sheets.** Queue, Lyrics, Details (signal path, file, credits), Sources (also on) and Tags open over Now playing: a bottom sheet on a phone, a docked panel beside it in the desktop layout (tablets too).
 - **Thumbs first.** 40–44 px targets on any touch screen (`pointer: coarse`), whatever the layout; transport and the secondary row in the bottom half; swipe a row for Play next, long-press for its menu.
 - **Same parts at every width;** only the arrangement and density change. Safe areas, both themes, reduced motion, font scale 1.3.
+- **Every press answers at once and acts once** (owner, 2026-11-04). A control whose action is on its way is busy at once (`aria-busy`), shows a spinner after 150 ms and ignores more presses until it is done; a failure says what happened. A menu's action shows on the ⋯ that opened it. Moving to another page marks the place at once, runs a thin bar along the top, shows the page's skeleton if it has nothing to show within 120 ms and "Still loading…" after 2 s, and an error offers Try again. A newer page replaces an older one still loading (A → B ends on B). `busy()` and `navigate()` in app.js; checked by `tools/ui-busy.js`.
 
 ## Phone (under 600 px)
 | Library, mini player, tab bar | Now playing, one screen | A sheet over Now playing | Settings, four groups |

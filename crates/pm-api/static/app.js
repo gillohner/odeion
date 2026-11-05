@@ -154,6 +154,69 @@
     clearTimeout(toast.h);
     toast.h = setTimeout(() => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); }, kind === 'error' ? 6000 : 3800);
   };
+  // ---- Every click shows progress and fires once (owner, 2026-11-04) ----
+  // busy(el, fn) runs fn. When fn returns a promise, el is busy until it settles: aria-busy and
+  // aria-disabled at once (.is-busy; not `disabled`, so keyboard focus stays on it), a spinner
+  // after 150 ms (.is-spinning), and further clicks on it are ignored. Then it is restored; a failure
+  // nobody caught shows its message. A plain return value passes through (`return false` still cancels).
+  // BUSY maps a control to the event that made it busy: only a busy mark made by a click drops later
+  // clicks (and says aria-disabled), and the same click bubbling on to a row's own handler is not a
+  // second click. A mark made without an event (a menu's action on its ⋯) only shows the progress.
+  const BUSY = new WeakMap();
+  const busy = (el, fn, ev = null) => {
+    let out;
+    try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; }
+    if (!el || !out || typeof out.then !== 'function' || BUSY.has(el)) return out;
+    const was = [el.getAttribute('aria-busy'), el.getAttribute('aria-disabled')];
+    el.setAttribute('aria-busy', 'true'); if (ev) el.setAttribute('aria-disabled', 'true'); el.classList.add('is-busy');
+    const spin = setTimeout(() => el.classList.add('is-spinning'), 150);
+    const mark = { out, ev }; BUSY.set(el, mark);
+    const done = () => {
+      clearTimeout(spin); if (BUSY.get(el) === mark) BUSY.delete(el);
+      el.classList.remove('is-busy', 'is-spinning');
+      ['aria-busy', 'aria-disabled'].forEach((a, i) => { if (was[i] == null) el.removeAttribute(a); else el.setAttribute(a, was[i]); });
+    };
+    out.then(done, (e) => { done(); if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); });
+    return out;
+  };
+  // The element that shows the progress: the handler's own control, the control clicked inside a
+  // container that handles its rows' clicks, or a form's submit button.
+  const BUSY_CONTROL = 'button, a[href], [role="button"], [role="menuitem"], [role="tab"], [role="option"], .chip, input[type="checkbox"], input[type="radio"], select';
+  const busyTarget = (host, e) => {
+    if (e && e.type === 'submit') { const f = e.target; return e.submitter || (f instanceof HTMLFormElement ? f.querySelector('button[type="submit"], button:not([type])') || f : null); }
+    if (host.matches(BUSY_CONTROL)) return host;
+    const t = e && e.target instanceof Element ? e.target.closest(BUSY_CONTROL) : null;
+    return t && host.contains(t) ? t : null;
+  };
+  // An event handler run through busy(): a click or submit on a control that is still busy is dropped
+  // (one request per action); a change still runs (it carries a new value). Controls meant to be pressed
+  // quickly in a row (volume steps) opt out with data-repeat.
+  const viaBusy = (host, fn, self, e) => {
+    const t = busyTarget(host, e);
+    if (!t || t.closest('[data-repeat]')) return fn.call(self, e);
+    const was = BUSY.get(t);
+    if (was && was.ev && was.ev !== e && e.type !== 'change') { e.preventDefault(); return false; }
+    return busy(t, () => fn.call(self, e), e.type === 'change' ? null : e);
+  };
+  // For a container that handles its controls' events (addEventListener on the container)
+  const onBusy = (host, type, fn) => host.addEventListener(type, (e) => { viaBusy(host, fn, host, e); });
+  // Every onclick, onsubmit and onchange handler goes through it, wherever it is assigned: the setters
+  // are wrapped once here, so no handler can miss it.
+  for (const prop of ['onclick', 'onsubmit', 'onchange']) {
+    const d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, prop);
+    if (!d || !d.set) continue;
+    Object.defineProperty(HTMLElement.prototype, prop, {
+      configurable: true, enumerable: d.enumerable,
+      get() { const f = d.get.call(this); return (f && f.pmHandler) || f; },
+      set(fn) {
+        if (typeof fn !== 'function') { d.set.call(this, fn); return; }
+        const host = this;
+        const wrapped = function (e) { return viaBusy(host, fn, this, e); };
+        wrapped.pmHandler = fn;
+        d.set.call(this, wrapped);
+      },
+    });
+  }
   const setFill = (el) => { const min = +el.min || 0; const max = +el.max || 1; el.style.setProperty('--fill', `${((el.value - min) / (max - min)) * 100}%`); };
 
   // Errors in people's words: what happened and what to do, in one line. The node's own wording
@@ -176,7 +239,20 @@
     if (/error sending request|connection refused|dns error|could not resolve/i.test(text)) return `Couldn't reach ${who === 'The service' ? 'the service' : who}; check the node's internet connection.`;
     return text;
   };
-  const api = async (method, path, body, opts = {}) => {
+  // A change already on its way is not sent twice: an identical request (method, path and body) made
+  // while the first is in flight gets the first one's answer. Reads are left alone.
+  const inFlight = new Map();
+  const api = (method, path, body, opts = {}) => {
+    if (method === 'GET') return apiSend(method, path, body, opts);
+    let key; try { key = `${method} ${path} ${body === undefined ? '' : JSON.stringify(body)}`; } catch { return apiSend(method, path, body, opts); }
+    const was = inFlight.get(key); if (was) return was;
+    const p = apiSend(method, path, body, opts);
+    inFlight.set(key, p);
+    const drop = () => { if (inFlight.get(key) === p) inFlight.delete(key); };
+    p.then(drop, drop);
+    return p;
+  };
+  const apiSend = async (method, path, body, opts = {}) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
@@ -553,7 +629,7 @@
       const text = f.elements.content.value; f.querySelector('button').disabled = !text.trim();
       if (text.trim()) commentDrafts.set(draftKey(f), text); else commentDrafts.delete(draftKey(f));
     });
-    sec.addEventListener('submit', async (e) => {
+    onBusy(sec, 'submit', async (e) => {
       const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
       const content = f.elements.content.value.trim(); if (!content) return;
       const b = f.querySelector('button'); b.disabled = true;
@@ -564,7 +640,7 @@
         if (f.dataset.replyTo) await replies(f.closest('li.comment'), f.dataset.replyTo); else await show();
       } catch (err) { b.disabled = false; toast(err.message, 'error'); }
     });
-    sec.addEventListener('click', async (e) => {
+    onBusy(sec, 'click', async (e) => {
       const r = e.target.closest('[data-creply]');
       if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) openReply(r.closest('li.comment'), r.dataset.creply).elements.content.focus(); return; }
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
@@ -1254,7 +1330,7 @@
     location.replace('/');
   };
   // A pasted token is tried first: a wrong one is said here, not taken for an ended session
-  $('#tokform').addEventListener('submit', async (e) => {
+  onBusy($('#tokform'), 'submit', async (e) => {
     e.preventDefault();
     const t = $('#tok').value.trim(); if (!t) return;
     const out = $('#tokerr'); out.textContent = '';
@@ -3283,6 +3359,8 @@
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
+    // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
+    const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
     state.view = v; state.viewArg = arg;
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs(v);
@@ -3290,7 +3368,7 @@
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
-    return render();
+    return navigate(fresh);
   };
   window.addEventListener('popstate', async (e) => {
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
@@ -3510,7 +3588,7 @@
   let rowLists = {}; let rowsBound = false;
   const bindTrackRows = (container, pageLists) => {
     rowLists = pageLists; if (rowsBound) return; rowsBound = true;
-    container.addEventListener('click', async (e) => {
+    onBusy(container, 'click', async (e) => {
       const lists = rowLists;
       const btn = e.target.closest('[data-act]');
       // On a touch screen a tap on the row plays from there (no hover to reveal the play button)
@@ -3540,7 +3618,7 @@
         try { await setFavourite({ track_id: tracks[i].id }, !on); btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; }
         catch (er) { toast(er.message, 'error'); }
       }
-    }, { once: false });
+    });
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
@@ -3731,13 +3809,14 @@
       const want = menuPick; menuPick = null; closeMenu();
       {
         const it = items.find((x) => !x.title && !x.disabled && String(x.label || '').replace(/…$/, '') === want.label);
-        if (it) Promise.resolve(it.run()); else toast(`${want.label} isn't available for this row`);
+        if (it) busy(anchor, () => it.run()); else toast(`${want.label} isn't available for this row`);
         return;
       }
     }
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
-    // The item runs first: a page it opens replaces the transient entry; otherwise it is popped.
-    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(items[Number(b.dataset.mi)].run()).finally(popTransient); });
+    // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
+    // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
     menuEl.hidden = false; pushTransient();
     const r = anchor.getBoundingClientRect(); const mw = 280;
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
@@ -4589,8 +4668,45 @@
     };
   };
 
+  // ---- Navigation answers at once (owner, 2026-11-04) ----
+  // setView() starts a navigation: the place clicked is marked at once (markTabs), a thin bar runs along
+  // the top until the page is drawn, and a page that has drawn nothing of its own after 120 ms shows a
+  // skeleton ("Still loading…" after 2 s). A newer navigation supersedes it: the page code's reads
+  // (renderPage's `api`, below) that are on their way are aborted, and they and any it starts before it
+  // is drawn never answer, so the old page stops where it was and draws nothing (A→B ends on B). Once a
+  // page is drawn, its handlers and polls read as usual. Changes (anything but GET) are never held back.
+  let navGen = 0; let navCtl = new AbortController(); let navStop = () => {};
+  const NEVER = () => new Promise(() => {}); // a fresh one each time: nothing piles up on a shared one
+  const navApiFor = (gen, ctl, drawing) => (method, path, body, opts = {}) => {
+    if (method !== 'GET') return api(method, path, body, opts);
+    if (gen !== navGen) return drawing.on ? NEVER() : api(method, path, body, opts);
+    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal })
+      .then((r) => (gen === navGen || !drawing.on ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : ctl.signal.aborted || drawing.on ? NEVER() : Promise.reject(e)));
+  };
+  const NAV_SKELETON = `<div class="navskel" aria-busy="true"><p class="sr-only" role="status">Loading…</p><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
+  const navigate = (fresh) => {
+    const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
+    navStop(); const superseded = new Promise((res) => { navStop = res; });
+    let bar = document.getElementById('navprog');
+    if (!bar) { bar = document.createElement('div'); bar.id = 'navprog'; bar.className = 'navprog'; bar.setAttribute('aria-hidden', 'true'); document.body.appendChild(bar); }
+    bar.hidden = false;
+    const before = main.firstElementChild;
+    const skel = fresh ? setTimeout(() => { if (gen === navGen && main.firstElementChild === before) { main.innerHTML = NAV_SKELETON; slowNote(main, () => gen === navGen && !!main.querySelector(':scope > .navskel')); } }, 120) : 0;
+    const end = () => { clearTimeout(skel); if (gen === navGen) bar.hidden = true; };
+    // Settles when the page is drawn or when a newer navigation takes over (so the control that
+    // started it isn't left busy)
+    return Promise.race([render(), superseded]).finally(end);
+  };
+
   // ---- render --------------------------------------------------------------
-  const render = async () => {
+  // The page's code reads through its own `api`, tied to the navigation that draws it (navigate above)
+  const render = () => {
+    const drawing = { on: true };
+    const p = renderPage(navApiFor(navGen, navCtl, drawing));
+    const drawn = () => { drawing.on = false; }; p.then(drawn, drawn);
+    return p;
+  };
+  const renderPage = async (api) => {
     // The search box is a combobox over the results page only
     if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); }
     const v = state.view;
@@ -6573,7 +6689,8 @@
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
     } catch (e) {
-      main.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`;
+      main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
+      $('#navretry', main).onclick = () => render();
     }
   };
 

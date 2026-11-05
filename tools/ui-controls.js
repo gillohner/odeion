@@ -49,7 +49,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
     });
     return out;
   });
-  const dead = []; let clicked = 0; let skipped = 0;
+  const dead = []; const stuck = []; let clicked = 0; let skipped = 0;
   for (const view of views) {
     await p.goto(BASE + view); await settle();
     const list = await kinds();
@@ -70,11 +70,16 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       const did = after.mut > 0 || after.opened > 0 || after.dialog || after.scrolled || p.url() !== before.url || requests > before.req;
       if (!did) dead.push(`${view}  "${k.words}"  (${k.sig})`);
       await p.keyboard.press('Escape').catch(() => {});
+      // A control whose action never settles would stay busy (and ignore presses) for good
+      const stuckAt = Date.now() + 10000; let busyNow = [];
+      for (;;) { busyNow = await p.evaluate(() => [...document.querySelectorAll('.is-busy')].map((e) => (e.textContent || e.getAttribute('aria-label') || e.title || e.tagName).trim().slice(0, 40))).catch(() => []); if (!busyNow.length || Date.now() > stuckAt) break; await sleep(500); }
+      if (busyNow.length) stuck.push(`${view}  "${k.words}"  (${k.sig}): still busy after 10 s: ${busyNow.join(', ')}`);
     }
   }
   await browser.close();
   console.log(`${views.length} views, ${clicked} controls clicked, ${skipped} skipped (lasting effects)`);
   for (const d of dead) console.log('DEAD ' + d);
+  for (const d of stuck) console.log('STUCK ' + d);
   for (const e of pageErrors) console.log('page error: ' + e);
   if (dead.length || pageErrors.length) { console.log(`${dead.length} dead controls, ${pageErrors.length} page errors`); process.exit(1); }
   console.log('every control does something');
