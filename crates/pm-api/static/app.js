@@ -2942,7 +2942,9 @@
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#quality');
-    const first = $('[data-dsp]:not(:disabled), button', qPanel); if (first) first.focus();
+    // Its first control; with none (the in-page player: no DSP, no volume here) the panel itself,
+    // so Escape and the arrows work and a screen reader lands in it
+    const first = $('[data-dsp]:not(:disabled), button', qPanel) || qPanel; first.focus();
   };
   // Where the bar has no room for the slider (narrow tablets and desktops): a small volume popover
   $('#volbtn').onclick = () => { if (!volPop().hidden) closeVolPop(); else openVolPop(); };
