@@ -57,8 +57,13 @@ a speaker then.
 
 On macOS, Windows and the Linux AppImage, the app checks for a new version when it starts and
 asks before installing it. The Linux `.deb` is updated like other packages: install the new
-`.deb` over the old one. On Android, install the new `.apk` from the release page over the old
-one.
+`.deb` over the old one.
+
+On Android (the `.apk` from the release page), the app checks too and asks "Odeion X is available
+(this is Y). Install it now?". After **Install** it downloads the update; Android then asks you to
+confirm. The first time, Android needs your permission for Odeion to install apps: the app says so
+and opens that setting; turn on **Allow from this source** and go back to Odeion. Your settings and
+downloaded music stay.
 
 ## Subsonic apps instead
 
