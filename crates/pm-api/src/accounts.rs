@@ -733,6 +733,9 @@ const LISTENER_OWN: &[&str] = &[
 
 /// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
 const LISTENER_OWN_ALWAYS: &[&str] = &[
+    // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
+    // whatever plays through whose sign-ins (usage.rs checks the person)
+    "/usage",
     "/play-order",
     "/sources/tidal/stream",
     "/sources/qobuz/stream",

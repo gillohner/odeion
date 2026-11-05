@@ -21343,4 +21343,66 @@ exec sleep 300
         assert!(open_as_ben("own").await.unwrap_err().contains("Connect Qobuz"));
         assert_eq!(q_seen.lock().unwrap().len(), 1, "never the node's under `own`");
     }
+
+    /// Under "This node's sign-ins" (SourcePolicy::Node) a listener still reaches their own usage
+    /// insights: their choice, Stop for me and Clear mine; their own sign-ins stay refused.
+    #[tokio::test]
+    async fn a_listener_keeps_their_usage_insights_under_the_nodes_sign_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let app = router(s.clone());
+        let key = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": true, "added_at": 1}]}).to_string()).unwrap();
+            lib.set_setting(accounts::SOURCE_POLICY_KEY, "node").unwrap();
+        }
+        // The rule itself, for every usage path and method
+        for (method, path) in [
+            (axum::http::Method::GET, "/v1/usage/me"),
+            (axum::http::Method::PUT, "/v1/usage/me"),
+            (axum::http::Method::POST, "/v1/usage/me/clear"),
+            (axum::http::Method::POST, "/v1/usage/me/notice"),
+            (axum::http::Method::POST, "/v1/usage/sessions"),
+            (axum::http::Method::POST, "/v1/usage/sessions/close"),
+            (axum::http::Method::POST, "/v1/usage/events"),
+        ] {
+            assert_eq!(
+                accounts::listener_refusal(&s, &method, path),
+                None,
+                "{method} {path}"
+            );
+        }
+        assert_eq!(
+            accounts::listener_refusal(&s, &axum::http::Method::POST, "/v1/sources/tidal/login"),
+            Some(accounts::NODE_SOURCES_ONLY),
+            "their own sign-in stays refused under the node's"
+        );
+        // Over HTTP: their choice reads, and Clear mine isn't refused for the policy
+        let tok = accounts::mint(&s, key).unwrap();
+        let send = |method: &'static str, uri: &'static str, body: Option<serde_json::Value>| {
+            let (app, tok) = (app.clone(), tok.clone());
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {tok}"))
+                    .header("content-type", "application/json")
+                    .body(
+                        body.map(|b| Body::from(b.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                (st, String::from_utf8_lossy(&bytes).into_owned())
+            }
+        };
+        let (st, body) = send("GET", "/v1/usage/me", None).await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        let (st, body) = send("POST", "/v1/usage/me/clear", None).await;
+        assert!(!body.contains(accounts::NODE_SOURCES_ONLY), "{st} {body}");
+        assert_ne!(st, StatusCode::FORBIDDEN, "{body}");
+    }
 }
