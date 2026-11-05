@@ -6118,6 +6118,25 @@
           const aboutTop = !!(pg.about_text && pg.about_text.text); // artist, album and song (F5: the same About everywhere)
           // A file is its name; where it is on the node's disk is a tooltip, not page text (UX sweep A21)
           const fileFact = (f) => { if (f.label !== 'File' || !/[\\/]/.test(String(f.value || ''))) return esc(f.value); const v = String(f.value); const name = v.split(/[\\/]/).pop(); return `<span class="filefact" title="${esc(v)}">${esc(name)}</span>`; };
+          // With an article the page shows the music first (owner, 2026-11-05: "the page shows
+          // artist metadata and songs but not less relevant metadata directly"): the blurb and one
+          // facts line under the hero, the ids, links and credits in Details at the foot. The node
+          // says which fact is which (`kind`: fact or ref).
+          const isRef = (f) => f.kind === 'ref';
+          const factValue = (f) => (webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : fileFact(f));
+          const aboutTopHtml = (p) => {
+            const at = p.about_text;
+            const wiki = at && at.url && at.source === 'Wikipedia' && webUrl(at.url) ? ` <a class="small wikilink" href="${esc(webUrl(at.url))}" target="_blank" rel="noopener">Wikipedia</a>` : '';
+            const facts = p.about.filter((f) => !isRef(f) && f.label !== 'In your library');
+            const lib = p.about.find((f) => f.label === 'In your library');
+            return `<section class="section about-top" id="iabout"><div class="section-head"><h3>About</h3></div><p class="blurb clamp" id="iblurb"${at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(at.text)}</p><p class="blurb-foot"><button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>${wiki}</p>${facts.length ? `<p class="facts-line">${facts.map((f) => `<span class="fact" title="${esc(f.label)}">${f.label === 'Active' ? 'Active ' : ''}${esc(f.value)}</span>`).join('<span class="dot" aria-hidden="true"> · </span>')}</p>` : ''}${lib ? `<p class="muted small libline">In your library: ${esc(lib.value)}</p>` : ''}</section>`;
+          };
+          const aboutDetailsHtml = (p) => {
+            const refs = p.about.filter(isRef);
+            const credit = aboutCredit(p);
+            if (!refs.length && !credit) return '';
+            return `<details class="section idetails" id="idetails"${window.innerWidth >= 600 ? ' open' : ''}><summary><h3>Details</h3></summary>${credit}${refs.length ? `<dl class="kv">${refs.map((f) => `<dt>${esc(f.label)}</dt><dd>${factValue(f)}</dd>`).join('')}</dl>` : ''}</details>`;
+          };
           const aboutHtml = (p) => {
             const at = p.about_text;
             const clamp = !!(at && at.text);
@@ -6130,7 +6149,7 @@
             + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
-            + (aboutTop ? aboutHtml(pg) : '')
+            + (aboutTop ? aboutTopHtml(pg) : '')
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
@@ -6139,7 +6158,7 @@
             + (myReview !== undefined ? `<section class="section" id="ireview">${reviewRow(myReview)}</section>` : '')
             + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
-            + (aboutTop ? '' : aboutHtml(pg));
+            + (aboutTop ? aboutDetailsHtml(pg) : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
           // is measured again when its width or the text size changes (zoom, rotation, a late font)
@@ -6256,7 +6275,9 @@
               const sources = (p) => JSON.stringify([(p.also_on || []).map((v) => v.url), (p.open_on || []).map((v) => v.url)]);
               if (sources(np) !== sources(pg)) { const redraw = () => { if (!here()) return; if (commentTyping()) { setTimeout(redraw, 3000); return; } render(); }; redraw(); return; }
               if (isListener()) np.about = (np.about || []).filter((f) => f.label !== 'File');
-              const sec = $('#iabout', main); if (sec) { sec.outerHTML = aboutHtml({ ...np, about: np.about || [] }); bindBlurb(); }
+              // With an article now: the top part in place and Details at the foot; else About whole, as drawn
+              const sec = $('#iabout', main); const got = { ...np, about: np.about || [] };
+              if (sec) { if (got.about_text && got.about_text.text) { sec.outerHTML = aboutTopHtml(got); const old = $('#idetails', main); if (old) old.remove(); main.insertAdjacentHTML('beforeend', aboutDetailsHtml(got)); } else sec.outerHTML = aboutHtml(got); bindBlurb(); }
               const ph = np.image && !pg.image && $('.hero .art.placeholder', main);
               if (ph) ph.outerHTML = `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(np.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>`;
               Object.assign(pg, { about: np.about, blurb: np.blurb, about_text: np.about_text, image_credit: np.image_credit, image: np.image || pg.image, about_pending: false });

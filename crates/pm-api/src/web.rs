@@ -95,6 +95,7 @@ mod tests {
         let fact = |href: &str| Fact {
             label: "Homepage".into(),
             value: href.into(),
+            kind: FactKind::Fact,
             href: Some(href.into()),
         };
         let out = serde_json::to_value(fact("javascript:alert(document.cookie)")).unwrap();

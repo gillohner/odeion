@@ -870,7 +870,18 @@ fn mb_fact(label: &str, entity: &str, mbid: &str) -> Fact {
     Fact {
         label: label.into(),
         value: mbid.into(),
+        kind: FactKind::Ref,
         href: Some(format!("https://musicbrainz.org/{entity}/{mbid}")),
+    }
+}
+
+/// A reference (an id, a raw URL, a file): the Details at the foot of the page.
+fn reference(label: &str, value: impl Into<String>) -> Fact {
+    Fact {
+        label: label.into(),
+        value: value.into(),
+        kind: FactKind::Ref,
+        href: None,
     }
 }
 
@@ -878,6 +889,7 @@ fn fact(label: &str, value: impl Into<String>) -> Fact {
     Fact {
         label: label.into(),
         value: value.into(),
+        kind: FactKind::Fact,
         href: None,
     }
 }
@@ -919,12 +931,12 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         None => None,
     };
     let mut about = vec![
-        fact("Format", t.file.format.to_string()),
-        fact("File", t.file.path.display().to_string()),
+        reference("Format", t.file.format.to_string()),
+        reference("File", t.file.path.display().to_string()),
     ];
     // Where the file lives decides nothing else in the UI; the details say it (STEWARD-BUNDLED-HOMESERVER §7)
     if let Some(hs) = s.homeserver_files_dir() {
-        about.push(fact(
+        about.push(reference(
             "Stored",
             if t.file.path.starts_with(hs) {
                 "On your homeserver".to_string()
@@ -934,25 +946,26 @@ async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage
         ));
     }
     if let Some(g) = t.replaygain_track_gain_db {
-        about.push(fact("ReplayGain", format!("{g:+.1} dB")));
+        about.push(reference("ReplayGain", format!("{g:+.1} dB")));
     }
     if let Some(i) = &t.isrc {
-        about.push(fact("ISRC", i.to_string()));
+        about.push(reference("ISRC", i.to_string()));
     }
     match &t.canonical {
         Some((MusicUri::Recording { mbid }, c)) => {
             about.push(mb_fact("MusicBrainz", "recording", &mbid.to_string()));
-            about.push(fact("Identified by", c.label().replace('_', " ")));
+            about.push(reference("Identified by", c.label().replace('_', " ")));
         }
         Some((u, c)) => {
             about.push(Fact {
                 label: "Identity".into(),
                 value: u.to_url(),
+                kind: FactKind::Ref,
                 href: Some(u.to_url()),
             });
-            about.push(fact("Identified by", c.label().replace('_', " ")));
+            about.push(reference("Identified by", c.label().replace('_', " ")));
         }
-        None => about.push(fact("Identity", "not identified yet")),
+        None => about.push(reference("Identity", "not identified yet")),
     }
     // The work it records, and that work's Wikipedia article
     let recording = t.recording_mbid.or(match &t.canonical {
@@ -1241,6 +1254,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
                 about.push(Fact {
                     label: label.into(),
                     value: u.clone(),
+                    kind: FactKind::Ref,
                     href: Some(u.clone()),
                 });
             }
@@ -1421,13 +1435,14 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
             about.push(fact("Type", t.clone()));
         }
         if let Some(g) = &r.card.group {
-            about.push(fact("Pinakes", format!("{} links in its group", g.size)));
+            about.push(reference("Pinakes", format!("{} links in its group", g.size)));
         }
     }
     if let Some(site) = &it.site {
         about.push(Fact {
             label: "Link".into(),
             value: site.clone(),
+            kind: FactKind::Ref,
             href: it.page.clone(),
         });
     }

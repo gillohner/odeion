@@ -817,6 +817,21 @@ html[data-shell="phone"] .idbar { max-width: none; }
 /* Where the About text and picture come from, and their licences */
 .credit { max-width: 72ch; line-height: 1.5; margin: -4px 0 12px; }
 /* About under the header (F6): a few lines of the article, then More; the credits small */
+/* The music first (owner, 2026-11-05): under the hero the blurb, a small Wikipedia link, one facts line
+   without labels, the library line; the ids, links and credits in Details at the foot */
+.about-top .blurb { margin-bottom: 6px; }
+.blurb-foot { display: flex; align-items: baseline; gap: 12px; margin: 0 0 10px; }
+.facts-line .fact { white-space: nowrap; }
+.wikilink { color: var(--muted); }
+.facts-line { color: var(--fg-2); font-size: 14px; line-height: 1.5; margin: 0 0 4px; }
+.facts-line .dot { color: var(--muted); }
+.libline { margin: 0; }
+details.idetails > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+details.idetails > summary::-webkit-details-marker { display: none; }
+details.idetails > summary::before { content: ''; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(-45deg); transition: transform 0.15s; flex: none; }
+details.idetails[open] > summary::before { transform: rotate(45deg); }
+details.idetails > summary h3 { margin: 0; }
+details.idetails > .credit, details.idetails > .kv { margin-top: 12px; }
 .blurb.clamp { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; margin-bottom: 4px; }
 #iblurbmore { display: inline-block; margin-bottom: 8px; }
 .credit a { color: inherit; text-decoration: underline; }
