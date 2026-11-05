@@ -499,6 +499,7 @@ jobs:
             echo "| \`pubky-music-android-arm64.apk\` (most phones), \`-universal.apk\`, \`.aab\` | the app on Android and Google TV |"
             echo "| \`pubky-music-node-linux-{x86_64,arm64,armv7}.tar.gz\` | the node, \`odeiond\` (also as \`pm-node\`, its old name; armv7: 32-bit Raspberry Pi OS) |"
             echo "| \`ghcr.io/$GITHUB_REPOSITORY:$( [ "$CHANNEL" = edge ] && echo edge || echo "${CHANNEL#v}")\` | the Odeion node image (amd64, arm64) |"
+            echo "| \`odeion-$CHANNEL-amd64.iso\` (added a little after the rest, with its \`.sha256\`) | a whole Odeion box on a spare PC: [install guide](https://github.com/$GITHUB_REPOSITORY/blob/main/docs/guides/install-iso.md) |"
             echo
             echo "Check downloads against \`SHA256SUMS\`."
           } > notes.md
@@ -553,6 +554,8 @@ jobs:
           # Files an older build had and this one does not.
           keep=$(cd dist && ls)
           for a in $(gh release view edge --json assets -q '.assets[].name'); do
+            # The installer ISO comes from iso.yml after this run, and stays
+            case $a in odeion-edge-amd64.iso | odeion-edge-amd64.iso.sha256) continue ;; esac
             echo "$keep" | grep -qxF "$a" || gh release delete-asset edge "$a" --yes
           done
       - name: versioned
