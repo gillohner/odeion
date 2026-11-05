@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Listeners have their own collections, on their own homeserver** (owner's ask, 11-02 and 11-03).
+  - A listener's Playlists page is theirs: what they make, change, share or delete is written to their homeserver with the session they gave the node (the same approval as their bookmarks), as social v1 collections the way the owner's sync writes the owner's. Nothing of theirs goes into the owner's playlists, and they never see the owner's.
+  - Add to playlist… in the menus and the swipe on a song work for them too. Sharing one publishes it on their own homeserver, with a link of theirs.
+  - When their homeserver doesn't answer, a change waits on the node and is written later; when it refuses the node, the page asks them to approve it again. One changed or deleted in another app of theirs comes in at their next visit.
+  - Imports, smart playlists, play orders, pins, node-only songs and Save as playlist from a queue stay the owner's. Playing one of theirs queues what the library has, on a zone open to listeners.
+
 ### 2026-11-04
 
 - **Listeners have their own bookmarks, on their own homeserver** (owner's ask, 11-02 and 11-03).

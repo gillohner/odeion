@@ -602,6 +602,9 @@ jobs:
       - name: a listener's own bookmarks and sign-ins (connect, lost, pending, Settings › You; 1280, 820 and 390)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-listener-library.js ci-token http://127.0.0.1:7788
+      - name: a listener's own collections (connect, create, share, lost, pending, none of the owner's; 1280, 820 and 390)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-listener-collections.js ci-token http://127.0.0.1:7788
       - name: collections with web links and posts show their cards in order (desktop and phone)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-collection-cards.js ci-token http://127.0.0.1:7788

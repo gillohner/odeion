@@ -1363,12 +1363,12 @@ html:not([data-shell="desktop"]) .pagebar .crumbs { display: none; }
 .track .title:has(.idmark) { display: flex; align-items: center; min-width: 0; }
 .track .title:has(.idmark) > .lnk { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .track .title:has(.idmark) > .idmark { flex: none; }
-/* A listener (#46) plays the shared library; the owner's playlists, tags and settings aren't theirs (their bookmarks are their own) */
-body.listener .nav-item[data-view="home"], body.listener .nav-item[data-view="playlists"],
+/* A listener (#46) plays the shared library; the owner's tags and settings aren't theirs (their bookmarks and collections are their own) */
+body.listener .nav-item[data-view="home"],
 body.listener .nav-item[data-view="radio"], body.listener .nav-item[data-view="sources"], body.listener .nav-item[data-view="identify"],
 body.listener .bnav[data-bnav="home"], body.listener .bnav[data-bnav="sources"], body.listener #jobchip, body.listener #h-setup, body.listener #zgroup,
 body.listener .idmark, body.listener #itags,
-body.listener .np-tags, body.listener [data-sel="playlist"], body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
+body.listener .np-tags, body.listener [data-sel="tag"], body.listener [data-sel="remove"] { display: none !important; }
 /* Library › Add music */
 .addm { padding: 18px 20px; }
 .addm h3 { display: flex; align-items: center; gap: 8px; }
@@ -1432,6 +1432,9 @@ details.set-row.svc-own { display: block; }
 .svc-own[open] > summary { margin-bottom: 10px; }
 .svc-body:empty::before { content: ''; display: block; height: 40px; }
 html[data-shell="phone"] #hson, html[data-shell="tablet"] #hson, html[data-shell="phone"] #hsoff, html[data-shell="tablet"] #hsoff, html[data-shell="phone"] [data-hsconnect], html[data-shell="tablet"] [data-hsconnect] { min-height: 40px; }
+/* The Playlists page's own controls (a listener has the page too): 40 px to touch */
+html[data-shell="phone"] #plcreate, html[data-shell="tablet"] #plcreate, html[data-shell="phone"] #plname, html[data-shell="tablet"] #plname { min-height: 40px; }
+html[data-shell="phone"] [data-plplay], html[data-shell="tablet"] [data-plplay] { min-height: 40px; min-width: 40px; }
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
 .nav-item.nav-offline, .bnav.nav-offline { display: none; }
 body.offline .nav-item.nav-offline, html[data-shell="tablet"] body.offline .bnav.nav-offline { display: flex; }

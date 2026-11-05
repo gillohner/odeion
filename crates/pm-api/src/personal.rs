@@ -1,5 +1,6 @@
 //! A listener's own Bookmarks on their own homeserver (TASK-listener-personal-library-1104, ADR
-//! 0016 step 5). The owner's stay what they were: rows in the library, pushed by the owner's sync.
+//! 0016 step 5); their Collections are in [`crate::personal_collections`]. The owner's stay what
+//! they were: rows in the library, pushed by the owner's sync.
 //!
 //! - **The grant.** A listener approves the node in Ring a second time, for
 //!   [`PERSONAL_CAPABILITIES`] only (their bookmarks and collections folders: no vault, no files).
@@ -71,6 +72,14 @@ pub trait PersonalHomeserver: Send + Sync {
     async fn put_bookmark(&self, key: &str, uri: &str, created_at: i64) -> Result<(), PersonalError>;
     /// Removes the bookmark of `uri`; one that isn't there is no error.
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError>;
+    /// Every file under `dir` (one of the granted folders), at any depth; a folder that isn't
+    /// there is empty.
+    async fn list(&self, key: &str, dir: &str) -> Result<Vec<String>, PersonalError>;
+    /// The file at `path`; `None` when it isn't there.
+    async fn read(&self, key: &str, path: &str) -> Result<Option<Vec<u8>>, PersonalError>;
+    async fn write(&self, key: &str, path: &str, body: &serde_json::Value) -> Result<(), PersonalError>;
+    /// Removes the file at `path`; one that isn't there is no error.
+    async fn remove(&self, key: &str, path: &str) -> Result<(), PersonalError>;
 }
 
 /// Where grants are kept: `<data>/grants/`, next to the library.
@@ -201,6 +210,46 @@ impl Grants {
         }
         e
     }
+
+    /// A call about one file, time-limited: `None` when the file isn't there. On a session
+    /// restored from the grant just now a 404 is the file's; on an older one it may be the grant
+    /// gone, so the session is restored again (a grant that is gone fails there) and the call
+    /// asked once more.
+    async fn maybe_there<T, F, Fut>(&self, key: &str, f: F) -> Result<Option<T>, PersonalError>
+    where
+        F: Fn(PubkySession) -> Fut,
+        Fut: std::future::Future<Output = Result<T, HomeserverError>>,
+    {
+        let (session, fresh) = self.session(key).await?;
+        match tokio::time::timeout(CALL_LIMIT, f(session)).await {
+            Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
+            Ok(Ok(v)) => Ok(Some(v)),
+            Ok(Err(e)) if is_not_found(&e) && fresh => Ok(None),
+            Ok(Err(e)) if is_not_found(&e) => {
+                sessions().lock().expect("sessions").remove(key);
+                let (session, _) = self.session(key).await?;
+                match tokio::time::timeout(CALL_LIMIT, f(session)).await {
+                    Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
+                    Ok(Ok(v)) => Ok(Some(v)),
+                    Ok(Err(e)) if is_not_found(&e) => Ok(None),
+                    Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
+                }
+            }
+            Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
+        }
+    }
+}
+
+/// How a path of theirs is reached: `/pub/` publicly, anything else with their session.
+fn visibility_of<'a>(
+    path: &str,
+    session: &'a PubkySession,
+) -> (pm_pubky::Visibility, Option<&'a PubkySession>) {
+    if path.starts_with("/pub/") {
+        (pm_pubky::Visibility::Public, None)
+    } else {
+        (pm_pubky::Visibility::Private, Some(session))
+    }
 }
 
 #[async_trait::async_trait]
@@ -251,27 +300,37 @@ impl PersonalHomeserver for Grants {
 
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError> {
         let path = pm_pubky::v1::bookmark_path(uri).map_err(PersonalError::Unreachable)?;
-        let (session, fresh) = self.session(key).await?;
+        self.remove(key, &path).await
+    }
+
+    async fn list(&self, key: &str, dir: &str) -> Result<Vec<String>, PersonalError> {
+        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
-        match tokio::time::timeout(CALL_LIMIT, hs.delete(&session, &path)).await {
-            Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
-            Ok(Ok(())) => Ok(()),
-            // Restored from the grant just now: the 404 is the bookmark's (nothing to remove)
-            Ok(Err(e)) if is_not_found(&e) && fresh => Ok(()),
-            // An older session: a 404 may be its grant gone. Restored again (a grant that is
-            // gone fails there), then asked once more
-            Ok(Err(e)) if is_not_found(&e) => {
-                sessions().lock().expect("sessions").remove(key);
-                let (session, _) = self.session(key).await?;
-                match tokio::time::timeout(CALL_LIMIT, hs.delete(&session, &path)).await {
-                    Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) if is_not_found(&e) => Ok(()),
-                    Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
-                }
-            }
-            Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
-        }
+        let (visibility, session) = visibility_of(dir, &session);
+        self.limited(key, hs.list_tree(key, dir, visibility, session))
+            .await
+    }
+
+    async fn read(&self, key: &str, path: &str) -> Result<Option<Vec<u8>>, PersonalError> {
+        let hs = self.client()?;
+        self.maybe_there(key, |session| async move {
+            let (visibility, session) = visibility_of(path, &session);
+            hs.get_bytes(key, path, visibility, session).await
+        })
+        .await
+    }
+
+    async fn write(&self, key: &str, path: &str, body: &serde_json::Value) -> Result<(), PersonalError> {
+        let (session, _) = self.session(key).await?;
+        let hs = self.client()?;
+        self.limited(key, hs.write_object(&session, path, body)).await
+    }
+
+    async fn remove(&self, key: &str, path: &str) -> Result<(), PersonalError> {
+        let hs = self.client()?;
+        self.maybe_there(key, |session| async move { hs.delete(&session, path).await })
+            .await
+            .map(|_| ())
     }
 }
 
@@ -328,7 +387,7 @@ fn load(s: &NodeState, key: &str) -> Copy {
 /// while a heart comes in, would otherwise each save their own and lose the other's.
 type PersonLocks = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     static L: OnceLock<PersonLocks> = OnceLock::new();
     L.get_or_init(Default::default)
         .lock()
@@ -351,6 +410,19 @@ fn save(s: &NodeState, key: &str, c: &Copy) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Whether their homeserver refused the grant (approve the node again).
+pub(crate) fn is_lost(s: &NodeState, key: &str) -> bool {
+    load(s, key).lost
+}
+
+/// Their homeserver refused the grant: nothing is tried until they approve the node again.
+pub(crate) fn mark_lost(s: &NodeState, key: &str, why: &str) -> Result<(), ApiError> {
+    tracing::info!(%key, "a listener's homeserver refused the node: {why}");
+    let mut c = load(s, key);
+    c.lost = true;
+    save(s, key, &c)
+}
+
 impl Copy {
     fn apply(&mut self, uri: &str, on: bool, at: i64) {
         self.items.retain(|i| i.uri != uri);
@@ -364,11 +436,11 @@ impl Copy {
 }
 
 /// The answer a listener gets when the node can't write for them: connect (again) first.
-fn needs_connect(lost: bool) -> Response {
+pub(crate) fn needs_connect(lost: bool) -> Response {
     let error = if lost {
         "Your homeserver no longer lets this node in: approve it again (Settings › You › My homeserver)"
     } else {
-        "Connect your homeserver first (Settings › You › My homeserver): your bookmarks are kept there"
+        "Connect your homeserver first (Settings › You › My homeserver): your bookmarks and collections are kept there"
     };
     (
         StatusCode::CONFLICT,
@@ -571,7 +643,7 @@ pub(crate) async fn status(
     Ok(Json(PersonalState {
         connected,
         lost: connected && copy.lost,
-        pending: copy.pending.len(),
+        pending: copy.pending.len() + crate::personal_collections::pending(&s, &key),
         stale: false,
     }))
 }
@@ -590,7 +662,7 @@ pub(crate) async fn disconnect(
     Ok(Json(PersonalState {
         connected: false,
         lost: false,
-        pending: copy.pending.len(),
+        pending: copy.pending.len() + crate::personal_collections::pending(&s, &key),
         stale: false,
     }))
 }

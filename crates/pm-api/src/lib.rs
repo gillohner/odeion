@@ -75,6 +75,7 @@ pub mod party;
 pub mod peer;
 pub mod people;
 pub mod personal;
+pub mod personal_collections;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
@@ -313,32 +314,42 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/folders/suggest", get(first_run::suggest_folders))
         .route("/library/scan", post(scan))
-        // Collections: the same resource as /playlists (playlists.rs)
-        .route("/collections", get(playlists::list).post(playlists::create))
+        // Collections: the same resource as /playlists (playlists.rs); each caller their own
+        // (a listener's: personal_collections.rs)
+        .route(
+            "/collections",
+            get(personal_collections::list).post(personal_collections::create),
+        )
         .route(
             "/collections/{id}",
-            get(playlists::get)
-                .put(playlists::update)
-                .delete(playlists::delete),
+            get(personal_collections::get)
+                .put(personal_collections::update)
+                .delete(personal_collections::delete),
         )
-        .route("/collections/{id}/items", post(playlists::add_items))
+        .route("/collections/{id}/items", post(personal_collections::add_items))
         .route(
             "/collections/{id}/items/{index}",
-            axum::routing::delete(playlists::remove_item),
+            axum::routing::delete(personal_collections::remove_item),
         )
         .route(
             "/collections/{id}/local/{index}",
             axum::routing::delete(playlists::remove_local),
         )
-        .route("/collections/{id}/play", post(playlists::play))
+        .route("/collections/{id}/play", post(personal_collections::play))
         .route("/collections/{id}/play-from", get(play_from::playlist_play_from))
         .route("/collections/{id}/order", put(playlists::set_order))
-        .route("/collections/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/collections/{id}/visibility",
+            put(personal_collections::set_visibility),
+        )
         .route(
             "/collections/{id}/items/{index}/source",
             put(playlists::pin_source),
         )
-        .route("/playlists", get(playlists::list).post(playlists::create))
+        .route(
+            "/playlists",
+            get(personal_collections::list).post(personal_collections::create),
+        )
         .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
         .route("/playlists/import/file", post(activity::import_playlist_file))
@@ -371,23 +382,26 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route(
             "/playlists/{id}",
-            get(playlists::get)
-                .put(playlists::update)
-                .delete(playlists::delete),
+            get(personal_collections::get)
+                .put(personal_collections::update)
+                .delete(personal_collections::delete),
         )
-        .route("/playlists/{id}/items", post(playlists::add_items))
+        .route("/playlists/{id}/items", post(personal_collections::add_items))
         .route(
             "/playlists/{id}/local/{index}",
             axum::routing::delete(playlists::remove_local),
         )
         .route(
             "/playlists/{id}/items/{index}",
-            axum::routing::delete(playlists::remove_item),
+            axum::routing::delete(personal_collections::remove_item),
         )
-        .route("/playlists/{id}/play", post(playlists::play))
+        .route("/playlists/{id}/play", post(personal_collections::play))
         .route("/playlists/{id}/play-from", get(play_from::playlist_play_from))
         .route("/playlists/{id}/order", put(playlists::set_order))
-        .route("/playlists/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/playlists/{id}/visibility",
+            put(personal_collections::set_visibility),
+        )
         .route("/playlists/{id}/items/{index}/source", put(playlists::pin_source))
         .route("/shared/resolve", get(shared::resolve))
         .route("/shared/{user}/playlists", get(shared::list))
