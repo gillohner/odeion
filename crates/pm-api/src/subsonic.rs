@@ -1441,16 +1441,10 @@ async fn dispatch(
             let bytes = tokio::fs::read(&art.file)
                 .await
                 .map_err(|e| SubErr::not_found(format!("cover: {e}")))?;
-            return Ok(Reply::Raw(
-                (
-                    [
-                        (header::CONTENT_TYPE, art.mime),
-                        (header::CACHE_CONTROL, "private, max-age=86400".to_string()),
-                    ],
-                    bytes,
-                )
-                    .into_response(),
-            ));
+            // Served by its bytes, never by the stored type (a row from an older scan may hold any)
+            let resp = crate::art::picture(bytes, "private, max-age=86400")
+                .map_err(|_| SubErr::not_found("Cover art not found"))?;
+            return Ok(Reply::Raw(resp));
         }
         "startScan" | "getScanStatus" => {
             if method == "startScan" {

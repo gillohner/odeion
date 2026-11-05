@@ -419,19 +419,31 @@ async fn relay(
     if !resp.status().is_success() {
         return Err(upstream(format!("{method} answered {}", resp.status())));
     }
-    let ctype = resp
+    let said = resp
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or(fallback_type)
+        .unwrap_or("")
         .to_string();
-    if ctype.starts_with("application/json") || ctype.starts_with("text/xml") {
+    // Subsonic answers an error as a document with 200
+    if said.starts_with("application/json") || said.starts_with("text/xml") {
         return Err(ApiError::not_found(format!(
             "the server has no {method} for this id"
         )));
     }
+    // A picture is answered by what its bytes are
+    if fallback_type.starts_with("image/") {
+        return crate::art::relayed_picture(resp, "private, max-age=3600").await;
+    }
+    // Audio or video as the server said, else what was asked for
+    let ctype = crate::art::safe_media_type(Some(&said), fallback_type);
     let mut out = axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, ctype)
+        .header(axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            crate::art::PASSIVE_CSP,
+        )
         .header(axum::http::header::CACHE_CONTROL, "private, max-age=3600");
     if let Some(n) = resp.content_length() {
         out = out.header(axum::http::header::CONTENT_LENGTH, n);

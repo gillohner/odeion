@@ -37,19 +37,21 @@ jobs:
       ODEION_UPDATE_CHANNEL: edge
       ODEION_UPDATE_FEED: http://127.0.0.1:18480/latest.json
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: 17
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/pm-desktop
           key: android-update
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
       - name: generate the Android project
@@ -90,7 +92,7 @@ jobs:
           ODEION_UPDATE_CHANNEL= npx tauri android build --ci --aab --target x86_64 --features update-feed-fixture \
             --config update.conf.json
           python3 -I ../../tools/release/aab-check.py gen/android/app/build/outputs "$GITHUB_WORKSPACE/update/old.apk"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: update-apks
           path: update/
@@ -108,8 +110,10 @@ jobs:
           - {api: "35", target: google_apis}
           - {api: "37.0", target: google_atd}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: update-apks
           path: update
@@ -119,7 +123,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: the app updates itself
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64
@@ -132,7 +136,7 @@ jobs:
           disable-animations: true
           script: python3 -I tools/android-update-probe.py update/old.apk update/new.apk /tmp/up ${{ matrix.target == 'google_atd' && '--settings-optional' || '' }}
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: update-probe-api${{ matrix.api }}-${{ matrix.target }}
           path: /tmp/up/
