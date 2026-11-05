@@ -20077,11 +20077,9 @@ exec sleep 300
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
 
-    /// Security audit 2026-11-05 (A1): a node without a token is the owner to whoever reaches it,
-    /// so it answers only requests addressed to it by a loopback name from its own pages: a page
-    /// on another site that rebinds its name to 127.0.0.1, or opens the event stream from there,
-    /// is refused. A node with a token answers by any name, behind a proxy too. No other site
-    /// frames the pages.
+    /// A node without a token answers only requests addressed to it by a loopback name from its
+    /// own pages, the event stream included. A node with a token answers by any name, behind a
+    /// proxy too. No other site frames the pages.
     #[tokio::test]
     async fn a_tokenless_node_refuses_other_sites_and_pages_cant_be_framed() {
         let send = |app: Router, uri: &'static str, headers: Vec<(&'static str, &'static str)>| async move {
@@ -20103,14 +20101,14 @@ exec sleep 300
             assert_eq!(st, StatusCode::OK, "{h:?}");
         }
         // A rebound name, another site's page, its event stream
-        let (st, _) = send(open.clone(), "/v1/info", vec![("host", "evil.example:7788")]).await;
+        let (st, _) = send(open.clone(), "/v1/info", vec![("host", "other.example:7788")]).await;
         assert_eq!(st, StatusCode::FORBIDDEN);
-        let (st, _) = send(open.clone(), "/", vec![("host", "evil.example:7788")]).await;
+        let (st, _) = send(open.clone(), "/", vec![("host", "other.example:7788")]).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "the page too");
         let (st, _) = send(
             open.clone(),
             "/v1/info",
-            vec![("host", "127.0.0.1:7788"), ("origin", "http://evil.example")],
+            vec![("host", "127.0.0.1:7788"), ("origin", "http://other.example")],
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN);
@@ -20124,7 +20122,7 @@ exec sleep 300
                 ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
             ]
         };
-        let (st, _) = send(open.clone(), "/v1/events", ws("http://evil.example")).await;
+        let (st, _) = send(open.clone(), "/v1/events", ws("http://other.example")).await;
         assert_eq!(st, StatusCode::FORBIDDEN, "cross-site event stream");
 
         // With a token: any name (a proxy, a LAN name) with the token; the event stream still
@@ -20142,7 +20140,7 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::OK);
-        let mut cross = ws("http://evil.example");
+        let mut cross = ws("http://other.example");
         cross[0] = ("host", "music.example");
         cross.push(("authorization", "Bearer s3cret"));
         let (st, _) = send(tok.clone(), "/v1/events", cross).await;

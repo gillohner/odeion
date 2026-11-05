@@ -94,23 +94,50 @@ pub async fn tokenless_direct_only(State(s): State<Arc<NodeState>>, req: Request
     next.run(req).await
 }
 
-/// The host a request names (`Host`, else the URI's authority, as HTTP/2 sends it), lowercased.
-fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Option<String> {
-    h.get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| uri.authority().map(|a| a.as_str().to_string()))
-        .map(|v| v.to_ascii_lowercase())
+/// A host and port as a request names them (`Host`, or the URI's authority as HTTP/2 sends it).
+#[derive(Debug, PartialEq)]
+struct Named {
+    /// Lowercased, without IPv6 brackets.
+    name: String,
+    /// `None` when the authority names no port (or 80, the default of `http`).
+    port: Option<u16>,
 }
 
-/// The name part of `host[:port]` (`[::1]:7788` → `::1`).
-fn host_name(host: &str) -> &str {
-    if let Some(rest) = host.strip_prefix('[') {
-        return rest.split(']').next().unwrap_or(rest);
+/// `host[:port]`, parsed strictly: no user info, path or junk around it (`[::1].other.example`,
+/// `[::1` and `user@localhost` are not hosts).
+fn parse_authority(a: &str) -> Option<Named> {
+    if a.is_empty() || a.contains(['/', '?', '#', '@', '\\']) {
+        return None;
     }
-    match host.rsplit_once(':') {
-        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
-        _ => host,
+    let u = url::Url::parse(&format!("http://{a}")).ok()?;
+    if !u.username().is_empty() || u.password().is_some() || u.path() != "/" {
+        return None;
+    }
+    let name = u
+        .host_str()?
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    Some(Named { name, port: u.port() })
+}
+
+/// What a request says about the host it is for: `Ok(None)` when it names none (no browser
+/// does that), `Err` when what it names is unreadable, doubled or contradicts itself.
+fn named_host(h: &HeaderMap, uri: &axum::http::Uri) -> Result<Option<Named>, ()> {
+    let mut hosts = h.get_all(axum::http::header::HOST).iter();
+    let header = match (hosts.next(), hosts.next()) {
+        (Some(_), Some(_)) => return Err(()),
+        (Some(v), None) => Some(parse_authority(v.to_str().map_err(|_| ())?).ok_or(())?),
+        (None, _) => None,
+    };
+    let authority = match uri.authority() {
+        Some(a) => Some(parse_authority(a.as_str()).ok_or(())?),
+        None => None,
+    };
+    match (header, authority) {
+        (Some(a), Some(b)) if a != b => Err(()),
+        (Some(a), _) | (None, Some(a)) => Ok(Some(a)),
+        (None, None) => Ok(None),
     }
 }
 
@@ -122,33 +149,58 @@ fn is_loopback_name(name: &str) -> bool {
         || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+/// The `Origin` a browser sent, parsed; `Err` for one that names no site (`null`) or can't be read.
+fn origin_of(h: &HeaderMap) -> Result<Option<url::Url>, ()> {
+    match h.get(axum::http::header::ORIGIN) {
+        None => Ok(None),
+        Some(o) => {
+            let u = url::Url::parse(o.to_str().map_err(|_| ())?).map_err(|_| ())?;
+            if !matches!(u.scheme(), "http" | "https") || u.host_str().is_none() {
+                return Err(());
+            }
+            Ok(Some(u))
+        }
+    }
+}
+
+/// Whether an origin is that host: the same name, and the same port, where a host that names no
+/// port means the origin's own default (browsers leave 80 and 443 out of `Origin`, proxies often
+/// keep them in `X-Forwarded-Host`).
+fn origin_is(origin: &url::Url, host: &Named) -> bool {
+    let name = origin
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    name == host.name
+        && match host.port {
+            None => origin.port().is_none(),
+            Some(p) => origin.port_or_known_default() == Some(p),
+        }
+}
+
 /// Whether a request to a node without a token comes from the node's own pages, or from a
-/// program that isn't a browser (DNS rebinding, security audit 2026-11-05):
-/// - the host it names is a loopback name: a page on another site that rebinds its own name to
-///   127.0.0.1 still sends that name, and is refused;
-/// - an `Origin`, when the browser sends one, is that very host (scheme and port included): a
-///   page elsewhere, another local web app on another port, or a sandboxed `null` page is refused.
+/// program that isn't a browser:
+/// - the host it names is a loopback name (any other name is refused, and so is an unreadable,
+///   doubled or contradictory host);
+/// - an `Origin`, when the browser sends one, is that very host and port (pages elsewhere, other
+///   local apps on other ports and `null` origins are refused).
 ///
 /// A request naming no host at all (not a browser: they always do) passes on the source checks.
 pub fn loopback_addressed(h: &HeaderMap, uri: &axum::http::Uri) -> bool {
-    let Some(host) = named_host(h, uri) else {
-        return true;
+    let host = match named_host(h, uri) {
+        Ok(Some(host)) => host,
+        Ok(None) => return true,
+        Err(()) => return false,
     };
-    if !is_loopback_name(host_name(&host)) {
+    if !is_loopback_name(&host.name) {
         return false;
     }
-    same_origin(h, &host)
-}
-
-/// Whether an `Origin`, when there is one, is `http(s)://<host>` for the host the request names.
-/// Browsers send `Origin` on every WebSocket handshake and on cross-site requests.
-pub fn same_origin(h: &HeaderMap, host: &str) -> bool {
-    match h.get(axum::http::header::ORIGIN) {
-        None => true,
-        Some(o) => o.to_str().ok().is_some_and(|o| {
-            let o = o.to_ascii_lowercase();
-            o == format!("http://{host}") || o == format!("https://{host}")
-        }),
+    match origin_of(h) {
+        Ok(None) => true,
+        Ok(Some(o)) => origin_is(&o, &host),
+        Err(()) => false,
     }
 }
 
@@ -158,26 +210,23 @@ pub fn same_origin(h: &HeaderMap, host: &str) -> bool {
 /// a reverse proxy says it was asked for (`X-Forwarded-Host`; proxies often rewrite `Host`), and
 /// the node's configured public address.
 pub fn ws_origin_ok(h: &HeaderMap, uri: &axum::http::Uri, public_url: &str) -> bool {
-    let Some(origin) = h.get(axum::http::header::ORIGIN) else {
-        return true;
+    let origin = match origin_of(h) {
+        Ok(None) => return true,
+        Ok(Some(o)) => o,
+        Err(()) => return false,
     };
-    let Ok(origin) = origin.to_str() else {
-        return false;
-    };
-    let origin = origin.to_ascii_lowercase();
+    let named = named_host(h, uri).ok().flatten();
     let forwarded = h
         .get("x-forwarded-host")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split(',').next())
-        .map(|v| v.trim().to_ascii_lowercase());
-    let public = url::Url::parse(public_url)
-        .ok()
-        .map(|u| u.origin().ascii_serialization().to_ascii_lowercase());
-    named_host(h, uri)
-        .into_iter()
-        .chain(forwarded)
-        .any(|host| origin == format!("http://{host}") || origin == format!("https://{host}"))
-        || public.is_some_and(|p| p == origin)
+        .and_then(|v| parse_authority(v.trim()));
+    let public = url::Url::parse(public_url).ok().map(|u| u.origin());
+    named
+        .iter()
+        .chain(forwarded.iter())
+        .any(|host| origin_is(&origin, host))
+        || public.is_some_and(|p| p == origin.origin())
 }
 
 /// Serve the API for the iroh tunnel on its own loopback listener, every request marked
@@ -267,7 +316,7 @@ mod tests {
     }
 
     /// A node without a token answers its own pages at a loopback name, and nothing a page on
-    /// another site sends through a visitor's browser (DNS rebinding; security audit 2026-11-05).
+    /// another site sends through a visitor's browser.
     #[test]
     fn a_tokenless_node_answers_only_its_loopback_names_and_own_pages() {
         let uri: axum::http::Uri = "/v1/status".parse().unwrap();
@@ -284,20 +333,49 @@ mod tests {
             assert!(loopback_addressed(&heads(&ok), &uri), "{ok:?}");
         }
         for refused in [
-            // A rebound name: the attacker's own host
-            vec![("host", "evil.example:7788")],
-            vec![("host", "127.0.0.1.evil.example:7788")],
+            // Another name for the address
+            vec![("host", "other.example:7788")],
+            vec![("host", "127.0.0.1.other.example:7788")],
             vec![("host", "music.lan:7788")],
             // Another site, another local app on another port, a sandboxed page
-            vec![("host", "127.0.0.1:7788"), ("origin", "http://evil.example")],
+            vec![("host", "127.0.0.1:7788"), ("origin", "http://other.example")],
             vec![("host", "localhost:7788"), ("origin", "http://localhost:3000")],
             vec![("host", "127.0.0.1:7788"), ("origin", "null")],
         ] {
             assert!(!loopback_addressed(&heads(&refused), &uri), "{refused:?}");
         }
         // HTTP/2 names the host in the URI
-        let abs: axum::http::Uri = "http://evil.example:7788/v1/status".parse().unwrap();
+        let abs: axum::http::Uri = "http://other.example:7788/v1/status".parse().unwrap();
         assert!(!loopback_addressed(&HeaderMap::new(), &abs));
+        // What isn't a plain host is refused, never read as "no host"
+        for junk in [
+            "[::1].other.example:7788",
+            "[::1]garbage",
+            "[::1",
+            "user@localhost:7788",
+            "localhost:7788/x",
+            "",
+        ] {
+            assert!(!loopback_addressed(&heads(&[("host", junk)]), &uri), "{junk:?}");
+        }
+        let mut two = heads(&[("host", "127.0.0.1:7788")]);
+        two.append(axum::http::header::HOST, "other.example:7788".parse().unwrap());
+        assert!(!loopback_addressed(&two, &uri), "two Host headers");
+        let mut bad = HeaderMap::new();
+        bad.insert(
+            axum::http::header::HOST,
+            axum::http::HeaderValue::from_bytes(b"local\xffhost").unwrap(),
+        );
+        assert!(!loopback_addressed(&bad, &uri), "an unreadable Host");
+        let local_abs: axum::http::Uri = "http://127.0.0.1:7788/v1/status".parse().unwrap();
+        assert!(loopback_addressed(
+            &heads(&[("host", "127.0.0.1:7788")]),
+            &local_abs
+        ));
+        assert!(
+            !loopback_addressed(&heads(&[("host", "127.0.0.1:7788")]), &abs),
+            "Host and URI disagree"
+        );
     }
 
     /// The event stream opens from this node's pages, behind a reverse proxy too, and never
@@ -330,10 +408,36 @@ mod tests {
             &uri,
             public
         ));
+        // A proxy that keeps the default port in X-Forwarded-Host
+        assert!(ws_origin_ok(
+            &heads(&[
+                ("host", "127.0.0.1:7788"),
+                ("x-forwarded-host", "music.example:443"),
+                ("origin", "https://music.example")
+            ]),
+            &uri,
+            ""
+        ));
+        assert!(ws_origin_ok(
+            &heads(&[("host", "music.example"), ("origin", "https://music.example")]),
+            &uri,
+            ""
+        ));
+        assert!(
+            !ws_origin_ok(
+                &heads(&[
+                    ("host", "music.example:8443"),
+                    ("origin", "https://music.example")
+                ]),
+                &uri,
+                ""
+            ),
+            "another port is another origin"
+        );
         for o in [
-            "http://evil.example",
+            "http://other.example",
             "null",
-            "https://music.example.evil.example",
+            "https://music.example.other.example",
         ] {
             assert!(
                 !ws_origin_ok(&heads(&[("host", "127.0.0.1:7788"), ("origin", o)]), &uri, public),
