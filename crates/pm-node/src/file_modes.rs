@@ -6,16 +6,26 @@
 use std::path::{Path, PathBuf};
 
 /// The files [`tighten`] makes the node's alone: the library database and its journal files,
-/// the config (it may hold the API token and service secrets) and the remote-access key.
-pub fn private_files(data_dir: &Path, db: &Path, config: Option<&Path>) -> Vec<PathBuf> {
+/// the config (it may hold the API token and service secrets), the Pubky session secret, the
+/// remote-access key, the app players' keys and a config a restore brought back. Only those that
+/// are in the data folder are changed ([`tighten`]).
+pub fn private_files(
+    data_dir: &Path,
+    db: &Path,
+    config: Option<&Path>,
+    session_secret: &Path,
+) -> Vec<PathBuf> {
     let mut v = vec![db.to_path_buf()];
-    for ext in ["-wal", "-shm"] {
+    for ext in ["-wal", "-shm", "-journal"] {
         let mut p = db.as_os_str().to_owned();
         p.push(ext);
         v.push(PathBuf::from(p));
     }
     v.extend(config.map(Path::to_path_buf));
-    v.push(data_dir.join("remote.key"));
+    v.push(session_secret.to_path_buf());
+    for name in ["remote.key", "endpoint-keys.json", "node.restored.toml"] {
+        v.push(data_dir.join(name));
+    }
     v
 }
 
@@ -29,13 +39,20 @@ pub struct Tightened {
     pub left: Vec<(PathBuf, String, u32)>,
 }
 
-/// Makes the data folder 0711 at most and each of `files` that exists 0600 at most.
+/// Makes the data folder 0711 at most and each of `files` that exists 0600 at most. Only what is
+/// the node's to change: a file is changed only when it is a regular file (never through a link,
+/// never a link's target) whose real folder is the data folder or one inside it. A file kept
+/// elsewhere (a config in `/etc`) is its installer's to set, and is left as it is.
 #[cfg(unix)]
 pub fn tighten(data_dir: &Path, files: &[PathBuf]) -> Tightened {
     use std::os::unix::fs::PermissionsExt;
     let mut out = Tightened::default();
-    let mut fix = |p: &Path, keep: u32, should: u32| {
-        let m = match std::fs::metadata(p) {
+    let Ok(root) = data_dir.canonicalize() else {
+        return out;
+    };
+    let mut fix = |p: &Path, keep: u32, should: u32, dir: bool| {
+        // Not followed: a link is never changed, nor what it points to
+        let m = match std::fs::symlink_metadata(p) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
@@ -43,6 +60,24 @@ pub fn tighten(data_dir: &Path, files: &[PathBuf]) -> Tightened {
                 return;
             }
         };
+        let kind_ok = if dir {
+            m.file_type().is_dir()
+        } else {
+            m.file_type().is_file()
+        };
+        if !kind_ok {
+            return;
+        }
+        if !dir {
+            // Its real folder, links in the path resolved: inside the data folder, or not ours
+            let inside = p
+                .parent()
+                .and_then(|d| d.canonicalize().ok())
+                .is_some_and(|d| d.starts_with(&root));
+            if !inside {
+                return;
+            }
+        }
         let mode = m.permissions().mode() & 0o7777;
         let want = mode & keep;
         if want == mode {
@@ -56,9 +91,9 @@ pub fn tighten(data_dir: &Path, files: &[PathBuf]) -> Tightened {
         }
     };
     // The folder: no reading or writing by others; searching stays
-    fix(data_dir, !0o066, 0o711);
+    fix(&root, !0o066, 0o711, true);
     for f in files {
-        fix(f, 0o7700, 0o600);
+        fix(f, 0o7700, 0o600, false);
     }
     out
 }
@@ -96,7 +131,21 @@ mod tests {
         std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
 
-        let changed = tighten(&data, &private_files(&data, &db, Some(&conf))).changed;
+        let secret = data.join("pubky-session.secret");
+        let more = [
+            data.join("library.sqlite-journal"),
+            secret.clone(),
+            data.join("endpoint-keys.json"),
+            data.join("node.restored.toml"),
+        ];
+        for f in &more {
+            std::fs::write(f, "x").unwrap();
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let changed = tighten(&data, &private_files(&data, &db, Some(&conf), &secret)).changed;
+        for f in &more {
+            assert_eq!(mode(f), 0o600, "{f:?}");
+        }
         assert_eq!(mode(&data), 0o711);
         for f in [
             &db,
@@ -106,11 +155,11 @@ mod tests {
         ] {
             assert_eq!(mode(f), 0o600, "{f:?}");
         }
-        assert_eq!(changed.len(), 5, "{changed:?}");
+        assert_eq!(changed.len(), 9, "{changed:?}");
         // What another service reads stays readable: the folder can be searched, the file is its own
         assert_eq!(mode(&tunnel.join("domain")), 0o644);
         // Already tight: nothing changes, nothing is logged; a missing file is skipped
-        let again = tighten(&data, &private_files(&data, &db, Some(&conf)));
+        let again = tighten(&data, &private_files(&data, &db, Some(&conf), &secret));
         assert!(again.changed.is_empty() && again.left.is_empty(), "{again:?}");
     }
 
@@ -119,7 +168,7 @@ mod tests {
     fn what_the_node_cant_fix_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        let locked = dir.path().join("locked");
+        let locked = data.join("locked");
         std::fs::create_dir(&data).unwrap();
         std::fs::create_dir(&locked).unwrap();
         let conf = locked.join("node.toml");
@@ -141,5 +190,61 @@ mod tests {
             .map(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0)
             .unwrap_or(false)
             && std::fs::read_dir("/root").is_ok()
+    }
+
+    /// Never through a link, never outside the data folder: a link named like a secret file, a
+    /// config kept in another folder and a folder in place of a file are left as they are.
+    #[test]
+    fn only_the_data_folders_own_files_are_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let outside = dir.path().join("etc-node.toml");
+        let target = dir.path().join("someone-elses");
+        for f in [&outside, &target] {
+            std::fs::write(f, "x").unwrap();
+            std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        std::os::unix::fs::symlink(&target, data.join("remote.key")).unwrap();
+        std::fs::create_dir(data.join("endpoint-keys.json")).unwrap();
+        std::fs::set_permissions(
+            data.join("endpoint-keys.json"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        // A folder inside reached through a link to outside: not the data folder's own
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("node.toml"), "x").unwrap();
+        std::fs::set_permissions(
+            elsewhere.join("node.toml"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&elsewhere, data.join("conf")).unwrap();
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        let db = data.join("library.sqlite");
+        let files = private_files(&data, &db, Some(&outside), &data.join("pubky-session.secret"));
+        let mut files = files;
+        files.push(data.join("conf").join("node.toml"));
+        let out = tighten(&data, &files);
+        assert_eq!(mode(&target), 0o644, "a link's target is never changed");
+        assert_eq!(
+            mode(&outside),
+            0o644,
+            "a config outside the data folder is the installer's"
+        );
+        assert_eq!(mode(&data.join("endpoint-keys.json")), 0o755, "not a file");
+        assert_eq!(
+            mode(&elsewhere.join("node.toml")),
+            0o644,
+            "reached through a link"
+        );
+        assert!(
+            out.changed
+                .iter()
+                .all(|(p, _, _)| p == &data.canonicalize().unwrap()),
+            "{out:?}"
+        );
     }
 }

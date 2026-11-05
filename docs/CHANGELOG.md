@@ -9,7 +9,7 @@ Newest first. Dates are when the change landed on `main`.
 - **Covers, portraits and profile pictures are served by what they are.**
   - A picture's type now comes from its bytes, so only JPEG, PNG, WebP and GIF are served, whatever type a tag or a server gave it. Anything else isn't shown.
   - Every picture, and every file the node relays from Jellyfin, Plex, Audiobookshelf or a Subsonic server, is marked to be shown only as what it is.
-- **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, the node makes its library, its config and its remote-access key its own if a group or anyone else could read them, and logs that. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
+- **The node's own files are its own.** A new library is readable by the node's user only, and the systemd units and the Docker image create files that way. At start, before the library opens, the node makes its library and its journal files, its config, its Pubky session secret, its remote-access key, the app players' keys and a restored config its own if a group or anyone else could read them, and logs that. It changes only regular files in its data folder, never through a link; a config kept elsewhere (`/etc`) is left to its installer. The data folder stays passable, so the homeserver still reads the tunnel's hostname there.
 
 ### 2026-11-04
 

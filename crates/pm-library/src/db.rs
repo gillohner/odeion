@@ -346,18 +346,28 @@ impl Library {
     /// Opens (or makes) the library at `path`. A new one is readable by the node's user alone
     /// (it holds sign-ins); SQLite gives its journal files the same permissions.
     pub fn open(path: &Path) -> Result<Self> {
-        let new = !path.exists();
-        let conn = Connection::open(path)?;
+        // A new one is made empty and 0600 first, so it is never readable by others, not even
+        // for the moment between SQLite creating it and the first write
         #[cfg(unix)]
-        if new {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-                LibraryError::Io {
-                    path: path.to_path_buf(),
-                    source: e,
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(LibraryError::Io {
+                        path: path.to_path_buf(),
+                        source: e,
+                    })
                 }
-            })?;
+            }
         }
+        let conn = Connection::open(path)?;
         Self::init(conn)
     }
 

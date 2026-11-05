@@ -1074,7 +1074,12 @@ async fn artist_info_comes_from_open_sources_and_is_cached() {
             "/wiki/Special:FilePath/{file}",
             axum::routing::get(move || {
                 c4();
-                async { ([("content-type", "image/jpeg")], b"\xFF\xD8fake-jpeg".to_vec()) }
+                async {
+                    (
+                        [("content-type", "image/jpeg")],
+                        b"\xFF\xD8\xFFfake-jpeg".to_vec(),
+                    )
+                }
             }),
         );
     tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });

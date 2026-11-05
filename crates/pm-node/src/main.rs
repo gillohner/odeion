@@ -164,9 +164,14 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
     let db_path = cfg.db_path();
-    let lib = pm_library::Library::open(&db_path)?;
-    // Sign-ins, keys and the token live in these: the node's alone
-    let private = file_modes::private_files(&cfg.data_dir, &db_path, config_file.as_deref());
+    // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
+    // (and migrated) and before anything reads them
+    let private = file_modes::private_files(
+        &cfg.data_dir,
+        &db_path,
+        config_file.as_deref(),
+        &session_secret_path(cfg),
+    );
     let modes = file_modes::tighten(&cfg.data_dir, &private);
     for (path, was, now) in modes.changed {
         tracing::info!(path = %path.display(), "made the node's own: {was:o} to {now:o}");
@@ -178,6 +183,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             path.display()
         );
     }
+    let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
     pm_api::tidal_unofficial::set_config_client(
         &cfg.tidal.unofficial_client_id,
