@@ -1,4 +1,4 @@
-# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Squeezebox, Android phones
+# Device test prompt: Chromecast, Google TV, smart TVs, Sonos, AirPlay, Snapcast, Squeezebox, Android phones, USB DACs on Android
 
 The multiroom outputs (infra brief §3) were built against mocks and open-source receivers on a machine
 with no speakers or TVs. Paste the section for each device you have into Claude Code on a laptop on
@@ -161,6 +161,40 @@ nearly every phone. In a group it is "loosely synced": Android adds latency the 
 6. Battery: note the battery used over 30 minutes of playback with the screen off.
 7. If anything fails, attach `adb logcat -s pubky-music` (USB debugging on) and the phone's model
    and Android version.
+```
+
+## USB DAC (FiiO KA17) on Android
+
+Checked without the DAC: the description of a KA17 is unit-tested from what Android lists for it and
+from its recorded USB descriptors (crates/pm-out-local/src/usb_dac.rs, crates/pm-usb-audio); the node
+learning it when the app registers again, and the page showing it, are tested on a fake phone
+(crates/pm-out-net/tests/device.rs, tools/ui-usb-dac.js). Not checked: a real DAC on a real phone.
+
+What it is for now: **detection only.** The app shows the DAC by name with what it takes, and still
+plays through Android's mixer ("shared"), which converts to 48 kHz on nearly every phone. Nothing says
+bit-perfect yet. The KA17's own display is the acceptance check for the bit-perfect update that follows:
+there a 44.1/16, a 96/24 and a 192/24 file must show 44.1, 96 and 192 on the KA17. With this version it
+shows 48 for all three, as before.
+
+```
+1. Install the edge APK (pubky-music-android-arm64.apk), connect to your node, pick the phone's zone
+   and play an album. Note your phone's model and Android version.
+2. Plug in the FiiO KA17 (USB-C, no adapter) while it plays. The app never asks for USB access.
+   Within a few seconds:
+   - The zone picker (the speaker button) shows under the phone's zone: "FiiO KA17 · shared".
+   - The sound pill reads "… → FiiO KA17 · shared" (on a phone: open the Sound panel, "Playing on").
+   - Settings › This device › This phone: "FiiO KA17", "Shared. Android plays it through its own
+     mixer…", and "What it takes" (for the KA17 on Android 14: PCM up to 768 kHz · 16, 24, 32 bit ·
+     2 channels; your phone may list less). Below Android 14 a note says bit-perfect needs Android 14.
+   - From a laptop: GET /v1/outputs shows the phone's output with "device": {"name": "FiiO KA17", …,
+     "mode": "shared", "confirmed": false}.
+   Report the exact name and "What it takes" line, and screenshots of all three.
+3. Play a 44.1/16, a 96/24 and a 192/24 file; note the rate the KA17's display shows for each
+   (expected now: 48 kHz each time).
+4. Unplug the KA17: the picker, pill and Settings no longer name it (This phone goes away). Plug it in
+   again: it comes back. Note whether playback moved to the speaker on unplug (it may, for now).
+5. If something is missing, attach `adb logcat -s pubky-music` (USB debugging on): the lines
+   "USB audio devices changed" and "player registered with the node" show what the app saw.
 ```
 
 ## Squeezebox players and squeezelite (Slimproto)

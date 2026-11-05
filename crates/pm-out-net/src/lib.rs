@@ -21,7 +21,8 @@ use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, SampleKind, Volume};
 use pm_stream::{expect_control, write_audio, write_frame, Frame, Key, StreamError};
 use pm_zones::sink::check_block;
-use pm_zones::{AudioSink, BufferLevel, Output, OutputId, OutputInfo, SinkError};
+use pm_zones::{AudioSink, BufferLevel, Output, OutputDevice, OutputId, OutputInfo, SinkError};
+use std::collections::HashMap;
 use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -39,20 +40,46 @@ fn io_err(e: StreamError) -> SinkError {
 
 /// The key of one endpoint, shared by all its outputs: when the app registers again with a new
 /// key (it makes one each start), the zones that already play there use it too.
+///
+/// It also keeps the [`OutputDevice`] each of the endpoint's outputs reported in its last
+/// `Welcome`: a phone's output describes the USB DAC plugged into it, and the app registers again
+/// when that changes. Every [`NetOutput`] of the endpoint, also those zones already hold, reads it
+/// from here. (Names stay as they were: a zone is named once, from its output's name.)
 #[derive(Clone, Default)]
-pub struct KeyCell(Arc<RwLock<Key>>);
+pub struct KeyCell {
+    key: Arc<RwLock<Key>>,
+    devices: Arc<RwLock<HashMap<OutputId, Option<OutputDevice>>>>,
+}
 
 impl KeyCell {
     pub fn new(key: Key) -> Self {
-        Self(Arc::new(RwLock::new(key)))
+        Self {
+            key: Arc::new(RwLock::new(key)),
+            devices: Arc::default(),
+        }
     }
 
     pub fn set(&self, key: Key) {
-        *self.0.write().expect("endpoint key") = key;
+        *self.key.write().expect("endpoint key") = key;
     }
 
     pub fn get(&self) -> Key {
-        self.0.read().expect("endpoint key").clone()
+        self.key.read().expect("endpoint key").clone()
+    }
+
+    /// Remember the devices a `Welcome` reports for the endpoint's outputs.
+    fn report(&self, outputs: &[OutputInfo]) {
+        let mut known = self.devices.write().expect("endpoint devices");
+        for o in outputs {
+            if known.get(&o.id) != Some(&o.device) {
+                tracing::info!(output = %o.id, device = ?o.device.as_ref().map(|d| &d.name), "endpoint output device");
+                known.insert(o.id.clone(), o.device.clone());
+            }
+        }
+    }
+
+    fn device(&self, id: &OutputId) -> Option<Option<OutputDevice>> {
+        self.devices.read().expect("endpoint devices").get(id).cloned()
     }
 }
 
@@ -118,6 +145,7 @@ impl NetOutput {
                 pm_stream::PROTOCOL_VERSION
             )));
         }
+        key.report(&outputs);
         Ok(outputs
             .into_iter()
             .map(|mut remote| {
@@ -152,6 +180,13 @@ impl Output for NetOutput {
         format!("{} · {}", self.endpoint_name, self.remote.name)
     }
 
+    /// What the endpoint last said is behind this output (a phone's USB DAC).
+    fn device(&self) -> Option<OutputDevice> {
+        self.key
+            .device(&self.remote.id)
+            .unwrap_or_else(|| self.remote.device.clone())
+    }
+
     fn caps(&self) -> &OutputCaps {
         &self.remote.caps
     }
@@ -160,7 +195,11 @@ impl Output for NetOutput {
         if !self.remote.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
-        let (mut c, _welcome) = Conn::open(self.addr, &self.key)?;
+        let (mut c, welcome) = Conn::open(self.addr, &self.key)?;
+        // Each session starts with the endpoint's outputs as they are now (a DAC plugged in since)
+        if let Frame::Welcome { outputs, .. } = &welcome {
+            self.key.report(outputs);
+        }
         write_frame(
             &mut c.w,
             &Frame::Open {

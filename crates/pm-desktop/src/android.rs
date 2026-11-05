@@ -499,6 +499,140 @@ fn updater(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -> jni
     })
 }
 
+/// Watch the USB DACs attached to the phone (`UsbAudio`, tools/release/android/UsbAudio.kt): its
+/// callback starts on the UI thread, then a thread of ours, attached to the JVM, waits for each new
+/// report, describes the DAC (`pm_out_local::usb_dac`) for the phone's output and calls `changed`
+/// when that is different. Builds without the class watch nothing.
+pub fn watch_usb_audio(app: &tauri::AppHandle, changed: impl Fn() + Send + 'static) {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window(crate::MAIN) else {
+        return;
+    };
+    let scheduled = window.with_webview(move |wv| {
+        wv.jni_handle().exec(move |env, activity, _webview| {
+            let started = crate::crash::guarded("the USB audio watcher", || start_usb_audio(env, activity))
+                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            let (vm, class) = match started {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("no USB DAC detection ({e})");
+                    return;
+                }
+            };
+            let spawned = std::thread::Builder::new()
+                .name("usb-audio".into())
+                .spawn(move || usb_audio_loop(vm, class, changed));
+            if let Err(e) = spawned {
+                tracing::warn!("no USB DAC detection: {e}");
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!("cannot reach the activity to watch USB DACs: {e}");
+    }
+}
+
+/// `UsbAudio.start(activity)`, and what the waiting thread needs: the JVM and the class.
+fn start_usb_audio(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+) -> jni021::errors::Result<(jni021::JavaVM, jni021::objects::GlobalRef)> {
+    use jni021::objects::{JClass, JValue};
+    let cls = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let full = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.UsbAudio"),
+        None => "UsbAudio".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&full)?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let class = JClass::from(class);
+    env.call_static_method(
+        &class,
+        "start",
+        "(Landroid/app/Activity;)V",
+        &[JValue::Object(activity)],
+    )?;
+    Ok((env.get_java_vm()?, env.new_global_ref(&class)?))
+}
+
+/// Waits for `UsbAudio.next` reports for as long as the app runs.
+fn usb_audio_loop(vm: jni021::JavaVM, class: jni021::objects::GlobalRef, changed: impl Fn()) {
+    use jni021::objects::{JClass, JValue};
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("no USB DAC detection: {e}");
+            return;
+        }
+    };
+    let mut seen: i64 = 0;
+    loop {
+        let answer = env.with_local_frame(8, |env| -> jni021::errors::Result<String> {
+            let class: &JClass = class.as_obj().into();
+            let s = env
+                .call_static_method(
+                    class,
+                    "next",
+                    "(JJ)Ljava/lang/String;",
+                    &[JValue::Long(seen), JValue::Long(30_000)],
+                )?
+                .l()?;
+            Ok(env.get_string(&s.into())?.into())
+        });
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        let answer = match answer {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("USB DAC detection: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        let Some((version, report)) = pm_out_local::usb_dac::parse_poll(&answer) else {
+            continue;
+        };
+        let version = i64::try_from(version).unwrap_or(i64::MAX);
+        if version == seen {
+            continue;
+        }
+        seen = version;
+        let dac = match pm_out_local::usb_dac::parse_report(report) {
+            Ok(r) => pm_out_local::usb_dac::describe(&r),
+            Err(e) => {
+                tracing::warn!("USB DAC detection: {e}");
+                continue;
+            }
+        };
+        tracing::info!(dac = ?dac.as_ref().map(|d| &d.summary), "USB audio devices changed");
+        if pm_out_local::usb_dac::set_current(dac) {
+            changed();
+        }
+    }
+}
+
 /// Tracing output for `adb logcat -s pubky-music` (Android drops stdout).
 pub struct Logcat;
 

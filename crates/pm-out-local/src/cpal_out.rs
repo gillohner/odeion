@@ -9,7 +9,9 @@
 //! On Android the app offers one output: the one Android routes to (the
 //! speaker, wired or Bluetooth headphones, a USB DAC), followed as the user
 //! plugs things in. Android's mixer runs at 48 kHz on nearly every phone, so
-//! the output takes 44.1 and 48 kHz and the node converts anything higher.
+//! the output takes 44.1 and 48 kHz and the node converts anything higher. A
+//! USB DAC Android routes to is described by the app (`usb_dac`) and reported
+//! as the output's device, still in shared mode.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Samples, Volume};
@@ -139,6 +141,15 @@ impl Output for CpalOutput {
 
     fn name(&self) -> String {
         format!("{} ({}, shared mode)", self.device_name, host_label())
+    }
+
+    /// On Android, the USB DAC the app reported (`usb_dac`), played in shared mode. The name and
+    /// id stay the phone's: a zone is named once, from its output's name, and a DAC comes and goes.
+    fn device(&self) -> Option<pm_zones::OutputDevice> {
+        #[cfg(target_os = "android")]
+        return crate::usb_dac::current();
+        #[cfg(not(target_os = "android"))]
+        None
     }
 
     fn caps(&self) -> &OutputCaps {

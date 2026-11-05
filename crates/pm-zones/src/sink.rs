@@ -41,6 +41,102 @@ pub struct OutputInfo {
     /// The device as its maker names it (`Klimax DSM`, `HomePod`), when the protocol tells.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The hardware behind it, when the output knows: a USB DAC on a phone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<OutputDevice>,
+}
+
+/// The hardware an output plays through, as it describes itself: a USB DAC on a phone. What the
+/// output does with it now is in [`OutputInfo::caps`]; this is what the device itself takes, and
+/// how the app drives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OutputDevice {
+    /// "FiiO KA17".
+    pub name: String,
+    #[serde(default)]
+    pub kind: DeviceKind,
+    /// One line for a picker: "FiiO KA17 · PCM up to 768 kHz / 32 bit · DSD · hardware volume".
+    #[serde(default)]
+    pub summary: String,
+    /// PCM rates the device takes, ascending (empty while unknown).
+    #[serde(default)]
+    pub rates: Vec<u32>,
+    /// Integer PCM sample sizes it takes, ascending (16, 24, 32).
+    #[serde(default)]
+    pub bits: Vec<u8>,
+    /// The highest of `rates` (0 while unknown).
+    #[serde(default)]
+    pub max_rate: u32,
+    /// The highest of `bits` (0 while unknown).
+    #[serde(default)]
+    pub max_bits: u8,
+    /// Most channels it takes (0 while unknown).
+    #[serde(default)]
+    pub channels: u8,
+    /// DSD, when the device says how it takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dsd: Option<DsdKind>,
+    /// It has its own volume (a USB feature unit).
+    #[serde(default)]
+    pub hardware_volume: bool,
+    /// How the app drives it now.
+    #[serde(default)]
+    pub mode: DeviceMode,
+    /// The modes this device and phone allow.
+    #[serde(default)]
+    pub modes: Vec<DeviceMode>,
+    /// The system confirmed `mode` for the format playing now (Android read the bit-perfect mixer
+    /// back for that device and format). Never true for [`DeviceMode::Shared`]; a UI says
+    /// "bit-perfect" only when this is true.
+    #[serde(default)]
+    pub confirmed: bool,
+    /// Why it is not bit-perfect, or anything else the listener should know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// USB ids, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb: Option<UsbIds>,
+}
+
+/// What kind of hardware an [`OutputDevice`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceKind {
+    /// A USB DAC (Android's `TYPE_USB_DEVICE`).
+    #[default]
+    UsbDac,
+    /// A USB headset (Android's `TYPE_USB_HEADSET`).
+    UsbHeadset,
+}
+
+/// How an app drives an [`OutputDevice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceMode {
+    /// Through the system mixer, which may resample and mix in other sounds.
+    #[default]
+    Shared,
+    /// The system passes the stream to the device unchanged (Android 14's bit-perfect mixer).
+    BitPerfect,
+    /// The app drives the device itself (its own USB audio driver).
+    Exclusive,
+}
+
+/// How a device takes DSD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DsdKind {
+    /// As raw DSD (UAC2 `TYPE_I_RAW_DATA`).
+    Native,
+    /// Packed in PCM frames (DoP).
+    Dop,
+}
+
+/// A USB device's vendor and product ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsbIds {
+    pub vendor_id: u16,
+    pub product_id: u16,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -249,7 +345,13 @@ pub trait Output: Send + Sync {
             protocol: self.id().protocol().to_string(),
             caps: self.caps().clone(),
             model: self.model(),
+            device: self.device(),
         }
+    }
+
+    /// The hardware behind this output, when it knows (see [`OutputDevice`]).
+    fn device(&self) -> Option<OutputDevice> {
+        None
     }
 
     /// Open the output in exactly `fmt`. Implementations must not convert:

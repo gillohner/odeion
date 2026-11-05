@@ -22,6 +22,9 @@ pub mod alsa;
 #[cfg(feature = "cpal")]
 pub mod cpal_out;
 
+// USB DACs on an Android phone, as the app reports them (built on every host; see its docs)
+pub mod usb_dac;
+
 /// Device names this crate will open. `plughw:` and `default` go through
 /// ALSA's conversion plugins, which silently resample and dither; refusing
 /// them keeps constraint 5 (bit-perfect) enforceable.

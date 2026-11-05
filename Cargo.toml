@@ -26,6 +26,7 @@ members = [
     "crates/pubky-music-specs",
     "crates/pm-appdata",
     "crates/pm-offline",
+    "crates/pm-usb-audio",
 ]
 # The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
 exclude = ["crates/pm-desktop"]
@@ -91,6 +92,7 @@ pubky-app-specs = "0.8.1"
 pubky-social-specs = "=1.0.0-rc.1"
 pubky-music-specs = { path = "crates/pubky-music-specs" }
 pm-appdata = { path = "crates/pm-appdata" }
+pm-usb-audio = { path = "crates/pm-usb-audio" }
 
 [profile.release]
 lto = "thin"

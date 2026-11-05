@@ -180,9 +180,8 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
-        let player = state.player.clone();
         #[cfg(target_os = "android")]
-        if player.is_some() {
+        if state.player.is_some() {
             let node = if info.name.is_empty() {
                 "your node"
             } else {
@@ -190,16 +189,26 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
             };
             android::start_player_service(app, format!("This phone is a zone of {node}"));
         }
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let s = player::register(s, player).await;
-            let state = app.state::<AppState>();
-            if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
-                state.store(Some(s));
-            }
-        });
+        tauri::async_runtime::spawn(register_player(app.clone(), s));
     }
     Ok(())
+}
+
+/// Register the player with the node in `s`, keep its address, and tell the node's page which
+/// output is this app's (`player::output_script`). Again whenever the phone's USB DAC changes, so
+/// the node learns it.
+#[cfg(any(desktop, target_os = "android"))]
+async fn register_player(app: AppHandle, s: Settings) {
+    let player = app.state::<AppState>().player.clone();
+    let s = player::register(s, player).await;
+    let state = app.state::<AppState>();
+    if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
+        state.store(Some(s));
+        let script = player::output_script();
+        if let (false, Some(w)) = (script.is_empty(), app.get_webview_window(MAIN)) {
+            let _ = w.eval(script);
+        }
+    }
 }
 
 /// Whether this device keeps any music (the connect page offers it while the node is away).
@@ -644,6 +653,14 @@ pub fn run() {
                     };
                     if s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str()) {
                         let _ = w.eval(token_sync_script(&s.token));
+                        // Which output is this app's (a phone's USB DAC shows in its Settings)
+                        #[cfg(any(desktop, target_os = "android"))]
+                        {
+                            let script = player::output_script();
+                            if !script.is_empty() {
+                                let _ = w.eval(script);
+                            }
+                        }
                     }
                 });
             #[cfg(desktop)]
@@ -671,6 +688,20 @@ pub fn run() {
             update::spawn(app.handle());
             #[cfg(target_os = "android")]
             android::init_tls(&window);
+            // A USB DAC plugged in or out: the player registers again, so the node and its page learn it
+            #[cfg(target_os = "android")]
+            {
+                let handle = app.handle().clone();
+                android::watch_usb_audio(app.handle(), move || {
+                    let app = handle.clone();
+                    let Some(s) = app.state::<AppState>().current() else {
+                        return;
+                    };
+                    if s.via.is_empty() {
+                        tauri::async_runtime::spawn(register_player(app, s));
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!());

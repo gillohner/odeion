@@ -27,8 +27,8 @@ pub mod zone;
 pub use queue::{FetchLimit, Insert, Queue, QueueItem, Repeat};
 pub use registry::OutputRegistry;
 pub use sink::{
-    AudioSink, BufferLevel, ClockSource, Describe, MemberStatus, Output, OutputId, OutputInfo, SinkError,
-    SyncClass, TrackMeta,
+    AudioSink, BufferLevel, ClockSource, Describe, DeviceKind, DeviceMode, DsdKind, MemberStatus, Output,
+    OutputDevice, OutputId, OutputInfo, SinkError, SyncClass, TrackMeta, UsbIds,
 };
 pub use source::{
     FrameSource, Processor, ReplayGain, SourceError, SourceFactory, StreamInfo, WithReplayGain,

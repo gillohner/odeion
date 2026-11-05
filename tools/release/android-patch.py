@@ -33,6 +33,9 @@ silently cannot connect.
    REQUEST_INSTALL_PACKAGES. `--without-updater` takes both out again of a patched project, for
    the .aab: an app from Google Play may update only through Play. Without the class the app
    never checks for updates.
+11. USB DACs (tools/release/android/UsbAudio.kt, src/android.rs): an AudioDeviceCallback reports the
+   USB audio outputs (name, rates, encodings) to the player, which tells the node. It never asks for
+   USB permission, so no manifest change; a ProGuard keep rule for its JNI entry points.
 
 Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """
@@ -110,12 +113,15 @@ if rule not in existing:
 player = "-keep class **.PlayerService { public static void start(...); public static void stop(...); }"
 crash = "-keep class **.CrashReport { public static *; }\n-keep class **.PubkyMusicApp { *; }"
 updater = "-keep class **.AppUpdate { public static *; }"
+usb_audio = "-keep class **.UsbAudio { public static *; }"
 if player not in existing:
     existing = existing.rstrip("\n") + "\n\n# The player service's start/stop (called over JNI from src/android.rs)\n" + player + "\n"
 if crash.split("\n")[0] not in existing:
     existing = existing.rstrip("\n") + "\n\n# The crash report (Application class; share() is called over JNI)\n" + crash + "\n"
 if updater not in existing:
     existing = existing.rstrip("\n") + "\n\n# App updates (called over JNI from src/android.rs)\n" + updater + "\n"
+if usb_audio not in existing:
+    existing = existing.rstrip("\n") + "\n\n# USB DACs: start() and next() are called over JNI from src/android.rs\n" + usb_audio + "\n"
 proguard.write_text(existing)
 
 # 4. multicast permission
@@ -280,7 +286,14 @@ if INSTALL_PERM not in mtext:
         die(f"expected one `{anchor}` in {manifest}")
     manifest.write_text(mtext.replace(anchor, anchor + "\n    " + INSTALL_PERM))
 
+# 11. USB DACs: the watcher next to MainActivity
+usb_kt = (Path(__file__).parent / "android" / "UsbAudio.kt").read_text()
+usb_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", usb_kt, count=1, flags=re.M)
+if n != 1:
+    die("UsbAudio.kt has no package line")
+(activities[0].parent / "UsbAudio.kt").write_text(usb_kt)
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs"
 )

@@ -17,5 +17,6 @@ tracing = { workspace = true }
 pm-audio = { workspace = true }
 pm-endpoint = { workspace = true }
 hound = { workspace = true }
+serde_json = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }

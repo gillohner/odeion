@@ -17,6 +17,9 @@ cpal = ["dep:cpal"]
 [dependencies]
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
+pm-usb-audio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

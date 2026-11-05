@@ -2144,8 +2144,25 @@
   // the protocol of its output id, and the device's maker and model when the node knows them
   // (`model` in GET /v1/outputs); the id itself stays as the tooltip.
   const PROTO_WORDS = { alsa: 'ALSA DAC', cpal: 'System audio', null: 'Null output, for developers', pull: 'Pull stream', upnp: 'UPnP', airplay: 'AirPlay', cast: 'Chromecast', slim: 'Squeezelite', snapcast: 'Snapcast', mpd: 'MPD', net: 'The app', group: 'Group', rec: 'Recording', wav: 'WAV file', clock: 'Clock', bluos: 'BluOS', heos: 'HEOS', browser: 'This browser' };
+  // A USB DAC on the app's own output (a phone): the node reports it as that output's `device`
+  // (GET /v1/outputs). Android's mixer still plays it ("shared"); a mode other than shared shows
+  // only when the node says the phone confirmed it for what plays now.
+  const DAC_MODE = { bit_perfect: 'Bit-perfect', exclusive: 'Exclusive USB', shared: 'Shared' };
+  const DAC_HELP = { shared: 'Android plays it through its own mixer, which mixes in other sounds and usually converts the music to 48 kHz.' };
+  const deviceOf = (z) => { const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null; };
+  const dacShort = (d) => (d.mode === 'shared' || !DAC_MODE[d.mode] ? 'shared' : `${DAC_MODE[d.mode].toLowerCase()}${d.confirmed ? '' : ', not confirmed'}`);
+  const dacWords = (d) => `${d.name} · ${dacShort(d)}`;
+  const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? `DSD (${d.dsd === 'native' ? 'native' : 'DoP'})` : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
+  // This app's own output (the app tells the page after it registers its player), with its device
+  const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
+  const hereDevice = () => (window.pmDesktop && window.pmDesktop.platform === 'android' ? 'This phone' : 'This computer');
+  // A DAC plugged in or out: the app registers its player again and says so
+  // (also once after each page load); Settings draws again when it shows another device than this app's
+  const appDevice = () => JSON.stringify((appOutput() || {}).device || null);
+  window.addEventListener('pmdesktop:output', () => { if (isOwner()) api('GET', '/outputs').then((o) => { state.outputs = o; renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); });
   const deviceWords = (z) => {
     if (z.id === BROWSER) return 'Streams the files to this browser';
+    const dv = deviceOf(z); if (dv) return dacWords(dv);
     const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
     return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
   };
@@ -2368,7 +2385,7 @@
     renderZonePop();
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
     // The devices' models: the owner's output list, fetched once
-    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
+    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); renderBar(); }).catch(() => {});
   };
   // The tabs' Library: the library page last open
   const libHome = () => state.lastLib || 'library';
@@ -2733,7 +2750,8 @@
     q.className = 'quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : '');
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
     $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
-    const words = np.signal_path || np.format ? pathSummary(np) : 'Played by this browser';
+    const dv = deviceOf(z);
+    const words = (np.signal_path || np.format ? pathSummary(np) : 'Played by this browser') + (dv ? ` → ${dacWords(dv)}` : '');
     $('.qtext', q).textContent = words;
     $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
@@ -3245,11 +3263,13 @@
   // Settings in four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md, docs/ux/responsive.md):
   // You (your homeserver), This device, This node (admin), This homeserver (admin, with a bundled one)
   const SETTINGS_GROUPS = { you: 'Saved on your homeserver: follows you to every node and device', device: 'Only on this device', node: 'For everyone on this node', homeserver: 'The homeserver this node runs' };
-  const settingsTabs = ({ saved = {}, bundled = false, tunnel = false }) => [
+  const settingsTabs = ({ saved = {}, bundled = false, tunnel = false, dac = null }) => [
     { group: 'you', title: 'You', saved: saved.you || SETTINGS_GROUPS.you },
     ['accounts', 'My accounts', 'artist'], ['home', 'Home', 'home'], ['quality', 'Playback quality', 'zone'], ['playfrom', 'Play from', 'play'],
     { group: 'device', title: 'This device', saved: saved.device || SETTINGS_GROUPS.device },
     ['appearance', 'Display', 'sun'],
+    // The app's own output with a USB DAC on it (`dac`: "This phone"), read-only for now
+    ...(dac ? [['dac', dac, 'zone']] : []),
     { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
     ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['playback', 'Zones and outputs', 'zone'],
     ['nodehome', 'Home for everyone', 'home'],
@@ -3257,7 +3277,7 @@
     ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['about', 'About and updates', 'info'],
     ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
   ];
-  const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true }).filter(Array.isArray); // every tab, for routes
+  const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true, dac: 'This phone' }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['library', 'home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
   const VIEW_LABELS = { library: 'Your library', downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
@@ -6361,7 +6381,8 @@
           const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available) }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          state.outputs = outs; const myOut = appOutput(); const dv = myOut && myOut.device; state.dacDrawn = appDevice();
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available), dac: dv ? hereDevice() : null }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -6439,7 +6460,11 @@
             + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
-          main.innerHTML = tabs.page(`${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
+          // This phone: the USB DAC this app plays through, what it takes and how it is played (no choices yet)
+          const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(`${dacShort(dv).charAt(0).toUpperCase()}${dacShort(dv).slice(1)}.${dacShort(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
+            + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
+            + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''));
+          main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
