@@ -860,6 +860,11 @@ async fn a_device_signs_in_once_and_keeps_it_over_browser_log_outs() {
     const API: &str = "the-api-token";
     let dir = tempfile::tempdir().unwrap();
     let s = node_with(dir.path(), Some(API));
+    // A token the node made itself (`<data_dir>/api-token`): only that one can be replaced with
+    // Make a new token; one set in the config answers 409 ("change it there")
+    let token_file = dir.path().join("api-token");
+    std::fs::write(&token_file, API).unwrap();
+    s.set_token_file(token_file);
     s.set_bundled_homeserver(ep);
     let app = router(s.clone());
     let owner = owner_with_signer(&app, API).await;
@@ -897,8 +902,8 @@ async fn a_device_signs_in_once_and_keeps_it_over_browser_log_outs() {
     let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
     assert_eq!(st, StatusCode::OK);
     // Make a new token signs every device out
-    let (st, _) = call_auth(&app, "POST", "/v1/node/token", API, None).await;
-    assert_eq!(st, StatusCode::OK);
+    let (st, made) = call_auth(&app, "POST", "/v1/node/token", API, None).await;
+    assert_eq!(st, StatusCode::OK, "{made}");
     let (st, _) = call_auth(&app, "GET", "/v1/me", &device, None).await;
     assert_eq!(st, StatusCode::UNAUTHORIZED, "the app signs in again from here");
 }
