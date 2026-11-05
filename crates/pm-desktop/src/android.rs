@@ -661,7 +661,7 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
             Box<dyn pm_out_local::bit_perfect::Track>,
             pm_out_local::bit_perfect::OpenReport,
         ),
-        String,
+        pm_out_local::bit_perfect::OpenError,
     > {
         use jni021::objects::{JClass, JValue};
         let answer = with_jvm(&self.vm, |env| {
@@ -680,7 +680,8 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
                 )?
                 .l()?;
             Ok(String::from(env.get_string(&s.into())?))
-        })?;
+        })
+        .map_err(pm_out_local::bit_perfect::OpenError::Refused)?;
         let (handle, buffer_frames, report) = pm_out_local::bit_perfect::parse_open_answer(&answer)?;
         let track = JniTrack {
             vm: self.vm.clone(),

@@ -17,18 +17,22 @@ pub enum StreamFault {
     DeviceGone,
     /// The stream must be rebuilt.
     Invalidated,
-    /// Anything else (a refused real-time priority, a busy device): it goes on.
+    /// A refused real-time priority: it goes on.
+    RealtimeDenied,
+    /// Anything else the stream's error callback reports (a busy device, no memory, unknown): the
+    /// stream stopped taking audio.
     Other,
 }
 
 /// Whether a fault ends the stream for the sink: a disconnect or an invalidated stream always;
-/// a reroute when a USB DAC was attached at open (Android moved it, likely to the phone's
-/// speaker); an underrun or anything else never.
+/// a reroute or any other fault when a USB DAC was attached at open (Android moved it, likely
+/// to the phone's speaker; or the stream stopped and a wait for room would never end); an
+/// underrun or a refused real-time priority never.
 pub fn ends_stream(fault: StreamFault, dac_at_open: bool) -> bool {
     match fault {
         StreamFault::DeviceGone | StreamFault::Invalidated => true,
-        StreamFault::Rerouted => dac_at_open,
-        StreamFault::Xrun | StreamFault::Other => false,
+        StreamFault::Rerouted | StreamFault::Other => dac_at_open,
+        StreamFault::Xrun | StreamFault::RealtimeDenied => false,
     }
 }
 
@@ -58,6 +62,11 @@ pub fn wait_drained(
     gone: impl Fn() -> Option<SinkError>,
     within: Duration,
 ) -> Result<(), SinkError> {
+    // Asked before and after, also with nothing queued: an unplug at a song boundary must not be
+    // lost because the queue happened to be empty
+    if let Some(e) = gone() {
+        return Err(e);
+    }
     let deadline = Instant::now() + within;
     while !empty() && Instant::now() < deadline {
         if let Some(e) = gone() {
@@ -65,7 +74,10 @@ pub fn wait_drained(
         }
         std::thread::sleep(STEP);
     }
-    Ok(())
+    match gone() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -119,6 +131,10 @@ mod tests {
             .expect("the drain ends once the DAC is gone");
         assert!(matches!(r, Err(SinkError::Gone(..))), "{r:?}");
         assert!(wait_drained(|| true, || None, Duration::from_secs(1)).is_ok());
+        // Codex H3 (round 3): nothing queued, the DAC gone: still Gone
+        let gone = Arc::new(AtomicBool::new(true));
+        let r = wait_drained(|| true, gone_after(&gone), Duration::from_secs(1));
+        assert!(matches!(r, Err(SinkError::Gone(..))), "{r:?}");
         // An empty that never comes: the deadline, not forever
         assert!(wait_drained(|| false, || None, Duration::from_millis(20)).is_ok());
     }
@@ -128,7 +144,9 @@ mod tests {
     fn only_a_real_disconnect_ends_the_stream() {
         for dac in [false, true] {
             assert!(!ends_stream(StreamFault::Xrun, dac), "an underrun never ends it");
-            assert!(!ends_stream(StreamFault::Other, dac));
+            assert!(!ends_stream(StreamFault::RealtimeDenied, dac));
+            // Any other fault with a DAC: the stream stopped, so the sink stops (Claude L2)
+            assert_eq!(ends_stream(StreamFault::Other, dac), dac);
             assert!(ends_stream(StreamFault::DeviceGone, dac));
             assert!(ends_stream(StreamFault::Invalidated, dac));
         }

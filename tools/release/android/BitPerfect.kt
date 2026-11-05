@@ -159,6 +159,20 @@ class BitPerfect private constructor() {
 
         private fun refused(why: String) = JSONObject().put("ok", false).put("why", why).toString()
 
+        /// The DAC is not there (any more): typed, so the Rust side pauses the zone instead of
+        /// opening Android's default route.
+        private fun gone(why: String) = JSONObject().put("ok", false).put("why", why).put("gone", true).toString()
+
+        /// The one gate for "nothing reaches another device": a track may play only while it is
+        /// not lost, the DAC it was opened for is still attached, and Android routes it there.
+        /// write() and play() ask here; a track that fails it is lost (paused, flushed) for good.
+        private fun reachable(p: Playing): Boolean {
+            if (p.gone) return false
+            if (deviceFor(p.dacId) == null) return false
+            val routed = p.track.routedDevice
+            return routed == null || routed.id == p.dacId
+        }
+
         private fun mixerFor(format: AudioFormat) = AudioMixerAttributes.Builder(format)
             .setMixerBehavior(AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT)
             .build()
@@ -170,7 +184,7 @@ class BitPerfect private constructor() {
         fun open(dacId: Int, encoding: Int, rate: Int, channelMask: Int): String {
             if (Build.VERSION.SDK_INT < 34) return refused("bit-perfect needs Android 14")
             val am = audio() ?: return refused("no audio service")
-            val dac = deviceFor(dacId) ?: return refused("the DAC is not attached")
+            val dac = deviceFor(dacId) ?: return gone("the DAC is not attached")
             worker.removeCallbacks(clearLater)
             val format = AudioFormat.Builder()
                 .setEncoding(encoding)
@@ -273,9 +287,7 @@ class BitPerfect private constructor() {
         @JvmStatic
         fun write(handle: Long, buf: ByteBuffer, size: Int): Int {
             val p = get(handle) ?: return AudioTrack.ERROR_INVALID_OPERATION
-            if (p.gone) return GONE
-            val routed = p.track.routedDevice
-            if (routed != null && routed.id != p.dacId) {
+            if (!reachable(p)) {
                 lose(p)
                 return GONE
             }
@@ -312,7 +324,11 @@ class BitPerfect private constructor() {
         fun play(handle: Long) {
             synchronized(tracks) {
                 val p = tracks[handle] ?: return
-                if (p.gone) return
+                // Never started for a DAC that is not there or not routed (the next write says GONE)
+                if (!reachable(p)) {
+                    lose(p)
+                    return
+                }
                 // Cleared during a long pause: set again first, then confirmed only as at open: the
                 // mixer read back in exactly this format, and the track on the DAC
                 if (p.mixerCleared && Build.VERSION.SDK_INT >= 34) {

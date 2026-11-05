@@ -382,6 +382,13 @@ struct Phone {
     settings_file: Option<std::path::PathBuf>,
     /// The DAC the listener's agreement to full level (`full_level_ok`) was given for.
     consent_dac: Option<String>,
+    /// Sinks open for a DAC now, and when the last one closed: an unplug then is one no sink
+    /// may have seen yet.
+    sinks_open: u32,
+    last_close: Option<std::time::Instant>,
+    /// A DAC went while a sink was open for it or moments after one closed, and nothing has
+    /// reported it yet: the next open pauses instead of opening the default route.
+    gone_unseen: Option<String>,
 }
 
 /// [`gone_count`] without the lock, for the audio callback.
@@ -424,6 +431,94 @@ pub fn gone_reason() -> String {
             p.gone_why.clone()
         }
     })
+}
+
+/// An unplug this soon after the last sink for the DAC closed counts as one the zone hasn't seen
+/// (it lands between one song's sink closing and the next one opening).
+const UNSEEN_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The DAC a sink (or an open) is for, as it was then: rule (b)'s reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedFor {
+    pub dac_id: i32,
+    pub name: String,
+    /// The count of DACs gone then.
+    pub gone_at: u64,
+}
+
+/// The phone's DAC now, as something to open for (`None`: no DAC).
+pub fn opened_for_now() -> Option<OpenedFor> {
+    with_phone(|p| {
+        p.dac.as_ref().map(|d| OpenedFor {
+            dac_id: d.id,
+            name: d.device.name.clone(),
+            gone_at: p.gone,
+        })
+    })
+}
+
+/// **The one gate for rule (b), "nothing reaches another device":** audio opened for `f` may
+/// reach a device only while that DAC is still the one Android plays media to (attached, the
+/// routed one: the report names no other) and no DAC went since. Opened without a DAC (`None`):
+/// always. Every write, drain, flush, resume and open of the phone's sinks asks here (the audio
+/// callback asks [`may_reach_now`]); `Err` is why, for [`pm_zones::SinkError::Gone`].
+pub fn may_reach(f: Option<&OpenedFor>) -> Result<(), String> {
+    let Some(f) = f else { return Ok(()) };
+    with_phone(|p| {
+        if p.gone != f.gone_at {
+            return Err(if p.gone_why.is_empty() {
+                format!("{} was unplugged", f.name)
+            } else {
+                p.gone_why.clone()
+            });
+        }
+        match p.dac.as_ref() {
+            Some(d) if d.id == f.dac_id => Ok(()),
+            Some(_) | None => Err(format!("{} is not where Android plays now", f.name)),
+        }
+    })
+}
+
+/// [`may_reach`] without a lock, for the audio callback: no DAC went since `gone_at` (a DAC
+/// replaced or no longer routed counts as gone too).
+pub fn may_reach_now(gone_at: u64) -> bool {
+    GONE.load(std::sync::atomic::Ordering::SeqCst) == gone_at
+}
+
+/// An unplug no sink has reported yet (see [`DacUse`]): taken once, by the next open, which
+/// pauses the zone with it instead of opening the default route.
+pub fn take_gone_unseen() -> Option<String> {
+    with_phone(|p| p.gone_unseen.take())
+}
+
+/// A sink or an open reported the DAC gone: the zone knows (the next open is the listener's).
+pub fn gone_seen() {
+    with_phone(|p| p.gone_unseen = None);
+}
+
+/// Held by a sink opened for a DAC while it lives: an unplug while one is open, or moments after
+/// it closed, is one the zone must still hear about ([`take_gone_unseen`]).
+#[derive(Debug)]
+pub struct DacUse(bool);
+
+impl DacUse {
+    pub fn new(f: Option<&OpenedFor>) -> Self {
+        if f.is_some() {
+            with_phone(|p| p.sinks_open += 1);
+        }
+        DacUse(f.is_some())
+    }
+}
+
+impl Drop for DacUse {
+    fn drop(&mut self) {
+        if self.0 {
+            with_phone(|p| {
+                p.sinks_open = p.sinks_open.saturating_sub(1);
+                p.last_close = Some(std::time::Instant::now());
+            });
+        }
+    }
 }
 
 /// What an open of the phone's output got, on which DAC.
@@ -595,13 +690,18 @@ fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
             GONE.store(p.gone, std::sync::atomic::Ordering::SeqCst);
             let name = p.dac.as_ref().map(|d| d.device.name.clone()).unwrap_or_default();
             p.gone_why = why.unwrap_or_else(|| format!("{name} was unplugged"));
+            let armed = p.sinks_open > 0 || p.last_close.is_some_and(|t| t.elapsed() < UNSEEN_WINDOW);
+            if armed {
+                p.gone_unseen = Some(p.gone_why.clone());
+            }
         }
         if other {
             GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             p.last = None;
-            // The next DAC's reason, when it goes, is its own
+            // The next DAC's reason, when it goes, is its own; an earlier unplug is moot now
             if dac.is_some() {
                 p.gone_why.clear();
+                p.gone_unseen = None;
             }
         }
         p.dac = dac;

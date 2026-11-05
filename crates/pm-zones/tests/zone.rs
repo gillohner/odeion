@@ -199,6 +199,12 @@ struct Recorder {
     drain_gone: std::sync::atomic::AtomicBool,
     /// The output's settings changed: sinks open before this ask to be reopened.
     reopen: std::sync::atomic::AtomicBool,
+    /// Opens from this one on find the device gone (unplugged while the output opens).
+    open_gone_from: Mutex<Option<u64>>,
+    /// The next write must go to a fresh sink (a phone's DAC that would go back to full level).
+    reopen_now: std::sync::atomic::AtomicBool,
+    /// The next resume finds the device gone (unplugged during the pause).
+    resume_gone: std::sync::atomic::AtomicBool,
 }
 
 struct RecOutput {
@@ -218,7 +224,23 @@ impl Output for RecOutput {
         &self.caps
     }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        *self.rec.opens.lock().unwrap() += 1;
+        let n = {
+            let mut o = self.rec.opens.lock().unwrap();
+            *o += 1;
+            *o
+        };
+        if self
+            .rec
+            .open_gone_from
+            .lock()
+            .unwrap()
+            .is_some_and(|from| n >= from)
+        {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 is not where Android plays now".into(),
+            ));
+        }
         Ok(Box::new(RecSink {
             fmt,
             rec: self.rec.clone(),
@@ -285,6 +307,9 @@ impl AudioSink for RecSink {
     fn reopen_at_track(&self) -> bool {
         self.rec.reopen.load(Ordering::SeqCst)
     }
+    fn reopen_now(&self) -> bool {
+        self.rec.reopen_now.swap(false, Ordering::SeqCst)
+    }
     fn pause(&mut self) -> Result<bool, SinkError> {
         if !self.rec.device_pause.load(Ordering::SeqCst) {
             return self.flush().map(|()| false);
@@ -294,6 +319,12 @@ impl AudioSink for RecSink {
     }
     fn resume(&mut self) -> Result<(), SinkError> {
         *self.rec.resumes.lock().unwrap() += 1;
+        if self.rec.resume_gone.swap(false, Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
         if self.rec.fail_resume.swap(false, Ordering::SeqCst) {
             return Err(SinkError::Device("listener went away during the pause".into()));
         }
@@ -1146,6 +1177,100 @@ async fn a_device_gone_at_a_song_boundary_pauses_the_next_song() {
     assert_eq!(
         *r.rec.samples.lock().unwrap(),
         want,
+        "nothing lost, nothing twice"
+    );
+    drop(drain_events(&mut r.events));
+}
+
+/// Codex M4 (round 3): the device is not there when the next song's sink opens (the route went
+/// between the drain and the open): the same pause as a drain that finds it gone, never a stopped
+/// zone, and nothing opens elsewhere.
+#[tokio::test]
+async fn a_device_gone_while_the_next_song_opens_pauses_not_stops() {
+    let mut r = rig(&[("a", RATE, 200), ("b", 2 * RATE, 300)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    *r.rec.open_gone_from.lock().unwrap() = Some(2);
+    r.zone.play();
+    r.gate.allow(3);
+    let mut w = r.zone.watch();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        w.wait_for(|s| s.transport == Transport::Paused),
+    )
+    .await
+    .expect("the zone pauses, it does not stop")
+    .unwrap();
+    let st = r.zone.state();
+    assert_eq!(
+        st.error.as_deref(),
+        Some("FiiO KA17 is not where Android plays now: paused")
+    );
+    assert_eq!(st.now_playing.as_ref().unwrap().item.uri, "b");
+    // Back: Play opens b there
+    *r.rec.open_gone_from.lock().unwrap() = None;
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    r.gate.allow(100);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    let mut want = frames(0, 200);
+    want.extend(frames(0, 300));
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        want,
+        "nothing lost, nothing twice"
+    );
+    drop(drain_events(&mut r.events));
+}
+
+/// Unplugged during a pause the device held: Play pauses there with the reason; it doesn't open
+/// the output again (that would be the phone's speaker).
+#[tokio::test]
+async fn a_device_gone_during_a_pause_stays_paused_on_play() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    r.rec.device_pause.store(true, Ordering::SeqCst);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.zone.pause();
+    r.gate.allow(1);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    r.rec.resume_gone.store(true, Ordering::SeqCst);
+    r.zone.play();
+    wait_for(|| r.zone.state().error.is_some()).await;
+    let st = r.zone.state();
+    assert_eq!(st.transport, Transport::Paused);
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "nothing opened again");
+    drop(drain_events(&mut r.events));
+}
+
+/// A sink that may not go on as it is (a phone's DAC paused in bit-perfect whose volume went
+/// down since): the next write goes to a fresh sink, from where it was, nothing lost.
+#[tokio::test]
+async fn a_sink_that_may_not_go_on_is_replaced_before_the_write() {
+    let mut r = rig(&[("a", RATE, 500)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 200).await;
+    r.gate.blocked().await;
+    r.rec.reopen_now.store(true, Ordering::SeqCst);
+    r.gate.allow(100);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        *r.rec.opens.lock().unwrap(),
+        2,
+        "a fresh sink before the next write"
+    );
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        frames(0, 500),
         "nothing lost, nothing twice"
     );
     drop(drain_events(&mut r.events));

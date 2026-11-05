@@ -475,7 +475,7 @@ impl Engine {
             }
         }
         // A seek while paused closed the paused device's sink: a fresh one starts here
-        if self.sink.is_none() && !self.ensure_sink(fmt, false) {
+        if self.sink.is_none() && !self.open_or_pause(fmt) {
             return;
         }
         let Some(c) = self.current.as_mut() else {
@@ -507,6 +507,11 @@ impl Engine {
         let Some(Err(e)) = self.sink.as_mut().map(|s| s.resume()) else {
             return true;
         };
+        // Its device went during the pause: paused there, nothing opens elsewhere
+        if let Some(why) = e.gone_reason() {
+            self.device_gone(why);
+            return false;
+        }
         tracing::info!(zone = %self.id, "resume: opening the output again ({e})");
         let unheard = self
             .sink
@@ -519,7 +524,7 @@ impl Engine {
         if let Some(mut s) = self.sink.take() {
             let _ = s.flush();
         }
-        self.ensure_sink(fmt, false)
+        self.open_or_pause(fmt)
     }
 
     /// Before writing `block`: a sink whose fixed-size stream can't take it (its track ran longer
@@ -531,14 +536,17 @@ impl Engine {
             .sink
             .as_ref()
             .is_some_and(|s| s.room_frames().is_some_and(|r| r < block.frames() as u64));
-        !full || self.renew_full_sink(block.format)
+        // A sink that may not carry on as it is (a phone's DAC that would go back to full level
+        // without consent): a fresh one, planned as things are now
+        let reopen = self.sink.as_ref().is_some_and(|s| s.reopen_now());
+        !(full || reopen) || self.renew_full_sink(block.format)
     }
 
     /// The sink's fixed-size stream is full: play it out and go on on a fresh one from here. The
     /// current track goes on from what was written (the source is not rewound), not from what
     /// a device still holds. False when that could not open (the zone stopped).
     fn renew_full_sink(&mut self, fmt: AudioFormat) -> bool {
-        tracing::info!(zone = %self.id, "the output's stream is full; going on on a fresh one");
+        tracing::info!(zone = %self.id, "the output's sink can't go on as it is; going on on a fresh one");
         let written = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
         let at = self
             .current
@@ -546,10 +554,14 @@ impl Engine {
             .map(|c| c.base_ms + frames_to_ms(c.proc.output_format(), written.saturating_sub(c.start_frame)));
         if let Some(mut s) = self.sink.take() {
             if let Err(e) = s.drain() {
+                if let Some(why) = e.gone_reason() {
+                    self.device_gone(why);
+                    return false;
+                }
                 tracing::warn!(zone = %self.id, "closing a full sink: {e}");
             }
         }
-        if !self.ensure_sink(fmt, false) {
+        if !self.open_or_pause(fmt) {
             return false;
         }
         let written = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
@@ -586,6 +598,9 @@ impl Engine {
         };
         if let Some(s) = self.sink.as_mut() {
             if let Err(e) = s.flush() {
+                if let Some(why) = e.gone_reason() {
+                    return self.device_gone(why);
+                }
                 self.fail(format!("flush: {e}"));
                 return;
             }
@@ -681,11 +696,28 @@ impl Engine {
                 self.sink = Some(s);
                 true
             }
+            // Its device is gone (or not where the system plays): the same pause as a drain that
+            // finds it gone, never a stopped zone
+            Err(e) if e.gone_reason().is_some() => {
+                self.pending_gone = e.gone_reason();
+                false
+            }
             Err(e) => {
                 self.fail(format!("open {} in {fmt}: {e}", self.output.id()));
                 false
             }
         }
+    }
+
+    /// [`Self::ensure_sink`] where a track is current: a device gone pauses it there.
+    fn open_or_pause(&mut self, fmt: AudioFormat) -> bool {
+        if self.ensure_sink(fmt, false) {
+            return true;
+        }
+        if let Some(why) = self.pending_gone.take() {
+            self.device_gone(why);
+        }
+        false
     }
 
     /// Switch to `item` as the current track. Returns false if the sink

@@ -403,6 +403,14 @@ pub trait AudioSink: Send {
         false
     }
 
+    /// The sink may not carry on as it is with the next write: a phone's DAC paused in
+    /// bit-perfect mode whose listener turned Android's volume down since (writing would put it
+    /// back at full level without consent). Whoever writes opens the output again in the same
+    /// format first (planned as it is now: shared) and writes there.
+    fn reopen_now(&self) -> bool {
+        false
+    }
+
     /// How many more frames the sink's stream can carry, when it has a fixed size (a renderer's
     /// stream offered as a file of fixed length); `None` when there is no limit. The zone starts
     /// a track that doesn't fit on a fresh sink instead of joining it to this one.
