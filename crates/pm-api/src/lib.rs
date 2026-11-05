@@ -20226,7 +20226,7 @@ exec sleep 300
         // The zone state on /v1/events says so
         let mut seen = false;
         while let Ok(Ok(ev)) = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await {
-            if let ApiEvent::Zone { state } = ev {
+            if let ApiEvent::Zone { state } = ev.event {
                 if state.id == ZoneId::new(&zid) && state.shuffle {
                     assert_eq!(serde_json::to_value(&state).unwrap()["shuffle"], true);
                     seen = true;
