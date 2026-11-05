@@ -98,6 +98,22 @@ fn token_sync_script(token: &str) -> String {
     )
 }
 
+/// Whether reaching the node failed because it wants a new sign-in from this device (it refused
+/// the saved one, or there is none): trying again won't help, signing in again does.
+fn needs_new_sign_in(error: &str) -> bool {
+    error == node::REFUSED || error == node::NEEDS_SIGN_IN
+}
+
+/// The app's connect page (`ui/index.html`), where the window starts.
+fn connect_page() -> url::Url {
+    let page = if cfg!(any(windows, target_os = "android")) {
+        "http://tauri.localhost/index.html"
+    } else {
+        "tauri://localhost/index.html"
+    };
+    url::Url::parse(page).expect("a fixed URL")
+}
+
 /// The app's own pages: `tauri://localhost` on macOS and Linux,
 /// `http(s)://tauri.localhost` on Windows and Android.
 fn is_app_page(u: &url::Url) -> bool {
@@ -231,11 +247,26 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let state = app.state::<AppState>();
                 let Some(s) = state.current() else { break };
-                if let Ok((s, info)) = reach(&app, &state, s).await {
-                    if let Err(e) = connected(&app, &state, s, &info) {
-                        tracing::warn!("back from offline: {e}");
+                match reach(&app, &state, s).await {
+                    Ok((s, info)) => {
+                        if let Err(e) = connected(&app, &state, s, &info) {
+                            tracing::warn!("back from offline: {e}");
+                        }
+                        break;
                     }
-                    break;
+                    // The node answers but no longer takes this device's sign-in (a new token, the
+                    // one-time change after the update): trying again never helps. Back to the
+                    // connect page, which reconnects and signs in again (`open_saved`)
+                    Err(e) if needs_new_sign_in(&e) => {
+                        tracing::info!("back from offline: the node asks for a new sign-in");
+                        if let Some(w) = app.get_webview_window(MAIN) {
+                            if let Err(e) = w.navigate(connect_page()) {
+                                tracing::warn!("back from offline: {e}");
+                            }
+                        }
+                        break;
+                    }
+                    Err(_) => {}
                 }
             }
             RETURNING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -289,7 +320,7 @@ async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String
             Ok(info.name)
         }
         // The node refused this device's sign-in, or now asks for one it never had: a new one
-        Err(e) if e == node::REFUSED || e == node::NEEDS_SIGN_IN => {
+        Err(e) if needs_new_sign_in(&e) => {
             if again.owner.is_empty() {
                 // Saved before the app knew whose node it is (or connected by address): find the
                 // node through the owner's record again, so its sign-in is checked against them
@@ -905,5 +936,17 @@ mod tests {
             assert!(is_app_page(&url::Url::parse(u).unwrap()), "{u}");
         }
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
+    }
+
+    /// Back from offline: a refused or missing sign-in sends the app to its connect page, which
+    /// signs in again; a node that doesn't answer is tried again later.
+    #[test]
+    fn a_refused_sign_in_ends_the_offline_wait() {
+        assert!(needs_new_sign_in(node::REFUSED));
+        assert!(needs_new_sign_in(node::NEEDS_SIGN_IN));
+        assert!(!needs_new_sign_in("Can't reach http://192.168.1.10:7788"));
+        assert!(!needs_new_sign_in("The node answered 503"));
+        assert!(is_app_page(&connect_page()), "the connect page is the app's own");
+        assert!(connect_page().path().ends_with("/index.html"));
     }
 }
