@@ -23,6 +23,8 @@ struct Phone {
     /// Its sink may not go on as it is (bit-perfect whose volume went down): once
     reopen: Arc<std::sync::atomic::AtomicBool>,
     opens: std::sync::atomic::AtomicU64,
+    /// Its first sink asks to be opened afresh at the next song (full level no longer allowed)
+    first_reopens_at_track: std::sync::atomic::AtomicBool,
 }
 
 impl Phone {
@@ -34,6 +36,7 @@ impl Phone {
             gone: Arc::default(),
             reopen: Arc::default(),
             opens: Default::default(),
+            first_reopens_at_track: Default::default(),
         }
     }
 }
@@ -43,6 +46,8 @@ struct PhoneSink(
     Box<dyn AudioSink>,
     Arc<std::sync::atomic::AtomicBool>,
     Arc<std::sync::atomic::AtomicBool>,
+    /// This sink asks to be opened afresh at the next song
+    bool,
 );
 
 impl AudioSink for PhoneSink {
@@ -62,7 +67,15 @@ impl AudioSink for PhoneSink {
         self.0.buffer_level()
     }
     fn flush(&mut self) -> Result<(), SinkError> {
-        self.0.flush()
+        self.0.flush()?;
+        // Emptied, and the DAC gone: said (as the phone's real sinks do)
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("cpal", "Speaker or headphones"),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
+        Ok(())
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         self.0.drain()
@@ -72,6 +85,9 @@ impl AudioSink for PhoneSink {
     }
     fn reopen_now(&self) -> bool {
         self.2.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+    fn reopen_at_track(&self) -> bool {
+        self.3
     }
 }
 
@@ -103,9 +119,18 @@ impl Output for Phone {
         Ok(())
     }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = self.opens.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         let s = self.inner.open(fmt).await?;
-        Ok(Box::new(PhoneSink(s, self.gone.clone(), self.reopen.clone())))
+        let reopens = n == 1
+            && self
+                .first_reopens_at_track
+                .load(std::sync::atomic::Ordering::SeqCst);
+        Ok(Box::new(PhoneSink(
+            s,
+            self.gone.clone(),
+            self.reopen.clone(),
+            reopens,
+        )))
     }
 }
 
@@ -492,6 +517,90 @@ async fn a_sink_that_may_not_go_on_is_replaced_on_the_phone() {
         "opened afresh"
     );
     assert_eq!(sink.frames_written(), 3 * 480, "the count goes on");
+}
+
+/// Codex H2 (round 4): paused, the volume down (the sink must be replaced) and the DAC unplugged
+/// meanwhile: the replacement's flush says Gone, the node hears it (the zone pauses), and nothing
+/// opens on the phone (no speaker).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replacement_on_a_dac_that_went_is_gone_not_the_speaker() {
+    let (phone, serving, cell) = phone();
+    let out = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    let fmt = AudioFormat::pcm(48_000, 24, 2);
+    let mut sink = out.open(fmt).await.unwrap();
+    let block = pm_model::AudioBlock::pcm_i32(fmt, vec![0; 480 * 2]);
+    sink.write(&block).unwrap();
+    sink.flush().unwrap();
+    phone.reopen.store(true, std::sync::atomic::Ordering::SeqCst);
+    phone.gone.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut err = None;
+    for _ in 0..500 {
+        if let Err(e) = sink.write(&block) {
+            err = Some(e);
+            break;
+        }
+    }
+    let e = err.expect("the write fails: the DAC is gone");
+    assert_eq!(e.gone_reason().as_deref(), Some("FiiO KA17 was unplugged"), "{e}");
+    assert_eq!(
+        phone.opens.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "nothing opened in its place"
+    );
+}
+
+fn write_wav(path: &std::path::Path, frames: usize, seed: i32) {
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate: 48_000,
+        bits_per_sample: 24,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(path, spec).unwrap();
+    for i in 0..frames * 2 {
+        w.write_sample(((i as i64 * 7919 + seed as i64) % (1 << 23)) as i32)
+            .unwrap();
+    }
+    w.finalize().unwrap();
+}
+
+/// Codex H4 / Claude 2 (round 4): two songs in the same format through a zone on the node, the
+/// phone's endpoint and its sink. The phone's sink says, in its acks, that it may not carry the
+/// next song (Android's volume went down below full level): the second song opens afresh on the
+/// phone, planned as things are there now, instead of joining the full-level sink.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_next_song_in_the_same_format_opens_afresh_when_the_phone_asks() {
+    let (phone, serving, cell) = phone();
+    phone
+        .first_reopens_at_track
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let out: Arc<dyn Output> = Arc::new(NetOutput::connect(serving.addr(), &cell).unwrap().remove(0));
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.wav");
+    let b = dir.path().join("b.wav");
+    write_wav(&a, 9600, 1);
+    write_wav(&b, 9600, 2);
+    let zone = pm_zones::Zone::new(
+        pm_zones::ZoneId::new("phone"),
+        "phone",
+        out,
+        Arc::new(pm_audio::LocalFiles::new(pm_audio::PipelineConfig::default())),
+    );
+    zone.enqueue(
+        vec![
+            pm_zones::QueueItem::new(a.to_string_lossy()),
+            pm_zones::QueueItem::new(b.to_string_lossy()),
+        ],
+        pm_zones::Insert::End,
+    );
+    zone.play();
+    let st = zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        phone.opens.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the second song opened afresh on the phone"
+    );
 }
 
 /// The node plans each source with the formats the phone's DAC lists: 96/24 stays 96/24 even when

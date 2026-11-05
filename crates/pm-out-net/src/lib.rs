@@ -456,6 +456,7 @@ fn open_session(
             at: None,
             written: 0,
             acks: 0,
+            reopen: false,
             replies: std::collections::VecDeque::new(),
             closed: None,
         }),
@@ -473,9 +474,11 @@ fn open_session(
                 Ok(Frame::Ack {
                     level,
                     frames_written,
+                    reopen,
                 }) => {
                     // Stamped as it arrives: the level counts down from then
                     st.level = level;
+                    st.reopen = reopen;
                     st.at = Some(Instant::now());
                     st.written = frames_written;
                     st.acks += 1;
@@ -515,6 +518,8 @@ struct AckState {
     written: u64,
     /// `Ack`s so far: one per audio part.
     acks: u64,
+    /// The endpoint's sink asked, at its last `Ack`, to be opened afresh at the next song.
+    reopen: bool,
     /// Replies to control frames, in order.
     replies: std::collections::VecDeque<Frame>,
     /// The connection ended (why).
@@ -746,6 +751,7 @@ impl AudioSink for NetSink {
     /// between bit-perfect and shared, or was plugged in or out): the next song opens afresh.
     fn reopen_at_track(&self) -> bool {
         endpoint_choice(&self.key, &self.remote) != self.seen
+            || self.answers.state.lock().expect("answers").reopen
     }
 }
 

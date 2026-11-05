@@ -64,6 +64,10 @@ pub enum Frame {
     Ack {
         level: BufferLevel,
         frames_written: u64,
+        /// The endpoint's sink asks to be opened afresh at the next song (`AudioSink::reopen_at_track`:
+        /// a phone's DAC whose full-level bit-perfect is no longer allowed). Absent: no.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        reopen: bool,
     },
     Flush,
     Flushed,

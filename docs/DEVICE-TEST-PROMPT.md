@@ -218,6 +218,11 @@ What it does:
 4. Volume: during bit-perfect playback press the phone's volume buttons down a few steps; report
    whether the level changes (it should not get louder at any point). Play the next song: on Auto it
    now plays shared (the panel says why), at Android's volume. Report anything louder than before.
+   Then, with Auto at full volume again and bit-perfect playing: pause, turn Android's volume down
+   to about half, and press Play (once right away, once after waiting more than a minute). It must
+   carry on shared (the panel says "Android's volume is at N%…"), never at full level. Also play two
+   songs in the same format in a row after turning the volume down mid-song: the second one plays
+   shared. Report anything louder than before.
 5. Unplug the KA17 mid-song: the zone must pause (the bar says "FiiO KA17 was unplugged: paused"),
    and nothing must play from the phone's speaker. Also try at the end of a song, just as the next one
    (in another format) starts: it must pause too. Plug it in again: the DAC shows again; press Play:
