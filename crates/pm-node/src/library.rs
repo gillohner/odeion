@@ -132,8 +132,14 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
         // put the sign-ins back too)
         let parsed = pm_api::backup::parse(&bytes)?;
         std::fs::write(&staged, &parsed.database)?;
-        if parsed.manifest.secrets.is_some() || !parsed.manifest.left_out.is_empty() {
+        if parsed.manifest.secrets.is_some() {
             println!("note: sign-ins are restored only from Settings › Backup in the web app");
+        }
+        if !parsed.manifest.left_out.is_empty() {
+            println!(
+                "note: this backup was made without a passphrase and holds no sign-ins, invite links, \
+                 signup token or parties; this node's own stay as they are"
+            );
         }
     } else {
         std::fs::write(&staged, &bytes)?;
@@ -142,10 +148,17 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
         let lib =
             Library::open(&staged).with_context(|| format!("{} is not a library backup", file.display()))?;
         // What is this node's own (stream key, id, backup schedule, files jobs) stays, and the
-        // sign-ins, invites and parties a plain copy doesn't carry stay as they are here
+        // sign-ins, invites and parties a plain copy doesn't carry stay as they are here. A current
+        // database that won't open (damaged, or from a newer version) is the reason to restore:
+        // then nothing is carried over, and the restore goes on
         if db.exists() {
-            let here = Library::open(&db).with_context(|| format!("opening {}", db.display()))?;
-            pm_api::backup::keep_this_nodes(&here, &lib)?;
+            match Library::open(&db) {
+                Ok(here) => pm_api::backup::keep_this_nodes(&here, &lib)?,
+                Err(e) => println!(
+                    "note: the current database can't be read ({e}); its own settings (backup schedule, \
+                     stream key, sign-ins) are not carried over"
+                ),
+            }
         }
         lib.stats()?
     };
@@ -540,5 +553,28 @@ mod tests {
             None,
             "the backup's library is in"
         );
+    }
+
+    /// A current database that won't open (damaged, or a newer version's) is what a restore is
+    /// for: it goes ahead, carrying nothing over.
+    #[test]
+    fn a_restore_over_a_damaged_database_goes_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        open(&cfg).unwrap().set_setting("node.id", "old").unwrap();
+        let file = dir.path().join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        std::fs::write(cfg.db_path(), b"not a database at all").unwrap();
+        restore(&cfg, &file).unwrap();
+        let lib = open(&cfg).unwrap();
+        assert_eq!(
+            lib.get_setting("node.id").unwrap(),
+            None,
+            "nothing carried from the damaged one"
+        );
+        assert!(cfg.db_path().with_extension("db.bak").exists());
     }
 }
