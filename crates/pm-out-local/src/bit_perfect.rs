@@ -346,7 +346,9 @@ pub fn view_extras(
     full_level_ok: bool,
 ) -> (Vec<pm_zones::DeviceFormat>, Option<u8>) {
     let media = backend().and_then(|b| b.media_volume());
-    let f = if plays_bit_perfect(dac, settings, full_level_ok, media) {
+    let f = if crate::exclusive::plays_exclusive(dac, settings, full_level_ok, media) {
+        crate::exclusive::formats(dac)
+    } else if plays_bit_perfect(dac, settings, full_level_ok, media) {
         formats(dac)
     } else {
         Vec::new()
@@ -354,30 +356,39 @@ pub fn view_extras(
     (f, media)
 }
 
-/// [`live_caps`] for the phone's output now.
-pub fn phone_caps(shared: &OutputCaps) -> OutputCaps {
+/// [`live_caps`] for the phone's output now (or Exclusive USB's, when it plays that way), with
+/// the formats the DAC then takes unchanged.
+fn phone_caps_and_formats(shared: &OutputCaps) -> (OutputCaps, Vec<pm_zones::DeviceFormat>) {
     let dac = usb_dac::current_dac();
     let media = dac.as_ref().and(backend()).and_then(|b| b.media_volume());
-    live_caps(
-        dac.as_ref(),
-        usb_dac::settings(),
-        usb_dac::full_level_consent(),
-        media,
-        shared,
-    )
+    let settings = usb_dac::settings();
+    let consent = usb_dac::full_level_consent();
+    if let Some(d) = dac.as_ref() {
+        if let Some(c) = crate::exclusive::live_caps(d, settings, consent, media, shared) {
+            return (c, crate::exclusive::formats(d));
+        }
+    }
+    let caps = live_caps(dac.as_ref(), settings, consent, media, shared);
+    let f = match dac.as_ref() {
+        Some(d) if caps.quality_ceiling == QualityCeiling::BitPerfect => formats(d),
+        _ => Vec::new(),
+    };
+    (caps, f)
+}
+
+/// [`live_caps`] for the phone's output now.
+pub fn phone_caps(shared: &OutputCaps) -> OutputCaps {
+    phone_caps_and_formats(shared).0
 }
 
 /// [`phone_caps`] for one source: its own format when the DAC lists it (unchanged), else the
 /// closest listed one.
 pub fn phone_caps_for(shared: &OutputCaps, src: AudioFormat) -> OutputCaps {
-    let caps = phone_caps(shared);
-    if caps.quality_ceiling != QualityCeiling::BitPerfect {
+    let (caps, f) = phone_caps_and_formats(shared);
+    if caps.quality_ceiling != QualityCeiling::BitPerfect || f.is_empty() {
         return caps;
     }
-    match usb_dac::current_dac() {
-        Some(d) => pm_zones::caps_for_source(&formats(&d), src, &caps),
-        None => caps,
-    }
+    pm_zones::caps_for_source(&f, src, &caps)
 }
 
 /// Confirmed only when Android read the bit-perfect mixer back with exactly the format asked for
@@ -464,6 +475,12 @@ impl OpenError {
 pub enum PhoneOpen {
     /// The bit-perfect player.
     BitPerfect(TrackSink),
+    /// The app's own USB driver (Exclusive USB).
+    Exclusive(crate::exclusive::ExclusiveSink),
+    /// The DAC can't take this format unchanged in Exclusive USB: the zone plans another.
+    Unsupported(String),
+    /// Exclusive USB holds the DAC but would not start: nothing plays (never another device).
+    Failed(String),
     /// Android's shared path; `any_rate`: at the format's own rate even if the shared caps don't
     /// list it (Android converts), because it was planned for the DAC.
     Shared { any_rate: bool },
@@ -471,10 +488,86 @@ pub enum PhoneOpen {
     Gone(String),
 }
 
+/// The exclusive driver's open, as the phone's output opens it; `Err`: Android plays it (why).
+fn open_exclusive(
+    id: OutputId,
+    dac: &Dac,
+    fmt: AudioFormat,
+    warning: Option<String>,
+) -> Result<PhoneOpen, String> {
+    use crate::exclusive::ExclusiveError as E;
+    match crate::exclusive::open(id, dac, fmt, warning) {
+        Ok(s) => Ok(PhoneOpen::Exclusive(s)),
+        Err(E::Gone(why)) => Ok(PhoneOpen::Gone(why)),
+        Err(E::Unsupported(why)) => Ok(PhoneOpen::Unsupported(why)),
+        Err(E::Failed(why)) => {
+            tracing::warn!(format = %fmt, "Exclusive USB: {why}");
+            usb_dac::record_open(LastOpen {
+                dac_id: dac.id,
+                format: fmt,
+                mode: DeviceMode::Exclusive,
+                confirmed: false,
+                note: Some(why.clone()),
+            });
+            Ok(PhoneOpen::Failed(why))
+        }
+        Err(E::Refused(why)) => Err(why),
+    }
+}
+
+/// How long a DAC the app gave back may take to reappear in Android's list.
+const GIVE_BACK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The DAC Android plays again, after the app gave it back: `None` while it doesn't (yet).
+fn dac_back_from_exclusive() -> Option<Dac> {
+    let until = std::time::Instant::now() + GIVE_BACK_WAIT;
+    loop {
+        match usb_dac::current_dac() {
+            // Still the app's, or given back and not listed by Android again yet
+            Some(d) if d.held => {}
+            other => return other,
+        }
+        if std::time::Instant::now() >= until {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// How the phone's output opens `fmt` now: the whole decision, apart from cpal.
 pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
+    if let Some(dac) = usb_dac::current_dac() {
+        let media = backend().and_then(|b| b.media_volume());
+        // Exclusive USB when chosen; when chosen but not possible, why (Android plays it)
+        let why_not =
+            match crate::exclusive::decide(&dac, usb_dac::settings(), usb_dac::full_level_consent(), media) {
+                Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning) {
+                    Ok(o) => return o,
+                    Err(why) => {
+                        tracing::warn!(format = %fmt, "no Exclusive USB: {why}");
+                        Some(why)
+                    }
+                },
+                Some(Err(why)) => Some(why),
+                None => None,
+            };
+        // Android's paths, once Android has the DAC back (never while the app holds it)
+        crate::exclusive::release();
+        if dac.held || usb_dac::current_dac().is_some_and(|d| d.held) {
+            if dac_back_from_exclusive().is_none() {
+                return PhoneOpen::Gone(format!(
+                    "{} is going back to Android: press Play again in a moment",
+                    dac.device.name
+                ));
+            }
+        }
+        if let Some(why) = why_not {
+            record_shared(&dac, fmt, why);
+            return PhoneOpen::Shared { any_rate: true };
+        }
+    }
     match plan(fmt) {
-        Plan::BitPerfect(dac, choice, warning) => match open(id, &dac, choice, warning, fmt) {
+        Plan::BitPerfect(dac, choice, warning) => match open(id.clone(), &dac, choice, warning, fmt) {
             Ok(s) => PhoneOpen::BitPerfect(s),
             Err(OpenError::RouteLost(why)) => {
                 tracing::warn!(format = %fmt, "the DAC is not where Android plays: {why}");
@@ -486,6 +579,15 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
             }
             Err(OpenError::Refused(why)) => {
                 tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
+                // Auto: Exclusive USB instead, where permission was given before (never asks)
+                if usb_dac::settings().mode == PreferredMode::Auto {
+                    let media = backend().and_then(|b| b.media_volume());
+                    if let Some(warning) = crate::exclusive::auto_fallback(&dac, media) {
+                        if let Ok(o) = open_exclusive(id, &dac, fmt, warning) {
+                            return o;
+                        }
+                    }
+                }
                 record_shared(&dac, fmt, why);
                 PhoneOpen::Shared { any_rate: true }
             }
@@ -783,6 +885,8 @@ mod tests {
             id: 41,
             mixer,
             sdk,
+            descriptors: None,
+            held: false,
         }
     }
 

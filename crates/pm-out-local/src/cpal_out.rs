@@ -200,7 +200,13 @@ impl Output for CpalOutput {
         #[cfg(target_os = "android")]
         let any_rate = match crate::bit_perfect::open_phone(self.id(), fmt) {
             crate::bit_perfect::PhoneOpen::BitPerfect(s) => return Ok(Box::new(s)),
+            crate::bit_perfect::PhoneOpen::Exclusive(s) => return Ok(Box::new(s)),
             crate::bit_perfect::PhoneOpen::Gone(why) => return Err(SinkError::Gone(self.id(), why)),
+            crate::bit_perfect::PhoneOpen::Unsupported(why) => {
+                tracing::info!(format = %fmt, "Exclusive USB: {why}");
+                return Err(SinkError::UnsupportedFormat(self.id(), fmt));
+            }
+            crate::bit_perfect::PhoneOpen::Failed(why) => return Err(SinkError::Unavailable(self.id(), why)),
             crate::bit_perfect::PhoneOpen::Shared { any_rate } => any_rate,
         };
         #[cfg(not(target_os = "android"))]
@@ -215,10 +221,16 @@ impl Output for CpalOutput {
             .map(|s| Box::new(s) as Box<dyn AudioSink>)
     }
 
-    /// No volume of its own: Android's (the phone's buttons) in shared mode; in bit-perfect mode
-    /// the level is the DAC's. The zone's software volume (DSP) still works, and the signal path
-    /// then says it changes the samples.
-    async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
+    /// In Exclusive USB with "Use the DAC's volume" on: the DAC's own (its feature unit), the
+    /// samples untouched. Otherwise none of its own: Android's (the phone's buttons) in shared
+    /// mode; in bit-perfect mode the level is the DAC's. The zone's software volume (DSP) still
+    /// works, and the signal path then says it changes the samples.
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        #[cfg(target_os = "android")]
+        if self.live_caps().hw_volume.is_some() {
+            return crate::exclusive::set_volume(v).map_err(SinkError::Device);
+        }
+        let _ = v;
         Err(SinkError::NoVolume(self.id()))
     }
 }

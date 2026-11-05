@@ -5,14 +5,30 @@
 //! The input is what a USB host reads: the device descriptor followed by the configuration
 //! descriptors, as Android's `UsbDeviceConnection.getRawDescriptors()` returns them. UAC2 devices
 //! keep their sample rates behind the clock source's `RANGE` request; its reply is parsed by
-//! [`parse_rate_ranges`]. Nothing here does I/O, so it runs and is tested on any machine.
+//! [`parse_rate_ranges`].
+//!
+//! The exclusive driver (step 3) is here too: [`stream`] picks the playback setting for a format,
+//! [`requests`] builds the clock and volume requests, [`schedule`] sizes the isochronous packets
+//! from the DAC's feedback, [`volume`] keeps the hand-over never louder, [`quirks`] lists what some
+//! DACs need, and [`driver`] runs it all on a [`driver::Transport`]. Only [`usbfs`] (Linux and
+//! Android) does I/O; everything else runs and is tested on any machine, against a fake DAC.
 //!
 //! Hostile input is expected: every length is checked, unknown descriptors are skipped, and a
 //! malformed one ends the walk with what was understood so far.
 
-#![forbid(unsafe_code)]
+// Only `usbfs` (the kernel's USB interface on the file descriptor Android hands over) is unsafe.
+#![deny(unsafe_code)]
 
 use serde::Serialize;
+
+pub mod driver;
+pub mod quirks;
+pub mod requests;
+pub mod schedule;
+pub mod stream;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod usbfs;
+pub mod volume;
 
 /// The USB Audio Class version of a device's audio function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -101,6 +117,11 @@ pub struct UsbAudioDevice {
     pub vendor_id: u16,
     pub product_id: u16,
     pub uac: Option<Uac>,
+    /// The AudioControl interface's number (requests to the clock and feature unit go there).
+    pub control_interface: Option<u8>,
+    /// Every interface of its audio function (control, playback, capture), in order: what a
+    /// driver taking the DAC over claims and gives back.
+    pub audio_interfaces: Vec<u8>,
     /// Playback settings, in the device's order.
     pub streams: Vec<Stream>,
     pub clocks: Vec<ClockSource>,
@@ -181,6 +202,8 @@ pub fn parse(raw: &[u8]) -> UsbAudioDevice {
         vendor_id: 0,
         product_id: 0,
         uac: None,
+        control_interface: None,
+        audio_interfaces: Vec::new(),
         streams: Vec::new(),
         clocks: Vec::new(),
         hardware_volume: None,
@@ -210,6 +233,12 @@ pub fn parse(raw: &[u8]) -> UsbAudioDevice {
             }
             4 if n >= 9 => {
                 iface = Some((d[2], d[3], d[5], d[6], d[7]));
+                if d[5] == 1 && d[6] == 1 && dev.control_interface.is_none() {
+                    dev.control_interface = Some(d[2]);
+                }
+                if d[5] == 1 && !dev.audio_interfaces.contains(&d[2]) {
+                    dev.audio_interfaces.push(d[2]);
+                }
                 if d[5] == 1 && dev.uac.is_none() {
                     dev.uac = Some(match d[7] {
                         0x20 => Uac::V2,

@@ -56,6 +56,10 @@ fn the_fiio_ka17() {
             (3, 4, 32, false, true, 2)
         ]
     );
+    // The audio function: control on 0, playback on 1 (what the exclusive driver claims)
+    assert_eq!(d.control_interface, Some(0));
+    assert_eq!(d.audio_interfaces.first(), Some(&0));
+    assert!(d.audio_interfaces.contains(&1));
     for s in &d.streams {
         assert_eq!(s.interface, 1);
         assert_eq!(s.rates, Rates::FromClock(0x29));

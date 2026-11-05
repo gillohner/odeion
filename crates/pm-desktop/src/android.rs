@@ -543,6 +543,26 @@ pub fn watch_usb_audio(app: &tauri::AppHandle, changed: impl Fn() + Send + 'stat
                     tracing::warn!("no bit-perfect player ({e})");
                 }
             }
+            // Exclusive USB (UsbExclusive.kt): the app's own driver for the phone's DAC
+            match crate::crash::guarded("the exclusive USB driver", || {
+                app_class(env, activity, "UsbExclusive")
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")))
+            {
+                Ok(c) => match env.get_java_vm() {
+                    Ok(vm3) => pm_out_local::exclusive::set_backend(std::sync::Arc::new(JniUsbExclusive {
+                        vm: std::sync::Arc::new(vm3),
+                        class: c,
+                    })),
+                    Err(e) => tracing::warn!("no exclusive USB driver: {e}"),
+                },
+                Err(e) => {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                    tracing::warn!("no exclusive USB driver ({e})");
+                }
+            }
             let spawned = std::thread::Builder::new()
                 .name("usb-audio".into())
                 .spawn(move || usb_audio_loop(vm, class, changed));
@@ -699,6 +719,75 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         })
         .ok()?;
         u8::try_from(p).ok().filter(|p| *p <= 100)
+    }
+}
+
+/// Exclusive USB's app side (`UsbExclusive.kt`) for pm-out-local's `exclusive`: Android's
+/// permission for the DAC (asked only when the listener chose Exclusive USB), and the open device's
+/// file descriptor, on which the app's driver speaks usbfs.
+struct JniUsbExclusive {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+}
+
+impl JniUsbExclusive {
+    fn ids(usb: pm_out_local::exclusive::UsbIds) -> [jni021::objects::JValue<'static, 'static>; 2] {
+        [
+            jni021::objects::JValue::Int(i32::from(usb.vendor_id)),
+            jni021::objects::JValue::Int(i32::from(usb.product_id)),
+        ]
+    }
+}
+
+impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
+    fn has_permission(&self, usb: pm_out_local::exclusive::UsbIds) -> bool {
+        use jni021::objects::JClass;
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "hasPermission", "(II)Z", &Self::ids(usb))?
+                .z()
+        })
+        .unwrap_or(false)
+    }
+
+    fn request_permission(&self, usb: pm_out_local::exclusive::UsbIds) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "requestPermission", "(II)V", &Self::ids(usb))?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: cannot ask Android's permission: {e}");
+        }
+    }
+
+    fn open(
+        &self,
+        usb: pm_out_local::exclusive::UsbIds,
+    ) -> Result<(std::sync::Arc<dyn pm_out_local::exclusive::Transport>, Vec<u8>), String> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "open", "(II)Ljava/lang/String;", &Self::ids(usb))?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })?;
+        let (fd, raw) = pm_out_local::exclusive::parse_open_answer(&answer)?;
+        Ok((pm_out_local::exclusive::usbfs(fd), raw))
+    }
+
+    fn release(&self) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "release", "()V", &[])?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: release: {e}");
+        }
     }
 }
 
