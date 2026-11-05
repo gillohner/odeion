@@ -174,6 +174,30 @@ mod tests {
         assert!(again.changed.is_empty() && again.left.is_empty(), "{again:?}");
     }
 
+    /// Problem reports and usage insights hold what people wrote and did: a copy made by hand, or
+    /// a journal SQLite left behind, is the node's alone too.
+    #[test]
+    fn reports_and_usage_insights_become_the_nodes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let mut files = Vec::new();
+        for base in ["feedback.sqlite", "usage.sqlite"] {
+            for ext in ["", "-journal", "-wal", "-shm"] {
+                let f = data.join(format!("{base}{ext}"));
+                std::fs::write(&f, "x").unwrap();
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+                files.push(f);
+            }
+        }
+        let db = data.join("library.sqlite");
+        let secret = data.join("pubky-session.secret");
+        tighten(&data, &private_files(&data, &db, None, &secret));
+        let open: Vec<_> = files.iter().filter(|f| mode(f) != 0o600).collect();
+        assert!(open.is_empty(), "still readable by others: {open:?}");
+    }
+
     /// A file the node can't look at or change is reported, never passed over in silence.
     #[test]
     fn what_the_node_cant_fix_is_reported() {
