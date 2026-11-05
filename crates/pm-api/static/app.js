@@ -154,6 +154,81 @@
     clearTimeout(toast.h);
     toast.h = setTimeout(() => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); }, kind === 'error' ? 6000 : 3800);
   };
+  // ---- Every click shows progress and fires once (owner, 2026-11-04) ----
+  // busy(el, fn) runs fn. When fn returns a promise, el is busy until it settles: aria-busy and
+  // aria-disabled at once (.is-busy; not `disabled`, so keyboard focus stays on it), a spinner
+  // after 150 ms (.is-spinning), and further clicks on it are ignored. Then it is restored; a failure
+  // nobody caught shows its message. A plain return value passes through (`return false` still cancels).
+  // BUSY maps a control to the event that made it busy: only a busy mark made by a click drops later
+  // clicks (and says aria-disabled), and the same click bubbling on to a row's own handler is not a
+  // second click. A mark made without an event (a menu's action on its ⋯) only shows the progress.
+  const BUSY = new WeakMap();
+  let inHandler = 0; // a press's handler is running (its reads are its own, not a page's: navApiFor)
+  const busy = (el, fn, ev = null) => {
+    let out;
+    inHandler++;
+    try { out = fn(); } catch (e) { console.error(e); toast((e && e.message) || 'That didn’t work; try again.', 'error'); return undefined; } finally { inHandler--; }
+    if (!out || typeof out.then !== 'function') return out;
+    const failed = (e) => { if (!e || e.name !== 'AbortError') toast((e && e.message) || 'That didn’t work; try again.', 'error'); };
+    if (!el) { out.catch(failed); return out; }
+    // Several actions on one control at once (the same click reaching its row's handler, or changes in a
+    // row): it stays busy until the last one has settled
+    let mark = BUSY.get(el);
+    if (!mark) {
+      mark = { ev, n: 0, was: [el.getAttribute('aria-busy'), el.getAttribute('aria-disabled')] };
+      el.setAttribute('aria-busy', 'true'); if (ev) el.setAttribute('aria-disabled', 'true'); el.classList.add('is-busy');
+      mark.spin = setTimeout(() => el.classList.add('is-spinning'), 150);
+      BUSY.set(el, mark);
+    }
+    mark.n++;
+    const done = () => {
+      if (--mark.n > 0) return;
+      clearTimeout(mark.spin); if (BUSY.get(el) === mark) BUSY.delete(el);
+      el.classList.remove('is-busy', 'is-spinning');
+      ['aria-busy', 'aria-disabled'].forEach((a, i) => { if (mark.was[i] == null) el.removeAttribute(a); else el.setAttribute(a, mark.was[i]); });
+    };
+    out.then(done, (e) => { done(); failed(e); });
+    return out;
+  };
+  // The element that shows the progress: the handler's own control, the control clicked inside a
+  // container that handles its rows' clicks, or a form's submit button.
+  const BUSY_CONTROL = 'button, a[href], [role="button"], [role="menuitem"], [role="tab"], [role="option"], .chip, input[type="checkbox"], input[type="radio"], select';
+  const busyTarget = (host, e) => {
+    if (e && e.type === 'submit') { const f = e.target; return e.submitter || (f instanceof HTMLFormElement ? f.querySelector('button[type="submit"], button:not([type])') || f : null); }
+    if (host.matches(BUSY_CONTROL)) return host;
+    const t = e && e.target instanceof Element ? e.target.closest(BUSY_CONTROL) : null;
+    return t && host.contains(t) ? t : null;
+  };
+  // An event handler run through busy(): a click or submit on a control that is still busy is dropped
+  // (one request per action); a change still runs (it carries a new value). Controls meant to be pressed
+  // quickly in a row (volume steps) opt out with data-repeat.
+  const viaBusy = (host, fn, self, e) => {
+    const t = busyTarget(host, e);
+    if (!t) return fn.call(self, e);
+    if (t.closest('[data-repeat]')) return busy(t, () => fn.call(self, e)); // progress only: every press runs
+    const was = BUSY.get(t);
+    if (was && was.ev && was.ev !== e && e.type !== 'change') { e.preventDefault(); return false; }
+    return busy(t, () => fn.call(self, e), e.type === 'change' ? null : e);
+  };
+  // For a container that handles its controls' events (addEventListener on the container)
+  const onBusy = (host, type, fn) => host.addEventListener(type, (e) => { viaBusy(host, fn, host, e); });
+  // Every onclick, onsubmit and onchange handler goes through it, wherever it is assigned: the setters
+  // are wrapped once here, so no handler can miss it.
+  for (const prop of ['onclick', 'onsubmit', 'onchange']) {
+    const d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, prop);
+    if (!d || !d.set) continue;
+    Object.defineProperty(HTMLElement.prototype, prop, {
+      configurable: true, enumerable: d.enumerable,
+      get() { const f = d.get.call(this); return (f && f.pmHandler) || f; },
+      set(fn) {
+        if (typeof fn !== 'function') { d.set.call(this, fn); return; }
+        const host = this;
+        const wrapped = function (e) { return viaBusy(host, fn, this, e); };
+        wrapped.pmHandler = fn;
+        d.set.call(this, wrapped);
+      },
+    });
+  }
   const setFill = (el) => { const min = +el.min || 0; const max = +el.max || 1; el.style.setProperty('--fill', `${((el.value - min) / (max - min)) * 100}%`); };
 
   // Errors in people's words: what happened and what to do, in one line. The node's own wording
@@ -176,7 +251,29 @@
     if (/error sending request|connection refused|dns error|could not resolve/i.test(text)) return `Couldn't reach ${who === 'The service' ? 'the service' : who}; check the node's internet connection.`;
     return text;
   };
-  const api = async (method, path, body, opts = {}) => {
+  // A change already on its way is not sent twice: the same request again (method, path and body) while
+  // it is the latest one to that resource and still in flight gets its answer. Any other change to the
+  // resource in between is sent, and so is a repeat after it (A, B, A sends all three, one after another).
+  // Reads are left alone.
+  const inFlight = new Map();
+  const api = (method, path, body, opts = {}) => {
+    if (method === 'GET') return apiSend(method, path, body, opts);
+    // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
+    let sent; let snap; try { sent = body === undefined ? '' : JSON.stringify(body); snap = sent ? JSON.parse(sent) : body; } catch { return apiSend(method, path, body, opts); }
+    // One line per resource (its path without the query: PUT /favourites and DELETE /favourites?… too)
+    const line = path.split('?')[0]; const was = inFlight.get(line); const ask = `${method} ${path} ${sent}`;
+    // opts.repeat: each one is meant (Next pressed twice skips two), so it is never shared
+    if (!opts.repeat && was && was.ask === ask) return was.p;
+    // After the one before it on the same line, so the node applies them, and their answers land, in the
+    // order they were made (a late answer to the first Next can't undo the second)
+    const send = () => apiSend(method, path, snap, opts);
+    const entry = { ask: opts.repeat ? null : ask, p: was ? was.p.catch(() => {}).then(send) : send() };
+    inFlight.set(line, entry);
+    const drop = () => { if (inFlight.get(line) === entry) inFlight.delete(line); };
+    entry.p.then(drop, drop);
+    return entry.p;
+  };
+  const apiSend = async (method, path, body, opts = {}) => {
     // A change made while the connection is down waits a few seconds for it, then is refused (nothing is sent).
     if (method !== 'GET') await whenConnected();
     // Switching a service on or off, signing in or out, or a new play order changes the ranking
@@ -553,7 +650,7 @@
       const text = f.elements.content.value; f.querySelector('button').disabled = !text.trim();
       if (text.trim()) commentDrafts.set(draftKey(f), text); else commentDrafts.delete(draftKey(f));
     });
-    sec.addEventListener('submit', async (e) => {
+    onBusy(sec, 'submit', async (e) => {
       const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
       const content = f.elements.content.value.trim(); if (!content) return;
       const b = f.querySelector('button'); b.disabled = true;
@@ -564,7 +661,7 @@
         if (f.dataset.replyTo) await replies(f.closest('li.comment'), f.dataset.replyTo); else await show();
       } catch (err) { b.disabled = false; toast(err.message, 'error'); }
     });
-    sec.addEventListener('click', async (e) => {
+    onBusy(sec, 'click', async (e) => {
       const r = e.target.closest('[data-creply]');
       if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) openReply(r.closest('li.comment'), r.dataset.creply).elements.content.focus(); return; }
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
@@ -597,11 +694,22 @@
   };
   // Theme: System (no attribute), or Light/Dark kept in this browser (index.html applies it early).
   const themePref = () => { try { return localStorage.getItem('pm.theme') || 'system'; } catch { return 'system'; } };
-  // One design at three sizes (docs/ux/responsive.md): phone under 600 px (bottom tabs and a mini
-  // player), tablet to 1024 px (a rail), desktop above (the sidebar). Settings › Appearance › Layout
-  // can force Compact (the phone arrangement at any width) or Comfortable (the tablet one on a desktop).
-  const layoutPref = () => { try { return localStorage.getItem('pm.layout') || 'auto'; } catch { return 'auto'; } };
-  const shellFor = (w, pref) => (pref === 'compact' || w < 600 ? 'phone' : pref === 'comfortable' || w <= 1024 ? 'tablet' : 'desktop');
+  // Two layouts (docs/ux/responsive.md; owner, 2026-11-04): phone under 600 px (bottom tabs and a
+  // mini player) and desktop from 600 px (the sidebar and the full player bar), tablets included.
+  // Settings › Appearance › Layout can force either: Phone at any width, Desktop from 480 px (a
+  // narrower window has no room for the sidebar and the bar). The old choices map across:
+  // Compact (the phone arrangement at any width) becomes Phone; Comfortable (the tablet rail from
+  // 600 px, a phone below) becomes Automatic, which is now the desktop layout from 600 px.
+  const LAYOUT_WAS = { compact: 'phone', comfortable: 'auto' };
+  const layoutPref = () => {
+    let v = 'auto';
+    try { v = localStorage.getItem('pm.layout') || 'auto'; if (LAYOUT_WAS[v]) { v = LAYOUT_WAS[v]; if (v === 'auto') localStorage.removeItem('pm.layout'); else localStorage.setItem('pm.layout', v); } } catch { /* no storage */ }
+    return v;
+  };
+  // A touch screen (a tablet in the desktop layout too): the player bar is one target that opens
+  // Now playing, as on a phone; with a mouse its title and artist are links of their own
+  const barPlain = () => shellMode() !== 'desktop' || !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const shellFor = (w, pref) => (pref === 'phone' || w < (pref === 'desktop' ? 480 : 600) ? 'phone' : 'desktop');
   const shellMode = () => document.documentElement.dataset.shell || 'desktop';
   const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
   const setTheme = (v) => { try { if (v === 'system') localStorage.removeItem('pm.theme'); else localStorage.setItem('pm.theme', v); } catch { /* no storage */ } if (v === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; };
@@ -1243,7 +1351,7 @@
     location.replace('/');
   };
   // A pasted token is tried first: a wrong one is said here, not taken for an ended session
-  $('#tokform').addEventListener('submit', async (e) => {
+  onBusy($('#tokform'), 'submit', async (e) => {
     e.preventDefault();
     const t = $('#tok').value.trim(); if (!t) return;
     const out = $('#tokerr'); out.textContent = '';
@@ -1927,7 +2035,7 @@
     if (action.action === 'toggle') action = { action: zt.transport === 'playing' ? 'pause' : 'play' };
     if (action.action === 'play' && zt.queue && zt.queue.length) startWait('play', state.zone, zt.now_playing ? zt.now_playing.item.title || '' : '');
     try {
-      const st = await api('POST', `/zones/${state.zone}/transport`, action);
+      const st = await api('POST', `/zones/${state.zone}/transport`, action, { repeat: action.action === 'next' || action.action === 'previous' });
       state.zones[st.id] = st;
       renderBar();
     } catch (e) { if (state.starting && state.starting.zone === zt.id) startFail(e.message, true); toast(e.message, 'error'); }
@@ -2010,6 +2118,8 @@
     try { await api('POST', `/zones/${state.zone}/shuffle`); toast('Shuffled what comes next'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
   };
   $('#toggle').onclick = () => transport({ action: 'toggle' });
+  // Next and Previous pressed twice skip twice: they don't wait for the last press (data-repeat)
+  $('#next').dataset.repeat = ''; $('#prev').dataset.repeat = '';
   $('#next').onclick = () => transport({ action: 'next' });
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
@@ -2260,9 +2370,8 @@
     // The devices' models: the owner's output list, fetched once
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
-  // The rail's Library: the library page last open, but never Sources on a tablet, where Sources
-  // has its own button (it may have been recorded while this was a phone)
-  const libHome = () => (state.lastLib && !(state.lastLib === 'sources' && shellMode() === 'tablet') ? state.lastLib : 'library');
+  // The tabs' Library: the library page last open
+  const libHome = () => state.lastLib || 'library';
   $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
@@ -2291,12 +2400,11 @@
   // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
-  // The tabs (phone) and the rail (tablet) mark the current place; again when the shell changes
+  // The phone's tabs mark the current place; again when the shell changes
   const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
   const markTabs = (v = state.view) => {
-    // The tablet rail has Sources of its own; on phones it is a Library section
-    const srcView = v === 'sources' || v === 'source-item'; const railSources = shellMode() === 'tablet';
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) && !(srcView && railSources) : k === 'sources' ? srcView && railSources : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    // Sources is a Library section on phones
+    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   };
   const applyShell = () => {
     const now = shellFor(window.innerWidth, layoutPref());
@@ -2319,18 +2427,18 @@
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
   applyShell();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
-  const tablet = () => mq('(max-width: 1100px)');
+  const narrow = () => mq('(max-width: 1100px)'); // the sidebar is icons there unless expanded
   const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
   applySide();
   // Icon-only nav items keep their names as tooltips and accessible labels.
   $$('.nav-item').forEach((b) => { const t = (b.querySelector('span') || {}).textContent; if (t) { b.title = t; b.setAttribute('aria-label', t); } });
   $('#menu').setAttribute('aria-expanded', 'false');
   $('#menu').onclick = () => {
-    const collapsedNow = shell.classList.contains('collapsed') || (tablet() && !shell.classList.contains('expanded'));
-    const next = collapsedNow ? (tablet() ? 'names' : 'auto') : 'icons';
+    const collapsedNow = shell.classList.contains('collapsed') || (narrow() && !shell.classList.contains('expanded'));
+    const next = collapsedNow ? (narrow() ? 'names' : 'auto') : 'icons';
     try { localStorage.setItem('pm.sidebar', next); } catch { /* no storage */ }
     applySide();
-    $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(tablet() && next === 'auto')));
+    $('#menu').setAttribute('aria-expanded', String(next !== 'icons' && !(narrow() && next === 'auto')));
   };
   // Menus, popovers and dialogs close on back and the page stays (STEWARD-UX-BRIEF-2 navigation).
   // Opening one adds a transient history entry; back pops it and closes them. Closing one any
@@ -2611,11 +2719,11 @@
     }
     const it = np.item;
     const live = np.stream_title;
-    const links = npLinksHtml(it, live, shellMode() !== 'desktop');
+    const links = npLinksHtml(it, live, barPlain());
     $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    // On phones and tablets the whole bar opens Now playing (the song page is one tap further, from
+    // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
     // its title there); with a mouse the bar's title and artist are links of their own
-    if (!waitHtml && !errHtml && shellMode() === 'desktop') bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+    if (!waitHtml && !errHtml && !barPlain()) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -2763,7 +2871,7 @@
     openQPanel('#quality');
     const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
   };
-  // Where the bar has no room for the slider (narrow tablets and desktops): the Sound panel, at its volume
+  // Where the bar has no room for the slider (a desktop under 1100 px, tablets too): the Sound panel, at its volume
   $('#volbtn').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#volbtn');
@@ -2845,7 +2953,7 @@
   // tablets and desktops keep one open beside it. The open sheet survives re-renders (state.npSheet).
   const NP_SHEETS_ALL = [['queue', 'Queue', 'queue'], ['lyrics', 'Lyrics', 'notes'], ['details', 'Details', 'info'], ['sources', 'Sources', 'archive'], ['tags', 'Tags', 'compass']];
   const npSheets = () => NP_SHEETS_ALL.filter(([k]) => k !== 'tags' || isOwner()); // listeners cannot tag
-  // Compact: the phone arrangement (sheets over the player), also on tablets narrower than two columns need
+  // Compact: the phone arrangement (sheets over the player), also in a desktop window narrower than two columns need
   const npCompact = () => shellMode() === 'phone' || window.innerWidth <= 720;
   const npSheetNow = () => { const k = npSheets().some(([x]) => x === state.npSheet) ? state.npSheet : null; return npCompact() ? k : k || 'queue'; };
   // What a re-render keeps: the sheet's scroll and the focused control
@@ -2906,7 +3014,7 @@
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
             <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
           </section>
           <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -2918,7 +3026,7 @@
       </div>`;
     const sk = $('#npseek'); setFill(sk);
     // Now playing's own transport (phones: the mini player hides behind it)
-    // Volume in Now playing (phones and narrow tablets have none in the bar; UX sweep 11-01, A6):
+    // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
     const nv = $('#npvol', overlay); if (nv) { setFill(nv); nv.oninput = () => setFill(nv); nv.onchange = () => setZoneVol(z, nv.value); }
     else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
@@ -3274,24 +3382,30 @@
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
+    // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
+    const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
     state.view = v; state.viewArg = arg;
-    // Sources has a rail button of its own on tablets: the Library button doesn't open it there
-    if (LIB_TOP.some(([k]) => k === v) && !(v === 'sources' && shellMode() === 'tablet')) state.lastLib = v;
+    if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs(v);
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
-    return render();
+    return navigate(fresh);
   };
   window.addEventListener('popstate', async (e) => {
     if (popHandled) { popHandled = false; return; } // back only closed a menu or dialog
     if (e.state && e.state.transient) return; // forward onto a closed menu's entry: nothing to show
     const st = e.state || routeFromPath() || { v: 'home' };
     navDepth = st.depth || 0;
-    if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); await setView('search', st.arg, 'pop'); }
-    else await setView(st.v, st.arg, 'pop');
-    if (st.scroll) main.scrollTop = st.scroll;
+    let going;
+    if (st.v === 'search' && st.arg && st.arg.q) { search.value = st.arg.q; startSearch(st.arg.q, st.arg.in || 'everywhere'); going = setView('search', st.arg, 'pop'); }
+    else going = setView(st.v, st.arg, 'pop');
+    // Back to where the page was scrolled, once all of it is drawn, and only if nothing newer was opened
+    // meanwhile (this navigation's generation and code, taken before anything else can start)
+    const gen = navGen; const drawnAll = navRendering;
+    await going; await drawnAll;
+    if (st.scroll && gen === navGen) main.scrollTop = st.scroll;
   });
   // The back arrow: one step back when there is in-app history, else the parent page.
   const goBack = (fallback) => { if (navDepth > 0) history.back(); else if (fallback && fallback.startsWith('item:')) { const [, kind, ...id] = fallback.split(':'); setView('item', { kind, id: id.join(':') }); } else setView(fallback || 'home'); };
@@ -3502,7 +3616,7 @@
   let rowLists = {}; let rowsBound = false;
   const bindTrackRows = (container, pageLists) => {
     rowLists = pageLists; if (rowsBound) return; rowsBound = true;
-    container.addEventListener('click', async (e) => {
+    onBusy(container, 'click', async (e) => {
       const lists = rowLists;
       const btn = e.target.closest('[data-act]');
       // On a touch screen a tap on the row plays from there (no hover to reveal the play button)
@@ -3532,7 +3646,7 @@
         try { await setFavourite({ track_id: tracks[i].id }, !on); btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; }
         catch (er) { toast(er.message, 'error'); }
       }
-    }, { once: false });
+    });
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
@@ -3723,13 +3837,14 @@
       const want = menuPick; menuPick = null; closeMenu();
       {
         const it = items.find((x) => !x.title && !x.disabled && String(x.label || '').replace(/…$/, '') === want.label);
-        if (it) Promise.resolve(it.run()); else toast(`${want.label} isn't available for this row`);
+        if (it) busy(anchor, () => it.run()); else toast(`${want.label} isn't available for this row`);
         return;
       }
     }
     menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
-    // The item runs first: a page it opens replaces the transient entry; otherwise it is popped.
-    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(items[Number(b.dataset.mi)].run()).finally(popTransient); });
+    // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
+    // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
+    $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
     menuEl.hidden = false; pushTransient();
     const r = anchor.getBoundingClientRect(); const mw = 280;
     menuEl.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
@@ -4070,7 +4185,15 @@
     const worker = async () => { while (next < rows.length) { const row = rows[next++]; if (row.isConnected) await one(row); } };
     worker(); worker();
   };
-  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist || t.artists ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  // A song kept in more than one copy (#268: a homeserver copy, FLAC and MP3, hi-res and CD) is one row
+  // that plays the best copy; a quiet "2 versions" in its second line opens the copies to choose from
+  // (owner: "maybe have some indication or version chooser, very subtle").
+  const versionMark = (t, k) => (Array.isArray(t.versions) && t.versions.length > 1 ? `<button class="lnk vmark" data-sver="${k}" aria-label="${t.versions.length} versions of ${esc(t.title)}: choose which to play" title="Choose which copy plays">${t.versions.length} versions</button>` : '');
+  // The row's second line; with a marker, the words shrink to an ellipsis and the marker keeps its width
+  const subLine = (html, mark) => (mark ? `<div class="sub subv"><span class="subtext">${html}</span>${html ? '<span aria-hidden="true">·</span>' : ''}${mark}</div>` : `<div class="sub">${html}</div>`);
+  const VERSION_FROM = { library: 'Your library', homeserver: 'Your homeserver' };
+  const versionLabel = (v) => [VERSION_FROM[v.source] || v.source, v.format || (v.container || '').toUpperCase(), v.size_bytes ? fileSize(v.size_bytes) : ''].filter(Boolean).join(' · ');
+  const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([t.artist || t.artists ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -4138,6 +4261,14 @@
       showMenu(b, [{ title: t.title }, ...(web ? [{ label: 'Open', icon: 'external', run: () => window.open(web, '_blank', 'noopener') }] : []),
         { label: 'Copy link', icon: 'copy', run: async () => { try { await navigator.clipboard.writeText(t.page); toast('Link copied'); } catch { toast(t.page); } } },
         ...(ctx.rowExtra ? ctx.rowExtra(k, b.closest('.srow')) : [])]);
+    });
+    // A song's copies: the default first; picking one plays that copy from this row on (the default stays)
+    $$('[data-sver]', box).forEach((b) => b.onclick = (e) => {
+      e.stopPropagation(); const k = Number(b.dataset.sver); const t = all[k];
+      const vs = [...t.versions].sort((x, y) => Number(y.best) - Number(x.best));
+      // Every listener may play any copy: { all } keeps the homeserver's copies in the list for them too
+      showMenu(b, [{ title: `${t.title}: versions` }, ...vs.map((v) => ({ label: versionLabel(v) + (v.best ? ' · plays by default' : ''), icon: v.best ? 'check' : 'play',
+        run: () => playSongs(songs.map((x) => (x === t ? { ...x, track_id: v.track_id } : x)), at(k), 'replace', ctx.plays_from, b, ctx.fallback) }))], { all: true });
     });
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     hydrateArtistCredits(box);
@@ -4363,7 +4494,7 @@
     $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
-  const LAYOUTS = [['auto', 'Automatic', 'By the width of the window'], ['compact', 'Compact', 'Tabs and a mini player, as on a phone'], ['comfortable', 'Comfortable', 'A rail, as on a tablet']];
+  const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
   const layoutGroup = (group, row) => group('Layout', row('Arrangement', 'Kept on this device.', `<div class="chips layoutswitch" role="radiogroup" aria-label="Layout">${LAYOUTS.map(([v, l, d]) => `<button class="chip scope ${layoutPref() === v ? 'on' : ''}" role="radio" aria-checked="${layoutPref() === v}" data-layout-pick="${v}" title="${d}">${l}</button>`).join('')}</div>`)
     + row('Dense lists', 'More songs and covers on a tablet or computer screen.', `<input type="checkbox" class="switch" role="switch" id="densepick" ${densePref() ? 'checked' : ''} aria-label="Dense lists">`));
   const colourGroup = (group, row) => group('Colour', row('Colour from where it plays', 'The player takes a tint from the service: TIDAL, Qobuz, Spotify…; your own files keep ours.', `<input type="checkbox" class="switch" role="switch" data-colour-pick="pm.srcColour" ${colourOn('pm.srcColour') ? 'checked' : ''} aria-label="Colour from where it plays">`)
@@ -4381,7 +4512,7 @@
     const dp = $('#densepick', main);
     if (dp) dp.onchange = () => { try { if (dp.checked) localStorage.setItem('pm.dense', '1'); else localStorage.removeItem('pm.dense'); } catch { /* no storage */ } applyShell(); };
   };
-  // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
+  // The library's sections as a row of chips above the page title; shown on phones (the desktop has the sidebar)
   const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
     if (!LIB_TOP.some(([k]) => k === state.view)) return '';
@@ -4581,8 +4712,62 @@
     };
   };
 
+  // ---- Navigation answers at once (owner, 2026-11-04) ----
+  // setView() starts a navigation: the place clicked is marked at once (markTabs), a thin bar runs along
+  // the top until the page is drawn, and a page that has drawn nothing of its own after 120 ms shows a
+  // skeleton ("Still loading…" after 2 s). A newer navigation supersedes it: the reads the page's code
+  // (renderPage's `api`, below) started before the page showed its content are aborted and never
+  // answer, so the old page stops where it was and draws nothing (A→B ends on B). Reads started once it
+  // shows its content (handlers, polls, slower extras) are never aborted and settle as usual. Changes
+  // (anything but GET) are never held back.
+  let navGen = 0; let navCtl = new AbortController(); let navStop = () => {}; let navRendering = Promise.resolve();
+  const NEVER = () => new Promise(() => {}); // a fresh one each time: nothing piles up on a shared one
+  const navApiFor = (gen, ctl, drawing) => (method, path, body, opts = {}) => {
+    // Changes, and reads a press makes (a handler's GET before its PUT), are never held back
+    if (method !== 'GET' || inHandler) return api(method, path, body, opts);
+    // Once the page shows its content (or its code is done), its reads are as before: handlers, polls and
+    // slower extras are never held back
+    if (!drawing.on) return api(method, path, body, opts);
+    if (gen !== navGen) return NEVER();
+    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal })
+      .then((r) => (gen === navGen ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : NEVER()));
+  };
+  const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
+  // Drawn: something of the page's own that isn't a placeholder (a page's own loading() is one)
+  const pageDrawn = (before) => { const f = main.firstElementChild; return f !== before && !main.querySelector(':scope > .navskel, :scope > .skeleton, :scope > .sk-grid'); };
+  const navigate = (fresh) => {
+    const gen = ++navGen; navCtl.abort(); navCtl = new AbortController();
+    navStop(); const superseded = new Promise((res) => { navStop = res; });
+    let bar = document.getElementById('navprog');
+    if (!bar) { bar = document.createElement('div'); bar.id = 'navprog'; bar.className = 'navprog'; bar.setAttribute('aria-hidden', 'true'); document.body.appendChild(bar); }
+    // One status region outside the page, there before its words change, so "Loading…" is announced
+    let said = document.getElementById('navstatus');
+    if (!said) { said = document.createElement('p'); said.id = 'navstatus'; said.className = 'sr-only'; said.setAttribute('role', 'status'); document.body.appendChild(said); }
+    bar.hidden = false;
+    const before = main.firstElementChild;
+    const skel = fresh ? setTimeout(() => { if (gen === navGen && main.firstElementChild === before) { main.innerHTML = NAV_SKELETON; said.textContent = 'Loading…'; slowNote(main, () => gen === navGen && !!main.querySelector(':scope > .navskel')); } }, 120) : 0;
+    // Settles when the page has drawn its content (not when its slower extras arrive), when its code is
+    // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
+    // (a sidebar place) and the bar never stay busy for good
+    let mo = null; let cap = 0; let drawing = null;
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
+    const rendering = render(); navRendering = rendering; drawing = lastDrawing;
+    return Promise.race([rendering, superseded, drawn]).finally(end);
+  };
+
   // ---- render --------------------------------------------------------------
-  const render = async () => {
+  // The page's code reads through its own `api`, tied to the navigation that draws it (navigate above)
+  let lastDrawing = null;
+  const render = () => {
+    const drawing = { on: true }; lastDrawing = drawing;
+    // A page opened by a press is the page's own reading, not the press's
+    const outer = inHandler; inHandler = 0; let p;
+    try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
+    const drawn = () => { drawing.on = false; }; p.then(drawn, drawn);
+    return p;
+  };
+  const renderPage = async (api) => {
     // The search box is a combobox over the results page only
     if (state.view !== 'search') { search.setAttribute('aria-expanded', 'false'); search.removeAttribute('aria-controls'); search.removeAttribute('aria-activedescendant'); }
     const v = state.view;
@@ -5179,7 +5364,7 @@
             ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : 'Public copy pending: shared on the next sync with your homeserver.')
             : (d.summary.synced ? 'Private on your homeserver.' : 'Private on this node; saved to your homeserver on the next sync.');
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button>${shellMode() === 'desktop' ? `<button class="btn danger" id="pldel">${icon('trash')} Delete</button>` : ''}</div><p class="muted small" role="status">${sharingNote}</p></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button>${shellMode() === 'desktop' && window.innerWidth > 1024 ? `<button class="btn danger" id="pldel">${icon('trash')} Delete</button>` : ''}</div><p class="muted small" role="status">${sharingNote}</p></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`
@@ -5957,9 +6142,9 @@
               <div class="zc-head">${icon('zone')}<h3>${named(z)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
               <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
               <div class="zc-controls">
-                <button class="icon-btn" data-zt="previous" title="Previous">${icon('prev')}</button>
+                <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
-                <button class="icon-btn" data-zt="next" title="Next">${icon('next')}</button>
+                <button class="icon-btn" data-zt="next" data-repeat title="Next">${icon('next')}</button>
                 ${hv ? `<input type="range" data-zvol="${esc(z.id)}" min="${hv.min}" max="${hv.max}" step="${hv.step || 1}" value="${z.volume_db != null ? z.volume_db : hv.max}" aria-label="Volume of ${esc(z.name)}">` : z.id === BROWSER ? `<input type="range" data-zvol="${BROWSER}" min="-60" max="0" value="${Math.round(20 * Math.log10(audio.volume || 1))}" aria-label="Browser volume">` : '<span class="muted small">Volume: set on the device</span>'}
                 ${z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}">Play to</button>`}
                 ${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''}
@@ -5968,7 +6153,7 @@
           const zoneTransport = async (zid, action) => {
             if (zid === BROWSER) { const keep = state.zone; state.zone = BROWSER; try { await transport({ action }); } finally { state.zone = keep; } return; }
             if (action === 'toggle') action = (state.zones[zid] || {}).transport === 'playing' ? 'pause' : 'play';
-            try { const zs2 = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action }); state.zones[zs2.id] = zs2; render(); } catch (e) { toast(e.message, 'error'); }
+            try { const zs2 = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action }, { repeat: action === 'next' || action === 'previous' }); state.zones[zs2.id] = zs2; render(); } catch (e) { toast(e.message, 'error'); }
           };
           $$('[data-zcard]', main).forEach((card) => {
             const zid = card.dataset.zcard;
@@ -6142,6 +6327,7 @@
           if (isListener()) {
             const me = state.me; const info = state.info || await api('GET', '/info');
             const [who] = await loadProfiles([me.key]);
+            if (state.view !== 'settings') return; // they went elsewhere while the profile was looked up
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
@@ -6470,7 +6656,7 @@
               const k = $$('input[name="pinvkind"]', box).find((i) => i.value === draft.kind); if (k) k.checked = true;
               ['pinvname', 'pinvquota', 'pinvkey'].forEach((id) => { $(`#${id}`, box).value = draft[id]; });
             }
-            // Turning a tablet into a phone (or back) folds the sections (or unfolds them)
+            // Turning a desktop window into a phone (or back) folds the sections (or unfolds them)
             box.reshell = () => loadPeople(true);
             const fit = () => {
               const k = kindOf(); const music = k === 'music';
@@ -6565,7 +6751,8 @@
       $$('[data-crumb-kind]', main).forEach((b) => b.onclick = () => (b.dataset.asBack ? $('.pagebar > [data-back]', main).click() : setView('item', { kind: b.dataset.crumbKind, id: b.dataset.crumbId })));
       bindTrackRows(main, lists);
     } catch (e) {
-      main.innerHTML = `<div class="notice warn">${esc(e.message)}</div>`;
+      main.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)} <button class="btn sm" id="navretry">Try again</button></div>`;
+      $('#navretry', main).onclick = () => render();
     }
   };
 
