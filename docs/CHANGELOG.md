@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **The Android app updates itself** (owner's ask). Like the desktop app, it checks once at start on the channel it was built for (edge builds follow edge, releases follow the latest release) and asks "Odeion X is available (this is Y). Install it now?". After Install it downloads the APK for the phone (arm64 on most phones), installs it only when it matches the SHA-256 the release lists, and hands it to Android, which asks you to confirm and installs only an app signed with the same key. The first time, the app explains that Android needs your permission to install apps and opens that setting. A failed check (no network) says nothing. Local builds never check, and the `.aab` has no updater (an app from Google Play updates only through Play). The release feed (`latest.json`) gets an `android` entry; desktop entries stay as they were. Edge builds now show their full version (`0.3.0-412`) on Android too. Checked in CI on Android 15 and 17 emulators: a tampered download is refused, and the right one installs over the app and keeps its data.
+
 ### 2026-11-04
 
 - **Every song shows once, and songs whose files are gone leave the lists** (owner's report, iPad: an album listed each of its 16 songs twice and play-all played only half). The second copy was an old homeserver copy whose file had been removed.

@@ -77,6 +77,19 @@ lists the signed bundle per platform:
 The app installs only bundles signed with the project's key, for the version the signature names (no downgrade by a tampered feed). A Linux `.deb` does not update itself;
 the package manager does.
 
+The Android app (from the `.apk` files) checks the same `latest.json` at start, on the same
+channels. Its `android` entry (left out when the APKs are unsigned) gives the version, the
+versionCode and the SHA-256 of the arm64 and universal APKs; desktops ignore it. The app offers
+an update only when its versionCode is higher, picks the arm64 APK on arm64 phones (the universal
+one elsewhere), downloads it, installs it only when its SHA-256 is the feed's, and hands it to
+Android's installer: Android asks the user to confirm and installs only over an app signed with
+the release key above. The first time, Android asks to allow "Install unknown apps" for Odeion;
+the app explains it and opens that setting. The `.aab` is built without the updater
+(`android-patch.py --without-updater`: no `REQUEST_INSTALL_PACKAGES`, no update check), because
+an app from Google Play may update only through Play. CI: `android-update.yml` installs build N
+on Android 15 and 17 emulators, updates it to N+1 from a local feed and checks that a tampered
+download is refused.
+
 ## Android version codes
 
 `(major·1 000 000 + minor·1 000 + patch) · 1000`, plus the run number for edge builds and 999 for
