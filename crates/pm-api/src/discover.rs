@@ -1230,7 +1230,7 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     let cache_key = if who.is_owner() {
         format!("item.contents.{uri}")
     } else {
-        format!("{}{uri}", contents_prefix_of(who.tag()))
+        format!("{}{uri}", contents_prefix_of(&who.tag()))
     };
     let cached: Option<ItemContents> = {
         let lib = s.library.lock().expect("library poisoned");

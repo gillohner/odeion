@@ -1279,8 +1279,15 @@ pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Versi
 
 // ---- Spotify Connect ----
 
-/// `GET /v1/sources/spotify/devices`: the user's Spotify Connect devices.
-pub(crate) async fn devices(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<SpotifyDevice>> {
+/// `GET /v1/sources/spotify/devices`: the caller's own Spotify Connect devices. Always their own
+/// account, also when they play through the node's sign-ins (accounts::SourcePolicy): devices are
+/// personal, and the node's owner's phone is never listed or started for a listener.
+pub(crate) async fn devices(s: State<Arc<NodeState>>) -> ApiResult<Vec<SpotifyDevice>> {
+    let own = crate::accounts::asking().own();
+    crate::accounts::ASKING.scope(own, devices_for(s)).await
+}
+
+async fn devices_for(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<SpotifyDevice>> {
     need_user(&s)?;
     let v = get_json(&s, "/me/player/devices", &[]).await?;
     let d: Vec<SpotifyDevice> = serde_json::from_value(v["devices"].clone()).unwrap_or_default();
@@ -1288,8 +1295,14 @@ pub(crate) async fn devices(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Sp
 }
 
 /// `POST /v1/sources/spotify/play {uris, device_id?}`: start playback on a
-/// device (the active one when none is given). Premium only, per Spotify.
-pub(crate) async fn play(
+/// device (the active one when none is given). Premium only, per Spotify. With the caller's own
+/// account, as [`devices`].
+pub(crate) async fn play(s: State<Arc<NodeState>>, req: Json<PlayOnSpotify>) -> ApiResult<serde_json::Value> {
+    let own = crate::accounts::asking().own();
+    crate::accounts::ASKING.scope(own, play_for(s, req)).await
+}
+
+async fn play_for(
     State(s): State<Arc<NodeState>>,
     Json(req): Json<PlayOnSpotify>,
 ) -> ApiResult<serde_json::Value> {

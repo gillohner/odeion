@@ -529,3 +529,172 @@ async fn backups_are_readable_by_their_owner_only() {
     let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "{}", file.display());
 }
+
+/// A backup never holds a hash of the API token: the mark of a token an older node record held
+/// (`api.published_token`) stays on the node, and a restore keeps the node's own.
+#[tokio::test]
+async fn a_backup_leaves_out_the_published_token_mark() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let mark = ["fixture", "mark", "of", "a", "token"].join("-");
+    a.library
+        .lock()
+        .unwrap()
+        .set_setting(pm_api::access_token::PUBLISHED_TOKEN_KEY, &mark)
+        .unwrap();
+    for pass in [None, Some("fixture-passphrase")] {
+        let (bytes, _) = pm_api::backup::make(&a, pass).unwrap();
+        let db = pm_api::backup::parse(&bytes).unwrap().database;
+        assert!(
+            !String::from_utf8_lossy(&db).contains(&mark),
+            "the mark is in the backup's library ({pass:?})"
+        );
+    }
+    // Restored on another node: that node's own mark (none) stays
+    let (plain, _) = pm_api::backup::make(&a, None).unwrap();
+    let b = node(dir.path(), "b", None);
+    let (st, r) = restore(&router(b.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        b.library
+            .lock()
+            .unwrap()
+            .get_setting(pm_api::access_token::PUBLISHED_TOKEN_KEY)
+            .unwrap(),
+        None
+    );
+}
+
+/// The library file inside a backup (the zip's `library.db`).
+fn library_db_of(backup: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(backup)).unwrap();
+    let mut f = z.by_name("library.db").unwrap();
+    let mut out = Vec::new();
+    f.read_to_end(&mut out).unwrap();
+    out
+}
+
+/// A backup's plain library keeps no way in: no homeserver signup token, no invite's token and no
+/// party code. With a passphrase they travel locked and a restore brings them back; without one
+/// the invites come back without their links.
+#[tokio::test]
+async fn a_plain_backup_keeps_no_way_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    // Fake values, put together at run time
+    let v = |n: &str| ["fixture", "value", n].join("-");
+    let people = format!(
+        "{{\"people\":[],\"invites\":[{{\"id\":\"i1\",\"access\":\"music\",\"token\":\"{}\",\"created_at\":1}}]}}",
+        v("invite")
+    );
+    let parties = format!(
+        "[{{\"id\":\"p1\",\"code\":\"{}\",\"name\":\"n\",\"zone\":\"z\",\"created_at\":1,\"expires_at\":9999999999,\"adds_per_hour\":5,\"waiting_per_guest\":2}}]",
+        v("party")
+    );
+    {
+        let lib = a.library.lock().unwrap();
+        lib.set_setting("people", &people).unwrap();
+        lib.set_setting("homeserver.owner_signup_token", &v("signup"))
+            .unwrap();
+        lib.set_setting("party.parties", &parties).unwrap();
+        lib.set_setting("vault.signed_out.tidal", &v("vault")).unwrap();
+    }
+    let (plain, manifest) = pm_api::backup::make(&a, None).unwrap();
+    let raw = String::from_utf8_lossy(&library_db_of(&plain)).into_owned();
+    for n in ["invite", "signup", "party", "vault"] {
+        assert!(!raw.contains(&v(n)), "{n} in the plain library");
+    }
+    assert!(
+        manifest.left_out.iter().any(|l| l.contains("invite links")),
+        "{:?}",
+        manifest.left_out
+    );
+    // Restored without a passphrase: the invite, without its link
+    let b = node(dir.path(), "b", None);
+    let (st, r) = restore(&router(b.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    {
+        let lib = b.library.lock().unwrap();
+        let p = lib.get_setting("people").unwrap().unwrap();
+        assert!(p.contains("\"i1\"") && !p.contains(&v("invite")), "{p}");
+        assert_eq!(lib.get_setting("homeserver.owner_signup_token").unwrap(), None);
+    }
+    // Restored without a passphrase on the node it came from: the links, signup token and parties
+    // it has now stay (the plain copy has none to replace them)
+    let (st, r) = restore(&router(a.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    {
+        let lib = a.library.lock().unwrap();
+        let p = lib.get_setting("people").unwrap().unwrap();
+        assert!(p.contains(&v("invite")), "the invite keeps its link: {p}");
+        assert_eq!(
+            lib.get_setting("homeserver.owner_signup_token").unwrap(),
+            Some(v("signup"))
+        );
+        assert_eq!(
+            lib.get_setting("party.parties").unwrap().as_deref(),
+            Some(parties.as_str())
+        );
+    }
+    // Locked with a passphrase: all of it comes back
+    let pass = ["fixture", "passphrase"].join("-");
+    let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
+    let raw = String::from_utf8_lossy(&library_db_of(&locked)).into_owned();
+    assert!(!raw.contains(&v("invite")), "not in the plain part either");
+    let c = node(dir.path(), "c", None);
+    let (st, r) = restore(&router(c.clone()), &locked, Some(&pass)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let lib = c.library.lock().unwrap();
+    // The same list (a restore on the node it came from wrote it again, keys in another order)
+    let json = |t: &str| serde_json::from_str::<serde_json::Value>(t).unwrap();
+    assert_eq!(
+        lib.get_setting("people").unwrap().as_deref().map(json),
+        Some(json(&people))
+    );
+    assert_eq!(
+        lib.get_setting("homeserver.owner_signup_token").unwrap(),
+        Some(v("signup"))
+    );
+    assert_eq!(
+        lib.get_setting("party.parties").unwrap().as_deref(),
+        Some(parties.as_str())
+    );
+}
+
+/// The owner's browser sessions and device sign-ins never go into a backup, and a restore keeps
+/// the node's own: a backup from before Make a new token can't bring back a sign-in that ended.
+#[tokio::test]
+async fn a_restore_never_brings_back_ended_sign_ins() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let hash = |n: &str| ["fixture", "session", "hash", n].join("-");
+    let list = |n: &str| format!("[{{\"hash\":\"{}\",\"key\":\"k\",\"created_at\":1}}]", hash(n));
+    {
+        let lib = a.library.lock().unwrap();
+        lib.set_setting("accounts.owner_sessions", &list("browser"))
+            .unwrap();
+        lib.set_setting("accounts.device_sessions", &list("device"))
+            .unwrap();
+    }
+    let pass = ["fixture", "passphrase"].join("-");
+    let (plain, _) = pm_api::backup::make(&a, None).unwrap();
+    let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
+    for (name, b) in [("plain", &plain), ("locked", &locked)] {
+        let raw = String::from_utf8_lossy(&library_db_of(b)).into_owned();
+        for n in ["browser", "device"] {
+            assert!(!raw.contains(&hash(n)), "{n} sign-in in the {name} backup");
+        }
+    }
+    // Make a new token ended them; the older backup is restored: they stay ended
+    {
+        let lib = a.library.lock().unwrap();
+        lib.delete_setting("accounts.owner_sessions").unwrap();
+        lib.delete_setting("accounts.device_sessions").unwrap();
+    }
+    let (st, r) = restore(&router(a.clone()), &locked, Some(&pass)).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let lib = a.library.lock().unwrap();
+    assert_eq!(lib.get_setting("accounts.owner_sessions").unwrap(), None);
+    assert_eq!(lib.get_setting("accounts.device_sessions").unwrap(), None);
+}

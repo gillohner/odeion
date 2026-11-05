@@ -343,7 +343,30 @@ fn wait_for_writer(tries: i32) -> bool {
 }
 
 impl Library {
+    /// Opens (or makes) the library at `path`. A new one is readable by the node's user alone
+    /// (it holds sign-ins); SQLite gives its journal files the same permissions.
     pub fn open(path: &Path) -> Result<Self> {
+        // A new one is made empty and 0600 first, so it is never readable by others, not even
+        // for the moment between SQLite creating it and the first write
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+            {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(LibraryError::Io {
+                        path: path.to_path_buf(),
+                        source: e,
+                    })
+                }
+            }
+        }
         let conn = Connection::open(path)?;
         Self::init(conn)
     }
@@ -6351,5 +6374,19 @@ mod identify_tests {
         let took = t0.elapsed();
         // a few tens of ms here; the quadratic plan took seconds
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
+    /// A new library file is readable by the node's user alone: it holds sign-ins.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_library_is_the_nodes_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.sqlite");
+        let _lib = Library::open(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

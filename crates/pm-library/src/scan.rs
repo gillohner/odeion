@@ -94,13 +94,18 @@ impl<'a> Scanner<'a> {
         if self.lib.album_art(album_id)?.is_some() {
             return Ok(());
         }
-        if let Some(pic) = &tags.picture {
+        // An embedded picture counts by what its bytes are, not by the type its tag claims
+        let embedded = tags
+            .picture
+            .as_ref()
+            .and_then(|pic| crate::image::image_type(&pic.data).map(|mime| (pic, mime)));
+        if let Some((pic, mime)) = embedded {
             std::fs::create_dir_all(art_dir).map_err(|e| LibraryError::Io {
                 path: art_dir.clone(),
                 source: e,
             })?;
             let hash = blake3::hash(&pic.data).to_hex();
-            let file = art_dir.join(format!("{}.{}", &hash[..32], pic.extension()));
+            let file = art_dir.join(format!("{}.{}", &hash[..32], crate::image::image_extension(mime)));
             if !file.exists() {
                 std::fs::write(&file, &pic.data).map_err(|e| LibraryError::Io {
                     path: file.clone(),
@@ -110,7 +115,7 @@ impl<'a> Scanner<'a> {
             return self.lib.set_album_art(&crate::db::AlbumArt {
                 album_id,
                 file,
-                mime: pic.mime.clone(),
+                mime: mime.into(),
                 source: "embedded".into(),
             });
         }
@@ -739,13 +744,14 @@ fn cover_in(dir: &Path) -> Option<(PathBuf, String)> {
         else {
             continue;
         };
-        let mime = match ext.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "webp" => "image/webp",
-            _ => continue,
-        };
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp") {
+            continue;
+        }
         let Some(rank) = FOLDER_COVERS.iter().position(|n| *n == stem) else {
+            continue;
+        };
+        // What the file is, by its first bytes, not its name
+        let Some(mime) = crate::image::file_image_type(&p) else {
             continue;
         };
         if best.as_ref().is_none_or(|(r, _, _)| rank < *r) {
@@ -978,7 +984,7 @@ mod tests {
         write_album_wav(&d.join("Mix/CD1/01.wav"), "One", "Sefa", "Mix", false);
         write_album_wav(&d.join("Mix/CD1/02.wav"), "Two", "Dr. Peacock", "Mix", false);
         write_album_wav(&d.join("Mix/CD 2/01.wav"), "Three", "Cyclon", "Mix", false);
-        fs::write(d.join("Mix/cover.jpg"), b"\xff\xd8jpeg").unwrap();
+        fs::write(d.join("Mix/cover.jpg"), b"\xff\xd8\xffjpeg").unwrap();
         // A compilation flag alone is enough.
         write_album_wav(&d.join("Comp/01.wav"), "Four", "Angerfist", "Comp", true);
         // One artist with a guest: the album stays the artist's.
@@ -1075,7 +1081,7 @@ mod tests {
             mime_type: "image/png".into(),
             picture_type: id3::frame::PictureType::CoverFront,
             description: String::new(),
-            data: vec![0x89, b'P', b'N', b'G', 1, 2, 3],
+            data: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3],
         });
         t.write_to_path(&wav, id3::Version::Id3v24).unwrap();
         // Album B: no picture, a Folder.jpg beside the file.
@@ -1084,7 +1090,7 @@ mod tests {
         let mut t = id3::Tag::read_from_path(&wav_b).unwrap();
         t.set_album("Album B");
         t.write_to_path(&wav_b, id3::Version::Id3v24).unwrap();
-        fs::write(b.join("Folder.jpg"), b"\xff\xd8jpeg").unwrap();
+        fs::write(b.join("Folder.jpg"), b"\xff\xd8\xffjpeg").unwrap();
         fs::write(b.join("back.png"), b"png").unwrap();
 
         let lib = Library::open_in_memory().unwrap();
@@ -1098,7 +1104,7 @@ mod tests {
         assert!(art_a.file.starts_with(&art));
         assert_eq!(
             fs::read(&art_a.file).unwrap(),
-            vec![0x89, b'P', b'N', b'G', 1, 2, 3]
+            vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3]
         );
         let art_b = lib.album_art(find("Album B")).unwrap().unwrap();
         assert_eq!(art_b.source, "folder");

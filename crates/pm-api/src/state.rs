@@ -168,9 +168,13 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Target>>,
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
-    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
+    /// a device of the owner's).
     pub controller_logins: tokio::sync::Mutex<
-        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
+        std::collections::HashMap<
+            String,
+            (pm_pubky::homeserver::LoginFlow, std::time::Instant, String, bool),
+        >,
     >,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
@@ -189,6 +193,9 @@ pub struct NodeState {
     pub sleep: Mutex<HashMap<ZoneId, SleepTimer>>,
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
+    /// Held while the people roster is read, changed and stored (`people::update`), so no change
+    /// is made to a copy older than one stored meanwhile.
+    pub(crate) roster: tokio::sync::Mutex<()>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -264,6 +271,9 @@ fn load_sources_off(lib: &Library) -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Outputs found on the network (discovery, Squeezebox players) are added while the node has
+/// fewer outputs than this.
+pub const MAX_FOUND_OUTPUTS: usize = 256;
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 /// Endpoint addresses (the desktop app's player) it registered.
@@ -449,6 +459,7 @@ impl NodeState {
             vault_pass: tokio::sync::Mutex::new(()),
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
+            roster: tokio::sync::Mutex::new(()),
             discover: Mutex::new(None),
             endpoint_keys: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
@@ -935,8 +946,28 @@ impl NodeState {
             .clone()
     }
 
-    /// Start the Slimproto server (players connect to us) and the UDP
-    /// discovery responder. Call from inside the tokio runtime. Each connecting player becomes an output with a
+    /// The pull output for a device found on the network: the one registered under `name`, or a new
+    /// one that is registered only once the device is taken ([`Self::keep_pull`]). A device the node
+    /// turns away (no room, already known, unreachable) leaves nothing behind.
+    fn found_pull(&self, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
+        self.pulls
+            .lock()
+            .expect("pulls lock")
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(pm_zones::outputs::PullOutput::controlled(name)))
+    }
+
+    /// Registers a found device's pull output ([`Self::found_pull`]) for the HTTP route, once the
+    /// device was taken.
+    fn keep_pull(&self, name: &str, pull: Arc<pm_zones::outputs::PullOutput>) {
+        self.pulls
+            .lock()
+            .expect("pulls lock")
+            .entry(name.to_string())
+            .or_insert(pull);
+    }
+
     /// Offer every zone as a UPnP/DLNA MediaRenderer (`pm-renderer`): SSDP on the LAN, the
     /// device and control routes on the API port (merged by `router`, no token). Call from
     /// inside the runtime, before building the router. The advertiser lives as long as the
@@ -958,12 +989,51 @@ impl NodeState {
         }
     }
 
-    /// zone; its pull stream is registered for the HTTP route.
+    /// Whether one more output found on the network (discovery, Squeezebox players) may be added:
+    /// at most [`MAX_FOUND_OUTPUTS`] outputs in all, so a network announcing endless devices
+    /// can't fill the node with zones. Warns once each time the node is full.
+    pub(crate) fn room_for_found_output(&self) -> bool {
+        static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if self.outputs.len() < MAX_FOUND_OUTPUTS {
+            FULL.store(false, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+        if !FULL.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                outputs = self.outputs.len(),
+                "no more outputs added from the network: the node has as many as it takes"
+            );
+        }
+        false
+    }
+
+    /// Register `out`, found on the network, if [`Self::room_for_found_output`]; the check and the
+    /// registration are one step, so outputs found at the same time can't pass the cap together.
+    pub(crate) fn add_found_output(&self, out: Arc<dyn Output>) -> bool {
+        static ADDING: Mutex<()> = Mutex::new(());
+        let _one = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.room_for_found_output() {
+            return false;
+        }
+        self.outputs.register(out);
+        true
+    }
+
+    /// Start the Slimproto server (players connect to us) and the UDP discovery responder. Call
+    /// from inside the tokio runtime. Each connecting player becomes an output with a zone; its
+    /// pull stream is registered for the HTTP route.
     pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
+        self.start_slimproto_on(None)
+    }
+
+    /// [`Self::start_slimproto`] on one address (`None`: all of them). On a loopback address the
+    /// discovery responder stays off: only players on this machine can connect.
+    pub fn start_slimproto_on(self: &Arc<Self>, bind: Option<std::net::IpAddr>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {
             return Ok(());
         }
-        let listener = std::net::TcpListener::bind(("0.0.0.0", self.slimproto_port))?;
+        let bind = bind.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let listener = std::net::TcpListener::bind((bind, self.slimproto_port))?;
         let web_port = url::Url::parse(&self.public_url)
             .ok()
             .and_then(|u| u.port_or_known_default())
@@ -974,22 +1044,28 @@ impl NodeState {
         let state = self.clone();
         // Players connect on the server's own threads; zones need the runtime.
         let runtime = tokio::runtime::Handle::current();
-        // Once per player: a player that reconnects keeps its output and zone.
-        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
-            let _rt = runtime.enter();
-            let name = out.pull().stream_name().to_string();
-            state
-                .pulls
-                .lock()
-                .expect("pulls lock")
-                .insert(name, out.pull().clone());
-            let zone_name = out.name();
-            state.outputs.register(out.clone());
-            if state.zones.list().iter().all(|z| z.output != out.id()) {
-                state.create_zone(&zone_name, out);
-            }
-        });
+        // Once per player: a player that reconnects keeps its output and zone. A player the node
+        // has no room for is turned away, and offered again when it reconnects.
+        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) -> bool + Send + Sync> =
+            Arc::new(move |out| {
+                let _rt = runtime.enter();
+                if !state.add_found_output(out.clone()) {
+                    return false;
+                }
+                let name = out.pull().stream_name().to_string();
+                state
+                    .pulls
+                    .lock()
+                    .expect("pulls lock")
+                    .insert(name, out.pull().clone());
+                let zone_name = out.name();
+                if state.zones.list().iter().all(|z| z.output != out.id()) {
+                    state.create_zone(&zone_name, out);
+                }
+                true
+            });
         let name = self.name.clone();
+        let port = self.slimproto_port;
         std::thread::Builder::new()
             .name("slimproto".into())
             .spawn(move || {
@@ -997,14 +1073,16 @@ impl NodeState {
                     tracing::warn!("slimproto server stopped: {e}");
                 }
             })?;
-        std::thread::Builder::new()
-            .name("slimproto-discovery".into())
-            .spawn(move || {
-                if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
-                    tracing::info!("slimproto discovery responder unavailable: {e}");
-                }
-            })?;
-        tracing::info!(port = self.slimproto_port, "Slimproto server listening");
+        if !bind.is_loopback() {
+            std::thread::Builder::new()
+                .name("slimproto-discovery".into())
+                .spawn(move || {
+                    if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
+                        tracing::info!("slimproto discovery responder unavailable: {e}");
+                    }
+                })?;
+        }
+        tracing::info!(%bind, port, "Slimproto server listening");
         Ok(())
     }
 
@@ -1043,6 +1121,9 @@ impl NodeState {
         if self.outputs.get(&id).is_some() {
             return None;
         }
+        if !self.room_for_found_output() {
+            return None;
+        }
         // What it accepts decides how the stream is offered; a renderer that takes no PCM stream
         // (some TVs play only MP3/AAC files) gets no zone, rather than one that always fails.
         let sinks = pm_out_upnp::dlna::sink_protocols(&r).unwrap_or_else(|e| {
@@ -1053,12 +1134,16 @@ impl NodeState {
             tracing::info!(renderer = %r.friendly_name, "UPnP renderer accepts no PCM stream (WAV or LPCM); no zone");
             return None;
         };
-        let pull = self.pull_output(&name);
+        let pull = self.found_pull(&name);
         let out = Arc::new(
-            pm_out_upnp::UpnpOutput::new(r.clone(), pull, self.pull_url(&name))
+            pm_out_upnp::UpnpOutput::new(r.clone(), pull.clone(), self.pull_url(&name))
                 .with_stream_kind(kind.clone())
                 .with_describe(self.describe_for_renderers()),
         );
+        if !self.add_found_output(out.clone()) {
+            return None;
+        }
+        self.keep_pull(&name, pull);
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
         if pm_out_upnp::heos::is_heos(&r) {
             self.heos
@@ -1072,7 +1157,6 @@ impl NodeState {
                 .expect("sonos lock")
                 .insert(id.clone(), out.clone());
         }
-        self.outputs.register(out.clone());
         self.create_zone(&r.friendly_name, out);
         Some(id)
     }
@@ -1163,6 +1247,21 @@ impl NodeState {
         );
     }
 
+    /// A key cell for one endpoint: when one of its outputs reports another device (a phone's
+    /// USB DAC came or went), every owner's controller hears `outputs_changed`. Only for outputs
+    /// the node lists already: a new one is announced once it is registered
+    /// (`add_endpoint_address`), so a controller that fetches the outputs at once finds it.
+    fn endpoint_cell(&self, key: pm_stream::Key) -> pm_out_net::KeyCell {
+        let cell = pm_out_net::KeyCell::new(key);
+        let (events, outputs) = (self.events.clone(), self.outputs.clone());
+        cell.on_device_change(move |id| {
+            if outputs.get(id).is_some() {
+                events.send(ApiEvent::OutputsChanged { output: id.clone() });
+            }
+        });
+        cell
+    }
+
     /// The endpoint keys, loaded on first use; run `f` with them, saving when it says so.
     fn with_endpoint_keys<T>(
         &self,
@@ -1177,7 +1276,7 @@ impl NodeState {
                 .unwrap_or_default();
             stored
                 .into_iter()
-                .filter_map(|(a, k)| Some((a, pm_out_net::KeyCell::new(pm_stream::Key::parse(&k).ok()?))))
+                .filter_map(|(a, k)| Some((a, self.endpoint_cell(pm_stream::Key::parse(&k).ok()?))))
                 .collect()
         });
         let (out, changed) = f(keys);
@@ -1215,7 +1314,7 @@ impl NodeState {
                 (c, Some(old))
             }
             (Some(c), None) => (c, None),
-            (None, Some(k)) => (pm_out_net::KeyCell::new(k.clone()), None),
+            (None, Some(k)) => (self.endpoint_cell(k.clone()), None),
             (None, None) => {
                 return Err("no key stored for it; the app registers it again on its next start".into())
             }
@@ -1251,6 +1350,10 @@ impl NodeState {
                 let name = out.name();
                 self.outputs.register(out.clone());
                 self.create_zone(&name, out.clone());
+                // Its device (a DAC already plugged in) now that GET /v1/outputs lists it
+                if out.device().is_some() {
+                    self.events.send(ApiEvent::OutputsChanged { output: id.clone() });
+                }
             }
             infos.push(out.info());
         }
@@ -1320,18 +1423,24 @@ impl NodeState {
                     .take(32)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(
-                pm_out_cast::CastOutput::new(d.clone(), pull, self.pull_url(&name))
+                pm_out_cast::CastOutput::new(d.clone(), pull.clone(), self.pull_url(&name))
                     .with_describe(self.describe_for_renderers()),
             );
             let id = out.id();
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(device = %d.friendly_name, output = %id, "Cast device");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
+            self.keep_pull(&name, pull);
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1374,14 +1483,17 @@ impl NodeState {
                     .take(40)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(pm_out_mpd::MpdOutput::new(
                 server.clone(),
-                pull,
+                pull.clone(),
                 self.pull_url(&name),
             ));
             let id = out.id();
             if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            if !self.room_for_found_output() {
                 continue;
             }
             match pm_out_mpd::Client::connect(&server) {
@@ -1393,8 +1505,11 @@ impl NodeState {
                     continue;
                 }
             }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
+            self.keep_pull(&name, pull);
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1420,23 +1535,29 @@ impl NodeState {
                     .take(32)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(pm_out_bluos::BluosOutput::new(
                 p.clone(),
-                pull,
+                pull.clone(),
                 self.pull_url(&name),
             ));
             let id = out.id();
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
+            self.keep_pull(&name, pull);
             tracing::info!(player = %p.name, output = %id, "BluOS player");
             self.bluos_players
                 .lock()
                 .expect("bluos lock")
                 .insert(id.clone(), out.clone());
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1462,9 +1583,14 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(receiver = %d.name, output = %id, "AirPlay receiver");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1495,9 +1621,14 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(group = %out.name(), output = %id, "Snapcast group");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1524,8 +1655,13 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let name = out.name();
-            self.outputs.register(out.clone());
             new.push(id);
             self.create_zone(&name, out);
         }

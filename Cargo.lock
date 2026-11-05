@@ -4097,8 +4097,16 @@ dependencies = [
  "alsa-sys",
  "async-trait",
  "cpal",
+ "pm-audio",
+ "pm-endpoint",
  "pm-model",
+ "pm-out-net",
+ "pm-stream",
+ "pm-usb-audio",
  "pm-zones",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -4126,6 +4134,7 @@ dependencies = [
  "pm-model",
  "pm-stream",
  "pm-zones",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -4236,6 +4245,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-usb-audio"
+version = "0.2.2"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

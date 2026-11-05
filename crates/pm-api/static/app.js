@@ -2254,8 +2254,93 @@
   // the protocol of its output id, and the device's maker and model when the node knows them
   // (`model` in GET /v1/outputs); the id itself stays as the tooltip.
   const PROTO_WORDS = { alsa: 'ALSA DAC', cpal: 'System audio', null: 'Null output, for developers', pull: 'Pull stream', upnp: 'UPnP', airplay: 'AirPlay', cast: 'Chromecast', slim: 'Squeezelite', snapcast: 'Snapcast', mpd: 'MPD', net: 'The app', group: 'Group', rec: 'Recording', wav: 'WAV file', clock: 'Clock', bluos: 'BluOS', heos: 'HEOS', get browser() { return hereName(); } };
+  // A USB DAC on the app's own output (a phone): the node reports it as that output's `device`
+  // (GET /v1/outputs). Android's mixer still plays it ("shared"); a mode other than shared shows
+  // only when the node says the phone confirmed it for what plays now.
+  const DAC_MODE = { bit_perfect: 'Bit-perfect', exclusive: 'Exclusive USB', shared: 'Shared' };
+  const DAC_HELP = { shared: 'Android plays it through its own mixer, which mixes in other sounds and usually converts the music to 48 kHz.' };
+  const deviceOf = (z) => { const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null; };
+  // Anything but shared only when confirmed: bit-perfect is said only for mode bit_perfect with
+  // confirmed true; an unconfirmed or unknown mode reads as shared
+  const dacMode = (d) => (d.confirmed === true && (d.mode === 'bit_perfect' || d.mode === 'exclusive') ? d.mode : 'shared');
+  const dacShort = (d) => ({ bit_perfect: 'bit-perfect', exclusive: 'exclusive USB', shared: 'shared' })[dacMode(d)];
+  const dacUnconfirmed = (d) => (d.mode === 'bit_perfect' && d.confirmed !== true ? 'Android has not confirmed bit-perfect for this format.' : d.mode === 'exclusive' && d.confirmed !== true ? 'Exclusive USB mode is not confirmed for this format.' : '');
+  const dacWords = (d) => `${d.name} · ${dacShort(d)}`;
+  // What the zone's DAC does with what plays now: bit-perfect only when the phone confirmed it for
+  // this very format (the device's `format`) and the node's own path changes nothing (no volume,
+  // DSP or conversion); otherwise shared, and why when the node knows
+  const dacNow = (z) => {
+    const d = deviceOf(z); if (!d) return null;
+    const np = z && z.now_playing; const f = np && np.output_format;
+    if (!f) return { bp: false, d, why: '' };
+    const same = !!(d.format && d.format.rate_hz === f.rate_hz && d.format.bits === f.bits && d.format.channels === f.channels);
+    const clean = !!(np.signal_path && headline(np.signal_path) === 'bit_perfect');
+    if (dacMode(d) === 'bit_perfect' && same && clean) return { bp: true, d, f };
+    const why = !same ? '' : dacMode(d) === 'bit_perfect' ? 'the node changes the samples (volume, DSP or a conversion)'
+      : (dacUnconfirmed(d) || d.note || '').replace(/\.$/, '');
+    return { bp: false, d, f, why };
+  };
+  // The path as the listener hears it: the node's stages, then what the phone does with its DAC.
+  // Bit-perfect only as dacNow says (confirmed for this format, nothing changed on the way);
+  // otherwise Android's mixer, which may convert and mixes in other sounds: every headline, badge
+  // and label built from this path follows, so none says bit-perfect for a shared DAC
+  const zoneNp = (z, np) => {
+    const n = np && np.signal_path && dacNow(z);
+    if (!n) {
+      // The system's shared output (a phone without a DAC, or one the node no longer knows; a
+      // computer's system audio): its mixer is in the path too, so it is never bit-perfect
+      if (!np || !np.signal_path || !/(^|\/)cpal:/.test(String((z && z.output) || ''))) return np;
+      const of = np.output_format;
+      const st = { name: 'system mixer', in_format: of, out_format: of, quality: 'lossless', note: 'shared: the system may convert it and mixes in other sounds' };
+      return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, st] } };
+    }
+    const of = np.output_format;
+    const stage = n.bp
+      ? { name: 'DAC', in_format: of, out_format: of, quality: 'bit_perfect', note: `Android confirmed bit-perfect to ${n.d.name}` }
+      : { name: 'Android mixer', in_format: of, out_format: of, quality: 'lossless', note: `shared: Android may convert it and mixes in other sounds${n.why ? `; ${n.why}` : ''}` };
+    return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, stage] } };
+  };
+  // Bit-perfect at full level below Android's full volume (the listener agreed): said wherever it
+  // plays, for as long as it applies
+  const fullLevelNote = (z) => {
+    const n = deviceOf(z) && dacNow(z); const d = n && n.d;
+    return n && n.bp && d.settings && d.settings.full_level_ok && d.media_volume != null && d.media_volume < 100
+      ? `Bit-perfect plays at full level: Android’s volume (${d.media_volume}%) does not apply. Set the level on the DAC or amplifier.` : '';
+  };
+  // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
+  const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? 'bit-perfect' : 'shared'}` : ''; };
+  // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"
+  const dacLine = (z) => {
+    const n = dacNow(z); if (!n) return '';
+    if (n.bp) return `Bit-perfect · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
+    return `Shared · ${n.d.name}${n.why ? ` · ${n.why}` : ''}`;
+  };
+  const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? ({ native: 'DSD (native)', dop: 'DSD (DoP)' })[d.dsd] || 'DSD' : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
+  // This app's own output (the app tells the page after it registers its player), with its device
+  const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
+  const hereDevice = () => (window.pmDesktop && window.pmDesktop.platform === 'android' ? 'This phone' : 'This computer');
+  // A DAC plugged in or out: the app registers its player again and says so
+  // (also once after each page load), and the node tells every controller (`outputs_changed`):
+  // the outputs again, then the bar, the Sound panel and the picker; Settings draws again when it
+  // shows another device than this app's
+  const appDevice = () => JSON.stringify((appOutput() || {}).device || null);
+  // One loader for GET /v1/outputs, used by every refresh and Settings: one request at a time,
+  // one more after it when asked meanwhile (the answer in flight may predate the change), and an
+  // answer older than the newest installed is never installed
+  const outputsLoad = { seq: 0, applied: 0, inflight: null, again: false };
+  const loadOutputs = () => {
+    if (outputsLoad.inflight) { outputsLoad.again = true; return outputsLoad.inflight; }
+    const seq = ++outputsLoad.seq;
+    outputsLoad.inflight = api('GET', '/outputs')
+      .then((o) => { if (seq > outputsLoad.applied) { outputsLoad.applied = seq; state.outputs = o; } return state.outputs; })
+      .finally(() => { outputsLoad.inflight = null; if (outputsLoad.again) { outputsLoad.again = false; refreshOutputs(); } });
+    return outputsLoad.inflight;
+  };
+  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
+  window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
     if (z.id === BROWSER) return appPlatform() ? 'The app plays the files itself' : 'Streams the files to this browser';
+    if (deviceOf(z)) return dacWordsFor(z);
     const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
     return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
   };
@@ -2478,7 +2563,7 @@
     renderZonePop();
     zonePop.hidden = false; $('#scrim').hidden = false; pushTransient();
     // The devices' models: the owner's output list, fetched once
-    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
+    if (isOwner() && !state.outputs) loadOutputs().then(() => { if (!zonePop.hidden) renderZonePop(); renderBar(); }).catch(() => {});
   };
   // The tabs' Library: the library page last open
   const libHome = () => state.lastLib || 'library';
@@ -2823,22 +2908,26 @@
     // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
     // its title there); with a mouse the bar's title and artist are links of their own
     if (!waitHtml && !errHtml && !barPlain()) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+    // Paused because its device went away (a USB DAC unplugged): said where the artist is
+    if (!waitHtml && !errHtml && z.transport === 'paused' && z.error) { const sub = $('#np .np-sub'); if (sub) sub.innerHTML = `<span class="warn-text" role="alert">${esc(z.error)}</span>`; }
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
     // and whether DSP is on; on phones the device and a quality badge (CSS swaps .qtext for .qshort)
-    const h = np.signal_path ? headline(np.signal_path) : null;
+    const zp = zoneNp(z, np);
+    const h = zp.signal_path ? headline(zp.signal_path) : null;
     const dsp = dspOn(np);
     q.className = 'quality ' + (h ? 'q-' + h : '') + (dsp ? ' dsp' : '');
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
     $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
-    const words = np.signal_path || np.format ? pathSummary(np) : playedBy();
+    const dv = deviceOf(z);
+    const words = (np.signal_path || np.format ? pathSummary(zp) : playedBy()) + (dv ? ` → ${dacWordsFor(z)}` : '');
     $('.qtext', q).textContent = words;
     $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
     $('.qshort', q).innerHTML = `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`;
     q.setAttribute('aria-label', `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`);
-    q.title = np.signal_path ? np.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote();
+    q.title = zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote();
     syncQPanel();
   };
   // ---- immediate feedback on play (owner, 2026-10-29) ----
@@ -2885,7 +2974,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) + fullLevelNote(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -2936,11 +3025,11 @@
     }
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
-      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span>${fullLevelNote(z) ? `<span class="sub warn-text" role="status">${esc(fullLevelNote(z))}</span>` : ''}</span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? decodedBy() : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
-      ${np && np.signal_path ? pathHtml(np, 'compact') : `<p class="qp-note">${isBrowser() ? decodeNote() : 'Nothing playing.'}</p>`}
+      ${np && np.signal_path ? pathHtml(zoneNp(z, np), 'compact') : `<p class="qp-note">${isBrowser() ? decodeNote() : 'Nothing playing.'}</p>`}
       <div class="pop-title">DSP · ${esc(z.name)}</div>
       <div class="qp-dsp">${dsp}</div>`;
     qPanelKey = qpKey();
@@ -2955,7 +3044,7 @@
     renderQPanel();
     qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; $(opener).setAttribute('aria-expanded', 'true'); pushTransient();
     loadDsp();
-    if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
+    if (isOwner() && !state.outputs) loadOutputs().then(() => syncQPanel()).catch(() => {});
   };
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
@@ -3070,7 +3159,7 @@
     const q = (isBrowser() ? state.browserQueue : state.queue) || [];
     const idx = z.queue_index != null && q[z.queue_index] && q[z.queue_index].id === it.id ? z.queue_index : q.findIndex((x) => x.id === it.id);
     const rest = idx >= 0 ? q.slice(idx + 1) : [];
-    const h = np.signal_path ? headline(np.signal_path) : null;
+    const h = np.signal_path ? headline(zoneNp(z, np).signal_path) : null;
     const colour = Q_COLOUR;
     const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
     const sheet = npSheetNow();
@@ -3084,7 +3173,7 @@
       }
       if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
       if (k === 'details') {
-        return pathHtml(np)
+        return pathHtml(zoneNp(z, np))
             + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
       }
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
@@ -3117,7 +3206,7 @@
     // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
     const nv = $('#npvol', overlay); if (nv) { applyVol(nv, zoneVolume(z)); bindVolSlider(nv, currentZone); syncVolumeSliders(z); }
-    else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
+    else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = loadOutputs().then(() => { if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
@@ -3333,11 +3422,13 @@
   // Settings in four groups, by where each setting is saved (STEWARD-SETTINGS-GROUPS.md, docs/ux/responsive.md):
   // You (your homeserver), This device, This node (admin), This homeserver (admin, with a bundled one)
   const SETTINGS_GROUPS = { you: 'Saved on your homeserver: follows you to every node and device', device: 'Only on this device', node: 'For everyone on this node', homeserver: 'The homeserver this node runs' };
-  const settingsTabs = ({ saved = {}, bundled = false, tunnel = false }) => [
+  const settingsTabs = ({ saved = {}, bundled = false, tunnel = false, dac = null }) => [
     { group: 'you', title: 'You', saved: saved.you || SETTINGS_GROUPS.you },
     ['accounts', 'My accounts', 'artist'], ['home', 'Home', 'home'], ['quality', 'Playback quality', 'zone'], ['playfrom', 'Play from', 'play'],
     { group: 'device', title: 'This device', saved: saved.device || SETTINGS_GROUPS.device },
     ['appearance', 'Display', 'sun'],
+    // The app's own output with a USB DAC on it (`dac`: "This phone"), read-only for now
+    ...(dac ? [['dac', dac, 'zone']] : []),
     { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
     ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['playback', 'Zones and outputs', 'zone'],
     ['nodehome', 'Home for everyone', 'home'],
@@ -3345,7 +3436,7 @@
     ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['about', 'About and updates', 'info'],
     ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
   ];
-  const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true }).filter(Array.isArray); // every tab, for routes
+  const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true, dac: 'This phone' }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
   const NAV_VIEWS = ['library', 'home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
   const VIEW_LABELS = { library: 'Your library', downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
@@ -6412,7 +6503,7 @@
           break;
         }
         case 'zones': {
-          const outs = isListener() ? [] : state.outputs || (state.outputs = await api('GET', '/outputs').catch(() => []));
+          const outs = isListener() ? [] : state.outputs || (await loadOutputs().catch(() => []));
           if (state.view !== 'zones') return;
           const capsOf = (z) => (outs.find((o) => o.id === z.output) || {}).caps || null;
           const zs = zoneList();
@@ -6610,23 +6701,28 @@
           if (isListener()) {
             const me = state.me; const info = state.info || await api('GET', '/info');
             const [who] = await loadProfiles([me.key]);
+            const ms = await api('GET', '/me/sources').catch(() => null); // whose music-service sign-ins they play with
             if (state.view !== 'settings') return; // they went elsewhere while the profile was looked up
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
             const zonesText = me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
+            const srcNote = !ms ? '' : ms.plays_with === 'node' ? 'TIDAL, Qobuz and Spotify play through this node’s sign-ins.' : 'TIDAL, Qobuz and Spotify play with your own sign-ins.';
+            const srcCtl = ms && ms.may_choose ? `<div class="chips" role="radiogroup" aria-label="Whose sign-ins">${[['node', 'This node’s'], ['own', 'My own']].map(([v, l]) => `<button class="chip scope ${ms.use === v ? 'on' : ''}" role="radio" aria-checked="${ms.use === v}" data-mysrc="${v}">${l}</button>`).join('')}</div>` : '';
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), `<button class="btn" id="lsignout">${icon('logout')} Log out</button>`)
-                + row(`On ${esc(info.name)}`, `You can play its music ${hereIn()} and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, ''))
+                + row(`On ${esc(info.name)}`, `You can play its music ${hereIn()} and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, '')
+                + (ms ? row('Music services', srcNote + (ms.may_choose ? ' You choose; your own sign-ins stay kept either way.' : ''), srcCtl) : ''))
               + group('Play from', row('Your personal source order', 'Applies to every playlist you play.', '<div id="gorder"></div>'))
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             loadOrder();
             $('#lsignout').onclick = logOut;
+            $$('[data-mysrc]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/sources', { use: b.dataset.mysrc }); toast(b.dataset.mysrc === 'own' ? 'You play with your own sign-ins' : 'You play through this node’s sign-ins'); render(); } catch (e) { toast(e.message, 'error'); } });
             break;
           }
           const info = await api('GET', '/info'); state.info = info;
-          const outs = await api('GET', '/outputs');
+          const outs0 = await loadOutputs();
           const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
           // The homeserver bundled with the node (deploy/bundle) and its Cloudflare Tunnel, when there is one
           const bundled = await api('GET', '/homeserver/bundled').catch(() => null);
@@ -6644,7 +6740,9 @@
           const saved = Object.fromEntries(((nodeMap && nodeMap.groups) || []).map((g) => [g.id, g.saved]));
           // One topic per tab, settings as rows (STEWARD-UX-SETTINGS.md). Every panel is in the page
           // (their controls stay wired); only the chosen one shows. On a phone: the list, then a tab.
-          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available) }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
+          // The newest outputs, not the answer fetched before the awaits above (a change since wins)
+          const outs = state.outputs || outs0; const myOut = appOutput(); const dv = myOut && myOut.device; state.dacDrawn = appDevice();
+          const tabs = sideTabs({ view: 'settings', title: 'Settings', tabs: settingsTabs({ saved, bundled: !!(bundled && bundled.configured), tunnel: !!(tunnel && tunnel.available), dac: dv ? hereDevice() : null }), prefix: 'set', ids: { backup: 'backupcard', import: 'roonmove' }, remembered: state.settingsTab });
           const { phone, active } = tabs;
           if (active) state.settingsTab = active;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -6715,15 +6813,43 @@
           // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
           const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
           const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? (() => { const [x, y] = splitNote(a.limits); return help(esc(x)) + (y ? `<details class="small morenote"><summary>More</summary><p class="set-help">${esc(y)}</p></details>` : ''); })() : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
-          const appsTab = group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
+          // Whose TIDAL, Qobuz and Spotify sign-ins listeners play with (owner, 2026-11-03)
+          const SRC_POLICIES = [['node', 'This node’s', 'Everyone plays TIDAL, Qobuz and Spotify through the sign-ins made here. Listeners can’t sign in to their own.'], ['own', 'Each person’s own', 'Everyone signs in to their own accounts; a listener without one gets “Open in” instead.'], ['choice', 'Each person chooses', 'This node’s by default; each listener may switch to their own.']];
+          const curPolicy = ns.sources_policy || 'own';
+          const policyTab = group('Sources for everyone', row('Whose sign-ins people play with', (SRC_POLICIES.find(([v]) => v === curPolicy) || SRC_POLICIES[1])[2] + ' Switching keeps every sign-in, yours and theirs.', `<div class="chips" role="radiogroup" aria-label="Whose sign-ins people play with">${SRC_POLICIES.map(([v, l]) => `<button class="chip scope ${curPolicy === v ? 'on' : ''}" role="radio" aria-checked="${curPolicy === v}" data-srcpolicy="${v}">${l}</button>`).join('')}</div>`));
+          const appsTab = policyTab + group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
             + row('Status', '', bundled.reachable ? `<span class="pill ok">Running${bundled.version ? ` · ${esc(bundled.version)}` : ''}</span>` : `<span class="pill bad">Not reachable</span>${bundled.error ? ` <span class="muted small">${esc(bundled.error)}</span>` : ''}`)
             + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
-          main.innerHTML = tabs.page(`${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
+          // This phone: the USB DAC this app plays through, what it takes and how it is played (no choices yet)
+          // The zone on this output: what its DAC does with what plays now
+          const dz = myOut ? zoneList().find((z) => z.output === myOut.id) : null;
+          const dline = dz && dz.now_playing ? dacLine(dz) : '';
+          const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(dline ? `${dline}.${/^Shared/.test(dline) ? ` ${DAC_HELP.shared}` : ''}` : `${DAC_MODE[dacMode(dv)]}.${dacMode(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
+            + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
+            + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
+            + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : '')
+            + (dv.settings && dv.settings.mode === 'bit_perfect' && dv.settings.full_level_ok && dv.media_volume != null && dv.media_volume < 100 ? `<div class="notice warn" role="status">Bit-perfect plays at full level: Android’s volume (${esc(String(dv.media_volume))}%) does not apply. Set the level on the DAC or amplifier.</div>` : ''))
+            // The choices, from apps that take them (they report `settings`)
+            + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${v === 'bit_perfect' && !(dv.modes || []).includes('bit_perfect') ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)) : '');
+          main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
+          // This phone: the choices go to the node, which passes them to the app's player
+          const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
+          // Bit-perfect plays at full level: below Android's full volume only with the listener's OK
+          // (asked here; Cancel keeps the mode as it was)
+          const dvm = $('#dvmode', main); if (dvm) { const was = dvm.value; dvm.onchange = () => {
+            const mv = dv.media_volume;
+            if (dvm.value === 'bit_perfect' && mv !== 100) {
+              const at = mv != null ? ` (${mv}%)` : '';
+              if (!confirm(`Bit-perfect plays at full level; Android’s volume${at} no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?`)) { dvm.value = was; return; }
+              return putDev({ mode: 'bit_perfect', full_level_ok: true }, 'Mode saved');
+            }
+            return putDev({ mode: dvm.value }, 'Mode saved');
+          }; }
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
@@ -6735,6 +6861,7 @@
           const hd = $('#sethomedefault'); if (hd) hd.onclick = async () => { hd.disabled = true; try { await api('PUT', '/home/layout', { order: mine.order || [], hidden: mine.hidden || [] }); toast('Your Home is the default for everyone now'); render(); } catch (e) { hd.disabled = false; toast(e.message, 'error'); } };
           const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-srcpolicy]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/node/settings', { sources_policy: b.dataset.srcpolicy }); toast({ node: 'Everyone plays through this node’s sign-ins', own: 'Everyone plays with their own sign-ins', choice: 'Each person chooses whose sign-ins they play with' }[b.dataset.srcpolicy]); render(); } catch (e) { toast(e.message, 'error'); } });
           const pff = $('#preferfull'); if (pff) pff.onchange = async () => { try { await api('PUT', '/node/settings', { prefer_full: pff.checked }); toast(pff.checked ? 'Previews give way to full tracks from your Play from order' : 'A song page plays its own service, previews included'); } catch (e) { toast(e.message, 'error'); pff.checked = !pff.checked; } };
           const fst = $('#firststeps'); if (fst) fst.onchange = async () => { try { await api('PUT', '/node/settings', { first_steps_hidden: !fst.checked }); toast(fst.checked ? 'First steps show on Home again' : 'First steps are hidden for everyone'); render(); } catch (e) { toast(e.message, 'error'); fst.checked = !fst.checked; } };
           const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
@@ -7245,6 +7372,8 @@
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
+        // The outputs, so the bar names a zone's device (a phone's USB DAC) without the picker first
+        refreshOutputs();
       } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
@@ -7272,7 +7401,8 @@
         if (ev.id === link.pingId) { link.rtt = Math.max(1, Math.round(performance.now() - link.pingSent)); link.awaiting = false; link.missed = 0; link.pongs = true; setConn('ok', nodeLabel()); }
         return;
       }
-      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); return; }
+      // A snapshot (connected, reconnected, resynced): an outputs_changed may have been missed
+      if (ev.type === 'snapshot') { applySnapshot(ev); renderBar(); refreshOutputs(); return; }
       // Numbered events: a gap means something was missed, so ask for a fresh snapshot.
       if (typeof ev.seq === 'number' && link.seq != null) {
         if (ev.seq > link.seq + 1) ws.send(JSON.stringify({ type: 'resync' }));
@@ -7309,6 +7439,7 @@
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
+      else if (ev.type === 'outputs_changed') refreshOutputs(); // a phone's USB DAC came or went
       else if (ev.type === 'jobs') { if (isOwner()) { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); } } // the owner's jobs, as the polling
       renderBar();
     };

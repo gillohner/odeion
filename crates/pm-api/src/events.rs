@@ -144,8 +144,24 @@ pub(crate) async fn events_ws(
     Extension(c): Extension<Caller>,
     headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
-    ws: WebSocketUpgrade,
+    uri: axum::http::Uri,
+    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
 ) -> Response {
+    use axum::response::IntoResponse;
+    // Without a token, only the node's own pages open the event stream (checked before anything
+    // else about the handshake). With one, the stream needs that token: browsers hold it in the
+    // page, never in a cookie, so another site has nothing to open it with.
+    if s.token().is_none() && !crate::peer::ws_origin_ok(&headers, &uri, &s.public_url) {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            "the event stream opens only from this node's own pages",
+        )
+            .into_response();
+    }
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(e) => return e.into_response(),
+    };
     let token = crate::bearer(&headers, &q);
     ws.on_upgrade(move |socket| event_stream(socket, s, c, token))
 }
@@ -179,6 +195,8 @@ pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<Api
         ApiEvent::LibraryChanged => Some(ev.clone()),
         // The owner's copies: file names and folders on their machine
         ApiEvent::Jobs { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
+        // Outputs are the owner's, as `GET /v1/outputs` is
+        ApiEvent::OutputsChanged { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
     }
 }
 
@@ -455,6 +473,19 @@ mod tests {
         assert_eq!(
             v["event"],
             serde_json::json!({"type": "error", "message": "boom"})
+        );
+    }
+
+    /// A phone's USB DAC came or went: controllers read `outputs_changed` with the node's id.
+    #[test]
+    fn an_output_device_change_is_an_event() {
+        let ev = ApiEvent::OutputsChanged {
+            output: pm_zones::OutputId("net:192.168.1.20:7790/cpal:Speaker or headphones".into()),
+        };
+        let v = serde_json::to_value(EventMsg { seq: 9, event: &ev }).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"seq": 9, "type": "outputs_changed", "output": "net:192.168.1.20:7790/cpal:Speaker or headphones"})
         );
     }
 }
