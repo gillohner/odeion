@@ -388,10 +388,10 @@ async fn change(
 }
 
 /// An edit of an existing collection: `f` changes its playlist, which is then checked.
-fn edited(
-    id: &str,
-    f: impl FnOnce(&Library, &mut Playlist) -> Result<(), ApiError>,
-) -> impl FnOnce(&Library, Option<Kept>) -> Result<Kept, ApiError> + '_ {
+fn edited<'a>(
+    id: &'a str,
+    f: impl FnOnce(&Library, &mut Playlist) -> Result<(), ApiError> + 'a,
+) -> impl FnOnce(&Library, Option<Kept>) -> Result<Kept, ApiError> + 'a {
     move |lib, k| {
         let mut k = k.ok_or_else(|| not_found(id))?;
         f(lib, &mut k.playlist)?;

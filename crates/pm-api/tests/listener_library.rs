@@ -7,6 +7,7 @@ mod personal_fake;
 
 use axum::http::StatusCode;
 use personal_fake::*;
+use pm_api::personal::PersonalHomeserver;
 use pm_api::router;
 use std::sync::atomic::Ordering;
 
@@ -253,9 +254,10 @@ async fn a_listener_reaches_only_their_own_bookmark_routes() {
     let (s, fake, ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
     let app = router(s.clone());
+    // (Their own collections are theirs too: tests/listener_collections.rs)
     for (m, p) in [
-        ("GET", "/v1/playlists"),
-        ("POST", "/v1/playlists"),
+        ("GET", "/v1/smart"),
+        ("POST", "/v1/playlists/from-queue"),
         ("GET", "/v1/tags"),
         ("PUT", "/v1/collections"),
         ("GET", "/v1/me/listens"),

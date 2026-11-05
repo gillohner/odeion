@@ -6,7 +6,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use pm_api::personal::{PersonalError, PersonalHomeserver};
-use pm_api::{router, NodeSettings, NodeState};
+use pm_api::{NodeSettings, NodeState};
 use pm_audio::PipelineConfig;
 use pm_library::Library;
 use pm_zones::OutputRegistry;
