@@ -156,7 +156,7 @@ pub(crate) async fn status(State(s): State<Arc<NodeState>>) -> ApiResult<Bundled
 // ---- the owner's account ----
 
 /// Library setting: the signup token minted for the owner, reused while it is unused.
-const OWNER_TOKEN: &str = "homeserver.owner_signup_token";
+pub(crate) const OWNER_TOKEN: &str = "homeserver.owner_signup_token";
 
 /// `XXXX-XXXX-XXXX`, Crockford base32.
 pub(crate) fn is_signup_token(t: &str) -> bool {
