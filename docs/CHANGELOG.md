@@ -35,6 +35,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-04
 
+- **Usage insights, the node's side (off until the owner turns them on).** Which pages and buttons people use, which they are shown and pass by, and where they run into trouble, in fixed categories only, to guide changes to the app. The browser part comes next; nothing records anything yet.
+  - The owner's switch (`PUT /v1/node/usage`) starts off and is kept across restarts. Once on, every signed-in owner and listener browser takes part, and each person can Stop for themselves and Clear what is still linked to them; Stop and Clear are separate, and so are the owner's Off and Clear all.
+  - Nothing that says who someone is is kept: a page load gets a random alias, tied to its person only in the node's memory, for at most 12 hours and a day after for Clear mine. Never typed text, names, titles, addresses, ids of songs or people, error messages, or screens.
+  - Kept in `usage.sqlite` in the data folder (only the node's to read, never in a backup): raw events 14 days, daily counts 90 days, at most 400 000 events and 64 MiB, the oldest day first. What a Clear takes is overwritten in the file.
+  - The owner reads a summary (counts only) or downloads an export; `odeiond usage summary|export` reads the file on the node. The bundle's `backup.sh` and `restore.sh` leave it out too. Nothing is sent anywhere by itself. A button shown and not used is never read as disliked: a use rate needs enough visits from enough browsers.
+  - Party guests are not covered yet; the summary says so.
+
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
 
 - **Every press answers at once and acts once** (owner, iPad: "every click shows loader and fires once").
