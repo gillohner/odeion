@@ -63,7 +63,7 @@ fn inline_scripts(page: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Fact;
+    use crate::types::{Fact, FactKind};
 
     #[test]
     fn only_web_links_pass() {
@@ -95,6 +95,7 @@ mod tests {
         let fact = |href: &str| Fact {
             label: "Homepage".into(),
             value: href.into(),
+            kind: FactKind::Fact,
             href: Some(href.into()),
         };
         let out = serde_json::to_value(fact("javascript:alert(document.cookie)")).unwrap();

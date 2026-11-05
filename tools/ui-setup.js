@@ -234,9 +234,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       image_credit: { author: '<b>Jane</b> Doe', licence: 'CC BY 2.0', licence_url: 'javascript:alert(1)', file_page: 'https://commons.wikimedia.org/wiki/File:Credit.jpg', source: 'Wikimedia Commons' } };
     await p.route(/\/v1\/item\/artist\/lib-777(\?.*)?$/, (r) => r.fulfill({ json: credited }));
     await p.goto(BASE + '/artist/lib-777');
-    check(await visible(p, '#iabout .credit'), 'About shows a credit line');
-    const credit = await p.textContent('#iabout .credit').catch(() => '');
-    const links = await p.$$eval('#iabout .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
+    // With an article the credit lines sit in Details at the foot (TASK-item-page-details-to-bottom)
+    await p.evaluate(() => { const d = document.querySelector('#idetails'); if (d) d.open = true; });
+    check(await visible(p, '#idetails .credit'), 'Details shows the credit lines');
+    const credit = await p.textContent('#idetails .credit').catch(() => '');
+    const links = await p.$$eval('#idetails .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
     check(links.some(([t, h]) => t === 'Read more on Wikipedia' && h === 'https://de.wikipedia.org/wiki/Credit_Test') && links.some(([t, h]) => t === 'CC BY-SA 4.0' && /creativecommons/.test(h)), 'the text links its article and CC BY-SA');
     check(/Picture: <b>Jane<\/b> Doe · CC BY 2\.0 · Wikimedia Commons/.test(credit) && links.some(([t, h]) => t === 'Wikimedia Commons' && /File:Credit\.jpg/.test(h)), 'the picture names its author, licence and file page, as text');
     check(links.every(([, h]) => /^https?:/.test(h || '')), 'a credit link is only ever a web link');
@@ -290,7 +292,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.route(/\/v1\/sources$/, (r) => r.fulfill({ json: [{ id: 'tidal', name: 'TIDAL', enabled: true, healthy: true }, { id: 'spotify', name: 'Spotify', enabled: true, healthy: false }] }));
     await p.route(/\/v1\/play-order$/, (r) => r.fulfill({ json: { order: ['library', 'tidal', 'spotify'], services: [{ id: 'tidal', connected: true }, { id: 'spotify', connected: false }] } }));
     await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
-    const ab = await p.evaluate(() => { const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#iabout .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout dl dt').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
+    // (the credit lines are in Details at the foot; the facts one line under the blurb)
+    const ab = await p.evaluate(() => { const d = document.querySelector('#idetails'); if (d) d.open = true; const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#idetails .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout .facts-line .fact').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
     check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
     check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
     check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
