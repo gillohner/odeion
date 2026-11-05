@@ -3794,18 +3794,28 @@
   };
   // Suggestions while adding: the labels on this page, then your own from everywhere (read once)
   const tagLabels = { mine: null };
+  // Half-typed tags, per page and group: they outlive the page being drawn again (a tag added in the other group,
+  // Pubky's answer). One being sent is kept apart until it lands, so it is never offered twice
+  const heroDrafts = new Map(); const heroSending = new Set(); let heroNow = null;
   const openHeroAdd = async (box, ht, b, focus = true) => {
     const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
     b.hidden = true;
     b.insertAdjacentHTML('afterend', `<input class="taginput" data-htag-add="${g.scope}" list="htagsugg" maxlength="20" autocomplete="off" placeholder="Add a tag…" aria-label="Add a tag ${esc(lower1(g.name))}"><span class="muted small tag-hint">Public on your homeserver</span>`);
     const inp = b.nextElementSibling; const hint = inp.nextElementSibling;
-    const close = () => { inp.remove(); hint.remove(); b.hidden = false; };
+    const dk = `${ht.page}|${g.scope}`;
+    const close = () => { heroDrafts.delete(dk); inp.remove(); hint.remove(); b.hidden = false; };
     if (focus) inp.focus();
+    inp.oninput = () => { if (inp.value.trim()) heroDrafts.set(dk, inp.value); else heroDrafts.delete(dk); };
     inp.onkeydown = async (e) => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); b.focus(); return; }
       if (e.key !== 'Enter' || e.isComposing || inp.disabled || !inp.value.trim()) return;
-      const label = inp.value.trim(); inp.disabled = true;
-      try { await api('PUT', '/tags', { ...g.ref, label }); toast(`Tagged ${label.toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); inp.disabled = false; inp.focus(); if (ht.later) { ht.later = false; drawHeroTags(ht); } }
+      const label = inp.value.trim(); inp.disabled = true; heroDrafts.set(dk, inp.value); heroSending.add(dk);
+      try { await api('PUT', '/tags', { ...g.ref, label }); heroSending.delete(dk); heroDrafts.delete(dk); toast(`Tagged ${label.toLowerCase()}`); render(); } catch (er) {
+        heroSending.delete(dk); toast(er.message, 'error');
+        if (inp.isConnected) { inp.disabled = false; inp.focus(); if (ht.later) { ht.later = false; drawHeroTags(ht); } }
+        // The page was drawn again meanwhile (the other group's tag landed): what was typed comes back there
+        else if (heroNow && heroNow.page === ht.page) drawHeroTags(heroNow);
+      }
     };
     inp.onblur = () => setTimeout(() => { if (inp.isConnected && !inp.value.trim() && !inp.disabled && document.activeElement !== inp) close(); }, 150);
     const here = ht.groups.flatMap((x) => [...(x.pub.tags || []).map(([l]) => l), ...(x.own || []).map((t) => t.label)]);
@@ -3822,7 +3832,8 @@
     $$('[data-htag-del]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagDel); if (!g || b.disabled) return; b.disabled = true; try { await del(g.ref, b.dataset.label); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
     // A move writes the other URI first: when that fails, the tag stays where it was
     $$('[data-htag-move]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagMove); const to = ht.groups.find((x) => x !== g); const label = b.dataset.label; if (!g || !to || b.disabled) return; b.disabled = true; try { await api('PUT', '/tags', { ...to.ref, label }); await del(g.ref, label); toast(`${label} is ${lower1(to.name)} now`); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
-    $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => openHeroAdd(box, ht, b));
+    // Opening the input is at once: the suggestions it reads after aren't the button's to wait for
+    $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => { openHeroAdd(box, ht, b); });
     const m = $('[data-htag-match]', box); if (m) m.onclick = () => setView('identify', { tracks: ht.match.tracks });
   };
   // The faces come with the people's names and pictures once their profiles are read
@@ -3837,9 +3848,14 @@
     const box = $('#htags'); if (!box || box.dataset.for !== ht.key) return;
     // Half-typed tags stay when the public tags come in meanwhile (each group's own); while one is being sent, the
     // redraw waits for its answer
+    heroNow = ht;
     const typing = $$('input[data-htag-add]', box);
     if (typing.some((t) => t.disabled)) { ht.later = true; return; }
-    const drafts = typing.map((t) => ({ scope: t.dataset.htagAdd, value: t.value, focus: document.activeElement === t }));
+    const open = new Map(typing.map((t) => [t.dataset.htagAdd, { value: t.value, focus: document.activeElement === t }]));
+    // What was typed on this page before it was drawn again, except one being sent
+    ht.groups.forEach((g) => { const dk = `${ht.page}|${g.scope}`; if (!open.has(g.scope) && heroDrafts.has(dk) && !heroSending.has(dk)) open.set(g.scope, { value: heroDrafts.get(dk), focus: false }); });
+    // An empty input nobody is in isn't kept (it would never close)
+    const drafts = [...open].filter(([, d]) => d.value.trim() || d.focus).map(([scope, d]) => ({ scope, ...d }));
     box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
     bindHeroTags(box, ht);
     drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); $(`input[data-htag-add="${d.scope}"]`, box).value = d.value; } });
@@ -5974,7 +5990,7 @@
             ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri) }] : []),
           ];
           const htKey = `${kind}:${id}:${++heroTagsGen}`;
-          const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
+          const ht = { key: htKey, page: `${kind}:${id}`, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
           // No identity: say so; the owner's album leads to its folder in the matches to confirm
           const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.track_id).filter((x) => x != null) } : null; };
           if (localRef && songOwn.needsMatch) unmatched();

@@ -252,6 +252,38 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
       assert.ok(!(await back.isDisabled()), 'enabled again after the refusal');
       assert.equal(await back.inputValue(), 'slowtag');
       assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'linkdraft', 'and the other group’s draft is still there');
+      // The mirror: the second group's add on its way (the link's), the first group's half typed
+      const addIn = async (scope) => { const i = group(scope).locator('input[data-htag-add]'); if (!(await i.count())) await group(scope).locator('[data-htag-plus]').click(); return group(scope).locator('input[data-htag-add]'); };
+      failPut = LINK;
+      let releaseDiscover2; pubHold = new Promise((r) => { releaseDiscover2 = r; });
+      let releasePut2; putHold = new Promise((r) => { releasePut2 = r; });
+      await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor();
+      await (await addIn('song')).fill('songdraft');
+      const held2 = await addIn('link');
+      const before2 = tries.length;
+      await held2.fill('slowlink'); await held2.press('Enter'); await sleep(200);
+      releaseDiscover2(); pubHold = null; await sleep(400);
+      assert.ok(await group('link').locator('input[data-htag-add]').isDisabled(), 'the second group’s add is still on its way after Pubky answered');
+      assert.equal(await group('song').locator('input[data-htag-add]').inputValue(), 'songdraft');
+      await group('link').locator('input[data-htag-add]').press('Enter'); await sleep(200);
+      releasePut2(); putHold = null; await sleep(500);
+      assert.deepEqual(tries.slice(before2), [{ m: 'PUT', k: LINK, label: 'slowlink' }], 'one send only, the second group too');
+      assert.ok(!(await group('link').locator('input[data-htag-add]').isDisabled()));
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'slowlink');
+      assert.equal(await group('song').locator('input[data-htag-add]').inputValue(), 'songdraft');
+      failPut = null;
+      // A tag that lands draws the page again: the other group's half-typed tag stays
+      await group('link').locator('input[data-htag-add]').fill('keepme');
+      await group('song').locator('input[data-htag-add]').fill('quicktag'); await group('song').locator('input[data-htag-add]').press('Enter');
+      await chip('song', 'quicktag').waitFor({ state: 'attached' }); await sleep(300);
+      assert.equal(await group('link').locator('input[data-htag-add]').inputValue(), 'keepme', 'kept when the other group’s tag landed');
+      assert.equal(await group('song').locator('input[data-htag-add]').count(), 0, 'the one that landed is closed');
+      // Escape closes it and forgets it: the next tag that lands doesn't bring it back
+      await group('link').locator('input[data-htag-add]').press('Escape');
+      await (await addIn('song')).fill('quicktwo'); await group('song').locator('input[data-htag-add]').press('Enter');
+      await chip('song', 'quicktwo').waitFor({ state: 'attached' }); await sleep(300);
+      assert.equal(await page.locator('#htags input[data-htag-add]').count(), 0, 'nothing left open on the page');
+      own[CANON] = (own[CANON] || []).filter((t) => !['quicktag', 'quicktwo'].includes(t.label));
       failPut = null;
       pubFail = true;
       await go('/song/tidal-a'); await chip('song', 'mine-first').waitFor(); await sleep(400);
