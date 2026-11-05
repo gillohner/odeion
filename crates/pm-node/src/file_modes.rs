@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 /// The files [`tighten`] makes the node's alone: the library database and its journal files,
-/// the config (it may hold the API token and service secrets), the Pubky session secret, the
+/// the config (it may hold the API token and service secrets), the made API token, the Pubky session secret, the
 /// remote-access key, the app players' keys and a config a restore brought back. Only those that
 /// are in the data folder are changed ([`tighten`]).
 pub fn private_files(
@@ -23,7 +23,12 @@ pub fn private_files(
     }
     v.extend(config.map(Path::to_path_buf));
     v.push(session_secret.to_path_buf());
-    for name in ["remote.key", "endpoint-keys.json", "node.restored.toml"] {
+    for name in [
+        "api-token",
+        "remote.key",
+        "endpoint-keys.json",
+        "node.restored.toml",
+    ] {
         v.push(data_dir.join(name));
     }
     v
@@ -133,6 +138,7 @@ mod tests {
 
         let secret = data.join("pubky-session.secret");
         let more = [
+            data.join("api-token"),
             data.join("library.sqlite-journal"),
             secret.clone(),
             data.join("endpoint-keys.json"),
@@ -155,7 +161,7 @@ mod tests {
         ] {
             assert_eq!(mode(f), 0o600, "{f:?}");
         }
-        assert_eq!(changed.len(), 9, "{changed:?}");
+        assert_eq!(changed.len(), 10, "{changed:?}");
         // What another service reads stays readable: the folder can be searched, the file is its own
         assert_eq!(mode(&tunnel.join("domain")), 0o644);
         // Already tight: nothing changes, nothing is logged; a missing file is skipped

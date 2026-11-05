@@ -129,6 +129,23 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
+/// The copy a restore works on, made readable by the node's user alone before anything is
+/// written to it: this node's sign-ins, invite links and signup token go into it before it
+/// becomes the library.
+fn write_staged(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let mut f = o.open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()
+}
+
 /// Replace the library database with a backup. Stop the node first: the
 /// previous database is kept as `library.db.bak`, and stale WAL files are
 /// removed so SQLite cannot replay them into the restored copy.
@@ -144,7 +161,7 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
         // A backup file from Settings: its library only here (restore it in the web app to
         // put the sign-ins back too)
         let parsed = pm_api::backup::parse(&bytes)?;
-        std::fs::write(&staged, &parsed.database)?;
+        write_staged(&staged, &parsed.database)?;
         if parsed.manifest.secrets.is_some() {
             println!("note: sign-ins are restored only from Settings › Backup in the web app");
         }
@@ -155,7 +172,7 @@ pub fn restore(cfg: &NodeConfig, file: &Path) -> anyhow::Result<()> {
             );
         }
     } else {
-        std::fs::write(&staged, &bytes)?;
+        write_staged(&staged, &bytes)?;
     }
     let stats = {
         let lib =
@@ -566,6 +583,15 @@ mod tests {
             None,
             "the backup's library is in"
         );
+        // The restored library (it got this node's sign-ins) is the node's user's alone, from the
+        // moment it was made; nothing of the work is left
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(cfg.db_path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            assert!(!cfg.db_path().with_extension("db.restoring").exists());
+        }
     }
 
     /// A current database that won't open (damaged, or a newer version's) is what a restore is

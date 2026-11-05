@@ -79,12 +79,12 @@ pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
 }
 
 /// Why the node didn't take this request: `code`, whether this device sent no token, and what
-/// the node said. A node without a token answers only at 127.0.0.1 or localhost and says so
-/// ("no API token"); without a token anything else refused asks for a sign-in; a token it
-/// refuses is [`ProbeError::Refused`].
+/// the node said. A node without a token answers only directly (401) and only at 127.0.0.1 or
+/// localhost (403), and says so ("no API token"); without a token anything else refused asks for
+/// a sign-in; a token it refuses is [`ProbeError::Refused`].
 fn refusal(code: u16, no_token: bool, body: &str) -> ProbeError {
     match code {
-        403 if no_token && body.contains("no API token") => {
+        401 | 403 if no_token && body.contains("no API token") => {
             ProbeError::Other(body.chars().take(200).collect())
         }
         401 | 403 if no_token => ProbeError::NeedsSignIn,
@@ -291,6 +291,11 @@ mod tests {
         let tokenless = "this node has no API token, so it answers only at 127.0.0.1 or localhost";
         match refusal(403, true, tokenless) {
             ProbeError::Other(m) => assert!(m.contains("no API token"), "{m}"),
+            e => panic!("{e:?}"),
+        }
+        let remote = "this node has no API token, so it answers only directly";
+        match refusal(401, true, remote) {
+            ProbeError::Other(m) => assert!(m.contains("only directly"), "over a proxy or iroh: {m}"),
             e => panic!("{e:?}"),
         }
         assert!(matches!(refusal(403, true, "forbidden"), ProbeError::NeedsSignIn));
