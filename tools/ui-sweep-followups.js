@@ -1,13 +1,14 @@
 // The UX sweep's follow-ups (FIX-ux-sweep-2026-11-01.md, "Still open", rechecked on 2ddc70b), at
-// 390, 430 (phones), 768, 834 (tablets) and 1180 (a tablet in landscape, the desktop shell):
+// 390, 430 (phones), 768, 834 (tablets, touch) and 1180 (a tablet in landscape); tablets have the
+// desktop layout since 2026-11-04, with touch sizes:
 //   * A7: a slow TIDAL collection says so under the page's title, draws its playlists as they come,
 //     and shows the last good copy at once next time;
 //   * A10: touch layouts give a playlist's Move and Remove, a song row's actions, Select and the
 //     play-from order's grips 40 px;
-//   * A16: an album's and a playlist's hero buttons stay on one row on touch layouts, and a
-//     playlist's Delete is in its ⋯ menu there;
-//   * A17: phones and tablets have the back link only, the desktop the trail; a song opened from its
-//     album of the same name says Back;
+//   * A16: an album's and a playlist's hero buttons stay on one row on touch screens, and a
+//     playlist's Delete is in its ⋯ menu up to 1024 px;
+//   * A17: phones have the back link only, the desktop layout (tablets too) the trail; a song opened
+//     from its album of the same name says Back on a phone;
 //   * A19: a tablet's Now playing tabs all show, and its sound pill keeps its words;
 //   * A21: a song's File is its name, the path a tooltip;
 //   * A25: long notes in Service apps fold behind More, and a sign-in way not chosen shows one sentence.
@@ -84,12 +85,12 @@ const boxes = (p, sel) => p.$$eval(sel, (els) => els.filter((e) => e.offsetParen
       const ahero = await p.$$eval('.hero .actions > .btn', (bs) => bs.filter((b) => b.offsetParent).map((b) => Math.round(b.getBoundingClientRect().top)));
       if (touch(w)) check(ahero.length >= 4 && new Set(ahero).size === 1, `${w}: the album's hero buttons are one row (${JSON.stringify(ahero)})`);
       const vis = (sel) => p.$eval(sel, (e) => !!e.offsetParent).catch(() => false);
-      if (touch(w)) check(await vis('.pagebar .back'), `${w}: the album has its back link`);
-      check(await vis('.pagebar .crumbs') === !touch(w), `${w}: the trail shows ${touch(w) ? 'nowhere on touch layouts' : 'on the desktop'}`);
+      if (w < 600) check(await vis('.pagebar .back'), `${w}: the album has its back link`);
+      check(await vis('.pagebar .crumbs') === (w >= 600), `${w}: the trail shows ${w < 600 ? 'nowhere on a phone' : 'in the desktop layout'}`);
       await p.click('[data-ssong="0"]'); await until(async () => /\/song\//.test(p.url()), 8000);
       await p.waitForSelector('#iabout', { timeout: 20000 });
       const backText = (await p.textContent('.pagebar .back').catch(() => '')).trim();
-      check(/\/song\//.test(p.url()) && backText !== 'Same Name' && (!touch(w) || backText === 'Back'), `${w}: Back from the album of the same name says Back, never the title again ("${backText}")`);
+      check(/\/song\//.test(p.url()) && backText !== 'Same Name' && (w >= 600 || backText === 'Back'), `${w}: Back from the album of the same name says Back, never the title again ("${backText}")`);
       const file = await p.$eval('#iabout dd .filefact', (e) => ({ text: e.textContent, title: e.title })).catch(() => null);
       check(file && file.text === '14_wasted_bits.flac' && /\/home\/someone\//.test(file.title) && !/\/home\/someone/.test(await p.textContent('#iabout')), `${w}: the File fact is the name, the path a tooltip (${JSON.stringify(file)})`);
       await p.unroute(/\/v1\/item\/album\/lib-8$/); await p.unroute(/\/v1\/item\/song\/lib-1$/);
