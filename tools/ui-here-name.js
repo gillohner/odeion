@@ -85,6 +85,10 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     await fx.go(page, '/zones'); await page.waitForSelector('#main'); await sleep(400);
     const zonesPage = await page.$eval('#main', (el) => `${el.innerText} ${[...el.querySelectorAll('[aria-label]')].map((e) => e.getAttribute('aria-label')).join(' ')}`); seen.push(zonesPage);
     check(zonesPage.includes(`Volume of ${name}`), `${at}: the Zones page has the player's card and slider ("Volume of ${name}")`);
+    // Settings › Playback lists every zone with its output: the in-app player's says what it is
+    await fx.go(page, '/settings/playback'); await page.waitForSelector('#main'); await sleep(500);
+    const settings = await text(page, '#main'); seen.push(settings);
+    check(settings.includes(name), `${at}: Settings › Playback lists "${name}"`);
     // Now playing with the saved song in the bar: its Details line says who plays it
     await fx.go(page, '/library'); await page.waitForSelector('#npart'); await sleep(500);
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
@@ -96,7 +100,7 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     await page.screenshot({ path: path.join(SHOTS, `nowplaying-${tag}.png`) });
     await page.keyboard.press('Escape'); await sleep(200);
     const where = seen.map((t) => (t.match(/[^.\n]*\bbrowser\b[^.\n]*/i) || [''])[0]).filter(Boolean);
-    if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue and Zones pages or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
+    if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue, Zones and Settings › Playback pages or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
     else check(seen.some(hasBrowser), `${at}: the web UI still says browser`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
