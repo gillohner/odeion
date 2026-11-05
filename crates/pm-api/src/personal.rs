@@ -194,23 +194,28 @@ impl Grants {
     /// One call to their homeserver with their session, time-limited. With `gone_ok`, a 404 is
     /// the file's (`None`). On a session restored earlier, a refusal may be its grant's (gone, or
     /// a refresh of it failing inside the call), so the session is restored afresh (a grant that
-    /// is gone fails there) and the call asked once more. A refusal forgets the session.
-    async fn attempt<T, F, Fut>(&self, key: &str, gone_ok: bool, f: F) -> Result<Option<T>, PersonalError>
+    /// is gone fails there) and the call asked once more; so is an answer `suspect` finds
+    /// unlikely (an empty listing where there was something: a gone user's folders list as
+    /// empty). A refusal forgets the session.
+    async fn attempt<T, F, Fut>(
+        &self,
+        key: &str,
+        gone_ok: bool,
+        suspect: impl Fn(&T) -> bool,
+        f: F,
+    ) -> Result<Option<T>, PersonalError>
     where
         F: Fn(PubkySession) -> Fut,
         Fut: std::future::Future<Output = Result<T, HomeserverError>>,
     {
         let (session, fresh) = self.session(key).await?;
-        let e = match tokio::time::timeout(CALL_LIMIT, f(session)).await {
+        match tokio::time::timeout(CALL_LIMIT, f(session)).await {
             Err(_) => return Err(too_slow()),
-            Ok(Ok(v)) => return Ok(Some(v)),
-            Ok(Err(e)) => e,
-        };
-        if gone_ok && fresh && is_not_found(&e) {
-            return Ok(None);
-        }
-        if fresh || !grant_like(&e) {
-            return Err(self.noted(key, classify_call(&e)));
+            Ok(Ok(v)) if fresh || !suspect(&v) => return Ok(Some(v)),
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) if gone_ok && fresh && is_not_found(&e) => return Ok(None),
+            Ok(Err(e)) if fresh || !grant_like(&e) => return Err(self.noted(key, classify_call(&e))),
+            Ok(Err(_)) => {}
         }
         sessions().lock().expect("sessions").remove(key);
         let (session, _) = self.session(key).await?;
@@ -263,10 +268,14 @@ impl PersonalHomeserver for Grants {
             })
             .collect();
         let known = &known;
+        let expected = !known.is_empty();
         let all = self
-            .attempt(key, false, |session| async move {
-                hs.read_v1_bookmarks_except(&session, known).await
-            })
+            .attempt(
+                key,
+                false,
+                |v: &Vec<_>| expected && v.is_empty(),
+                |session| async move { hs.read_v1_bookmarks_except(&session, known).await },
+            )
             .await?
             .unwrap_or_default();
         Ok(all.into_iter().map(|(_, uri, at)| (uri, at)).collect())
@@ -277,9 +286,12 @@ impl PersonalHomeserver for Grants {
             pm_pubky::v1::bookmark_of(uri, created_at).map_err(PersonalError::Unreachable)?;
         let hs = self.client()?;
         let (object, path) = (&object, path.as_str());
-        self.attempt(key, false, |session| async move {
-            hs.write_object(&session, path, object).await
-        })
+        self.attempt(
+            key,
+            false,
+            |_| false,
+            |session| async move { hs.write_object(&session, path, object).await },
+        )
         .await
         .map(|_| ())
     }
@@ -292,6 +304,7 @@ impl PersonalHomeserver for Grants {
         self.attempt(
             key,
             true,
+            |_| false,
             |session| async move { hs.delete(&session, path).await },
         )
         .await
@@ -598,7 +611,17 @@ where
         }
         match tokio::time::timeout(EXCHANGE_LIMIT, poll()).await {
             Ok(Ok(None)) => tokio::time::sleep(ASK_EVERY).await,
-            Ok(Ok(Some(session))) => break keep(session).await,
+            Ok(Ok(Some(session))) => {
+                // Approved after it expired, or after it was replaced: nothing is kept (the page
+                // has moved on to a new one)
+                if started.elapsed() > ttl {
+                    break serde_json::json!({"state": "expired"});
+                }
+                if !connects().lock().await.contains_key(&id) {
+                    return;
+                }
+                break keep(session).await;
+            }
             Ok(Err(e)) => break serde_json::json!({"state": "error", "reason": e.to_string()}),
             Err(_) => break serde_json::json!({"state": "error", "reason": "the homeserver took too long"}),
         }
@@ -740,7 +763,7 @@ pub(crate) async fn connect_poll(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let key = listener_key(&c)?;
     let id = q.get("id").cloned().unwrap_or_default();
-    let all = connects().lock().await;
+    let mut all = connects().lock().await;
     // Only the listener who started it may read it
     let Some(c) = all.get(&id).filter(|c| c.who == key) else {
         return Ok(Json(serde_json::json!({"state": "expired"})));
@@ -748,13 +771,15 @@ pub(crate) async fn connect_poll(
     match &c.answer {
         None if c.started.elapsed() > CONNECT_TTL => Ok(Json(serde_json::json!({"state": "expired"}))),
         None => Ok(Json(serde_json::json!({"state": "pending"}))),
-        Some(a) if a["state"] == "error" => Err(ApiError::new(
-            StatusCode::BAD_GATEWAY,
-            a["reason"]
+        // A failure is answered once; then it is gone, so the page's next poll starts afresh
+        Some(a) if a["state"] == "error" => {
+            let why = a["reason"]
                 .as_str()
                 .unwrap_or("Ring's approval failed")
-                .to_string(),
-        )),
+                .to_string();
+            all.remove(&id);
+            Err(ApiError::new(StatusCode::BAD_GATEWAY, why))
+        }
         // Kept until it expires: another tab of theirs reads the same answer
         Some(a) => Ok(Json(a.clone())),
     }
@@ -945,6 +970,11 @@ mod tests {
         .await;
         let e = poll_as("ann", "t-failed").await.unwrap_err();
         assert_eq!(e.status, StatusCode::BAD_GATEWAY, "{}", e.message);
+        assert_eq!(
+            poll_as("ann", "t-failed").await.unwrap()["state"],
+            "expired",
+            "then the page starts afresh"
+        );
         // Too late: expired
         waiting("t-late", "ann").await;
         ask(
@@ -955,6 +985,30 @@ mod tests {
         )
         .await;
         assert_eq!(poll_as("ann", "t-late").await.unwrap()["state"], "expired");
+        // Approved while it was being replaced, or after it expired: nothing kept either
+        let approved_slowly = || async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok::<_, HomeserverError>(Some(()))
+        };
+        waiting("t-swapped", "ann").await;
+        let task = tokio::spawn(ask(
+            "t-swapped".into(),
+            Duration::from_secs(60),
+            approved_slowly,
+            |()| async { panic!("nothing is kept for a replaced approval") },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        connects().lock().await.remove("t-swapped");
+        task.await.unwrap();
+        waiting("t-overdue", "ann").await;
+        ask(
+            "t-overdue".into(),
+            Duration::from_millis(50),
+            approved_slowly,
+            |()| async { panic!("nothing is kept after it expired") },
+        )
+        .await;
+        assert_eq!(poll_as("ann", "t-overdue").await.unwrap()["state"], "expired");
     }
 
     #[test]
