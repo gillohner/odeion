@@ -22,7 +22,7 @@ use crate::ApiError;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pm_pubky::homeserver::{HomeserverError, LoginFlow, NodeHomeserver};
+use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
 use pubky::PubkySession;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -152,6 +152,16 @@ fn is_not_found(e: &HomeserverError) -> bool {
     status_of(e) == Some(404)
 }
 
+/// A refusal that may be the grant's rather than the call's: any 4xx but "slow down", or an auth
+/// error (a grant refreshed inside a call fails there).
+fn grant_like(e: &HomeserverError) -> bool {
+    matches!(status_of(e), Some(s) if (400..500).contains(&s) && s != 408 && s != 429) || is_auth_error(e)
+}
+
+fn too_slow() -> PersonalError {
+    PersonalError::Unreachable("the homeserver took too long".into())
+}
+
 /// The node's own reach into listeners' homeservers: their grant files and the node's client.
 pub struct Grants {
     dir: PathBuf,
@@ -190,15 +200,33 @@ impl Grants {
         Ok((session, true))
     }
 
-    /// A call to their homeserver, time-limited; a refusal forgets the restored session.
-    async fn limited<T>(
-        &self,
-        key: &str,
-        f: impl std::future::Future<Output = Result<T, HomeserverError>>,
-    ) -> Result<T, PersonalError> {
-        match tokio::time::timeout(CALL_LIMIT, f).await {
-            Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
-            Ok(Ok(v)) => Ok(v),
+    /// One call to their homeserver with their session, time-limited. With `gone_ok`, a 404 is
+    /// the file's (`None`). On a session restored earlier, a refusal may be its grant's (gone, or
+    /// a refresh of it failing inside the call), so the session is restored afresh (a grant that
+    /// is gone fails there) and the call asked once more. A refusal forgets the session.
+    async fn attempt<T, F, Fut>(&self, key: &str, gone_ok: bool, f: F) -> Result<Option<T>, PersonalError>
+    where
+        F: Fn(PubkySession) -> Fut,
+        Fut: std::future::Future<Output = Result<T, HomeserverError>>,
+    {
+        let (session, fresh) = self.session(key).await?;
+        let e = match tokio::time::timeout(CALL_LIMIT, f(session)).await {
+            Err(_) => return Err(too_slow()),
+            Ok(Ok(v)) => return Ok(Some(v)),
+            Ok(Err(e)) => e,
+        };
+        if gone_ok && fresh && is_not_found(&e) {
+            return Ok(None);
+        }
+        if fresh || !grant_like(&e) {
+            return Err(self.noted(key, classify_call(&e)));
+        }
+        sessions().lock().expect("sessions").remove(key);
+        let (session, _) = self.session(key).await?;
+        match tokio::time::timeout(CALL_LIMIT, f(session)).await {
+            Err(_) => Err(too_slow()),
+            Ok(Ok(v)) => Ok(Some(v)),
+            Ok(Err(e)) if gone_ok && is_not_found(&e) => Ok(None),
             Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
         }
     }
@@ -209,34 +237,6 @@ impl Grants {
             sessions().lock().expect("sessions").remove(key);
         }
         e
-    }
-
-    /// A call about one file, time-limited: `None` when the file isn't there. On a session
-    /// restored from the grant just now a 404 is the file's; on an older one it may be the grant
-    /// gone, so the session is restored again (a grant that is gone fails there) and the call
-    /// asked once more.
-    async fn maybe_there<T, F, Fut>(&self, key: &str, f: F) -> Result<Option<T>, PersonalError>
-    where
-        F: Fn(PubkySession) -> Fut,
-        Fut: std::future::Future<Output = Result<T, HomeserverError>>,
-    {
-        let (session, fresh) = self.session(key).await?;
-        match tokio::time::timeout(CALL_LIMIT, f(session)).await {
-            Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
-            Ok(Ok(v)) => Ok(Some(v)),
-            Ok(Err(e)) if is_not_found(&e) && fresh => Ok(None),
-            Ok(Err(e)) if is_not_found(&e) => {
-                sessions().lock().expect("sessions").remove(key);
-                let (session, _) = self.session(key).await?;
-                match tokio::time::timeout(CALL_LIMIT, f(session)).await {
-                    Err(_) => Err(PersonalError::Unreachable("the homeserver took too long".into())),
-                    Ok(Ok(v)) => Ok(Some(v)),
-                    Ok(Err(e)) if is_not_found(&e) => Ok(None),
-                    Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
-                }
-            }
-            Ok(Err(e)) => Err(self.noted(key, classify_call(&e))),
-        }
     }
 }
 
@@ -274,7 +274,6 @@ impl PersonalHomeserver for Grants {
         key: &str,
         known: &[(String, i64)],
     ) -> Result<Vec<(String, i64)>, PersonalError> {
-        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
         // A listing, and only the bookmarks the node doesn't know yet (as the owner's sync)
         let known: HashMap<String, (String, i64)> = known
@@ -284,18 +283,26 @@ impl PersonalHomeserver for Grants {
                 Some((path.rsplit('/').next()?.to_string(), (uri.clone(), *at)))
             })
             .collect();
+        let known = &known;
         let all = self
-            .limited(key, hs.read_v1_bookmarks_except(&session, &known))
-            .await?;
+            .attempt(key, false, |session| async move {
+                hs.read_v1_bookmarks_except(&session, known).await
+            })
+            .await?
+            .unwrap_or_default();
         Ok(all.into_iter().map(|(_, uri, at)| (uri, at)).collect())
     }
 
     async fn put_bookmark(&self, key: &str, uri: &str, created_at: i64) -> Result<(), PersonalError> {
         let (object, path) =
             pm_pubky::v1::bookmark_of(uri, created_at).map_err(PersonalError::Unreachable)?;
-        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
-        self.limited(key, hs.write_object(&session, &path, &object)).await
+        let (object, path) = (&object, path.as_str());
+        self.attempt(key, false, |session| async move {
+            hs.write_object(&session, path, object).await
+        })
+        .await
+        .map(|_| ())
     }
 
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError> {
@@ -304,16 +311,19 @@ impl PersonalHomeserver for Grants {
     }
 
     async fn list(&self, key: &str, dir: &str) -> Result<Vec<String>, PersonalError> {
-        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
-        let (visibility, session) = visibility_of(dir, &session);
-        self.limited(key, hs.list_tree(key, dir, visibility, session))
-            .await
+        // A folder that isn't there lists as empty
+        self.attempt(key, false, |session| async move {
+            let (visibility, session) = visibility_of(dir, &session);
+            hs.list_tree(key, dir, visibility, session).await
+        })
+        .await
+        .map(Option::unwrap_or_default)
     }
 
     async fn read(&self, key: &str, path: &str) -> Result<Option<Vec<u8>>, PersonalError> {
         let hs = self.client()?;
-        self.maybe_there(key, |session| async move {
+        self.attempt(key, true, |session| async move {
             let (visibility, session) = visibility_of(path, &session);
             hs.get_bytes(key, path, visibility, session).await
         })
@@ -321,16 +331,24 @@ impl PersonalHomeserver for Grants {
     }
 
     async fn write(&self, key: &str, path: &str, body: &serde_json::Value) -> Result<(), PersonalError> {
-        let (session, _) = self.session(key).await?;
         let hs = self.client()?;
-        self.limited(key, hs.write_object(&session, path, body)).await
+        self.attempt(key, false, |session| async move {
+            hs.write_object(&session, path, body).await
+        })
+        .await
+        .map(|_| ())
     }
 
     async fn remove(&self, key: &str, path: &str) -> Result<(), PersonalError> {
         let hs = self.client()?;
-        self.maybe_there(key, |session| async move { hs.delete(&session, path).await })
-            .await
-            .map(|_| ())
+        // One that isn't there is no error
+        self.attempt(
+            key,
+            true,
+            |session| async move { hs.delete(&session, path).await },
+        )
+        .await
+        .map(|_| ())
     }
 }
 
@@ -602,25 +620,93 @@ pub(crate) fn may_keep(key: &str, approver: &str, granted: &[String]) -> Result<
     Ok(())
 }
 
-/// A Ring approval in progress. Its poll runs in a task of its own: after an approval it goes
-/// on to exchange it with the listener's homeserver, and a request that gives up (or goes
-/// away) must not cancel that, or the approval is lost.
-type Polled = (Box<LoginFlow>, Result<Option<PubkySession>, HomeserverError>);
-enum Asking {
-    /// Nobody is asking it now (boxed: a flow is large, the other states a pointer or nothing).
-    Waiting(Box<LoginFlow>),
-    /// Being asked; a poll picks up its answer.
-    Asked(tokio::task::JoinHandle<Polled>),
-    /// A poll of theirs holds it this moment.
-    Busy,
+/// How long one relay poll or grant exchange may take before the approval is given up.
+const EXCHANGE_LIMIT: Duration = Duration::from_secs(120);
+/// How often a waiting approval asks the relay again.
+const ASK_EVERY: Duration = Duration::from_secs(1);
+
+/// A Ring approval in progress. A task of its own asks the relay, exchanges an approval with the
+/// listener's homeserver and keeps the grant; a poll only reads where it stands. A request that
+/// gives up or goes away can't stop that half way (the approval would be lost).
+struct Connect {
+    started: Instant,
+    /// The listener who started it: only they may read its answer.
+    who: String,
+    /// `None` while it waits; then `{state: ok|denied|expired|error, reason?}`.
+    answer: Option<serde_json::Value>,
 }
 
-/// Ring approvals in progress: id → (where it stands, started, the listener who started it).
-type Connects = tokio::sync::Mutex<HashMap<String, (Asking, Instant, String)>>;
+/// Ring approvals in progress, by id.
+type Connects = tokio::sync::Mutex<HashMap<String, Connect>>;
 
 fn connects() -> &'static Connects {
     static C: OnceLock<Connects> = OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// The approval `id`'s task: asks the relay until Ring approves (`poll`), then hands the session
+/// to `keep`. It ends early when the approval is replaced or gone, and gives up after `ttl`.
+async fn ask<S, P, PF, K, KF>(id: String, ttl: Duration, mut poll: P, keep: K)
+where
+    P: FnMut() -> PF,
+    PF: std::future::Future<Output = Result<Option<S>, HomeserverError>>,
+    K: FnOnce(S) -> KF,
+    KF: std::future::Future<Output = serde_json::Value>,
+{
+    let started = Instant::now();
+    let answer = loop {
+        // Replaced by a newer one of theirs, or gone: nobody waits for this one
+        if !connects().lock().await.contains_key(&id) {
+            return;
+        }
+        if started.elapsed() > ttl {
+            break serde_json::json!({"state": "expired"});
+        }
+        match tokio::time::timeout(EXCHANGE_LIMIT, poll()).await {
+            Ok(Ok(None)) => tokio::time::sleep(ASK_EVERY).await,
+            Ok(Ok(Some(session))) => break keep(session).await,
+            Ok(Err(e)) => break serde_json::json!({"state": "error", "reason": e.to_string()}),
+            Err(_) => break serde_json::json!({"state": "error", "reason": "the homeserver took too long"}),
+        }
+    };
+    if let Some(c) = connects().lock().await.get_mut(&id) {
+        c.answer = Some(answer);
+    }
+}
+
+/// Keeps an approved session as `key`'s grant, when it may be theirs.
+async fn keep_grant(s: Arc<NodeState>, key: String, session: PubkySession) -> serde_json::Value {
+    let approver = session.public_key().to_string();
+    let granted = pm_pubky::homeserver::session_capabilities(&session);
+    if let Err(why) = may_keep(&key, &approver, &granted) {
+        tracing::warn!(%key, %approver, "a listener's homeserver grant was refused: {why}");
+        return serde_json::json!({"state": "denied", "reason": why});
+    }
+    let Some(secret) = pm_pubky::homeserver::export_session_secret(&session).await else {
+        return serde_json::json!({"state": "error", "reason": "Ring approved, but the session can't be kept: try again"});
+    };
+    let lock = person_lock(&key);
+    let _one = lock.lock().await;
+    // Their music access went meanwhile: nothing is kept
+    if !crate::people::may_use_music(&s, &key) {
+        return serde_json::json!({"state": "denied", "reason": "you have no music access on this node any more"});
+    }
+    let Some(file) = grant_file(&grants_dir(&s), &key) else {
+        return serde_json::json!({"state": "denied", "reason": "not a Pubky key"});
+    };
+    let _ = std::fs::remove_file(&file);
+    if let Err(e) = crate::imports::write_private(&file, secret.as_bytes()) {
+        return serde_json::json!({"state": "error", "reason": format!("cannot keep the grant: {e}")});
+    }
+    sessions().lock().expect("sessions").insert(key.clone(), session);
+    // Approved again: the node tries their homeserver again
+    let mut copy = load(&s, &key);
+    copy.lost = false;
+    if let Err(e) = save(&s, &key, &copy) {
+        tracing::warn!(%key, "a listener's grant is kept, but not that it works again: {}", e.message);
+    }
+    tracing::info!(%key, "a listener connected their homeserver");
+    serde_json::json!({"state": "ok"})
 }
 
 fn listener_key(c: &crate::accounts::Caller) -> Result<String, ApiError> {
@@ -682,113 +768,62 @@ pub(crate) async fn connect_start(
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = crate::tidal::random_urlsafe(24);
-    let mut all = connects().lock().await;
-    all.retain(|_, (_, at, _)| at.elapsed() < CONNECT_TTL);
-    // One at a time per listener: a new one replaces theirs
-    all.retain(|_, (_, _, who)| who != &key);
-    all.insert(id.clone(), (Asking::Waiting(Box::new(flow)), Instant::now(), key));
+    {
+        let mut all = connects().lock().await;
+        all.retain(|_, c| c.started.elapsed() < CONNECT_TTL);
+        // One at a time per listener: a new one replaces theirs (its task ends)
+        all.retain(|_, c| c.who != key);
+        all.insert(
+            id.clone(),
+            Connect {
+                started: Instant::now(),
+                who: key.clone(),
+                answer: None,
+            },
+        );
+    }
+    let flow = Arc::new(flow);
+    tokio::spawn(ask(
+        id.clone(),
+        CONNECT_TTL,
+        move || {
+            let flow = flow.clone();
+            async move { flow.poll().await }
+        },
+        move |session| keep_grant(s, key, session),
+    ));
     Ok(Json(
         serde_json::json!({"id": id, "qr_svg": crate::qr_svg(&url), "url": url}),
     ))
 }
 
 /// `GET /v1/me/homeserver/connect/poll?id=`: `pending`, `ok` (the grant is kept), `denied`
-/// (approved by someone else, or not for every folder: nothing kept) or `expired`.
+/// (approved by someone else, or not for every folder: nothing kept) or `expired`; 502 when the
+/// relay or their homeserver failed.
 pub(crate) async fn connect_poll(
-    axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
-    axum::Extension(c): axum::Extension<crate::accounts::Caller>,
+    axum::extract::Extension(c): axum::extract::Extension<crate::accounts::Caller>,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let key = listener_key(&c)?;
     let id = q.get("id").cloned().unwrap_or_default();
-    let pending = || Ok(Json(serde_json::json!({"state": "pending"})));
-    // Only the listener who started it may finish it. The shared map is held only to look: one
-    // slow homeserver holds up nobody else's
-    let mut handle = {
-        let mut all = connects().lock().await;
-        let Some((state, started, who)) = all.get_mut(&id) else {
-            return Ok(Json(serde_json::json!({"state": "expired"})));
-        };
-        if who != &key {
-            return Ok(Json(serde_json::json!({"state": "expired"})));
-        }
-        if started.elapsed() > CONNECT_TTL {
-            all.remove(&id);
-            return Ok(Json(serde_json::json!({"state": "expired"})));
-        }
-        match std::mem::replace(state, Asking::Busy) {
-            // Another tab of theirs is asking it this moment
-            Asking::Busy => return pending(),
-            Asking::Waiting(flow) => tokio::spawn(async move {
-                let r = flow.poll().await;
-                (flow, r)
-            }),
-            Asking::Asked(h) => h,
-        }
+    let all = connects().lock().await;
+    // Only the listener who started it may read it
+    let Some(c) = all.get(&id).filter(|c| c.who == key) else {
+        return Ok(Json(serde_json::json!({"state": "expired"})));
     };
-    let set = |id: String, st: Asking| async move {
-        if let Some(e) = connects().lock().await.get_mut(&id) {
-            e.0 = st;
-        }
-    };
-    let session = match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
-        // Still asking (an approval being exchanged): the next poll takes its answer
-        Err(_) => {
-            set(id, Asking::Asked(handle)).await;
-            return pending();
-        }
-        Ok(Ok((flow, Ok(None)))) => {
-            set(id, Asking::Waiting(flow)).await;
-            return pending();
-        }
-        Ok(Ok((_, Ok(Some(session))))) => {
-            connects().lock().await.remove(&id);
-            session
-        }
-        Ok(Ok((_, Err(e)))) => {
-            connects().lock().await.remove(&id);
-            return Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
-        }
-        Ok(Err(e)) => {
-            connects().lock().await.remove(&id);
-            return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
-        }
-    };
-    let approver = session.public_key().to_string();
-    let granted = pm_pubky::homeserver::session_capabilities(&session);
-    if let Err(why) = may_keep(&key, &approver, &granted) {
-        tracing::warn!(%key, %approver, "a listener's homeserver grant was refused: {why}");
-        return Ok(Json(serde_json::json!({"state": "denied", "reason": why})));
-    }
-    let Some(secret) = pm_pubky::homeserver::export_session_secret(&session).await else {
-        return Err(ApiError::new(
+    match &c.answer {
+        None if c.started.elapsed() > CONNECT_TTL => Ok(Json(serde_json::json!({"state": "expired"}))),
+        None => Ok(Json(serde_json::json!({"state": "pending"}))),
+        Some(a) if a["state"] == "error" => Err(ApiError::new(
             StatusCode::BAD_GATEWAY,
-            "Ring approved, but the session can't be kept: try again",
-        ));
-    };
-    let lock = person_lock(&key);
-    let _one = lock.lock().await;
-    // Their music access went meanwhile: nothing is kept
-    if !crate::people::may_use_music(&s, &key) {
-        return Ok(Json(
-            serde_json::json!({"state": "denied", "reason": "you have no music access on this node any more"}),
-        ));
+            a["reason"]
+                .as_str()
+                .unwrap_or("Ring's approval failed")
+                .to_string(),
+        )),
+        // Kept until it expires: another tab of theirs reads the same answer
+        Some(a) => Ok(Json(a.clone())),
     }
-    let file = grant_file(&grants_dir(&s), &key).ok_or_else(|| ApiError::bad_request("not a Pubky key"))?;
-    let _ = std::fs::remove_file(&file);
-    crate::imports::write_private(&file, secret.as_bytes()).map_err(|e| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("cannot keep the grant: {e}"),
-        )
-    })?;
-    sessions().lock().expect("sessions").insert(key.clone(), session);
-    // Approved again: the node tries their homeserver again
-    let mut copy = load(&s, &key);
-    copy.lost = false;
-    save(&s, &key, &copy)?;
-    tracing::info!(%key, "a listener connected their homeserver");
-    Ok(Json(serde_json::json!({"state": "ok"})))
 }
 
 /// People › Remove: the grant of `key` goes (in the background: the store is async).
@@ -893,6 +928,120 @@ mod tests {
             classify_call(&HomeserverError::Timeout),
             PersonalError::Unreachable(_)
         ));
+    }
+
+    async fn waiting(id: &str, who: &str) {
+        connects().lock().await.insert(
+            id.into(),
+            Connect {
+                started: Instant::now(),
+                who: who.into(),
+                answer: None,
+            },
+        );
+    }
+
+    async fn poll_as(who: &str, id: &str) -> Result<serde_json::Value, ApiError> {
+        let caller = crate::accounts::Caller {
+            role: crate::accounts::Role::Listener,
+            key: Some(who.into()),
+        };
+        let q = HashMap::from([("id".to_string(), id.to_string())]);
+        connect_poll(axum::Extension(caller), axum::extract::Query(q))
+            .await
+            .map(|j| j.0)
+    }
+
+    #[tokio::test]
+    async fn an_approval_is_kept_by_its_own_task_whatever_the_polls_do() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        waiting("t-kept", "ann").await;
+        let (asked, kept) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let (a, k) = (asked.clone(), kept.clone());
+        let task = tokio::spawn(ask(
+            "t-kept".into(),
+            Duration::from_secs(60),
+            move || {
+                let n = a.fetch_add(1, Ordering::SeqCst);
+                async move { Ok::<_, HomeserverError>((n >= 1).then_some(())) }
+            },
+            move |()| async move {
+                k.fetch_add(1, Ordering::SeqCst);
+                serde_json::json!({"state": "ok"})
+            },
+        ));
+        assert_eq!(poll_as("ann", "t-kept").await.unwrap()["state"], "pending");
+        // Nobody asks while it works (the page went away): it finishes all the same
+        task.await.unwrap();
+        assert_eq!(
+            (asked.load(Ordering::SeqCst), kept.load(Ordering::SeqCst)),
+            (2, 1)
+        );
+        // Each tab of hers reads the answer; anyone else reads nothing
+        assert_eq!(poll_as("ann", "t-kept").await.unwrap()["state"], "ok");
+        assert_eq!(poll_as("ann", "t-kept").await.unwrap()["state"], "ok");
+        assert_eq!(poll_as("bo", "t-kept").await.unwrap()["state"], "expired");
+        assert_eq!(poll_as("ann", "t-nothing").await.unwrap()["state"], "expired");
+    }
+
+    #[tokio::test]
+    async fn a_replaced_failed_or_late_approval_keeps_nothing() {
+        // Replaced (a new one of hers) or gone: the task ends, nothing is kept
+        waiting("t-gone", "ann").await;
+        let task = tokio::spawn(ask(
+            "t-gone".into(),
+            Duration::from_secs(60),
+            || async { Ok::<Option<()>, HomeserverError>(None) },
+            |()| async { panic!("nothing is kept for a replaced approval") },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        connects().lock().await.remove("t-gone");
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the task ends")
+            .unwrap();
+        // The relay or the exchange failed: a 502 for her, nothing kept
+        waiting("t-failed", "ann").await;
+        ask(
+            "t-failed".into(),
+            Duration::from_secs(60),
+            || async { Err::<Option<()>, _>(HomeserverError::Transport("relay down".into())) },
+            |()| async { panic!("nothing is kept for a failed approval") },
+        )
+        .await;
+        let e = poll_as("ann", "t-failed").await.unwrap_err();
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY, "{}", e.message);
+        // Too late: expired
+        waiting("t-late", "ann").await;
+        ask(
+            "t-late".into(),
+            Duration::ZERO,
+            || async { Ok::<Option<()>, HomeserverError>(None) },
+            |()| async { panic!("nothing is kept for an expired approval") },
+        )
+        .await;
+        assert_eq!(poll_as("ann", "t-late").await.unwrap()["state"], "expired");
+    }
+
+    #[test]
+    fn a_refusal_that_may_be_the_grants_is_asked_again_on_a_fresh_session() {
+        use pubky::errors::{AuthError, Error as Pe, RequestError};
+        let server = |c: u16| {
+            HomeserverError::Pubky(Pe::Request(RequestError::Server {
+                status: reqwest::StatusCode::from_u16(c).unwrap(),
+                message: String::new(),
+            }))
+        };
+        for c in [400, 401, 403, 404, 422] {
+            assert!(grant_like(&server(c)), "{c}");
+        }
+        for c in [408, 429, 500, 503] {
+            assert!(!grant_like(&server(c)), "{c}");
+        }
+        assert!(grant_like(&HomeserverError::Pubky(Pe::Authentication(
+            AuthError::Validation("expired".into())
+        ))));
+        assert!(!grant_like(&HomeserverError::Timeout));
     }
 
     #[test]

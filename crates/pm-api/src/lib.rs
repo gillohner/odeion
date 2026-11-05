@@ -5544,7 +5544,8 @@ mod tests {
             ("PUT", "/v1/node/settings"),
             ("POST", "/v1/library/folders"),
             ("POST", "/v1/zones"),
-            ("POST", "/v1/playlists"),
+            // (a listener's own collections are theirs: tests/listener_collections.rs)
+            ("POST", "/v1/playlists/from-queue"),
             ("GET", "/v1/sources/plex/server"),
         ] {
             let (st, v) = send(m, p.into(), tok.clone(), Some(serde_json::json!({}))).await;
