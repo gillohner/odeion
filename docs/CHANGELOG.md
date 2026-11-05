@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Workflows use each action at a fixed commit** (with its version beside it), checkouts keep no credentials, and `ci.yml` and `compat.yml` read the repository only. `tools/workflow-pins-check.py` runs in CI and fails on an action used by tag; Dependabot proposes the updates.
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
