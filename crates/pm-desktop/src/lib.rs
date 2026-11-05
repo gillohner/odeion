@@ -159,6 +159,23 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
     w.navigate(u).map_err(|e| e.to_string())
 }
 
+/// What the player service's notification says. The phone is a zone of the node when the node
+/// reaches its player directly; otherwise (through the tunnel, or without a player) the app plays
+/// the music itself.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn player_service_text(node_name: &str, direct: bool, native_player: bool) -> String {
+    let node = if node_name.is_empty() {
+        "your node"
+    } else {
+        node_name
+    };
+    if direct && native_player {
+        format!("This phone is a zone of {node}")
+    } else {
+        format!("Plays music from {node}")
+    }
+}
+
 /// Connected: remember the node, show it and register the player.
 fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::Info) -> Result<(), String> {
     take_moved(state);
@@ -177,19 +194,19 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
         let app = app.clone();
         o.spawn_sync(move || app.state::<AppState>().current());
     }
+    // The player service keeps the app playing in the background (from Android 12 a cached app
+    // is frozen within seconds): the phone's own zone needs it, and so does the in-app player,
+    // through the tunnel too, where the service used to be left out and the music stopped a few
+    // seconds after leaving the app (TASK-android-background-playback-1105).
+    #[cfg(target_os = "android")]
+    android::start_player_service(
+        app,
+        player_service_text(&info.name, s.via.is_empty(), state.player.is_some()),
+    );
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
         let player = state.player.clone();
-        #[cfg(target_os = "android")]
-        if player.is_some() {
-            let node = if info.name.is_empty() {
-                "your node"
-            } else {
-                info.name.as_str()
-            };
-            android::start_player_service(app, format!("This phone is a zone of {node}"));
-        }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             let s = player::register(s, player).await;
@@ -226,6 +243,9 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         .ok_or("the window is gone")?
         .navigate(page)
         .map_err(|e| e.to_string())?;
+    // The offline app plays in the page too: the service keeps it going in the background
+    #[cfg(target_os = "android")]
+    android::start_player_service(&app, "Plays the music kept on this phone".into());
     if !RETURNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -807,5 +827,18 @@ mod tests {
             assert!(is_app_page(&url::Url::parse(u).unwrap()), "{u}");
         }
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
+    }
+
+    /// The service is started in every connected case (the in-app player needs it through the
+    /// tunnel too); its notification says what the phone is doing.
+    #[test]
+    fn the_player_service_says_what_the_phone_does() {
+        assert_eq!(
+            player_service_text("NUC", true, true),
+            "This phone is a zone of NUC"
+        );
+        // Through the tunnel the node can't reach the phone's player: the app plays itself
+        assert_eq!(player_service_text("NUC", false, true), "Plays music from NUC");
+        assert_eq!(player_service_text("", true, false), "Plays music from your node");
     }
 }
