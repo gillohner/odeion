@@ -40,6 +40,9 @@ adb, api, until, log, ui_nodes, tap, center = ep.adb, ep.api, ep.until, ep.log, 
 PKG, out = ep.PKG, ep.out
 apk, node_bin = sys.argv[1], sys.argv[2]
 results = {}
+# Shown, never gating (part C's outcome depends on the Android version's freezer)
+results_info = {}
+lc_proc = None
 
 
 def shot(name):
@@ -124,8 +127,9 @@ def connect_app():
     log(adb("install", "-r", *([] if sdk >= 33 else ["-g"]), apk).strip())
     ep.relay(ep.GUEST)
     adb("logcat", "-c")
-    lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "chromium:I", "cr_MediaSession:V", "cr_AwContents:V", "*:S"],
-                          stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
+    global lc_proc
+    lc = lc_proc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "chromium:I", "cr_MediaSession:V", "cr_AwContents:V", "*:S"],
+                                    stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     tap(lambda n: "connect by address" in n, "“Or connect by address”")
     tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
@@ -220,7 +224,7 @@ def track_frames(text):
     return [int(x) for x in re.findall(r"(?:Server|server)\s*[:=]?\s*(?:0x)?([0-9]{4,})", text)]
 
 
-def away(seconds, screen_off=False):
+def away(seconds, screen_off=False, during=None):
     """Leave the app (HOME, and the screen off if asked) for `seconds`, come back, and return how far
     Now playing's time moved (None when it can't be read)."""
     tag = f"{seconds}{'-off' if screen_off else ''}"
@@ -229,6 +233,8 @@ def away(seconds, screen_off=False):
     adb("shell", "input", "keyevent", "3")
     if screen_off:
         screen(False)
+    if during:
+        during()
     time.sleep(seconds / 2)
     log(f"B away {seconds} s{' (screen off)' if screen_off else ''}: halfway players {players()}, frozen {frozen()}")
     time.sleep(seconds / 2)
@@ -306,30 +312,32 @@ def part_b():
     return ok1 and ok2
 
 
+def restart_logcat():
+    """`adb root` restarts adbd, which ends the running logcat: start it again, appending."""
+    global lc_proc
+    try:
+        lc_proc.terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    lc_proc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
+                               stdout=open(out / "logcat.txt", "a"), stderr=subprocess.STDOUT)
+
+
 def part_c():
-    """The mechanism, shown: the in-app player with the player service stopped (as when the app
-    reaches the node through the tunnel, where show_node never starts it). Expected to stop within
-    seconds of HOME; when it does, the cause is the missing foreground service."""
+    """Diagnostic (not gating): the in-app player with the player service stopped while the app is
+    away, as when nothing started it (the tunnel and offline cases before the fix). From Android 12 a
+    cached app is frozen, so the music is expected to stop there; API 30 has no freezer."""
     r = subprocess.run(["adb", "root"], capture_output=True, text=True, timeout=60)
     log(f"C: adb root: {(r.stdout + r.stderr).strip()}")
     time.sleep(5)
     subprocess.run(["adb", "wait-for-device"], timeout=120)
-    stopped = adb("shell", "am", "stopservice", "-n", f"{PKG}/.PlayerService", check=False)
-    time.sleep(3)
-    fg = service_foreground()
-    log(f"C: stopservice: {stopped.strip()[:120]}; service foreground now {fg}")
-    if fg:
-        log("C inconclusive: the service could not be stopped here")
-        results["C mechanism (in-app player without the service)"] = None
-        return None
+    restart_logcat()
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(2)
-    # The in-app player playing, Now playing open (Play if it shows)
-    if not any('text="Now playing' in n for n in ui_nodes() if 'Button' in n) or True:
-        try:
-            tap_text(["Now playing"], "the mini player (Now playing)", timeout=10)
-        except RuntimeError:
-            pass
+    try:
+        tap_text(["Now playing"], "the mini player (Now playing)", timeout=10)
+    except RuntimeError:
+        pass
     time.sleep(2)
     for n in ui_nodes():
         if re.search(r'(text|content-desc)="Play"', n):
@@ -339,12 +347,31 @@ def part_c():
             break
     time.sleep(4)
     log(f"C foreground: Now playing {mini_time()}, players {players()}")
-    moved, wall = away(60)
+
+    def stop_service():
+        out_ = adb("shell", "am", "stopservice", "-n", f"{PKG}/.PlayerService", check=False)
+        time.sleep(2)
+        log(f"C: stopservice while away: {out_.strip()[:100]}; service foreground {service_foreground()}")
+
+    moved, wall = away(60, during=stop_service)
     shot("c-back")
     stops = moved is not None and moved < wall - 20
-    log(f"C verdict: without the service the in-app player {'STOPPED' if stops else 'kept playing'} in the background ({moved} of {wall:.0f} s)")
-    results["C mechanism: without the service the in-app player stops (expected)"] = stops if moved is not None else None
+    log(f"C (diagnostic): without the service the in-app player {'STOPPED' if stops else 'kept playing'} in the background ({moved} of {wall:.0f} s)")
+    results_info["C without the service (diagnostic)"] = "stopped" if stops else "kept playing" if moved is not None else "unknown"
     return stops
+
+
+def part_d():
+    """The fix: back on screen, the app starts the service again (Resumed), and the in-app player
+    keeps playing in the background. Before the fix nothing started it again after C."""
+    time.sleep(3)
+    fg = service_foreground()
+    log(f"D: back on screen after C: service foreground {fg}")
+    moved, wall = away(60)
+    ok = fg and moved is not None and moved >= wall - 8
+    log(f"D verdict: service back {fg}; kept playing {moved} of {wall:.0f} s")
+    results["D service back on resume, in-app player keeps playing"] = ok
+    return ok
 
 
 def main():
@@ -375,15 +402,22 @@ def main():
             part_c()
         except Exception as e:  # noqa: BLE001
             log(f"C failed: {e}")
-            results["C mechanism: without the service the in-app player stops (expected)"] = None
+            results_info["C without the service (diagnostic)"] = f"error: {e}"
+        try:
+            part_d()
+        except Exception as e:  # noqa: BLE001
+            log(f"D failed: {e}")
+            results["D service back on resume, in-app player keeps playing"] = False
         dump("services-final", "activity", "services", PKG)
         dump("processes-final", "activity", "processes", PKG)
         dump("audio-final", "audio")
     finally:
-        if lc:
-            lc.terminate()
+        for p_ in (lc, lc_proc):
+            if p_:
+                p_.terminate()
         node.terminate()
     log("RESULTS: " + "; ".join(f"{k}: {'PASS' if v else 'inconclusive' if v is None else 'FAIL'}" for k, v in results.items()))
+    log("INFO: " + "; ".join(f"{k}: {v}" for k, v in results_info.items()))
     (out / "results.txt").write_text("\n".join(f"{k}: {v}" for k, v in results.items()))
     sys.exit(0 if all(v for v in results.values() if v is not None) and results else 1)
 

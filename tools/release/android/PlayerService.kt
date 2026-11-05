@@ -20,12 +20,37 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 
 class PlayerService : Service() {
     private var wake: PowerManager.WakeLock? = null
     private var wifi: WifiManager.WifiLock? = null
+    // The app playing the music itself (through the tunnel, the offline app): no locks, and the
+    // service ends after a while with nothing playing while the app is out of sight (it starts
+    // again when the app comes back). The phone as a zone of the node keeps both as before: the
+    // node may start music on it at any time.
+    private var zone = true
+    private var idleMs = 0L
+    private val tick = Handler(Looper.getMainLooper())
+    private val watch = object : Runnable {
+        override fun run() {
+            if (zone) return
+            val am = getSystemService(android.media.AudioManager::class.java)
+            idleMs = if (am.isMusicActive) 0L else idleMs + WATCH_MS
+            val me = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(me)
+            val seen = me.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+            if (idleMs >= IDLE_MS && !seen) {
+                android.util.Log.i("pubky-music", "player service: nothing played for ${IDLE_MS / 60000} min, stopping")
+                stopSelf()
+                return
+            }
+            tick.postDelayed(this, WATCH_MS)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -39,6 +64,7 @@ class PlayerService : Service() {
         val launch = packageManager.getLaunchIntentForPackage(packageName)
         val open = PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_IMMUTABLE)
         val text = intent?.getStringExtra(EXTRA_TEXT) ?: "This phone is a zone"
+        zone = intent?.getBooleanExtra(EXTRA_ZONE, true) ?: true
         val n = Notification.Builder(this, CHANNEL)
             // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
             // phones refuse as a small icon ("Bad notification for startForeground", a crash).
@@ -56,12 +82,24 @@ class PlayerService : Service() {
             }
         } catch (e: Exception) {
             // Refused (a missing permission, a background start, a system that wants more):
-            // no background playback, but the app carries on.
-            CrashReport.write(this, "The player service could not start", android.util.Log.getStackTraceString(e))
+            // no background playback, but the app carries on. A start refused because the app was
+            // in the background is not a crash: it is tried again when the app comes back.
+            if (backgroundRefusal(e)) {
+                android.util.Log.w("pubky-music", "player service: a start from the background was refused; again when the app is back")
+            } else {
+                CrashReport.write(this, "The player service could not start", android.util.Log.getStackTraceString(e))
+            }
             stopSelf()
             return START_NOT_STICKY
         }
-        hold()
+        if (zone) {
+            hold()
+        } else {
+            release()
+            idleMs = 0L
+            tick.removeCallbacks(watch)
+            tick.postDelayed(watch, WATCH_MS)
+        }
         return START_NOT_STICKY
     }
 
@@ -91,21 +129,34 @@ class PlayerService : Service() {
         stopSelf()
     }
 
-    override fun onDestroy() {
+    private fun release() {
         wake?.release()
         wifi?.release()
         wake = null
         wifi = null
+    }
+
+    override fun onDestroy() {
+        tick.removeCallbacks(watch)
+        release()
         super.onDestroy()
     }
 
     companion object {
         const val CHANNEL = "player"
         const val EXTRA_TEXT = "text"
+        const val EXTRA_ZONE = "zone"
+        const val WATCH_MS = 60_000L
+        const val IDLE_MS = 5 * 60_000L
+
+        /// Android 12+ refuses a foreground service started from the background
+        /// (ForegroundServiceStartNotAllowedException, by name: the class is new in API 31).
+        fun backgroundRefusal(e: Exception): Boolean =
+            Build.VERSION.SDK_INT >= 31 && e.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
         private const val NOTIFY = "android.permission.POST_NOTIFICATIONS"
 
         @JvmStatic
-        fun start(activity: Activity, text: String) {
+        fun start(activity: Activity, text: String, zone: Boolean) {
             // Android 13+: without this the service still runs, but its notification is hidden.
             // Asked once: someone who said no is not asked again on every launch.
             val prefs = activity.getSharedPreferences("pubky-music", Context.MODE_PRIVATE)
@@ -116,11 +167,16 @@ class PlayerService : Service() {
                 prefs.edit().putBoolean("asked-notifications", true).apply()
                 activity.requestPermissions(arrayOf(NOTIFY), 7)
             }
-            val i = Intent(activity, PlayerService::class.java).putExtra(EXTRA_TEXT, text)
+            val i = Intent(activity, PlayerService::class.java).putExtra(EXTRA_TEXT, text).putExtra(EXTRA_ZONE, zone)
             try {
                 activity.startForegroundService(i)
             } catch (e: Exception) {
-                CrashReport.write(activity, "The player service was refused", android.util.Log.getStackTraceString(e))
+                // From the background (Android 12+): not a crash; the app starts it again when it is back
+                if (backgroundRefusal(e)) {
+                    android.util.Log.w("pubky-music", "player service: a start from the background was refused; again when the app is back")
+                } else {
+                    CrashReport.write(activity, "The player service was refused", android.util.Log.getStackTraceString(e))
+                }
             }
         }
 

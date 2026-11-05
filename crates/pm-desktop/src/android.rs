@@ -177,17 +177,51 @@ fn take_lock(
 /// generated project by tools/release/android-patch.py): it keeps the phone's
 /// zone playing while the app is in the background. Must run while the app
 /// is on screen; starting it again only updates its notification.
-pub fn start_player_service(app: &tauri::AppHandle, text: String) {
+/// What the player service was last started with (its text and whether the phone is a zone of
+/// the node), so it can be started again when the app comes back: a start from the background is
+/// refused from Android 12, and the app's own-player mode ends itself when nothing plays.
+static LAST: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
+/// Start the player service. `zone`: the node reaches this phone's player (the service keeps the
+/// CPU and Wi-Fi awake for its stream, as long as the app is connected); otherwise the app plays the
+/// music itself (through the tunnel, the offline app): no locks, and it ends after a while with
+/// nothing playing out of sight.
+pub fn start_player_service(app: &tauri::AppHandle, text: String, zone: bool) {
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((text.clone(), zone));
+    run_service(app, Some((text, zone)));
+}
+
+/// The app is back on screen: start the service again as it was (a no-op when it still runs).
+pub fn resume_player_service(app: &tauri::AppHandle) {
+    let last = LAST.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(l) = last {
+        run_service(app, Some(l));
+    }
+}
+
+/// No node any more (forgotten): the service ends, and is not started again on resume.
+pub fn stop_player_service(app: &tauri::AppHandle) {
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    run_service(app, None);
+}
+
+/// Start (`Some`) or stop (`None`) the service on the activity's thread.
+fn run_service(app: &tauri::AppHandle, how: Option<(String, bool)>) {
     use tauri::Manager;
     let Some(window) = app.get_webview_window(crate::MAIN) else {
         return;
     };
     let scheduled = window.with_webview(move |wv| {
         wv.jni_handle().exec(move |env, activity, _webview| {
-            let started = crate::crash::guarded("the player service", || start_service(env, activity, &text))
-                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
-            match started {
-                Ok(()) => tracing::info!("player service started"),
+            let starting = how.is_some();
+            let done = crate::crash::guarded("the player service", || match &how {
+                Some((text, zone)) => start_service(env, activity, text, *zone),
+                None => stop_service(env, activity),
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            match done {
+                Ok(()) if starting => tracing::info!("player service started"),
+                Ok(()) => tracing::info!("player service stopped"),
                 Err(e) => {
                     // A Java exception stays pending until cleared.
                     if env.exception_check().unwrap_or(false) {
@@ -195,14 +229,14 @@ pub fn start_player_service(app: &tauri::AppHandle, text: String) {
                         let _ = env.exception_clear();
                     }
                     tracing::warn!(
-                        "no player service ({e}); the phone's zone stops when the app is in the background"
+                        "no player service ({e}); the app's music stops when it is in the background"
                     )
                 }
             }
         });
     });
     if let Err(e) = scheduled {
-        tracing::warn!("cannot reach the activity to start the player service: {e}");
+        tracing::warn!("cannot reach the activity for the player service: {e}");
     }
 }
 
@@ -210,6 +244,7 @@ fn start_service(
     env: &mut jni021::JNIEnv,
     activity: &jni021::objects::JObject,
     text: &str,
+    zone: bool,
 ) -> jni021::errors::Result<()> {
     use jni021::objects::{JClass, JValue};
     // The service sits next to MainActivity, in its package. Loaded through
@@ -242,8 +277,48 @@ fn start_service(
     env.call_static_method(
         &cls,
         "start",
-        "(Landroid/app/Activity;Ljava/lang/String;)V",
-        &[JValue::Object(activity), JValue::Object(&jtext)],
+        "(Landroid/app/Activity;Ljava/lang/String;Z)V",
+        &[
+            JValue::Object(activity),
+            JValue::Object(&jtext),
+            JValue::Bool(u8::from(zone)),
+        ],
+    )?;
+    Ok(())
+}
+
+/// `PlayerService.stop(context)`, loaded like `start`.
+fn stop_service(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&class, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let service = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.PlayerService"),
+        None => "PlayerService".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&service)?;
+    let cls = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let cls = JClass::from(cls);
+    env.call_static_method(
+        &cls,
+        "stop",
+        "(Landroid/content/Context;)V",
+        &[JValue::Object(activity)],
     )?;
     Ok(())
 }

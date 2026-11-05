@@ -199,10 +199,14 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     // through the tunnel too, where the service used to be left out and the music stopped a few
     // seconds after leaving the app (TASK-android-background-playback-1105).
     #[cfg(target_os = "android")]
-    android::start_player_service(
-        app,
-        player_service_text(&info.name, s.via.is_empty(), state.player.is_some()),
-    );
+    {
+        let zone = s.via.is_empty() && state.player.is_some();
+        android::start_player_service(
+            app,
+            player_service_text(&info.name, s.via.is_empty(), state.player.is_some()),
+            zone,
+        );
+    }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
@@ -245,7 +249,7 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         .map_err(|e| e.to_string())?;
     // The offline app plays in the page too: the service keeps it going in the background
     #[cfg(target_os = "android")]
-    android::start_player_service(&app, "Plays the music kept on this phone".into());
+    android::start_player_service(&app, "Plays the music kept on this phone".into(), false);
     if !RETURNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -562,8 +566,13 @@ async fn open_ring(app: AppHandle, url: String) -> Result<(), String> {
 
 /// Forget the node (the connect page's "Connect to another node").
 #[tauri::command]
-fn forget(state: State<'_, AppState>) {
+fn forget(app: AppHandle, state: State<'_, AppState>) {
     state.store(None);
+    // No node: the player service ends (and isn't started again when the app comes back)
+    #[cfg(target_os = "android")]
+    android::stop_player_service(&app);
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -695,19 +704,24 @@ pub fn run() {
         })
         .build(tauri::generate_context!());
     match app {
-        Ok(app) => app.run(|_, event| {
+        Ok(app) => app.run(|app, event| {
             // The Ring sign-in waits for the screen (ring_wait): Android onPause / onResume. Not on
             // iOS, whose Suspended (willResignActive) and Resumed (willEnterForeground) do not pair.
             #[cfg(target_os = "android")]
             if let tauri::RunEvent::WindowEvent { event, .. } = &event {
                 match event {
                     tauri::WindowEvent::Suspended => ring_wait::left(),
-                    tauri::WindowEvent::Resumed => ring_wait::back(),
+                    tauri::WindowEvent::Resumed => {
+                        ring_wait::back();
+                        // On screen again: the player service as it was (refused from the background,
+                        // or ended after a while with nothing playing)
+                        android::resume_player_service(app);
+                    }
                     _ => {}
                 }
             }
             #[cfg(not(target_os = "android"))]
-            let _ = event;
+            let _ = (app, event);
         }),
         Err(e) => {
             tracing::error!("cannot start: {e}");
@@ -829,8 +843,9 @@ mod tests {
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
     }
 
-    /// The service is started in every connected case (the in-app player needs it through the
-    /// tunnel too); its notification says what the phone is doing.
+    /// The player service's notification says what the phone does: a zone of the node when the
+    /// node reaches its player directly, else the app playing itself (this tests the text; the
+    /// starts are checked on the emulator, tools/android-background-probe.py).
     #[test]
     fn the_player_service_says_what_the_phone_does() {
         assert_eq!(
