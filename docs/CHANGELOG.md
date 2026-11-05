@@ -6,6 +6,16 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-05
 
+- **An item page tells switching from leaving** (owner's report: "multiple open in links. separate between switching and external apps"). The hero's icon row is two labelled groups: **Also on**, the services Odeion plays from (an icon switches to that service's page here, "Switch to TIDAL"), and **Open in ↗**, the services that only have a site (a new tab, "Open in Spotify (new tab)"). The ⋯ menu has one **Open in…** row whose second menu lists every site (one site is a direct row), and **Also on…** the same way; four "Open on X" rows are gone. Every link that leaves Odeion says "Open in".
+
+- **Tags are in the top card, drawn as pubky.app draws them** (owner's ask).
+  - Album, song and artist pages show their tags under the title, above Play. The Tags section at the bottom is gone; My rating stays where it was.
+  - The item's tags and the source link's stay two groups, both always visible, each with its own "+" to add one. Each group reads, adds, removes and counts on its own link only, and so do the people beside each tag: the same tag in both groups keeps its own people.
+  - Each tag has pubky.app's colour for its label (the same function, ported), without the "#", with how many people used it. Your own tag has a border, and only your own has × to remove it. Beside a tag are up to four of the people who used it, then "+N"; a click lists them, and each opens their page.
+  - Others' tags come first, most used first. About two rows show, and "+N more" shows the rest in place. While Pubky answers the item's own tags are already there; when it doesn't answer the page says so, and your tags still work.
+  - An album or artist with no MusicBrainz match says so in the top card; an album's **Match this album to tag it** opens its folder in the matches to confirm. A link with no MusicBrainz item takes tags on the link only. No tag, and no tag count or face, ever comes from a guessed identity.
+  - Home's tags, a tag's page, search's Tags, Genres' "Your Pubky tags" and the now-playing tags use the same chip and colours.
+
 - **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
   - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
   - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
@@ -15,15 +25,6 @@ Newest first. Dates are when the change landed on `main`.
   - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
 
 ### 2026-11-04
-
-- **An item page tells switching from leaving** (owner's report: "multiple open in links. separate between switching and external apps"). The hero's icon row is two labelled groups: **Also on**, the services Odeion plays from (an icon switches to that service's page here, "Switch to TIDAL"), and **Open in ↗**, the services that only have a site (a new tab, "Open in Spotify (new tab)"). The ⋯ menu has one **Open in…** row whose second menu lists every site (one site is a direct row), and **Also on…** the same way; four "Open on X" rows are gone. Every link that leaves Odeion says "Open in".
-- **Tags are in the top card, drawn as pubky.app draws them** (owner's ask).
-  - Album, song and artist pages show their tags under the title, above Play. The Tags section at the bottom is gone; My rating stays where it was.
-  - The item's tags and the source link's stay two groups, both always visible, each with its own "+" to add one. Each group reads, adds, removes and counts on its own link only, and so do the people beside each tag: the same tag in both groups keeps its own people.
-  - Each tag has pubky.app's colour for its label (the same function, ported), without the "#", with how many people used it. Your own tag has a border, and only your own has × to remove it. Beside a tag are up to four of the people who used it, then "+N"; a click lists them, and each opens their page.
-  - Others' tags come first, most used first. About two rows show, and "+N more" shows the rest in place. While Pubky answers the item's own tags are already there; when it doesn't answer the page says so, and your tags still work.
-  - An album or artist with no MusicBrainz match says so in the top card; an album's **Match this album to tag it** opens its folder in the matches to confirm. A link with no MusicBrainz item takes tags on the link only. No tag, and no tag count or face, ever comes from a guessed identity.
-  - Home's tags, a tag's page, search's Tags, Genres' "Your Pubky tags" and the now-playing tags use the same chip and colours.
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
 

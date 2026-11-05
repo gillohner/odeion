@@ -3785,7 +3785,7 @@
     $$('.tgroup', box).forEach((gr) => {
       const more = $('[data-htag-more]', gr); if (!more) return;
       const items = $$('.tagitem', gr); items.forEach((it) => { it.hidden = false; }); more.hidden = true;
-      const shown = () => [...items.filter((it) => !it.hidden), ...$$('.tgroup-name, [data-htag-more]:not([hidden]), [data-htag-plus]:not([hidden]), input[data-htag-add]', gr)];
+      const shown = () => [...items.filter((it) => !it.hidden), ...$$('.tgroup-name, [data-htag-more]:not([hidden]), [data-htag-plus]:not([hidden]), input[data-htag-add], .tag-hint, .tgroup > .muted.small', gr)].filter((el) => el.getClientRects().length);
       for (let k = items.length - 1; k > 0 && rows(shown()) > 2; k--) { items[k].hidden = true; more.hidden = false; more.textContent = `+${items.length - k} more`; }
     });
   };
@@ -3830,16 +3830,17 @@
     if (!box.isConnected || box.dataset.for !== ht.key) return;
     $$('[data-htag-faces]', box).forEach((b) => { const g = ht.groups.find((x) => x.scope === b.dataset.htagFaces); const fids = (g.pub.faces || {})[b.dataset.label] || []; b.innerHTML = tagFaces(fids.map(cardOf), new Map(g.pub.tags || []).get(b.dataset.label) || fids.length); });
   };
+  let heroTagsRo = null;
   const drawHeroTags = (ht) => {
     const box = $('#htags'); if (!box || box.dataset.for !== ht.key) return;
     // A half-typed tag stays when the public tags come in meanwhile
-    const typing = $('input[data-htag-add]', box);
-    const draft = typing && { scope: typing.dataset.htagAdd, value: typing.value, focus: document.activeElement === typing };
+    const drafts = $$('input[data-htag-add]', box).map((t) => ({ scope: t.dataset.htagAdd, value: t.value, focus: document.activeElement === t }));
     box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
     bindHeroTags(box, ht);
-    if (draft) { const b = $(`[data-htag-plus="${draft.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, draft.focus); $('input[data-htag-add]', box).value = draft.value; } }
+    drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); const inp = $(`input[data-htag-add="${d.scope}"]`, box); if (inp) inp.value = d.value; } });
     foldHeroTags(box);
-    if (!box.dataset.fold && window.ResizeObserver) { box.dataset.fold = '1'; let w = box.clientWidth; new ResizeObserver(() => { if (box.clientWidth !== w) { w = box.clientWidth; foldHeroTags(box); } }).observe(box); }
+    // One observer, on the current box (a redrawn page has a new one)
+    if (!box.dataset.fold && window.ResizeObserver) { box.dataset.fold = '1'; if (heroTagsRo) heroTagsRo.disconnect(); let w = box.clientWidth; heroTagsRo = new ResizeObserver(() => { if (!box.isConnected) { heroTagsRo.disconnect(); return; } if (box.clientWidth !== w) { w = box.clientWidth; foldHeroTags(box); } }); heroTagsRo.observe(box); }
     fillHeroFaces(box, ht);
   };
   let heroTagsGen = 0;
@@ -4236,9 +4237,9 @@
         if (!outs.length) return [];
         if (outs.length === 1) return [{ label: `Open in ${name(outs[0])}`, icon: 'external', run: () => openWeb(outs[0].url) }];
         // (the second menu opens once this one's history entry is popped, so it gets its own Back step)
-        return [{ label: 'Open in…', icon: 'external', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl, [{ title: 'Open in' }, ...outs.map((v) => ({ label: name(v), svc: srcSvc(v.source), run: () => openWeb(v.url) }))]); }, 0); } }];
+        return [{ label: 'Open in…', icon: 'external', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Open in' }, ...outs.map((v) => ({ label: name(v), svc: srcSvc(v.source), run: () => openWeb(v.url) }))]); }, 0); } }];
       })(),
-      ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl, [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
+      ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
       ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
