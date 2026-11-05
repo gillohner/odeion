@@ -850,6 +850,15 @@ fn library_row(t: &Track) -> ItemTrack {
         artist_id: t.artists.first().and_then(|a| a.id).map(|i| format!("lib-{i}")),
         album: t.album.as_ref().map(|a| a.title.clone()),
         album_id: t.album.as_ref().and_then(|a| a.id).map(|i| format!("lib-{i}")),
+        versions: Vec::new(),
+    }
+}
+
+/// [`library_row`] for a song kept in several copies: the row plays the best one and lists all.
+fn song_row(s: &pm_library::Song) -> ItemTrack {
+    ItemTrack {
+        versions: s.versions.clone(),
+        ..library_row(&s.track)
     }
 }
 
@@ -1031,12 +1040,13 @@ async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPag
         let a = lib
             .get_album(n)?
             .ok_or_else(|| ApiError::not_found(format!("no album {n}")))?;
-        (a, lib.album_tracks(n)?, lib.album_match(n)?)
+        (a, lib.album_songs(n)?, lib.album_match(n)?)
     };
     if mb_match.is_none() {
         crate::library_match::want_album(n);
     }
-    let songs: Vec<ItemTrack> = tracks.iter().map(library_row).collect();
+    let songs: Vec<ItemTrack> = tracks.iter().map(song_row).collect();
+    let tracks: Vec<Track> = tracks.into_iter().map(|s| s.track).collect();
     let mut versions = vec![Version {
         page: None,
         source: "library".into(),
@@ -1167,9 +1177,16 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
             let a = lib
                 .unknown_artist()?
                 .ok_or_else(|| ApiError::not_found("every song has an artist"))?;
-            let tracks = lib.tracks_without_artist()?;
+            let tracks: Vec<pm_library::Song> = lib
+                .tracks_without_artist()?
+                .into_iter()
+                .map(|track| pm_library::Song {
+                    track,
+                    versions: Vec::new(),
+                })
+                .collect();
             let mut albums: Vec<pm_model::Album> = Vec::new();
-            for al in tracks.iter().filter_map(|t| t.album.clone()) {
+            for al in tracks.iter().filter_map(|s| s.track.album.clone()) {
                 if !albums.iter().any(|x| x.id == al.id) {
                     albums.push(al);
                 }
@@ -1179,7 +1196,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
             let a = lib
                 .get_artist(n)?
                 .ok_or_else(|| ApiError::not_found(format!("no artist {n}")))?;
-            (a, lib.artist_albums(n)?, lib.artist_tracks(n)?)
+            (a, lib.artist_albums(n)?, lib.artist_songs(n)?)
         }
     };
     let mb_match = if unknown {
@@ -1233,7 +1250,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPa
     let songs: Vec<ItemTrack> = tracks
         .iter()
         .take(if unknown { 1000 } else { 10 })
-        .map(library_row)
+        .map(song_row)
         .collect();
     Ok(ItemPage {
         kind: "artist".into(),

@@ -26,7 +26,7 @@ COPY . .
 ENV CARGO_INCREMENTAL=0
 # The version the node reports (release.yml: 0.2.1, or 0.2.1-edge+<sha>); empty = Cargo.toml's
 ARG PM_NODE_VERSION
-# Built-in apps and the masked TIDAL device client, compiled in by crates/pm-api/build.rs (build stage only)
+# Built-in apps (public ids), compiled in by crates/pm-api/build.rs (build stage only)
 ARG PM_PROJECT_TIDAL_CLIENT_ID
 ARG PM_PROJECT_JAMENDO_CLIENT_ID
 ARG PM_PROJECT_ACOUSTID_KEY
@@ -44,7 +44,19 @@ ARG ODEION_PROJECT_FANART_KEY
 ARG ODEION_PROJECT_AUDIODB_KEY
 ARG ODEION_PROJECT_ONEDRIVE_CLIENT_ID
 ARG ODEION_PROJECT_GOOGLE_CLIENT_ID
-RUN set -eu; \
+# TIDAL's built-in clients (masked by build.rs): BuildKit secrets, read in this one RUN only, so they
+# are in no layer, no build argument and not in the final image. Without them (a plain
+# `docker build`) the build has none. Locally:
+#   docker buildx build --no-cache-filter build \
+#     --secret id=PM_TIDAL_PKCE_CLIENT_ID,env=PM_TIDAL_PKCE_CLIENT_ID … -t pubky-music-node .
+RUN --mount=type=secret,id=PM_TIDAL_PKCE_CLIENT_ID \
+    --mount=type=secret,id=PM_TIDAL_PKCE_CLIENT_SECRET \
+    --mount=type=secret,id=PM_TIDAL_DEVICE_CLIENT_ID \
+    --mount=type=secret,id=PM_TIDAL_DEVICE_CLIENT_SECRET \
+    set -eu; \
+    for k in PM_TIDAL_PKCE_CLIENT_ID PM_TIDAL_PKCE_CLIENT_SECRET PM_TIDAL_DEVICE_CLIENT_ID PM_TIDAL_DEVICE_CLIENT_SECRET; do \
+        if [ -s "/run/secrets/$k" ]; then export "$k=$(cat "/run/secrets/$k")"; fi; \
+    done; \
     if [ "$TARGETARCH" = "arm64" ] && [ "$(dpkg --print-architecture)" != "arm64" ]; then \
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
                CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \

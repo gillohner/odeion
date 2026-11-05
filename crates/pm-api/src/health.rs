@@ -137,7 +137,7 @@ async fn probe_all(s: &Arc<NodeState>) -> Vec<HealthPart> {
                 });
             }
             let t = Instant::now();
-            let r = match tokio::time::timeout(PROBE, sync.list_private_files()).await {
+            let r = match tokio::time::timeout(PROBE, sync.probe_private_storage()).await {
                 Ok(Ok(_)) => Ok(t.elapsed().as_millis() as u64),
                 Ok(Err(e)) if crate::sync::is_refusal(&e.to_string()) => {
                     sync.note_refusal();
