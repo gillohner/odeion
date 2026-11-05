@@ -20074,4 +20074,186 @@ exec sleep 300
         let (_, _) = call(&app, "GET", "/v1/bookmarks", None).await;
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
+
+    /// A stand-in for the bundled homeserver's admin API: `GET /signup_tokens` answers `used`, and
+    /// the first such call waits (after waking `held`) until `release`, so a test picks which
+    /// roster change stores last. `/info` is down.
+    async fn held_admin(
+        used: serde_json::Value,
+    ) -> (
+        bundled::AdminEndpoint,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let held = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tokens = {
+            let (held, release) = (held.clone(), release.clone());
+            move || {
+                let (held, release, calls, used) =
+                    (held.clone(), release.clone(), calls.clone(), used.clone());
+                async move {
+                    if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        held.notify_one();
+                        release.notified().await;
+                    }
+                    Json(used)
+                }
+            }
+        };
+        let app = Router::new()
+            .route("/signup_tokens", get(tokens))
+            .route("/info", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            bundled::AdminEndpoint::new(&url, "test-admin-password").unwrap(),
+            held,
+            release,
+        )
+    }
+
+    async fn as_who(
+        app: &Router,
+        method: &str,
+        uri: String,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(
+                body.map(|b| Body::from(b.to_string()))
+                    .unwrap_or_else(Body::empty),
+            )
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let st = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (
+            st,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    const ROSTER_KEY: &str = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+    const INVITE_TOKEN: &str = "FIXT-URE0-TOKN";
+
+    /// A node behind a token with one listener (music on) and one unused homeserver invite.
+    async fn roster_node(
+        dir: &std::path::Path,
+        used: serde_json::Value,
+    ) -> (
+        Arc<NodeState>,
+        Router,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let s = state(dir, Some("s3cret")).await;
+        let (ep, held, release) = held_admin(used).await;
+        s.set_bundled_homeserver(ep);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({
+                    "people": [{"key": ROSTER_KEY, "access": "homeserver_music", "music_enabled": true, "added_at": 1}],
+                    "invites": [{"id": "i1", "access": "homeserver_music", "token": INVITE_TOKEN, "created_at": 1}],
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let app = router(s.clone());
+        (s, app, held, release)
+    }
+
+    /// A rename that read the roster before music was turned off, and stores after, leaves music
+    /// off: the listener's token stays refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slow_roster_change_does_not_undo_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, app, held, release) = roster_node(dir.path(), serde_json::json!({"items": []})).await;
+        let rename = tokio::spawn({
+            let app = app.clone();
+            async move {
+                as_who(
+                    &app,
+                    "PATCH",
+                    format!("/v1/people/{ROSTER_KEY}"),
+                    "s3cret",
+                    Some(serde_json::json!({"name": "Sam"})),
+                )
+                .await
+            }
+        });
+        held.notified().await;
+        let (st, v) = as_who(
+            &app,
+            "PATCH",
+            format!("/v1/people/{ROSTER_KEY}"),
+            "s3cret",
+            Some(serde_json::json!({"music": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        release.notify_one();
+        let (st, v) = rename.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["music_enabled"], false, "{v}");
+        let p = people::load(&s)
+            .people
+            .into_iter()
+            .find(|p| p.key == ROSTER_KEY)
+            .unwrap();
+        assert!(!p.music_enabled, "music stays off");
+        assert_eq!(p.name.as_deref(), Some("Sam"), "and the rename is kept");
+        let tok = accounts::mint(&s, ROSTER_KEY).unwrap();
+        let (st, _) = as_who(&app, "GET", "/v1/library/tracks".into(), &tok, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    /// `GET /v1/people` turning a used invite into a person, slower than a disable made meanwhile,
+    /// adds the person without bringing music back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_slow_reconcile_does_not_undo_a_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        const NEW: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let used = serde_json::json!({"items": [{"token": INVITE_TOKEN, "used_by": NEW}]});
+        let (s, app, held, release) = roster_node(dir.path(), used).await;
+        let list = tokio::spawn({
+            let app = app.clone();
+            async move { as_who(&app, "GET", "/v1/people".into(), "s3cret", None).await }
+        });
+        held.notified().await;
+        let (st, v) = as_who(
+            &app,
+            "PATCH",
+            format!("/v1/people/{ROSTER_KEY}"),
+            "s3cret",
+            Some(serde_json::json!({"music": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        release.notify_one();
+        let (st, v) = list.await.unwrap();
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let r = people::load(&s);
+        let p = r.people.iter().find(|p| p.key == ROSTER_KEY).unwrap();
+        assert!(!p.music_enabled, "the disable stays: {r:?}");
+        assert_eq!(
+            r.people.iter().filter(|p| p.key == NEW).count(),
+            1,
+            "the invitee is in, once"
+        );
+        assert!(r.invites.is_empty());
+        let tok = accounts::mint(&s, ROSTER_KEY).unwrap();
+        let (st, _) = as_who(&app, "GET", "/v1/library/tracks".into(), &tok, None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
 }

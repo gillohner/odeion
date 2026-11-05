@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **Changes to People are made one at a time.** A change waits for any other to finish, homeserver calls come first, and the change is made to the list as it is by then: two changes made at once (a rename and turning music off, or opening People while an invite is used) both stay.
+
 ### 2026-11-04
 
 - **A song kept in more than one copy shows a quiet "2 versions"** in its row's second line (owner: "maybe have some indication or version chooser, very subtle"). The row plays the best copy, as before. Pressing the marker lists every copy (where it is kept, its format and size) with the default first; picking one plays that copy from this row on, and the default stays. Songs with one copy look as before. On album and artist pages, phone, tablet and desktop.
