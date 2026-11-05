@@ -380,6 +380,27 @@ class BitPerfect private constructor() {
             return (am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 + max / 2) / max
         }
 
+        /// Android's own attenuation of media, in dB, for the USB DAC it plays to now
+        /// (getStreamVolumeDb, Android 9+), for Exclusive USB's hand-over: NaN when it can't say,
+        /// or media goes elsewhere now (Android 13+ tells the route; before, a USB output must be
+        /// attached), so a reading is never another device's.
+        @JvmStatic
+        fun mediaVolumeDbOnUsb(): Float {
+            if (Build.VERSION.SDK_INT < 28) return Float.NaN
+            val am = audio() ?: return Float.NaN
+            val usb = setOf(AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET)
+            val type = if (Build.VERSION.SDK_INT >= 33) {
+                runCatching { am.getAudioDevicesForAttributes(media).map { it.type } }.getOrNull()
+                    ?.singleOrNull { it in usb } ?: return Float.NaN
+            } else {
+                am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type }.firstOrNull { it in usb }
+                    ?: return Float.NaN
+            }
+            return runCatching {
+                am.getStreamVolumeDb(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC), type)
+            }.getOrDefault(Float.NaN)
+        }
+
         /// Devices went away (UsbAudio's callback): tracks on them stop at once.
         fun removed(ids: Set<Int>) {
             val lost = synchronized(tracks) { tracks.values.filter { it.dacId in ids } }

@@ -146,6 +146,9 @@ pub struct Driver {
     /// A transfer finished without error since the stream started.
     running: bool,
     submitted: u64,
+    /// Frames in transfers that came back (played or not): what left the buffer.
+    retired: u64,
+    /// Frames in packets the DAC took (failed packets aren't).
     played: u64,
     claimed: Vec<u8>,
     open: bool,
@@ -170,6 +173,7 @@ impl Driver {
             readback: None,
             running: false,
             submitted: 0,
+            retired: 0,
             played: 0,
             claimed: Vec::new(),
             open: true,
@@ -267,7 +271,7 @@ impl Driver {
     /// Frames handed in and not played yet.
     pub fn queued_frames(&self) -> u64 {
         let fb = self.plan.setting.frame_bytes().max(1) as u64;
-        self.submitted.saturating_sub(self.played) + self.pending.len() as u64 / fb
+        self.submitted.saturating_sub(self.retired) + self.pending.len() as u64 / fb
     }
 
     /// Frames the buffer holds at most.
@@ -384,7 +388,18 @@ impl Driver {
             }
         } else if let Some(pos) = self.in_flight.iter().position(|(t, _)| *t == r.tag) {
             let (_, frames) = self.in_flight.remove(pos).expect("found");
-            self.played += frames;
+            self.retired += frames;
+            // Played: only what arrived, packet by packet (a failed packet's frames weren't)
+            let fb = self.plan.setting.frame_bytes().max(1) as u64;
+            if r.status == 0 {
+                self.played += r
+                    .packet_status
+                    .iter()
+                    .zip(&r.actual)
+                    .filter(|(st, _)| **st == 0)
+                    .map(|(_, n)| u64::from(*n) / fb)
+                    .sum::<u64>();
+            }
             // Running only while its packets arrive: a transfer with failed packets (silence,
             // dropouts) withdraws it, and a run of them stops the stream
             let clean = r.status == 0 && r.packet_status.iter().all(|p| *p == 0);
@@ -467,7 +482,7 @@ impl Driver {
             self.reap_one(Duration::from_millis(50))?;
         }
         self.in_flight.clear();
-        self.played = self.submitted;
+        self.retired = self.submitted;
         Ok(())
     }
 
@@ -682,6 +697,8 @@ pub mod fake {
         pub refuse_volume: bool,
         /// The volume reads back as this whatever was written (a DAC that ignores it).
         pub volume_stuck: Option<i16>,
+        /// Every volume write: (feature unit, value)
+        pub unit_writes: Vec<(u8, i16)>,
     }
 
     #[derive(Default, Clone)]
@@ -764,6 +781,7 @@ pub mod fake {
                         return Err(UsbError::Other("stall".into()));
                     }
                     let v = i16::from_le_bytes([req.data[0], req.data[1]]);
+                    s.unit_writes.push(((req.index >> 8) as u8, v));
                     s.volume = Some(v);
                     s.log.push(format!("volume {v}"));
                     Ok(Vec::new())
@@ -867,6 +885,7 @@ mod tests {
             },
             clock: Some(0x29),
             rate_settable: true,
+            unit: None,
         }
     }
 
@@ -1134,6 +1153,7 @@ mod tests {
         assert!(!d.confirmed(), "read back, but nothing arrives");
         let e = d.write(&vec![0u8; 96_000 * 8]).unwrap_err();
         assert_eq!(e, DriverError::Usb("the DAC does not take the audio".into()));
+        assert_eq!(d.played_frames(), 0, "nothing arrived, nothing played");
         // Packets arrive again: running
         let g = FakeDac::high_speed();
         let mut d = open(&g, 96_000).unwrap();

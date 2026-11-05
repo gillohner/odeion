@@ -126,12 +126,27 @@ pub struct Usbfs {
 }
 
 impl Usbfs {
-    /// usbfs on a duplicate of `fd` (an open `UsbDeviceConnection`'s); `fd` stays the app's.
+    /// usbfs on a duplicate of `fd` (an open `UsbDeviceConnection`'s); `fd` stays the app's. The
+    /// duplicate is close-on-exec (a child process never keeps the DAC claimed).
     pub fn new(fd: c_int) -> Self {
-        // SAFETY: dup on any integer is safe; a bad one fails with -1 (then every call is Gone)
-        let own = if fd >= 0 { unsafe { libc::dup(fd) } } else { -1 };
+        // SAFETY: fcntl on any integer is safe; a bad one fails with -1 (then every call is Gone)
+        let own = if fd >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) }
+        } else {
+            -1
+        };
         Usbfs {
             fd: own,
+            in_flight: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// usbfs on `fd`, handed over: a duplicate the app made under its own lock and gave up
+    /// (`ParcelFileDescriptor.detachFd`), so no detach can close it in between. Ours from now
+    /// on, closed when this is dropped.
+    pub fn take(fd: c_int) -> Self {
+        Usbfs {
+            fd,
             in_flight: Mutex::new(HashMap::new()),
         }
     }
@@ -420,6 +435,29 @@ mod tests {
             closed.reap(Duration::from_millis(1)),
             Err(UsbError::Gone) | Ok(None)
         ));
+    }
+
+    /// Codex M4 (round 2 of #306): a descriptor handed over is owned: closed when the transport
+    /// goes, and the duplicate `new` makes is close-on-exec.
+    #[test]
+    fn a_handed_over_descriptor_is_owned() {
+        use std::os::fd::IntoRawFd;
+        let fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+        let u = Usbfs::take(fd);
+        assert_eq!(u.fd, fd);
+        drop(u);
+        // SAFETY: probing a descriptor number
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) },
+            -1,
+            "closed with the transport"
+        );
+        let app = std::fs::File::open("/dev/null").unwrap();
+        use std::os::fd::AsRawFd;
+        let d = Usbfs::new(app.as_raw_fd());
+        // SAFETY: probing the duplicate's flags
+        let flags = unsafe { libc::fcntl(d.fd, libc::F_GETFD) };
+        assert!(flags & libc::FD_CLOEXEC != 0, "close-on-exec");
     }
 
     /// Not a USB device: every call fails cleanly, nothing is leaked or freed under the kernel.

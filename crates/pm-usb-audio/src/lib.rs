@@ -703,8 +703,26 @@ impl UsbAudioDevice {
         if self.uac != Some(Uac::V2) {
             return None;
         }
-        let link = self.streams.iter().find(|s| s.pcm)?.terminal_link;
+        // A playback setting (an OUT endpoint), never a capture one
+        let link = self
+            .streams
+            .iter()
+            .find(|s| s.pcm && s.endpoint.as_ref().is_some_and(|e| e.address & 0x80 == 0))?
+            .terminal_link;
         self.playback_unit(link)
+    }
+
+    /// The clocks of every playback setting's terminal that can be told for sure (UAC2), each once.
+    pub fn playback_clocks(&self) -> Vec<u8> {
+        let mut v: Vec<u8> = Vec::new();
+        for s in self.streams.iter().filter(|s| s.endpoint.is_some()) {
+            if let Some(c) = self.playback_clock(s.terminal_link) {
+                if !v.contains(&c) {
+                    v.push(c);
+                }
+            }
+        }
+        v
     }
 
     /// Its summary under `name`, with the UAC2 clock's ranges when they were read.

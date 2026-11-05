@@ -290,6 +290,13 @@ fn the_playback_paths_unit_and_clock_not_the_microphones() {
         }
     }
     assert_eq!(amb.playback_clock(0x04), None);
+    // Claude M3 (round 2 of #306): a setting whose clock can't be told is refused, never played
+    // at a speed nobody set
+    let clocks = [(0x10u8, vec![48_000u32]), (0x11, vec![48_000])];
+    use pm_usb_audio::schedule::Speed;
+    assert!(pm_usb_audio::stream::choose(&d, &clocks, 48_000, 16, 2, Speed::High).is_ok());
+    let e = pm_usb_audio::stream::choose(&amb, &clocks, 48_000, 16, 2, Speed::High).unwrap_err();
+    assert!(e.contains("can't be told"), "{e}");
     // Two outputs from one terminal: ambiguous, no unit assumed
     let mut two = d.clone();
     two.entities.push(Entity::OutputTerminal {

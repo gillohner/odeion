@@ -106,10 +106,12 @@ pub fn parse_detached(json: &str) -> Vec<UsbIds> {
     serde_json::from_str(json).unwrap_or_default()
 }
 
-/// The kernel's usbfs on (its own duplicate of) the file descriptor Android gave.
+/// The kernel's usbfs on the file descriptor the app handed over: a duplicate it made under its
+/// own lock and gave up, so it is ours (closed with the transport) and no unplug can close it
+/// before this takes it.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn usbfs(fd: i32) -> Arc<dyn Transport> {
-    Arc::new(pm_usb_audio::usbfs::Usbfs::new(fd))
+    Arc::new(pm_usb_audio::usbfs::Usbfs::take(fd))
 }
 
 /// The USB ids of the DAC (`None`: Android didn't say).
@@ -137,29 +139,54 @@ struct Unit {
     can_mute: bool,
 }
 
+/// A feature unit the driver may use, with its level and mute before the take and now.
+#[derive(Clone)]
+struct UnitState {
+    unit: Unit,
+    before: Option<Level>,
+    level: Option<Level>,
+    /// The driver set (or tried to set) it: given back at the end.
+    touched: bool,
+}
+
 /// The DAC while the app holds it.
 struct Held {
     dac_id: i32,
     dac_name: String,
     t: Arc<dyn Transport>,
     dev: UsbAudioDevice,
-    clock_rates: Vec<u32>,
+    /// Each playback clock's rates (its `RANGE`).
+    clock_rates: Vec<(u8, Vec<u32>)>,
     speed: Speed,
     quirks: Quirks,
-    unit: Option<Unit>,
-    /// The unit's level and mute before the app took the DAC over, and now.
-    before: Option<Level>,
-    level: Option<Level>,
+    /// Every playback path's feature unit (each path its own; never a microphone's).
+    units: Vec<UnitState>,
+    /// The unit of the setting playing (or last played): the zone's volume moves it.
+    active: Option<u8>,
     /// The listener muted it (the zone's mute), not the hand-over.
     listener_muted: bool,
-    /// Android's media volume read before the DAC was taken, while Android still played it.
-    media_at_take: Option<u8>,
+    /// Android's own attenuation for the DAC (dB), read before the DAC was taken, while Android
+    /// still played it (`None`: not known: the hand-over mutes).
+    media_db_at_take: Option<f32>,
     /// The driver, between songs and while paused (a sink has it while it plays).
     driver: Option<Driver>,
     /// A sink plays on it now.
     in_use: bool,
     /// Give it back once the sink closes.
     release_pending: bool,
+}
+
+impl Held {
+    fn state(&mut self, id: u8) -> Option<&mut UnitState> {
+        self.units.iter_mut().find(|u| u.unit.id == id)
+    }
+
+    /// The unit the zone's volume moves: the playing setting's, else the first playback path's.
+    fn shown(&self) -> Option<&UnitState> {
+        self.active
+            .and_then(|a| self.units.iter().find(|u| u.unit.id == a))
+            .or(self.units.first())
+    }
 }
 
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
@@ -182,9 +209,9 @@ const GIVE_BACK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// Before anything opens on Android's paths: when the app gave a DAC back (or touched it in an
 /// attempt that failed), wait until Android lists a DAC again; `Err` (why, for a pause) when it
 /// doesn't within a few seconds. Nothing opens on the default route meanwhile.
-pub fn wait_android_back() -> Result<(), String> {
+pub fn wait_android_back() -> Result<bool, String> {
     let Some((name, seq)) = GIVEN_BACK.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
-        return Ok(());
+        return Ok(false);
     };
     let until = std::time::Instant::now() + GIVE_BACK_WAIT;
     while usb_dac::listed_seq() == seq {
@@ -196,7 +223,17 @@ pub fn wait_android_back() -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     *GIVEN_BACK.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    Ok(())
+    Ok(true)
+}
+
+/// Android's own attenuation for the DAC (dB) for the hand-over, read before anything touches the
+/// DAC: `None` (the hand-over then mutes) when Android can't say it for the DAC's route, or while
+/// a DAC the app gave back may not be Android's route yet (its reading may be the speaker's).
+pub fn handover_reading() -> Option<f32> {
+    if GIVEN_BACK.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        return None;
+    }
+    crate::bit_perfect::backend().and_then(|b| b.media_db_on_dac())
 }
 
 /// Whether the app holds the DAC Android knows as `dac_id`.
@@ -283,7 +320,7 @@ fn has_unit(dac: &Dac) -> bool {
     if let Some(h) = with_held(|h| {
         h.as_ref()
             .filter(|h| h.dac_id == dac.id)
-            .map(|h| h.unit.is_some())
+            .map(|h| h.shown().is_some())
     }) {
         return h;
     }
@@ -303,7 +340,15 @@ pub fn formats(dac: &Dac) -> Vec<DeviceFormat> {
     let list = match held {
         Some(l) => l,
         None => match reported(dac) {
-            Some(d) => pm_usb_audio::stream::formats(&d, &dac.device.rates, assumed_speed(&d)),
+            Some(d) => {
+                // Before the take: each playback clock with the rates Android lists for the DAC
+                let clocks: Vec<(u8, Vec<u32>)> = d
+                    .playback_clocks()
+                    .into_iter()
+                    .map(|c| (c, dac.device.rates.clone()))
+                    .collect();
+                pm_usb_audio::stream::formats(&d, &clocks, assumed_speed(&d))
+            }
             None => Vec::new(),
         },
     };
@@ -351,11 +396,11 @@ pub fn hw_volume(dac: &Dac, dac_volume: bool) -> Option<VolumeKind> {
     with_held(|h| {
         h.as_ref()
             .filter(|h| h.dac_id == dac.id)
-            .and_then(|h| h.unit.as_ref())
+            .and_then(|h| h.shown())
             .map(|u| VolumeKind::Db {
-                min: vol::cur_to_db(u.range.min()),
-                max: vol::cur_to_db(u.range.max()),
-                step: u.range.step_db(),
+                min: vol::cur_to_db(u.unit.range.min()),
+                max: vol::cur_to_db(u.unit.range.max()),
+                step: u.unit.range.step_db(),
             })
     })
 }
@@ -498,9 +543,14 @@ fn hand_back(t: &dyn Transport, dev: &UsbAudioDevice) {
 /// connection closed. `attached`: the DAC is still there (Android's paths wait for it to be
 /// listed again).
 fn give_back(mut h: Held, attached: bool) {
-    if let (Some(u), Some(now)) = (h.unit.as_ref(), h.level) {
-        let back = vol::giveback(h.before, now);
-        let _ = driver::apply_level(&*h.t, u.id, u.ac, back, u.can_mute);
+    // Each unit the driver set goes back exactly as it was before the take (also one whose
+    // hand-over failed half-way)
+    for st in h.units.iter().filter(|u| u.touched) {
+        let Some(back) = st.before.or(st.level) else {
+            continue;
+        };
+        let back = vol::giveback(st.before, back);
+        let _ = driver::apply_level(&*h.t, st.unit.id, st.unit.ac, back, st.unit.can_mute);
     }
     if let Some(mut d) = h.driver.take() {
         d.stop();
@@ -551,10 +601,10 @@ pub enum ExclusiveError {
     Gone(String),
 }
 
-/// Take the DAC over (or keep it): its descriptors, the playback path's clock rates and feature
-/// unit (its range, level and mute before), and `media`, Android's volume read before the DAC was
-/// taken.
-fn acquire(dac: &Dac, media: Option<u8>) -> Result<(), ExclusiveError> {
+/// Take the DAC over (or keep it): its descriptors, every playback path's clock rates and feature
+/// unit (its range, level and mute before), and `media_db`, Android's attenuation for the DAC
+/// read before the DAC was taken.
+fn acquire(dac: &Dac, media_db: Option<f32>) -> Result<(), ExclusiveError> {
     if holds(dac.id) {
         return Ok(());
     }
@@ -606,40 +656,57 @@ fn acquire(dac: &Dac, media: Option<u8>) -> Result<(), ExclusiveError> {
         )));
     };
     let quirks = quirks::lookup(dev.vendor_id, dev.product_id);
-    let link = dev.streams.iter().find(|s| s.pcm).map(|s| s.terminal_link);
-    type Read = (Vec<u32>, Option<Unit>, Option<Level>);
+    type Read = (Vec<(u8, Vec<u32>)>, Vec<UnitState>);
     let read = || -> Result<Read, UsbError> {
+        // Each playback path's clock, as its terminal names it
         let mut clock_rates = Vec::new();
         if uac == Uac::V2 {
-            if let Some(c) = link.and_then(|l| dev.playback_clock(l)) {
-                clock_rates = driver::clock_rates(&*t, c, ac)?;
-            }
-            if clock_rates.is_empty() {
-                clock_rates = dac.device.rates.clone();
+            for c in dev.playback_clocks() {
+                let mut r = driver::clock_rates(&*t, c, ac)?;
+                if r.is_empty() {
+                    r = dac.device.rates.clone();
+                }
+                clock_rates.push((c, r));
             }
         }
-        let (mut unit, mut before) = (None, None);
-        if let (Some(hv), false) = (dev.exclusive_unit(), quirks.no_hardware_volume) {
-            if let Some(range) = driver::volume_range(&*t, hv.unit_id, ac)? {
+        // Each playback path's feature unit (never a capture path's), its range, level and mute
+        let mut units: Vec<UnitState> = Vec::new();
+        if uac == Uac::V2 && !quirks.no_hardware_volume {
+            let ids = dev
+                .streams
+                .iter()
+                .filter(|s| s.endpoint.as_ref().is_some_and(|e| e.address & 0x80 == 0))
+                .filter_map(|s| dev.playback_unit(s.terminal_link));
+            for hv in ids {
+                if units.iter().any(|u| u.unit.id == hv.unit_id) {
+                    continue;
+                }
+                let Some(range) = driver::volume_range(&*t, hv.unit_id, ac)? else {
+                    continue;
+                };
                 let cur = driver::get_volume(&*t, hv.unit_id, ac)?;
                 let mute = if hv.mute {
                     driver::get_mute(&*t, hv.unit_id, ac)?
                 } else {
                     Some(false)
                 };
-                // Both known, or the level before is unknown (the hand-over then mutes)
-                before = cur.zip(mute).map(|(cur, mute)| Level { cur, mute });
-                unit = Some(Unit {
-                    id: hv.unit_id,
-                    ac,
-                    range,
-                    can_mute: hv.mute,
+                units.push(UnitState {
+                    unit: Unit {
+                        id: hv.unit_id,
+                        ac,
+                        range,
+                        can_mute: hv.mute,
+                    },
+                    // Both known, or the level before is unknown (the hand-over then mutes)
+                    before: cur.zip(mute).map(|(cur, mute)| Level { cur, mute }),
+                    level: None,
+                    touched: false,
                 });
             }
         }
-        Ok((clock_rates, unit, before))
+        Ok((clock_rates, units))
     };
-    let (clock_rates, unit, before) = match read() {
+    let (clock_rates, units) = match read() {
         Ok(x) => x,
         Err(UsbError::Gone) => {
             return Err(let_go(ExclusiveError::Gone(format!(
@@ -652,7 +719,7 @@ fn acquire(dac: &Dac, media: Option<u8>) -> Result<(), ExclusiveError> {
     let speed = t
         .speed()
         .unwrap_or(if uac == Uac::V2 { Speed::High } else { Speed::Full });
-    tracing::info!(dac = %dac.device.name, ?uac, ?speed, rates = ?clock_rates, unit = ?unit.as_ref().map(|u| u.id), ?before, ?media, "Exclusive USB: the app holds the DAC");
+    tracing::info!(dac = %dac.device.name, ?uac, ?speed, clocks = ?clock_rates, units = ?units.iter().map(|u| (u.unit.id, u.before)).collect::<Vec<_>>(), ?media_db, "Exclusive USB: the app holds the DAC");
     with_held(|h| {
         *h = Some(Held {
             dac_id: dac.id,
@@ -662,11 +729,10 @@ fn acquire(dac: &Dac, media: Option<u8>) -> Result<(), ExclusiveError> {
             clock_rates,
             speed,
             quirks,
-            unit,
-            before,
-            level: None,
+            units,
+            active: None,
             listener_muted: false,
-            media_at_take: media,
+            media_db_at_take: media_db,
             driver: None,
             in_use: false,
             release_pending: false,
@@ -678,13 +744,15 @@ fn acquire(dac: &Dac, media: Option<u8>) -> Result<(), ExclusiveError> {
 }
 
 /// Open the exclusive driver for `fmt` on `dac`, with `warning` to keep (full level). `media`:
-/// Android's media volume, read by the caller before anything touched the DAC.
+/// Android's media volume (percent, for the full-level rule) and `media_db` its attenuation for
+/// the DAC ([`handover_reading`]), both read by the caller before anything touched the DAC.
 pub fn open(
     id: OutputId,
     dac: &Dac,
     fmt: AudioFormat,
     warning: Option<String>,
     media: Option<u8>,
+    media_db: Option<f32>,
 ) -> Result<ExclusiveSink, ExclusiveError> {
     if fmt.kind != SampleKind::Pcm {
         return Err(ExclusiveError::Unsupported(
@@ -697,14 +765,10 @@ pub fn open(
         gone_at: usb_dac::gone_count(),
     };
     let generation = usb_dac::generation();
-    acquire(dac, media)?;
-    // Now the feature unit is known for sure: a DAC without one at full level only as the
-    // settings allow
+    acquire(dac, media_db)?;
+    // Read before the held DAC's lock (the phone's state is never asked under it)
     let settings = usb_dac::settings();
-    if let Err(why) = volume_rule(settings.mode, has_unit(dac), media, usb_dac::full_level_consent()) {
-        release();
-        return Err(ExclusiveError::Failed(why));
-    }
+    let consent = usb_dac::full_level_consent();
     let mut note = warning;
     let taken = with_held(|h| {
         let h = h.as_mut().filter(|h| h.dac_id == dac.id)?;
@@ -716,6 +780,18 @@ pub fn open(
             fmt.channels,
             h.speed,
         );
+        // The setting's own path decides the volume: its unit, or (none) the full-level rule
+        let unit_id = setting
+            .as_ref()
+            .ok()
+            .and_then(|s| s.unit.as_ref())
+            .map(|u| u.unit_id)
+            .filter(|id| h.units.iter().any(|u| u.unit.id == *id));
+        if setting.is_ok() && unit_id.is_none() {
+            if let Err(why) = volume_rule(settings.mode, false, media, consent) {
+                return Some(Err(ExclusiveError::Failed(why)));
+            }
+        }
         let plan = match setting {
             Ok(setting) => Plan {
                 uac: h.dev.uac.unwrap_or(Uac::V2),
@@ -729,17 +805,24 @@ pub fn open(
         };
         // The level before the first sample: the hand-over once (from Android's volume read
         // before the DAC was taken), then the listener's; in place only once the DAC read it back
-        if let Some(u) = h.unit.clone() {
-            let level = *h
+        h.active = unit_id;
+        if let Some(uid) = unit_id {
+            let media_db = h.media_db_at_take;
+            let t = h.t.clone();
+            let st = h.state(uid).expect("filtered on a known unit");
+            let u = st.unit.clone();
+            let level = *st
                 .level
-                .get_or_insert_with(|| vol::handover(h.media_at_take, h.before, &u.range));
-            match driver::apply_level(&*h.t, u.id, u.ac, level, u.can_mute) {
+                .get_or_insert_with(|| vol::handover(media_db, st.before, &u.range));
+            // Touched before it is set: given back as it was even if this fails half-way
+            st.touched = true;
+            match driver::apply_level(&*t, u.id, u.ac, level, u.can_mute) {
                 Ok(()) => {}
                 Err(UsbError::Gone) => {
                     return Some(Err(ExclusiveError::Gone(format!("{} was unplugged", h.dac_name))))
                 }
                 Err(UsbError::Other(why)) => {
-                    h.level = None;
+                    st.level = None;
                     return Some(Err(ExclusiveError::Failed(format!(
                         "Exclusive USB could not set the DAC's volume ({why}): nothing plays"
                     ))));
@@ -747,7 +830,7 @@ pub fn open(
             }
             if level.mute && !h.listener_muted && note.is_none() {
                 note = Some(
-                    "The DAC starts muted: Android played quieter than the DAC's own volume goes. Raise the zone's volume to hear it".into(),
+                    "The DAC starts muted (Android's own level for it wasn't known, or is below what the DAC's volume goes): raise the zone's volume to hear it".into(),
                 );
             }
         }
@@ -781,7 +864,11 @@ pub fn open(
                     dac_changed(None);
                     ExclusiveError::Gone(format!("{} was unplugged", dac.device.name))
                 }
-                other => ExclusiveError::Failed(format!("Exclusive USB could not start: {other}")),
+                other => {
+                    // Not started: back to Android (nothing plays here, and it keeps nothing)
+                    release();
+                    ExclusiveError::Failed(format!("Exclusive USB could not start: {other}"))
+                }
             });
         }
     };
@@ -814,10 +901,11 @@ pub fn open(
 /// the hand-over keeps it never louder: always. Without one it plays at full level:
 /// [`volume_rule`] on the live settings, Android's volume now and the consent for this DAC.
 pub fn entry_gate(dac_id: i32) -> Result<Option<String>, String> {
+    // The playing setting's path: with a unit the hand-over keeps it never louder
     let unit = with_held(|h| {
         h.as_ref()
             .filter(|h| h.dac_id == dac_id)
-            .map(|h| h.unit.is_some())
+            .map(|h| h.active.is_some())
     });
     if unit != Some(false) {
         return Ok(None);
@@ -836,8 +924,16 @@ pub fn entry_gate(dac_id: i32) -> Result<Option<String>, String> {
 pub fn set_volume(v: Volume) -> Result<(), String> {
     with_held(|h| {
         let h = h.as_mut().ok_or("no DAC is held")?;
-        let u = h.unit.clone().ok_or("the DAC has no volume of its own")?;
-        let now = h.level.unwrap_or(Level {
+        let uid = h
+            .shown()
+            .map(|u| u.unit.id)
+            .ok_or("the DAC has no volume of its own")?;
+        let listener_muted = h.listener_muted;
+        let t = h.t.clone();
+        let st = h.state(uid).expect("shown");
+        let u = st.unit.clone();
+        st.touched = true;
+        let now = st.level.unwrap_or(Level {
             cur: u.range.min(),
             mute: true,
         });
@@ -847,9 +943,9 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
                 if !u.can_mute {
                     return Err("the DAC can't be muted".into());
                 }
-                driver::set_mute(&*h.t, u.id, u.ac, m).map_err(err)?;
+                driver::set_mute(&*t, u.id, u.ac, m).map_err(err)?;
+                st.level = Some(Level { mute: m, ..now });
                 h.listener_muted = m;
-                h.level = Some(Level { mute: m, ..now });
                 return Ok(());
             }
             Volume::Db(db) => vol::db_to_cur(db, &u.range),
@@ -860,13 +956,13 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
             Volume::Up => vol::db_to_cur(vol::cur_to_db(now.cur) + 2.0, &u.range),
             Volume::Down => vol::db_to_cur(vol::cur_to_db(now.cur) - 2.0, &u.range),
         };
-        driver::set_volume(&*h.t, u.id, u.ac, cur).map_err(err)?;
+        driver::set_volume(&*t, u.id, u.ac, cur).map_err(err)?;
         // A level the listener chose ends a hand-over mute; their own mute stays
-        let mute = now.mute && h.listener_muted;
+        let mute = now.mute && listener_muted;
         if now.mute && !mute {
-            driver::set_mute(&*h.t, u.id, u.ac, false).map_err(err)?;
+            driver::set_mute(&*t, u.id, u.ac, false).map_err(err)?;
         }
-        h.level = Some(Level { cur, mute });
+        st.level = Some(Level { cur, mute });
         Ok(())
     })
 }
@@ -930,13 +1026,22 @@ impl ExclusiveSink {
                     format!("{} went back to Android", self.dac),
                 ));
             };
+            // Started again: nothing confirmed until the clock and its packets say so again
+            self.withdraw("started again after a pause: not confirmed yet");
             if let Err(e) = d.retune(self.plan.rate, self.plan.setting.clone()) {
                 return Err(self.map(e));
             }
-            self.confirmed = false;
             self.driver = Some(d);
         }
         Ok(self.driver.as_mut().expect("just set"))
+    }
+
+    /// No longer confirmed (published to the node at once), with why.
+    fn withdraw(&mut self, why: &str) {
+        if self.confirmed {
+            self.confirmed = false;
+            usb_dac::unconfirm_exclusive(self.dac_id, self.fmt, why.into());
+        }
     }
 
     /// Confirmed once the clock read back the rate and its packets arrive; withdrawn when they
@@ -979,7 +1084,11 @@ impl AudioSink for ExclusiveSink {
                 self.check_confirmed();
                 Ok(())
             }
-            Err(e) => Err(self.map(e)),
+            // The stream failed: what was confirmed isn't any more, said before the error goes on
+            Err(e) => {
+                self.withdraw("the stream to the DAC failed: not confirmed");
+                Err(self.map(e))
+            }
         }
     }
 
@@ -1017,7 +1126,10 @@ impl AudioSink for ExclusiveSink {
             };
         }
         let r = self.driver()?.drain();
-        r.map_err(|e| self.map(e))
+        r.map_err(|e| {
+            self.withdraw("the stream to the DAC failed: not confirmed");
+            self.map(e)
+        })
     }
 
     /// Pause: the stream stops and its driver rests with the held DAC, so no sink holds it while
@@ -1122,6 +1234,14 @@ pub(crate) mod tests {
         pub opened: Mutex<u32>,
         /// Android's media volume (shared with the test's bit-perfect backend)
         pub media: Arc<Mutex<Option<u8>>>,
+        /// Android's own attenuation for the DAC's route, in dB (`None`: it can't say)
+        pub media_db: Arc<Mutex<Option<f32>>>,
+        /// Taking the DAC moves Android's route: its dB reading then is this (the speaker's)
+        pub media_db_on_open: Mutex<Option<f32>>,
+        /// Reading Android's volume finds the DAC unplugged (it goes while it is read)
+        pub unplug_on_read: Arc<std::sync::atomic::AtomicBool>,
+        /// The descriptors the app reads from the device (the KA17's unless set)
+        pub raw: Mutex<Option<Vec<u8>>>,
         /// Taking the DAC moves Android's route: its volume then reads this (the speaker's)
         pub media_on_open: Mutex<Option<u8>>,
         /// The app opens another USB device than asked
@@ -1164,6 +1284,10 @@ pub(crate) mod tests {
                 released: Mutex::new(0),
                 opened: Mutex::new(0),
                 media: Arc::new(Mutex::new(Some(100))),
+                media_db: Arc::new(Mutex::new(None)),
+                media_db_on_open: Mutex::new(None),
+                unplug_on_read: Arc::default(),
+                raw: Mutex::new(None),
                 media_on_open: Mutex::new(None),
                 other_device: Mutex::new(false),
                 refuse: Mutex::new(None),
@@ -1185,7 +1309,13 @@ pub(crate) mod tests {
             if let Some(v) = *self.media_on_open.lock().unwrap_or_else(|e| e.into_inner()) {
                 *self.media.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
             }
-            let raw = if *self.other_device.lock().unwrap_or_else(|e| e.into_inner()) {
+            if let Some(v) = *self.media_db_on_open.lock().unwrap_or_else(|e| e.into_inner()) {
+                *self.media_db.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+            }
+            let custom = self.raw.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let raw = if let Some(r) = custom {
+                r
+            } else if *self.other_device.lock().unwrap_or_else(|e| e.into_inner()) {
                 let mut r = KA17.to_vec();
                 r[8] = 0x99; // another vendor
                 r
@@ -1307,14 +1437,15 @@ pub(crate) mod tests {
     fn the_ka17s_rates_and_sizes_listed_together() {
         let dev = pm_usb_audio::parse(KA17);
         let rates = [44_100u32, 48_000, 96_000, 192_000, 768_000];
-        let f: Vec<DeviceFormat> = pm_usb_audio::stream::formats(&dev, &rates, Speed::High)
-            .into_iter()
-            .map(|(rate_hz, bits, channels)| DeviceFormat {
-                rate_hz,
-                bits,
-                channels,
-            })
-            .collect();
+        let f: Vec<DeviceFormat> =
+            pm_usb_audio::stream::formats(&dev, &[(0x29, rates.to_vec())], Speed::High)
+                .into_iter()
+                .map(|(rate_hz, bits, channels)| DeviceFormat {
+                    rate_hz,
+                    bits,
+                    channels,
+                })
+                .collect();
         // 16 and 24 in the 32-bit setting too: every rate with every size
         assert_eq!(rectangle(&f), (rates.to_vec(), vec![16, 24, 32]));
         // 96/24 is listed as itself: the node sends it unchanged
@@ -1332,7 +1463,11 @@ pub(crate) mod tests {
 
     /// Android's media volume, for the hand-over; its bit-perfect player refuses (Android 13, or
     /// refused on 14).
-    struct Media(Arc<Mutex<Option<u8>>>);
+    struct Media {
+        volume: Arc<Mutex<Option<u8>>>,
+        db: Arc<Mutex<Option<f32>>>,
+        unplug: Arc<std::sync::atomic::AtomicBool>,
+    }
 
     impl TrackBackend for Media {
         fn open(
@@ -1345,7 +1480,13 @@ pub(crate) mod tests {
             ))
         }
         fn media_volume(&self) -> Option<u8> {
-            *self.0.lock().unwrap()
+            if self.unplug.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                usb_dac::apply_report(r#"{"v":1,"sdk":33,"devices":[]}"#);
+            }
+            *self.volume.lock().unwrap_or_else(|e| e.into_inner())
+        }
+        fn media_db_on_dac(&self) -> Option<f32> {
+            *self.db.lock().unwrap_or_else(|e| e.into_inner())
         }
     }
 
@@ -1382,7 +1523,11 @@ pub(crate) mod tests {
         let app = FakeApp::new(permission);
         *app.media.lock().unwrap() = media;
         set_backend(app.clone());
-        crate::bit_perfect::set_backend(Arc::new(Media(app.media.clone())));
+        crate::bit_perfect::set_backend(Arc::new(Media {
+            volume: app.media.clone(),
+            db: app.media_db.clone(),
+            unplug: app.unplug_on_read.clone(),
+        }));
         assert!(usb_dac::apply_report(&ka17_report(33, "")));
         (guard, app)
     }
@@ -1411,6 +1556,8 @@ pub(crate) mod tests {
     fn exclusive_usb_plays_the_ka17_unchanged_and_says_so_once_confirmed() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_p, app) = phone(true, Some(60));
+        // Android's own level for the DAC at 60 %: -20 dB
+        *app.media_db.lock().unwrap() = Some(-20.0);
         exclusive(PreferredMode::Exclusive);
         assert_eq!(*app.asked.lock().unwrap(), 0, "permission was there: not asked");
         let d = usb_dac::current().unwrap();
@@ -1428,7 +1575,7 @@ pub(crate) mod tests {
         let fmt = AudioFormat::pcm(96_000, 24, 2);
         let mut sink = open_ok(fmt);
         let log = app.dac.state().log.clone();
-        // 60 % on Android's curve is -17 dB, less 3: the DAC starts at -20 dB, before the stream
+        // Android played the DAC at -20 dB: the DAC starts there, before the stream
         let level = log
             .iter()
             .position(|l| l == "volume -5120")
@@ -1554,11 +1701,12 @@ pub(crate) mod tests {
     fn another_mode_gives_the_dac_back_no_louder_than_it_was() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_p, app) = phone(true, Some(100));
+        *app.media_db.lock().unwrap() = Some(-3.0);
         app.dac.state().volume = Some(-6 * 256);
         exclusive(PreferredMode::Exclusive);
         let fmt = AudioFormat::pcm(48_000, 16, 2);
         let mut sink = open_ok(fmt);
-        // Before: -6 dB on the unit at Android's full volume; the hand-over is -9 dB
+        // Before: -6 dB on the unit, Android at -3 dB on top: the hand-over is -9 dB
         assert_eq!(app.dac.state().volume, Some(-9 * 256));
         set_volume(Volume::Db(0.0)).unwrap();
         // Shared chosen mid-song: the DAC goes back when the song ends, not under it
@@ -1637,6 +1785,14 @@ pub(crate) mod tests {
         let d = usb_dac::current().unwrap();
         assert_eq!((d.mode, d.confirmed), (DeviceMode::Exclusive, false));
         assert!(app.dac.state().out.is_empty(), "not a sample sent");
+        // Codex M6 (round 2 of #306): not started, so back to Android
+        assert!(!holding());
+        assert_eq!(*app.released.lock().unwrap(), 1);
+        let log = app.dac.state().log.clone();
+        assert!(
+            log.ends_with(&["release 1".into(), "release 0".into()]),
+            "{log:?}"
+        );
     }
 
     fn volume_of(app: &FakeApp) -> (Option<i16>, Option<bool>) {
@@ -1651,10 +1807,12 @@ pub(crate) mod tests {
     fn the_hand_over_uses_androids_volume_from_before_the_dac_was_taken() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_p, app) = phone(true, Some(20));
+        *app.media_db.lock().unwrap() = Some(-43.0);
         *app.media_on_open.lock().unwrap() = Some(80);
+        *app.media_db_on_open.lock().unwrap() = Some(-11.5);
         exclusive(PreferredMode::Exclusive);
         drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
-        // 20 % on Android's curve is -40 dB, less 3: -43 dB (80 % would be -11.5 dB)
+        // Android's level for the DAC before the take: -43 dB (the speaker's after: -11.5 dB)
         assert_eq!(volume_of(&app), (Some(-43 * 256), Some(false)));
     }
 
@@ -1686,6 +1844,7 @@ pub(crate) mod tests {
     fn quieter_than_the_dac_goes_starts_muted_and_a_mute_is_kept() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_p, app) = phone(true, Some(20));
+        *app.media_db.lock().unwrap() = Some(-43.0);
         {
             let mut s = app.dac.state();
             let mut v = 1u16.to_le_bytes().to_vec();
@@ -1710,6 +1869,7 @@ pub(crate) mod tests {
 
         // Muted while Android played it: muted, and given back muted
         let (_p, app) = phone(true, Some(100));
+        *app.media_db.lock().unwrap() = Some(0.0);
         app.dac.state().muted = Some(true);
         exclusive(PreferredMode::Exclusive);
         drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
@@ -1834,5 +1994,160 @@ pub(crate) mod tests {
         let _ = sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 2 * 384]));
         let d = usb_dac::current().unwrap();
         assert_eq!((d.mode, d.confirmed), (DeviceMode::Exclusive, false));
+    }
+
+    /// A UAC2 DAC (the KA17's ids) with a microphone path listed first, then two playback paths:
+    /// interface 1, 16 bit, terminal 4 → unit 5 → output 6, clock 0x11; interface 2, 32 bit,
+    /// terminal 7 → unit 0x0b → output 8, clock 0x12. The microphone: terminal 1 → unit 2 →
+    /// USB streaming output 3, clock 0x10.
+    fn two_path_dac() -> Vec<u8> {
+        let mut b = vec![
+            18, 1, 0x00, 0x02, 0xef, 2, 1, 64, 0x72, 0x29, 0x93, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+        ];
+        let fu = |id: u8, src: u8| -> Vec<u8> {
+            vec![18, 0x24, 6, id, src, 0x0f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        };
+        let it = |id: u8, ty: u16, clock: u8| -> Vec<u8> {
+            let t = ty.to_le_bytes();
+            vec![17, 0x24, 2, id, t[0], t[1], 0, clock, 2, 0, 0, 0, 0, 0, 0, 0, 0]
+        };
+        let ot = |id: u8, ty: u16, src: u8, clock: u8| -> Vec<u8> {
+            let t = ty.to_le_bytes();
+            vec![12, 0x24, 3, id, t[0], t[1], 0, src, clock, 0, 0, 0]
+        };
+        let mut ac: Vec<u8> = Vec::new();
+        for c in [0x10u8, 0x11, 0x12] {
+            ac.extend([8, 0x24, 0x0a, c, 0x03, 0x07, 0, 0]);
+        }
+        ac.extend(it(1, 0x0201, 0x10));
+        ac.extend(fu(2, 1));
+        ac.extend(ot(3, 0x0101, 2, 0x10));
+        ac.extend(it(4, 0x0101, 0x11));
+        ac.extend(fu(5, 4));
+        ac.extend(ot(6, 0x0302, 5, 0x11));
+        ac.extend(it(7, 0x0101, 0x12));
+        ac.extend(fu(0x0b, 7));
+        ac.extend(ot(8, 0x0301, 0x0b, 0x12));
+        let ac_len = (9 + ac.len()) as u16;
+        let mut cfg: Vec<u8> = vec![9, 4, 0, 0, 0, 1, 1, 0x20, 0, 9, 0x24, 1, 0x00, 0x02, 4];
+        cfg.extend(ac_len.to_le_bytes());
+        cfg.push(0);
+        cfg.extend(ac);
+        for (iface, link, subslot, bits) in [(1u8, 4u8, 2u8, 16u8), (2, 7, 4, 32)] {
+            cfg.extend([9, 4, iface, 0, 0, 1, 2, 0x20, 0]);
+            cfg.extend([9, 4, iface, 1, 1, 1, 2, 0x20, 0]);
+            cfg.extend([16, 0x24, 1, link, 0, 1, 1, 0, 0, 0, 2, 3, 0, 0, 0, 0]);
+            cfg.extend([6, 0x24, 2, 1, subslot, bits]);
+            // Isochronous OUT, adaptive, 1024 bytes a microframe
+            cfg.extend([7, 5, iface, 0x09, 0x00, 0x04, 1]);
+            cfg.extend([8, 0x25, 1, 0, 0, 0, 0, 0]);
+        }
+        let total = (9 + cfg.len()) as u16;
+        let mut head = vec![9, 2];
+        head.extend(total.to_le_bytes());
+        head.extend([3, 1, 0, 0x80, 50]);
+        head.extend(cfg);
+        b.extend(head);
+        b
+    }
+
+    /// Codex H2 / Claude M5 (round 2 of #306): each format's own playback path decides the volume:
+    /// 192/24 plays on interface 2 and only its unit (0x0b) is set; 48/16 on interface 1, unit 5;
+    /// the microphone's unit (2) never.
+    #[test]
+    fn the_volume_is_the_playing_paths_own() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true, Some(100));
+        *app.raw.lock().unwrap() = Some(two_path_dac());
+        *app.media_db.lock().unwrap() = Some(-10.0);
+        exclusive(PreferredMode::Exclusive);
+        let units = |app: &FakeApp| -> Vec<u8> {
+            let mut u: Vec<u8> = app.dac.state().unit_writes.iter().map(|(u, _)| *u).collect();
+            u.dedup();
+            u
+        };
+        let s = open_ok(AudioFormat::pcm(192_000, 24, 2));
+        assert_eq!(units(&app), [0x0b], "the 32-bit path's own unit");
+        assert_eq!(app.dac.state().unit_writes, [(0x0b, -10 * 256)]);
+        drop(s);
+        app.dac.state().unit_writes.clear();
+        drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        assert_eq!(units(&app), [0x05], "the 16-bit path's own unit");
+        assert!(!app.dac.state().log.iter().any(|l| l.contains("volume 2")));
+    }
+
+    /// Codex H3 / Claude M1 (round 2 of #306): the hand-over is Android's own level for the DAC
+    /// (getStreamVolumeDb), not an assumed curve; without that reading, or within the give-back
+    /// window (the reading may be the speaker's), the DAC starts muted at its minimum.
+    #[test]
+    fn the_hand_over_is_androids_own_level_for_the_dac_or_muted() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true, Some(50));
+        *app.media_db.lock().unwrap() = Some(-30.0);
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        assert_eq!(
+            volume_of(&app),
+            (Some(-30 * 256), Some(false)),
+            "Android's -30 dB"
+        );
+        drop(_p);
+
+        // No reading (Android 8, or media not on the DAC)
+        let (_p, app) = phone(true, Some(50));
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        assert_eq!(
+            volume_of(&app),
+            (Some(-127 * 256), Some(true)),
+            "muted at its minimum"
+        );
+        // Given back: exactly as it was before (0 dB, not muted), not the hand-over's mute
+        exclusive(PreferredMode::Shared);
+        assert_eq!(volume_of(&app), (Some(0), Some(false)));
+        drop(_p);
+
+        // Moments after a give-back the reading may be the speaker's: muted
+        let (_p, app) = phone(true, Some(50));
+        *app.media_db.lock().unwrap() = Some(-5.0);
+        mark_given_back("FiiO KA17");
+        exclusive(PreferredMode::Exclusive);
+        drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        assert_eq!(volume_of(&app), (Some(-127 * 256), Some(true)));
+    }
+
+    /// Codex H1 (round 2 of #306): the DAC goes while Android's volume is read for the open:
+    /// nothing opens on the default route (the guard fixed at the start stays).
+    #[test]
+    fn an_unplug_while_the_volume_is_read_never_opens_the_speaker() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true, Some(100));
+        exclusive(PreferredMode::Shared);
+        app.unplug_on_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        match open_phone(id(), AudioFormat::pcm(48_000, 16, 2)) {
+            PhoneOpen::Gone(why) => assert!(why.contains("FiiO KA17"), "{why}"),
+            PhoneOpen::Shared { opened_for, .. } => panic!("shared, for {opened_for:?}"),
+            _ => panic!("nothing else"),
+        }
+    }
+
+    /// Codex M5 (round 2 of #306): a confirmed stream that fails for good is no longer confirmed,
+    /// published before the error goes on.
+    #[test]
+    fn a_failed_stream_is_no_longer_confirmed() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true, Some(100));
+        exclusive(PreferredMode::Exclusive);
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        let mut sink = open_ok(fmt);
+        sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 2 * 9_600])).unwrap();
+        assert!(usb_dac::current().unwrap().confirmed);
+        app.dac.state().stall = true;
+        app.dac.state().packet_status = -71;
+        app.dac.state().stall = false;
+        let e = sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 2 * 96_000]));
+        assert!(e.is_err());
+        assert!(!usb_dac::current().unwrap().confirmed);
     }
 }

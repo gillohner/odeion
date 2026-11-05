@@ -2,7 +2,10 @@
 //! samples go into its subslots.
 
 use crate::schedule::{nominal_q16, supported, Speed};
-use crate::{Endpoint, Rates, Stream, Uac, UsbAudioDevice, COMMON_RATES};
+use crate::{Endpoint, HardwareVolume, Rates, Stream, Sync, Uac, UsbAudioDevice, COMMON_RATES};
+
+/// What each UAC2 clock answered to `RANGE`, as rates: `(clock id, rates)`.
+pub type ClockRates = [(u8, Vec<u32>)];
 
 /// What the exclusive driver plays a format with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +24,9 @@ pub struct Setting {
     /// The rate may be written: UAC2 the clock's frequency control, UAC1 the endpoint's. When not,
     /// the driver only reads it, and plays only when it already is the rate asked.
     pub rate_settable: bool,
+    /// UAC2: the feature unit on this setting's own playback path (never another path's, never a
+    /// microphone's); `None`: it has none the host may set.
+    pub unit: Option<HardwareVolume>,
 }
 
 impl Setting {
@@ -30,9 +36,10 @@ impl Setting {
     }
 }
 
-/// The rates a setting takes: UAC1 from its descriptor, UAC2 from the clock (`clock_rates`, what
-/// its `RANGE` request answered).
-pub fn rates_of(s: &Stream, clock_rates: &[u32]) -> Vec<u32> {
+/// The rates a setting takes: UAC1 from its descriptor, UAC2 from the clock of its own terminal
+/// (what that clock answered to `RANGE`, in `clocks`). A UAC2 setting whose clock can't be told
+/// for sure takes none: it is never played at a speed nobody set.
+pub fn rates_of(dev: &UsbAudioDevice, s: &Stream, clocks: &ClockRates) -> Vec<u32> {
     match &s.rates {
         Rates::Discrete(v) => v.clone(),
         Rates::Continuous { min, max } => COMMON_RATES
@@ -40,7 +47,11 @@ pub fn rates_of(s: &Stream, clock_rates: &[u32]) -> Vec<u32> {
             .copied()
             .filter(|r| r >= min && r <= max)
             .collect(),
-        Rates::FromClock(_) => clock_rates.to_vec(),
+        Rates::FromClock(_) => dev
+            .playback_clock(s.terminal_link)
+            .and_then(|c| clocks.iter().find(|(id, _)| *id == c))
+            .map(|(_, r)| r.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -58,8 +69,8 @@ fn pcm(dev: &UsbAudioDevice) -> impl Iterator<Item = &Stream> {
 }
 
 /// Whether the setting's endpoint carries `rate` at `speed`: an interval the driver plays, and room
-/// in each packet for the most frames one carries (the rate per packet rounded up, one more for
-/// the DAC's feedback), across all its transactions.
+/// in each packet for the most frames one carries (the rate per packet rounded up; one more for an
+/// asynchronous DAC's feedback, which may ask for it), across all its transactions.
 pub fn carries(s: &Stream, rate: u32, speed: Speed) -> bool {
     let Some(ep) = s.endpoint.as_ref() else {
         return false;
@@ -67,7 +78,8 @@ pub fn carries(s: &Stream, rate: u32, speed: Speed) -> bool {
     if !supported(speed, ep.interval) {
         return false;
     }
-    let per_packet = nominal_q16(rate, speed, ep.interval).div_ceil(1 << 16) + 1;
+    let headroom = u64::from(ep.sync == Sync::Async && ep.feedback.is_some());
+    let per_packet = nominal_q16(rate, speed, ep.interval).div_ceil(1 << 16) + headroom;
     let frame = u64::from(s.channels) * u64::from(s.subslot_bytes);
     per_packet * frame <= u64::from(ep.max_packet) * u64::from(ep.transactions.max(1))
 }
@@ -78,14 +90,15 @@ pub fn carries(s: &Stream, rate: u32, speed: Speed) -> bool {
 /// `Err` says why none does.
 pub fn choose(
     dev: &UsbAudioDevice,
-    clock_rates: &[u32],
+    clocks: &ClockRates,
     rate: u32,
     bits: u8,
     channels: u8,
     speed: Speed,
 ) -> Result<Setting, String> {
     let fits = |s: &&Stream| s.channels == channels && s.bits >= bits;
-    let listed = |s: &&Stream| rates_of(s, clock_rates).contains(&rate);
+    let listed = |s: &&Stream| rates_of(dev, s, clocks).contains(&rate);
+    let uac2 = dev.uac == Some(Uac::V2);
     let best = pcm(dev)
         .filter(fits)
         .filter(listed)
@@ -93,7 +106,14 @@ pub fn choose(
         .min_by_key(|s| (s.subslot_bytes, s.bits));
     let Some(s) = best else {
         let why = if pcm(dev).any(|s| s.channels == channels) {
-            if pcm(dev).filter(fits).any(|s| listed(&s)) {
+            if uac2
+                && pcm(dev)
+                    .filter(fits)
+                    .all(|s| dev.playback_clock(s.terminal_link).is_none())
+            {
+                "the DAC's clock for this setting can't be told for sure: Exclusive USB doesn't play it"
+                    .to_string()
+            } else if pcm(dev).filter(fits).any(|s| listed(&s)) {
                 format!("the DAC's USB endpoint can't carry {rate} Hz at this bus speed")
             } else if pcm(dev)
                 .filter(|s| s.channels == channels)
@@ -124,15 +144,20 @@ pub fn choose(
         endpoint: s.endpoint.clone().expect("filtered on an endpoint"),
         clock,
         rate_settable,
+        unit: if uac2 {
+            dev.playback_unit(s.terminal_link)
+        } else {
+            None
+        },
     })
 }
 
 /// Every format (rate, bits, channels) it plays unchanged at `speed`: each setting's rates its
 /// endpoint carries, with 16, 24 and 32 bit up to its resolution.
-pub fn formats(dev: &UsbAudioDevice, clock_rates: &[u32], speed: Speed) -> Vec<(u32, u8, u8)> {
+pub fn formats(dev: &UsbAudioDevice, clocks: &ClockRates, speed: Speed) -> Vec<(u32, u8, u8)> {
     let mut v: Vec<(u32, u8, u8)> = Vec::new();
     for s in pcm(dev) {
-        for rate in rates_of(s, clock_rates)
+        for rate in rates_of(dev, s, clocks)
             .into_iter()
             .filter(|r| carries(s, *r, speed))
         {
@@ -273,6 +298,34 @@ mod tests {
                 .unwrap()
                 .alt,
             3
+        );
+    }
+
+    /// Codex M8 / Claude L (round 2 of #306): the extra frame of headroom is for an asynchronous
+    /// DAC's feedback only: a synchronous or adaptive endpoint sized exactly for its rate carries it.
+    #[test]
+    fn headroom_only_for_feedback() {
+        let mut exact = st(1, 2, 16, Rates::Discrete(vec![48_000]));
+        {
+            let ep = exact.endpoint.as_mut().unwrap();
+            ep.max_packet = 192; // 48 frames of 4 bytes a millisecond, exactly
+            ep.sync = crate::Sync::Adaptive;
+            ep.feedback = None;
+        }
+        assert!(carries(&exact, 48_000, Speed::Full), "adaptive, exact capacity");
+        exact.endpoint.as_mut().unwrap().sync = crate::Sync::Sync;
+        assert!(
+            carries(&exact, 48_000, Speed::Full),
+            "synchronous, exact capacity"
+        );
+        {
+            let ep = exact.endpoint.as_mut().unwrap();
+            ep.sync = crate::Sync::Async;
+            ep.feedback = Some(0x81);
+        }
+        assert!(
+            !carries(&exact, 48_000, Speed::Full),
+            "asynchronous: one frame of headroom"
         );
     }
 

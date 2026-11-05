@@ -40,6 +40,12 @@ pub trait TrackBackend: Send + Sync {
     fn open(&self, dac_id: i32, entry: &MixerEntry) -> Result<(Box<dyn Track>, OpenReport), OpenError>;
     /// Android's media volume, 0 to 100 (`None`: it could not be read).
     fn media_volume(&self) -> Option<u8>;
+    /// Android's own attenuation of media (dB) for the USB DAC it plays to now
+    /// (`getStreamVolumeDb`, Android 9+); `None` when it can't say, or media doesn't go to a USB
+    /// DAC now (the reading would be another device's).
+    fn media_db_on_dac(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// One `AudioTrack`.
@@ -527,9 +533,10 @@ fn open_exclusive(
     fmt: AudioFormat,
     warning: Option<String>,
     media: Option<u8>,
+    media_db: Option<f32>,
 ) -> Result<PhoneOpen, String> {
     use crate::exclusive::ExclusiveError as E;
-    match crate::exclusive::open(id, dac, fmt, warning, media) {
+    match crate::exclusive::open(id, dac, fmt, warning, media, media_db) {
         Ok(s) => Ok(PhoneOpen::Exclusive(Box::new(s))),
         Err(E::Gone(why)) => {
             usb_dac::gone_seen();
@@ -568,10 +575,12 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
     let mut why_not = None;
     if let Some(dac) = usb_dac::current_dac() {
         let media = media_now();
+        // Android's attenuation for the DAC, before anything touches it (the hand-over's)
+        let media_db = crate::exclusive::handover_reading();
         // Exclusive USB when chosen; when chosen but not possible, why (Android plays it)
         why_not =
             match crate::exclusive::decide(&dac, usb_dac::settings(), usb_dac::full_level_consent(), media) {
-                Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning, media) {
+                Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning, media, media_db) {
                     Ok(o) => return o,
                     Err(why) => {
                         tracing::warn!(format = %fmt, "no Exclusive USB: {why}");
@@ -591,10 +600,17 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                 dac.device.name
             ));
         }
-        if let Err(why) = crate::exclusive::wait_android_back() {
-            return gone(why);
+        // Waited for a give-back: the DAC this open is for is the one Android lists now (a new
+        // id); none listed: Gone. Not waited: the DAC fixed at the start stays (it went meanwhile:
+        // the gate says so, never the default route)
+        match crate::exclusive::wait_android_back() {
+            Err(why) => return gone(why),
+            Ok(true) => match usb_dac::opened_for_now() {
+                Some(f) => at_open = Some(f),
+                None => return gone(format!("{} went while going back to Android", dac.device.name)),
+            },
+            Ok(false) => {}
         }
-        at_open = usb_dac::opened_for_now();
     }
     let shared = |any_rate| PhoneOpen::Shared {
         any_rate,
@@ -626,18 +642,29 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                 if usb_dac::settings().mode == PreferredMode::Auto {
                     let media = media_now();
                     if let Some(warning) = crate::exclusive::auto_fallback(&dac, media) {
-                        if let Ok(o) = open_exclusive(id, &dac, fmt, warning, media) {
+                        let media_db = crate::exclusive::handover_reading();
+                        if let Ok(o) = open_exclusive(id, &dac, fmt, warning, media, media_db) {
                             return o;
                         }
                         // The attempt may have taken the DAC from Android: shared only once
                         // Android lists it again, for the DAC as Android lists it then
-                        if let Err(why) = crate::exclusive::wait_android_back() {
-                            return gone(why);
-                        }
+                        let opened_for = match crate::exclusive::wait_android_back() {
+                            Err(why) => return gone(why),
+                            Ok(true) => match usb_dac::opened_for_now() {
+                                Some(f) => Some(f),
+                                None => {
+                                    return gone(format!(
+                                        "{} went while going back to Android",
+                                        dac.device.name
+                                    ))
+                                }
+                            },
+                            Ok(false) => at_open.clone(),
+                        };
                         record_shared(&dac, fmt, why);
                         return PhoneOpen::Shared {
                             any_rate: true,
-                            opened_for: usb_dac::opened_for_now(),
+                            opened_for,
                         };
                     }
                 }
@@ -2264,6 +2291,13 @@ mod tests {
         let block = |k: i32| AudioBlock::pcm_i32(fmt, (0..960).map(|i| k * 10_000 + i).collect());
         sink.write(&block(1)).unwrap();
         sink.write(&block(2)).unwrap();
+        // The phone's track has both (the node's writes reach it a moment later): 960 frames of
+        // packed 24-bit stereo
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while player.bytes.lock().unwrap().len() < 960 * 6 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(player.bytes.lock().unwrap().len(), 960 * 6);
         // The DAC played all but the last 300 frames
         player
             .played

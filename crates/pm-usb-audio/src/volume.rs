@@ -94,43 +94,17 @@ pub fn cur_to_db(cur: i16) -> f32 {
     f32::from(cur) / 256.0
 }
 
-/// Android's default media volume curve (AOSP `DEFAULT_MEDIA_VOLUME_CURVE`: percent of the index
-/// range to dB): 1 % at -58 dB, 20 % at -40, 60 % at -17, 100 % at 0.
-const MEDIA_CURVE: [(f32, f32); 4] = [(1.0, -58.0), (20.0, -40.0), (60.0, -17.0), (100.0, 0.0)];
-/// Below Android's own level by this much: phones tune their curves, and louder is never allowed.
-pub const HANDOVER_MARGIN_DB: f32 = 3.0;
-
-/// The level, in dB, that Android's media volume `percent` played at (its default curve), less
-/// [`HANDOVER_MARGIN_DB`]; `None` for silence (0 %).
-pub fn handover_db(percent: u8) -> Option<f32> {
-    let p = f32::from(percent.min(100));
-    if p <= 0.0 {
-        return None;
-    }
-    let db = if p <= MEDIA_CURVE[0].0 {
-        MEDIA_CURVE[0].1
-    } else {
-        MEDIA_CURVE
-            .windows(2)
-            .find(|w| p <= w[1].0)
-            .map(|w| {
-                let ((x0, y0), (x1, y1)) = (w[0], w[1]);
-                y0 + (y1 - y0) * (p - x0) / (x1 - x0)
-            })
-            .unwrap_or(0.0)
-    };
-    Some(db - HANDOVER_MARGIN_DB)
-}
-
-/// The unit's level when the driver takes the DAC over: Android played at media volume `percent`
-/// (read while Android still played the DAC) through the unit at `before`; never louder than
-/// both together. Muted when that was muted, silent (0 %), below the unit's minimum, or unknown.
-pub fn handover(percent: Option<u8>, before: Option<Level>, range: &VolumeRange) -> Level {
+/// The unit's level when the driver takes the DAC over: Android played the DAC at `media_db` (its
+/// own attenuation for the DAC's route, `AudioManager.getStreamVolumeDb`, read before the take
+/// while Android still played the DAC) through the unit at `before`; never louder than both
+/// together. Muted, at its minimum, when either is unknown, Android was silent, the unit was
+/// muted, or the target is below what the unit can do: the listener raises it.
+pub fn handover(media_db: Option<f32>, before: Option<Level>, range: &VolumeRange) -> Level {
     let quiet = Level {
         cur: range.min(),
         mute: true,
     };
-    let (Some(db), Some(b)) = (percent.and_then(handover_db), before) else {
+    let (Some(db), Some(b)) = (media_db.filter(|d| d.is_finite()), before) else {
         return quiet;
     };
     let target = ((db + cur_to_db(b.cur)) * 256.0).floor() as i32;
@@ -140,16 +114,10 @@ pub fn handover(percent: Option<u8>, before: Option<Level>, range: &VolumeRange)
     }
 }
 
-/// The unit's level when the driver gives the DAC back to Android (whose volume applies again on
-/// top): never louder than before, and muted if it was then or is now. Before unknown: as now.
+/// The unit's level when the driver gives the DAC back to Android: exactly its own level and mute
+/// from before the take (Android's volume applies on top again, as it did); unknown: as now.
 pub fn giveback(before: Option<Level>, now: Level) -> Level {
-    match before {
-        Some(b) => Level {
-            cur: b.cur.min(now.cur),
-            mute: b.mute || now.mute,
-        },
-        None => now,
-    }
+    before.unwrap_or(now)
 }
 
 #[cfg(test)]
@@ -212,41 +180,60 @@ mod tests {
         assert_eq!((r.min(), r.max()), (-60 * 256, 0));
     }
 
-    /// The hand-over is never louder than what Android played at that media volume through the
-    /// unit's level then.
+    /// The hand-over is Android's measured attenuation for the DAC plus the unit's level then, on
+    /// the unit's steps, rounded toward quieter: never louder.
     #[test]
     fn the_hand_over_is_never_louder() {
-        assert_eq!(handover_db(100), Some(-3.0));
-        assert_eq!(handover_db(60), Some(-20.0));
-        assert_eq!(handover_db(20), Some(-43.0));
-        assert_eq!(handover_db(1), Some(-61.0));
-        assert_eq!(handover_db(0), None);
-        assert_eq!(handover_db(40), Some(-31.5));
         let r = ka17();
-        for p in 1..=100u8 {
-            let l = handover(Some(p), at(0), &r);
-            assert!(!l.mute && cur_to_db(l.cur) <= handover_db(p).unwrap(), "{p}%");
+        for tenth in 0..=600 {
+            let db = -(tenth as f32) / 10.0;
+            let l = handover(Some(db), at(0), &r);
+            assert!(!l.mute && cur_to_db(l.cur) <= db, "{db} dB");
         }
-        // The unit was already turned down: the hand-over is that much lower
         assert_eq!(
-            handover(Some(100), at(-10 * 256), &r),
+            handover(Some(-20.0), at(0), &r),
             Level {
-                cur: -13 * 256,
+                cur: -20 * 256,
                 mute: false
             }
         );
-        // A curve that only rises
-        let mut last = f32::MIN;
-        for p in 1..=100u8 {
-            let d = handover_db(p).unwrap();
-            assert!(d >= last, "{p}%");
-            last = d;
-        }
+        // The unit was already turned down: the hand-over is that much lower
+        assert_eq!(
+            handover(Some(0.0), at(-10 * 256), &r),
+            Level {
+                cur: -10 * 256,
+                mute: false
+            }
+        );
+        assert_eq!(
+            handover(Some(-3.3), at(-10 * 256), &r),
+            Level {
+                cur: -13 * 256 - 128,
+                mute: false
+            }
+        );
     }
 
-    /// Codex H2 / Claude M3 (round 1 of #306): silence, a level below what the unit can do, a mute
-    /// before and anything unknown are muted, never the unit's minimum played aloud; giving back
-    /// keeps a mute.
+    /// Codex H3 (round 2 of #306): no assumed curve: without Android's own reading for the DAC
+    /// (an old Android, or not read from the DAC's route) the DAC starts muted at its minimum.
+    #[test]
+    fn no_reading_no_sound() {
+        let r = ka17();
+        let quiet = Level {
+            cur: r.min(),
+            mute: true,
+        };
+        assert_eq!(handover(None, at(0), &r), quiet);
+        assert_eq!(
+            handover(Some(f32::NEG_INFINITY), at(0), &r),
+            quiet,
+            "Android silent"
+        );
+        assert_eq!(handover(Some(f32::NAN), at(0), &r), quiet);
+    }
+
+    /// Codex H2 / Claude M3 (round 1 of #306): below what the unit can do, or muted before: muted;
+    /// Claude M4 (round 2): the give-back is the unit's own level and mute from before the take.
     #[test]
     fn what_the_unit_cant_do_quietly_is_muted() {
         let shallow = VolumeRange::single(-20 * 256, 0, 256);
@@ -254,21 +241,19 @@ mod tests {
             cur: -20 * 256,
             mute: true,
         };
-        assert_eq!(handover(Some(0), at(0), &shallow), quiet, "Android at 0 %");
         assert_eq!(
-            handover(Some(20), at(0), &shallow),
+            handover(Some(-43.0), at(0), &shallow),
             quiet,
             "-43 dB is below -20 dB: muted"
         );
-        assert_eq!(handover(None, at(0), &shallow), quiet, "volume unknown");
         assert_eq!(
-            handover(Some(100), None, &shallow),
+            handover(Some(0.0), None, &shallow),
             quiet,
             "the unit's level unknown"
         );
         assert_eq!(
             handover(
-                Some(100),
+                Some(-3.0),
                 Some(Level {
                     cur: -6 * 256,
                     mute: true
@@ -281,7 +266,7 @@ mod tests {
             },
             "muted before: muted"
         );
-        // Back to Android: never above before, a mute kept
+        // Back to Android: exactly as before, whatever the hand-over or the listener did
         let before = Some(Level {
             cur: -20 * 256,
             mute: false,
@@ -297,18 +282,31 @@ mod tests {
             giveback(
                 before,
                 Level {
-                    cur: -30 * 256,
+                    cur: -127 * 256,
                     mute: true
                 }
             ),
             Level {
-                cur: -30 * 256,
-                mute: true
+                cur: -20 * 256,
+                mute: false
             }
         );
         assert_eq!(
             giveback(Some(Level { cur: 0, mute: true }), Level { cur: 0, mute: false }),
             Level { cur: 0, mute: true }
+        );
+        assert_eq!(
+            giveback(
+                None,
+                Level {
+                    cur: -5 * 256,
+                    mute: false
+                }
+            ),
+            Level {
+                cur: -5 * 256,
+                mute: false
+            }
         );
     }
 }

@@ -26,8 +26,6 @@ import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.SystemClock
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -55,9 +53,9 @@ class UsbExclusive private constructor() {
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(ctx: Context, intent: Intent) {
                     when (intent.action) {
-                        // Unplugged while held: nothing to give back, the connection is dead
-                        // Unplugged: the connection closes; the Rust side works on its own duplicate
-                        // of the descriptor, and its next call finds the device gone
+                        // Unplugged: the connection closes; the Rust side works on its own descriptor
+                        // (handed over), and its next call finds the device gone. A claim recorded
+                        // for it is over (a replug gives Android's driver a fresh device)
                         UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                             val gone = deviceOf(intent)
                             synchronized(lock) {
@@ -68,6 +66,7 @@ class UsbExclusive private constructor() {
                                     claimed.clear()
                                 }
                                 if (gone != null && returning?.deviceName == gone.deviceName) returning = null
+                                if (gone != null && recorded() == gone.deviceName) forget()
                             }
                             UsbAudio.refreshNow()
                         }
@@ -140,12 +139,15 @@ class UsbExclusive private constructor() {
                 closing = false
                 conn?.let { c ->
                     if (device?.deviceName == d.deviceName) {
-                        return JSONObject().put("ok", true).put("fd", c.fileDescriptor)
+                        return JSONObject().put("ok", true).put("fd", handOver(c))
                             .put("descriptors", hex(c.rawDescriptors ?: ByteArray(0))).toString()
                     }
                     runCatching { c.close() }
                 }
                 val c = runCatching { um.openDevice(d) }.getOrNull() ?: return refused("Android would not open the DAC")
+                // Recorded before Android's driver lets go of anything: if this process dies holding
+                // it, the next start gives back exactly this device (and nothing else)
+                record(d)
                 // Held before Android's driver lets go, so the report that follows keeps the DAC
                 conn = c
                 device = d
@@ -160,13 +162,13 @@ class UsbExclusive private constructor() {
                         // stays open, and the Rust side gives them back to Android's driver, then
                         // calls release() (closing alone would leave them without a driver)
                         return JSONObject().put("ok", false).put("why", "another app holds the DAC")
-                            .put("fd", c.fileDescriptor).put("descriptors", hex(c.rawDescriptors ?: ByteArray(0)))
+                            .put("fd", handOver(c)).put("descriptors", hex(c.rawDescriptors ?: ByteArray(0)))
                             .toString()
                     }
                     claimed.add(intf)
                 }
                 val raw = c.rawDescriptors ?: ByteArray(0)
-                return JSONObject().put("ok", true).put("fd", c.fileDescriptor).put("descriptors", hex(raw)).toString()
+                return JSONObject().put("ok", true).put("fd", handOver(c)).put("descriptors", hex(raw)).toString()
             }
         }
 
@@ -181,35 +183,60 @@ class UsbExclusive private constructor() {
                 conn = null
                 device = null
                 claimed.clear()
+                forget()
             }
             UsbAudio.refreshNow()
             // Android lists it again by then, or it counts as gone
             BitPerfect.handler().postDelayed({ UsbAudio.refreshNow() }, RETURN_MS + 100)
         }
 
-        /// Attached audio devices the app may open that Android lists no USB audio output for: left
-        /// without Android's driver by an app killed while it held them. JSON: [{vendor_id,
-        /// product_id}]. Called once at start; the Rust side gives them back (the connection is
-        /// opened for that and released).
+        /// A duplicate of the connection's descriptor, made here under the lock and given up to the
+        /// Rust side, which owns it from now on (closes it with its transport): an unplug closing
+        /// the connection can no longer take it from under Rust, or let Rust duplicate a number
+        /// reused for something else.
+        private fun handOver(c: UsbDeviceConnection): Int =
+            android.os.ParcelFileDescriptor.fromFd(c.fileDescriptor).detachFd()
+
+        private const val PREFS = "odeion_exclusive_usb"
+        private const val CLAIMED = "claimed"
+
+        private fun prefs() = context?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+        /// The device this app claimed, kept across a crash: "deviceName|vendor|product".
+        private fun record(d: UsbDevice) {
+            prefs()?.edit()?.putString(CLAIMED, "${d.deviceName}|${d.vendorId}|${d.productId}")?.commit()
+        }
+
+        private fun forget() {
+            prefs()?.edit()?.remove(CLAIMED)?.commit()
+        }
+
+        /// The recorded claim's device name, when there is one.
+        private fun recorded(): String? = prefs()?.getString(CLAIMED, null)?.substringBefore('|')
+
+        /// The device this app itself claimed and never released (it was killed holding it): still
+        /// attached under the same device name, not held now. JSON: [{vendor_id, product_id}], at
+        /// most one. Nothing else is ever named: a DAC Android is using is never touched. Called
+        /// once at start; the Rust side opens it, gives its interfaces back to Android's driver and
+        /// releases it (which forgets the record).
         @JvmStatic
         fun detached(): String {
             val out = JSONArray()
-            val c = context ?: return out.toString()
             val um = usb() ?: return out.toString()
-            val am = c.getSystemService(AudioManager::class.java) ?: return out.toString()
-            val listed = runCatching {
-                am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).filter {
-                    it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET
-                }.map { it.productName?.toString()?.trim()?.lowercase().orEmpty() }
-            }.getOrDefault(emptyList())
-            val held = synchronized(lock) { device?.deviceName }
-            for (d in runCatching { um.deviceList.values.toList() }.getOrDefault(emptyList())) {
-                if (!isAudio(d) || d.deviceName == held) continue
-                if (!runCatching { um.hasPermission(d) }.getOrDefault(false)) continue
-                val name = runCatching { d.productName }.getOrNull()?.trim()?.lowercase().orEmpty()
-                val known = listed.any { it.isNotEmpty() && name.isNotEmpty() && (it.contains(name) || name.contains(it)) }
-                if (!known) out.put(JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId))
+            val rec = prefs()?.getString(CLAIMED, null) ?: return out.toString()
+            val parts = rec.split('|')
+            if (parts.size != 3) {
+                forget()
+                return out.toString()
             }
+            if (synchronized(lock) { conn != null }) return out.toString()
+            val d = runCatching { um.deviceList[parts[0]] }.getOrNull()
+            // Unplugged since (a replug gives Android a fresh device), or another device now
+            if (d == null || d.vendorId.toString() != parts[1] || d.productId.toString() != parts[2]) {
+                forget()
+                return out.toString()
+            }
+            out.put(JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId))
             return out.toString()
         }
 

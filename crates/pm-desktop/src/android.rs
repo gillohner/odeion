@@ -727,6 +727,18 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         .ok()?;
         u8::try_from(p).ok().filter(|p| *p <= 100)
     }
+
+    fn media_db_on_dac(&self) -> Option<f32> {
+        use jni021::objects::JClass;
+        let db = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "mediaVolumeDbOnUsb", "()F", &[])?
+                .f()
+        })
+        .ok()?;
+        // NaN: Android can't say for the DAC; -inf: silent (both: the hand-over mutes)
+        (!db.is_nan()).then_some(db)
+    }
 }
 
 /// Exclusive USB's app side (`UsbExclusive.kt`) for pm-out-local's `exclusive`: Android's
