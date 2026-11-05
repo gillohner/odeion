@@ -460,11 +460,12 @@ def run(node):
             log(f"crash report check skipped: `am crash` is not available here ({crashed.stderr.strip()})")
         else:
             time.sleep(3)
-            adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
             # Android may kill the app again right after (Play services restarting on the emulator:
             # "depends on provider …FontsProvider in dying proc", release run for fd2d80e0, API 33).
             # The report stays until Continue, so the app is started again and shows it once more.
+            # Kills are counted before the start, so one logged while `am start -W` waits counts too.
             seen = len(system_kills())
+            adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
             for attempt in (1, 2, 3):
                 def report_or_killed():
                     if len(system_kills()) > seen:
