@@ -4,7 +4,7 @@ use crate::config::NodeConfig;
 use anyhow::Context;
 use pm_library::{Library, Scanner};
 use pm_model::{MusicUri, Track};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn open(cfg: &NodeConfig) -> anyhow::Result<Library> {
     std::fs::create_dir_all(&cfg.data_dir)?;
@@ -84,6 +84,19 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
             std::io::copy(&mut std::fs::File::open(&tmp)?, &mut out)?;
             out.sync_all()?;
             drop(out);
+            // An old database's journal files beside the target (its WAL may hold its sign-ins,
+            // and SQLite would read it with the new file): gone before the new file goes in. Not
+            // when the target stays (no --force over an existing file)
+            if force || !file.exists() {
+                for ext in ["-wal", "-shm", "-journal"] {
+                    let mut side = file.as_os_str().to_owned();
+                    side.push(ext);
+                    match std::fs::remove_file(PathBuf::from(side)) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                        _ => {}
+                    }
+                }
+            }
             // Into place only once whole: with --force over the old one in one step (it stays
             // until then), without it never over a file that appeared meanwhile
             if force {
@@ -576,5 +589,61 @@ mod tests {
             "nothing carried from the damaged one"
         );
         assert!(cfg.db_path().with_extension("db.bak").exists());
+    }
+
+    /// `backup --force` over an old database: its WAL and shared-memory files (which may hold that
+    /// database's sign-ins) go, so nothing of it is left beside the new copy or read with it.
+    #[test]
+    fn backup_over_an_old_database_takes_its_journal_files_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        open(&cfg).unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let file = out.join("copy.sqlite");
+        let secret = ["fixture", "value", "old-wal"].join("-");
+        // An old database whose last change is still in its WAL (its connection open)
+        let old = Library::open(&out.join("old.sqlite")).unwrap();
+        old.set_setting("tidal.user", &secret).unwrap();
+        std::fs::copy(out.join("old.sqlite"), &file).unwrap();
+        for ext in ["-wal", "-shm"] {
+            let from = out.join(format!("old.sqlite{ext}"));
+            if from.exists() {
+                std::fs::copy(&from, out.join(format!("copy.sqlite{ext}"))).unwrap();
+            }
+        }
+        std::fs::write(out.join("copy.sqlite-wal"), {
+            let mut w = std::fs::read(out.join("copy.sqlite-wal")).unwrap_or_default();
+            w.extend_from_slice(secret.as_bytes());
+            w
+        })
+        .unwrap();
+        drop(old);
+        for f in ["old.sqlite", "old.sqlite-wal", "old.sqlite-shm"] {
+            let _ = std::fs::remove_file(out.join(f));
+        }
+        backup(&cfg, &file, true).unwrap();
+        for ext in ["-wal", "-shm", "-journal"] {
+            assert!(
+                !out.join(format!("copy.sqlite{ext}")).exists(),
+                "{ext} left beside the copy"
+            );
+        }
+        for e in std::fs::read_dir(&out).unwrap() {
+            let raw = std::fs::read(e.unwrap().path()).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&raw).contains(&secret),
+                "the old sign-in is gone"
+            );
+        }
+        let copy = Library::open(&file).unwrap();
+        assert_eq!(copy.get_setting("tidal.user").unwrap(), None);
+        // Without --force an existing target and its files stay as they are
+        std::fs::write(out.join("copy.sqlite-wal"), b"someone's").unwrap();
+        assert!(backup(&cfg, &file, false).is_err());
+        assert_eq!(std::fs::read(out.join("copy.sqlite-wal")).unwrap(), b"someone's");
     }
 }

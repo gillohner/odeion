@@ -348,18 +348,83 @@ pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_librar
             }
         }
     }
-    let carried = SECRET_SETTINGS
-        .iter()
-        .map(|(k, _)| *k)
-        .chain(CARRIED.iter().copied());
-    for key in carried {
+    // Sign-ins: the owner's and each listener's own, where the copy has none (a plain one has none)
+    for (key, _) in SECRET_SETTINGS {
         if staged.get_setting(key)?.is_none() {
             if let Some(v) = here.get_setting(key)? {
                 staged.set_setting(key, &v)?;
             }
         }
     }
+    let listeners = here.settings_with_prefix(crate::accounts::PERSON_PREFIX)?;
+    for (key, v) in listeners.into_iter().filter(|(k, _)| is_person_signin(k)) {
+        if staged.get_setting(&key)?.is_none() {
+            staged.set_setting(&key, &v)?;
+        }
+    }
+    merge_carried(staged, &carried_of(here)?)
+}
+
+/// This node's [`CARRIED`] settings as they are now: what a restore keeps where the backup brings
+/// no replacement ([`merge_carried`]).
+pub(crate) fn carried_of(
+    lib: &Library,
+) -> Result<Vec<(&'static str, Option<String>)>, pm_library::LibraryError> {
+    CARRIED.iter().map(|k| Ok((*k, lib.get_setting(k)?))).collect()
+}
+
+/// After a restore that brought no sealed values for them: the signup token and parties stay as
+/// they were here where the restored library has none, and so does the people list; where it has
+/// one (a plain copy keeps invites without their links), each invite gets back the link it has
+/// here, matched by id. Nothing of `here` is added that the restored library doesn't name.
+pub(crate) fn merge_carried(
+    into: &Library,
+    here: &[(&'static str, Option<String>)],
+) -> Result<(), pm_library::LibraryError> {
+    for (key, value) in here {
+        let Some(value) = value else { continue };
+        let Some(restored) = into.get_setting(key)? else {
+            into.set_setting(key, value)?;
+            continue;
+        };
+        if *key != crate::people::SETTING {
+            continue;
+        }
+        if let Some(merged) = invite_links_back(&restored, value) {
+            into.set_setting(key, &merged)?;
+        }
+    }
     Ok(())
+}
+
+/// `restored`'s people list with each invite that has no link given the one `here`'s invite of the
+/// same id has; `None` when nothing changes or either list can't be read.
+fn invite_links_back(restored: &str, here: &str) -> Option<String> {
+    let mut r: serde_json::Value = serde_json::from_str(restored).ok()?;
+    let h: serde_json::Value = serde_json::from_str(here).ok()?;
+    let links: std::collections::HashMap<&str, &serde_json::Value> = h
+        .get("invites")?
+        .as_array()?
+        .iter()
+        .filter_map(|i| Some((i.get("id")?.as_str()?, i.get("token").filter(|t| t.is_string())?)))
+        .collect();
+    let mut changed = false;
+    for inv in r.get_mut("invites")?.as_array_mut()? {
+        let Some(obj) = inv.as_object_mut() else { continue };
+        if obj.get("token").is_some_and(|t| !t.is_null()) {
+            continue;
+        }
+        let Some(link) = obj
+            .get("id")
+            .and_then(|i| i.as_str())
+            .and_then(|id| links.get(id))
+        else {
+            continue;
+        };
+        obj.insert("token".into(), (*link).clone());
+        changed = true;
+    }
+    changed.then(|| r.to_string())
 }
 
 /// Makes a plain copy of the database safe to keep anywhere: no sign-in (the owner's or a
@@ -681,6 +746,7 @@ async fn restore_locked(
             .map(|(k, _)| Ok((*k, lib.get_setting(k)?)))
             .collect::<Result<_, BackupError>>()?;
         let people_here = person_signins(&lib)?;
+        let carried_here = carried_of(&lib)?;
         lib.restore_from(&staged)?;
         for (k, v) in keep {
             match v {
@@ -716,12 +782,16 @@ async fn restore_locked(
         {
             lib.set_setting(k, v)?;
         }
-        // Invites with their links, the signup token and parties, from the locked part
-        for key in CARRIED {
-            if let Some(v) = secrets.as_ref().and_then(|x| x.settings.get(*key)) {
-                lib.set_setting(key, v)?;
+        // Invites with their links, the signup token and parties: from the locked part, else as
+        // they were here (a plain backup restored on this node keeps the links it handed out)
+        let mut kept = Vec::new();
+        for (key, now) in carried_here {
+            match secrets.as_ref().and_then(|x| x.settings.get(key)) {
+                Some(v) => lib.set_setting(key, v)?,
+                None => kept.push((key, now)),
             }
         }
+        merge_carried(&lib, &kept)?;
         lib.drop_missing_art()?;
         report.restored = counts_of(&lib)?;
         report.missing_folders = lib
@@ -1239,5 +1309,56 @@ mod tests {
             ]
         );
         assert!(dir.path().join("notes.txt").exists());
+    }
+
+    /// `odeiond restore` of a plain copy on the same node: listeners' own sign-ins stay, and each
+    /// invite in the copy gets back its link by id; an invite only here isn't added.
+    #[test]
+    fn a_plain_copy_restored_here_keeps_listeners_and_invite_links() {
+        let here = Library::open_in_memory().unwrap();
+        let v = |n: &str| ["fixture", "value", n].join("-");
+        let listener = format!("{}somekey.lastfm.session", crate::accounts::PERSON_PREFIX);
+        here.set_setting(&listener, &v("listener")).unwrap();
+        here.set_setting("tidal.user", &v("owner")).unwrap();
+        here.set_setting(
+            crate::people::SETTING,
+            &serde_json::json!({"people": [], "invites": [
+                {"id": "i1", "access": "music", "token": v("link1"), "created_at": 1},
+                {"id": "i2", "access": "music", "token": v("link2"), "created_at": 1}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        here.set_setting(crate::bundled::OWNER_TOKEN, &v("signup"))
+            .unwrap();
+        // The copy: made from an earlier state (only i1), scrubbed
+        let staged = Library::open_in_memory().unwrap();
+        staged
+            .set_setting(
+                crate::people::SETTING,
+                &serde_json::json!({"people": [], "invites": [{"id": "i1", "access": "music", "created_at": 1}]})
+                    .to_string(),
+            )
+            .unwrap();
+        keep_this_nodes(&here, &staged).unwrap();
+        assert_eq!(staged.get_setting(&listener).unwrap(), Some(v("listener")));
+        assert_eq!(staged.get_setting("tidal.user").unwrap(), Some(v("owner")));
+        assert_eq!(
+            staged.get_setting(crate::bundled::OWNER_TOKEN).unwrap(),
+            Some(v("signup"))
+        );
+        let people: serde_json::Value =
+            serde_json::from_str(&staged.get_setting(crate::people::SETTING).unwrap().unwrap()).unwrap();
+        let invites = people["invites"].as_array().unwrap();
+        assert_eq!(invites.len(), 1, "only the copy's invites: {people}");
+        assert_eq!(invites[0]["token"], v("link1"));
+        // What the copy has stays: a sign-in in it isn't replaced
+        let staged2 = Library::open_in_memory().unwrap();
+        staged2.set_setting(&listener, "from-the-copy").unwrap();
+        keep_this_nodes(&here, &staged2).unwrap();
+        assert_eq!(
+            staged2.get_setting(&listener).unwrap().as_deref(),
+            Some("from-the-copy")
+        );
     }
 }

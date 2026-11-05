@@ -585,6 +585,23 @@ async fn a_plain_backup_keeps_no_way_in() {
         assert!(p.contains("\"i1\"") && !p.contains(&v("invite")), "{p}");
         assert_eq!(lib.get_setting("homeserver.owner_signup_token").unwrap(), None);
     }
+    // Restored without a passphrase on the node it came from: the links, signup token and parties
+    // it has now stay (the plain copy has none to replace them)
+    let (st, r) = restore(&router(a.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    {
+        let lib = a.library.lock().unwrap();
+        let p = lib.get_setting("people").unwrap().unwrap();
+        assert!(p.contains(&v("invite")), "the invite keeps its link: {p}");
+        assert_eq!(
+            lib.get_setting("homeserver.owner_signup_token").unwrap(),
+            Some(v("signup"))
+        );
+        assert_eq!(
+            lib.get_setting("party.parties").unwrap().as_deref(),
+            Some(parties.as_str())
+        );
+    }
     // Locked with a passphrase: all of it comes back
     let pass = ["fixture", "passphrase"].join("-");
     let (locked, _) = pm_api::backup::make(&a, Some(&pass)).unwrap();
