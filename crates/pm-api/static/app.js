@@ -19,6 +19,8 @@
   // it (Android to its own rate: a USB DAC shows that rate, not the file's), no bit-perfect claim
   const playedBy = () => ({ android: 'Played by Android', desktop: 'Played by the app' }[appPlatform()] || 'Played by this browser');
   const decodedBy = () => (appPlatform() ? 'Decoded by the app' : 'Decoded by this browser');
+  // index.html's own two sentences about the player (the YouTube panel's head, the token hint)
+  const wordHere = () => { const y = $('#ytpanel .embedhead .muted'); if (y) y.textContent = `YouTube’s own player · its ads and terms apply · plays only ${hereOnly().replace('This', 'this')}`; const t = $('#tokhint'); if (t) t.innerHTML = `It’s in the <code>api-token</code> file in the node’s data folder, and stays ${hereIn()}.`; };
   const decodeNote = () => ({ android: 'The app decodes the file and Android mixes it to the system rate; the node makes no signal-path claim.', desktop: 'The app decodes the file and the system mixes it; the node makes no signal-path claim.' }[appPlatform()] || 'This browser decodes the file itself; the node makes no signal-path claim.');
 
   const state = {
@@ -600,7 +602,7 @@
       if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
       video.srcObject = stream; try { await video.play(); } catch { /* shows the first frame anyway */ }
       // A browser can have the API without reading QR codes: the camera goes off and it says so
-      let det; try { det = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; msg.textContent = `This browser can’t read QR codes (${e.message || e.name}). Paste their key instead.`; return; }
+      let det; try { det = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; msg.textContent = `${hereName()} can’t read QR codes (${e.message || e.name}). Paste their key instead.`; return; }
       const look = async () => {
         if (over) return;
         try { for (const c of await det.detect(video)) { const k = keyFrom(c.rawValue); if (k) return done(k); msg.textContent = 'That QR code isn’t a Pubky key.'; } } catch { /* the next frame */ }
@@ -1380,6 +1382,7 @@
   // The browser zone plays through one of two engines: the <audio> element, or YouTube's
   // official player (IFrame Player API) for YouTube links. `audio` stands for whichever is in use,
   // so the player bar, transport, media keys and repeat drive both the same way.
+  wordHere();
   const audioEl = $('#browser');
   const ytOf = (u) => { const m = /^youtube:video:([A-Za-z0-9_-]{11})$/.exec(u || '') || /^(?:https?:\/\/)?(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/.exec(u || ''); return m ? m[1] : null; };
   const yt = (() => {
@@ -1693,7 +1696,7 @@
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       const own = !u.from && u.signed_in;
       if (pick === 'browser') return own && u.session_client === 'pkce' ? h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') : tidalPkceSteps(u, h);
-      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
+      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in ${appPlatform() ? 'your browser' : 'this browser'} and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
         if (u.pending) return tidalCodeBox(u.pending);
         if (own && u.session_client === 'device') return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '');
@@ -2057,7 +2060,7 @@
   };
   const playStation = async (st) => {
     if (isBrowser()) {
-      if (location.protocol === 'https:' && /^http:\/\//i.test(st.url)) { toast('This page is served over HTTPS, so the browser will not play an http:// stream. Pick a node zone, or a station with an https stream.', 'error'); return; }
+      if (location.protocol === 'https:' && /^http:\/\//i.test(st.url)) { toast(`This page is served over HTTPS, so ${hereName().toLowerCase()} will not play an http:// stream. Pick a node zone, or a station with an https stream.`, 'error'); return; }
       state.browserQueue = [{ id: Date.now(), uri: st.url, stream: st.url, title: st.name, artist: [st.country, (st.tags || []).slice(0, 3).join(', ')].filter(Boolean).join(' · '), album: 'Internet radio', duration_ms: 0 }];
       browserPlay(0); toast(`Tuning to ${st.name}`); return;
     }

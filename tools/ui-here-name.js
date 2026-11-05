@@ -8,10 +8,12 @@
 //     apps (the phone's own zone comes first) and first on the web;
 //   * the Sound panel says what plays the sound: "Android mixes it to the system rate" in the Android
 //     app, "decodes the file itself" on the web; no bit-perfect claim in the apps;
-//   * in the apps, none of those screens (bar, picker, Sound panel, Now playing, Settings ›
-//     Playback) shows the word "browser";
-// and, from app.js's own text, every literal that names the player goes through the helpers
-// (hereName and friends): a new 'This browser' literal fails here.
+//   * with a song in the in-app player (its saved queue), Now playing › Details says "Played by
+//     Android" / "Played by the app" / "Played by this browser";
+//   * in the apps, none of those screens (bar, picker, Sound panel, the Queue page, Now playing)
+//     shows the word "browser";
+// and, from app.js's own text, every string literal that says "this browser" goes through the
+// helpers (hereName and friends) or sits in a `appPlatform() ? … : …` branch: a new literal fails here.
 //   node tools/ui-here-name.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -27,13 +29,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt = { kind: 'pcm', rate_hz: 48000, bits: 16, channels: 2 };
 const outputs = [{ id: 'net:10.0.0.5:7790/cpal:default', name: 'Pixel 8 · Speaker or headphones', kind: 'net', caps: { hw_volume: 'percent' } }];
 const zone = { id: 'pixel-8-speaker-or-headphones', name: 'Pixel 8 · Speaker or headphones', output: 'net:10.0.0.5:7790/cpal:default', transport: 'stopped', queue: [], queue_index: null, queue_version: 1, repeat: 'off', radio: false, error: null, acked: 1, sync: 'single', crossfade_ms: 0, volume: { percent: 40, muted: false }, now_playing: null };
-const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: outputs } };
+const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: outputs }, '/library/tracks/101': { body: { ...fx.track, id: 101, title: 'Song 1' } } };
+// The in-app player's saved queue: a library song, paused at 12 s (restoreBrowserQueue puts it in the bar)
+const SAVED = JSON.stringify([{ id: 1, uri: 'track:101', track_id: 101, title: 'Song 1', artist: 'Sefa', album: 'Journey', duration_ms: 200000 }]);
 const CASES = [['android', { platform: 'android', version: '0.0.0' }, 'This phone', 'Played by Android'], ['desktop', { platform: 'linux', version: '0.0.0' }, 'This computer', 'Played by the app'], ['web', null, 'This browser', 'Played by this browser']];
 const open = async (browser, desktop, w = 390) => {
   const run = await fx.create(browser, w, { touch: w < 600, fixtures });
   await run.page.setViewportSize({ width: w, height: w < 600 ? 844 : 900 });
   await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
-  await run.context.addInitScript((d) => { localStorage.setItem('pm.zone', 'browser'); if (d) window.pmDesktop = d; }, desktop);
+  await run.context.addInitScript(([d, saved]) => { localStorage.setItem('pm.zone', 'browser'); localStorage.setItem('pm.browserQueue', saved); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 12 })); if (d) window.pmDesktop = d; }, [desktop, SAVED]);
   return run;
 };
 const text = (page, sel) => page.$eval(sel, (el) => el.innerText || el.textContent || '').catch(() => '');
@@ -78,23 +82,46 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
     await fx.go(page, '/queue'); await page.waitForSelector('#main'); await sleep(400);
     const queuePage = await text(page, '#main'); seen.push(queuePage);
     check(queuePage.includes(name), `${at}: the Queue page is headed "${name}"`);
-    await page.click('#npart').catch(() => {});
-    if (await page.$('#nowplaying:not([hidden])')) { seen.push(await text(page, '#nowplaying')); await page.keyboard.press('Escape'); }
+    // Now playing with the saved song in the bar: its Details line says who plays it
+    await fx.go(page, '/library'); await page.waitForSelector('#npart'); await sleep(500);
+    await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
+    const np = await text(page, '#nowplaying'); seen.push(np);
+    const details = page.locator('#nowplaying .np-tabs [data-npsheet="details"]');
+    if (await details.count()) { await details.first().click(); await sleep(500); seen.push(await text(page, '#nowplaying')); }
+    const npAll = seen[seen.length - 1];
+    check(npAll.includes(played), `${at}: Now playing says "${played}"`);
+    await page.screenshot({ path: path.join(SHOTS, `nowplaying-${tag}.png`) });
+    await page.keyboard.press('Escape'); await sleep(200);
     const where = seen.map((t) => (t.match(/[^.\n]*\bbrowser\b[^.\n]*/i) || [''])[0]).filter(Boolean);
     if (inApp) check(!seen.some(hasBrowser), `${at}: no "browser" on the bar, the picker, the Sound panel, the Queue page or Now playing${where.length ? ': ' + where.slice(0, 2).join(' | ') : ''}`);
     else check(seen.some(hasBrowser), `${at}: the web UI still says browser`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
-  // app.js's own text: the player's name goes through the helpers. Literals allowed: the helpers'
-  // own strings, comments, and sentences about real browsers (a sign-in on a site, other browsers'
-  // sessions, the clipboard).
-  const src = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8').split('\n');
-  // (a line with both branches, `appPlatform() ? … : '… browser …'`, is the helper pattern itself)
-  const ALLOW = [/^\s*(\/\/|\/\*|\*|and plays either)/, /const (hereName|hereIn|hereOnly|playedBy|decodedBy|decodeNote) =/, /appPlatform\(\) \?/, /in your browser/, /every browser of yours|other browsers/, /radio-browser\.info/, /Your browser kept the tab/, /BarcodeDetector|This browser cannot scan/, /TIDAL|tidal/];
-  const code = (l) => l.replace(/\/\/.*$/, '');
-  const bad = src.map((l, i) => [i + 1, l]).filter(([, l]) => /this browser|in a browser|the browser/i.test(code(l)) && !ALLOW.some((re) => re.test(l)));
-  check(!bad.length, `app.js: every "browser" the page can show goes through the helpers${bad.length ? ': lines ' + bad.map(([n]) => n).join(', ') : ''}`);
+  // app.js's own text: every string literal with "this browser" / "the browser" is one of the
+  // helpers' own, or sits in a `appPlatform() ? … : …` branch (the helper pattern); literals about
+  // real browsers (a site's sign-in, other browsers' sessions, the clipboard, Your browser kept the
+  // tab) are named here one by one.
+  const srcText = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
+  const lines = srcText.split('\n');
+  const helperLines = new Set(lines.map((l, i) => (/const (hereName|hereIn|hereOnly|playedBy|decodedBy|decodeNote|wordHere) =/.test(l) ? i + 1 : 0)).filter(Boolean));
+  const EXACT = ['every browser of yours is logged out', 'Your browser kept the tab from opening', 'in your browser, open its cookies', 'the one your browser uses', 'Every Pubky Ring browser session'];
+  const bad = [];
+  // String literals: '…', "…" and `…` (template holes left in; good enough for a wording check)
+  const lit = /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`/g;
+  let m;
+  while ((m = lit.exec(srcText))) {
+    const str = m[0];
+    if (!/this browser|the browser|in a browser/i.test(str)) continue;
+    const line = srcText.slice(0, m.index).split('\n').length;
+    if (helperLines.has(line)) continue;
+    const l = lines[line - 1];
+    if (/^\s*(\/\/|\*|\/\*)/.test(l)) continue;
+    if (/appPlatform\(\) \?/.test(l)) continue; // both branches on the line: the web one may say browser
+    if (EXACT.some((e) => str.includes(e))) continue;
+    bad.push(`${line}: ${str.slice(0, 60)}`);
+  }
+  check(!bad.length, `app.js: every "browser" the page can show goes through the helpers${bad.length ? ': ' + bad.slice(0, 4).join(' | ') : ''}`);
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all passed'); console.log(`screenshots: ${SHOTS}`);
   process.exit(failed ? 1 : 0);
