@@ -111,13 +111,9 @@ pub async fn start_sign_in(s: &Settings) -> Result<SignInStarted, String> {
 /// One look at a sign-in started with [`start_sign_in`]: `Ok(Some(token))` once approved,
 /// `Ok(None)` while it waits (or the node can't be reached for a moment), `Err` when it ended.
 pub async fn poll_sign_in(s: &Settings, id: &str) -> Result<Option<String>, String> {
-    let Ok(resp) = client()
-        .map_err(|e| e.to_string())?
-        .get(api(s, "auth/pubky/poll"))
-        .query(&[("id", id)])
-        .send()
-        .await
-    else {
+    let url = reqwest::Url::parse_with_params(&api(s, "auth/pubky/poll"), &[("id", id)])
+        .map_err(|e| e.to_string())?;
+    let Ok(resp) = client().map_err(|e| e.to_string())?.get(url).send().await else {
         return Ok(None);
     };
     let Ok(st) = resp.json::<SignInStatus>().await else {
