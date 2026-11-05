@@ -390,9 +390,7 @@ mod tests {
         let flagged = serde_json::json!({"metadata": {"access-restricted-item": true}, "files": [{"name": "a.mp3", "format": "VBR MP3"}]});
         assert!(restricted_reason(&flagged).is_some());
         // A flagged item whose files don't say `private` is still refused, before its files count
-        let refused = item_from_metadata("flagged", &flagged, "b")
-            .err()
-            .expect("refused");
+        let refused = item_from_metadata("flagged", &flagged, "b").expect_err("refused");
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         let private_only = serde_json::json!({"metadata": {}, "files": [{"name": "a.mp3", "format": "VBR MP3", "private": true}]});
         assert!(restricted_reason(&private_only).is_some());
