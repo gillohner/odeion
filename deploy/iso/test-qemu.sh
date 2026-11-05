@@ -23,11 +23,28 @@ if ! timeout "${INSTALL_MIN}m" "${VM[@]}" -cdrom "$ISO" -boot d \
 fi
 
 echo "== booting the installed system"
+CONSOLE=$(dirname "$DISK")/console.sock
 "${VM[@]}" -boot c \
   -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:17788-:7788,hostfwd=tcp:127.0.0.1:16287-:6287" \
-  -device virtio-net-pci,netdev=n0 -serial "file:$LOGS/boot-$MODE.log" &
+  -device virtio-net-pci,netdev=n0 \
+  -chardev "socket,id=s0,path=$CONSOLE,server=on,wait=off,logfile=$LOGS/boot-$MODE.log" -serial chardev:s0 &
 QEMU=$!
 trap 'kill $QEMU 2>/dev/null || true' EXIT
+
+# What the VM itself says, through its serial console (the test's own login, TEST_PASSWORD)
+diagnose() {
+  [ -n "${TEST_PASSWORD:-}" ] && [ -S "$CONSOLE" ] || return 0
+  echo "== inside the VM"
+  timeout 600 python3 "$(dirname "$0")/vm-console.py" "$CONSOLE" odeion "$TEST_PASSWORD" \
+    "systemctl --no-pager --failed; systemctl --no-pager status odeion-firstboot odeion nftables | tail -n 40" \
+    "journalctl --no-pager -b -u odeion-firstboot | tail -n 60" \
+    "cd /opt/odeion && odeion-compose ps -a" \
+    "ss -ltnp" \
+    "nft list ruleset" \
+    "echo | timeout 10 openssl s_client -connect 127.0.0.1:6287 2>&1 | tail -n 25" \
+    "cd /opt/odeion && odeion-compose logs --tail 40 homeserver homeserver-config" \
+    | tee "$LOGS/inside-$MODE.log" || true
+}
 
 # The node: any HTTP answer from it
 node_up() {
@@ -42,21 +59,28 @@ tls_up() {
 }
 
 deadline=$(($(date +%s) + UP_MIN * 60))
-node=no hs=no
+node=no hs=no node_at=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  kill -0 $QEMU 2>/dev/null || { echo "::error::the VM stopped"; tail -n 80 "$LOGS/boot-$MODE.log"; exit 1; }
-  if [ $node = no ] && node_up; then node=yes; echo "node answers on :7788"; fi
+  kill -0 $QEMU 2>/dev/null || { echo "::error::the VM stopped"; tail -c 8000 "$LOGS/boot-$MODE.log"; exit 1; }
+  if [ $node = no ] && node_up; then node=yes; node_at=$(date +%s); echo "node answers on :7788"; fi
   if [ "$MODE" = bundle ] && [ $hs = no ] && tls_up; then hs=yes; echo "homeserver answers TLS on :6287"; fi
   if [ $node = yes ] && { [ "$MODE" = node ] || [ $hs = yes ]; }; then
     if [ "$MODE" = node ] && tls_up; then
       echo "::error::Odeion only should not run a homeserver"
+      diagnose
       exit 1
     fi
     echo "== Odeion is up ($MODE)"
     exit 0
   fi
+  # The node starts only once the homeserver is healthy: 5 min after it, the homeserver should answer
+  if [ "$MODE" = bundle ] && [ $node = yes ] && [ $hs = no ] && [ $(($(date +%s) - node_at)) -gt 300 ]; then
+    echo "::error::the node is up but :6287 gives no TLS from outside"
+    diagnose
+    exit 1
+  fi
   sleep 15
 done
 echo "::error::Odeion was not up within $UP_MIN min (node: $node, homeserver: $hs)"
-tail -n 80 "$LOGS/boot-$MODE.log"
+diagnose
 exit 1

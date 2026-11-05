@@ -103,6 +103,7 @@ jobs:
       - name: install and boot in QEMU
         env:
           LOGS: iso-logs
+          TEST_PASSWORD: odeion-ci
         run: deploy/iso/test-qemu.sh "odeion-test-${{ matrix.mode }}.iso" "${{ matrix.mode }}"
       - if: always()
         uses: actions/upload-artifact@v4

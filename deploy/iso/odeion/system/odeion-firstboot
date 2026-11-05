@@ -3,6 +3,11 @@
 # Odeion. It fails, and systemd tries again, until the network is there and everything is up.
 set -eu
 cd /opt/odeion
+# The network may come up a little after network-online (DHCP, Wi-Fi): wait for names to resolve
+for _ in $(seq 1 60); do
+  getent hosts ghcr.io >/dev/null 2>&1 && break
+  sleep 5
+done
 mode=$(cat /etc/odeion/mode)
 tag=$(cat /etc/odeion/image-tag)
 if [ ! -s .env ]; then
