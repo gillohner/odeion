@@ -26,8 +26,9 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
   const browser = await chromium.launch();
   try {
     for (const width of [1280, 820, 390]) {
-      const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: 'reduce', colorScheme: 'dark' });
-      await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; }, TOKEN);
+      const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: 'reduce', colorScheme: 'dark', hasTouch: width < 1100 });
+      // What Copy link copies is kept for the checks
+      await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (x) => { window.copied = x; } }, configurable: true }); }, TOKEN);
       const page = await ctx.newPage();
       const errors = []; page.on('pageerror', (e) => errors.push(e.message));
       const shot = async (name) => { if (OUT) { fs.mkdirSync(OUT, { recursive: true }); await page.screenshot({ path: path.join(OUT, `${width}-${name}.png`) }); } };
@@ -82,7 +83,7 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
 
       // ---- her collection's page: hers to change and share, nothing of the owner's ----
       await page.locator('[data-pl] .name').first().click();
-      await page.locator('#plpubky').waitFor();
+      await page.locator('#plshare').waitFor();
       await sleep(300);
       let txt = await main();
       assert.match(txt, /on your homeserver/);
@@ -92,8 +93,8 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       const share = page.locator('dialog.dialog');
       assert.match(await share.innerText(), /A public copy goes to your homeserver: the songs/);
       await share.locator('button', { hasText: 'Share' }).click();
-      await page.locator('#plpubky .sharelink').waitFor();
-      assert.match(await page.locator('#plpubky .sharelink').innerText(), new RegExp(`^pubky://${ANN}/pub/social/v1/posts/${ID}$`), 'the link is on her homeserver');
+      await page.locator('#plcopylink').click(); await sleep(300);
+      assert.match(await page.evaluate(() => window.copied), new RegExp(`^pubky://${ANN}/pub/social/v1/posts/${ID}$`), 'the link is on her homeserver');
       await shot('collection-shared');
       // Her ⋯ menu offers Add to playlist… (no longer hidden for listeners)
       await page.locator('#plmore').click();

@@ -33,6 +33,7 @@ pub mod tags;
 pub mod tagwrite;
 
 pub use canonical::{assign, Resolver};
+pub use db::{is_homeserver_copy, Song, TrackVersion};
 pub use db::{
     AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentifiedBy,
     IdentityCounts, PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,

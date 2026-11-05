@@ -1,8 +1,7 @@
 // Real-browser check for where playlist songs play from (STEWARD-UX-BRIEF §3):
 //   * every row has a source chip, the summary bar counts and filters by source;
 //   * a chip opens the song's sources plus "Auto"; picking one pins it (pin mark), Auto unpins;
-//   * the playlist's "Play from" order moves with the arrow buttons and Alt+arrows, and
-//     "Use my node's order" goes back to the global one; Settings has the global order.
+//   * Play from is personal: the playlist page has no order editor, Settings has the order.
 // Uses the first playlist that has songs and puts every change back. Skips without one.
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
 //   node tools/ui-playlist-sources.js <api token> [http://127.0.0.1:7788] [screenshot dir]
@@ -52,7 +51,7 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
       if (k >= 0) {
         await p.click(`[data-psrc="${k}"]`); await sleep(300);
         const menu = await p.$$eval('.popover.menu .pop-item span', (e) => e.map((x) => x.firstChild.textContent));
-        check(menu[0] === 'Auto (follow the playlist)' && menu.length >= 2, `chip menu: ${JSON.stringify(menu)}`);
+        check(menu[0] === 'Auto (follow your Settings)' && menu.length >= 2, `chip menu: ${JSON.stringify(menu)}`);
         if (OUT) await p.screenshot({ path: `${OUT}/playlist-source-menu-1280-dark.png` });
         await p.click('.popover.menu .pop-item:nth-of-type(2)'); await p.waitForSelector(`[data-psrc="${k}"].pinned`, { timeout: 30000 }).catch(() => {});
         check(!!(await p.$(`[data-psrc="${k}"].pinned svg use[href="#i-pin"]`)), 'picking a source pins it (pin mark on the chip)');
@@ -60,20 +59,10 @@ const api = async (method, path, body) => { const r = await fetch(BASE + '/v1' +
         await waitFor(p, (kk) => { const c = document.querySelector(`[data-psrc="${kk}"]`); return c && !c.classList.contains('pinned'); }, k, 30000).catch(() => {});
         check(!(await p.$(`[data-psrc="${k}"].pinned`)), 'Auto unpins it');
       }
-      // the playlist's own order
-      const orderOf = () => p.$$eval('#plorder .porder-row .grow', (e) => e.map((x) => x.firstChild.textContent.trim()));
-      const o1 = await orderOf();
-      await p.click('#plorder [data-odown="0"]'); await waitFor(p, (first) => { const r = document.querySelector('#plorder .porder-row .grow'); return r && r.firstChild.textContent.trim() !== first; }, o1[0], 30000).catch(() => {});
-      const o2 = await orderOf();
-      check(o2[0] === o1[1] && o2[1] === o1[0] && (await checkedOf(p, '#plownorder')) === false, `arrow button moves it: ${o1.join('›')} → ${o2.join('›')}, own order`);
-      await p.focus('#plorder [data-ogrip="1"]'); await p.keyboard.press('Alt+ArrowUp');
-      await waitFor(p, (first) => { const r = document.querySelector('#plorder .porder-row .grow'); return r && r.firstChild.textContent.trim() === first; }, o1[0], 30000).catch(() => {});
-      check((await orderOf())[0] === o1[0], 'Alt+↑ on the grip moves it back');
-      if (OUT) { await p.$eval('#plorder', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/playlist-play-from-1280-dark.png` }); }
-      await p.click('#plownorder'); await waitFor(p, () => document.querySelector('#plownorder') && document.querySelector('#plownorder').checked, null, 30000).catch(() => {});
-      check((await checkedOf(p, '#plownorder')) === true, '"Use my node’s order" goes back to the global order');
+      // Play from is personal and lives in Settings only: no order editor on the playlist page
+      check(!(await p.$('#plorder, #plownorder, #plorderopen')), 'no per-playlist Play from editor');
       // global order in Settings
-      await p.goto(`${BASE}/settings/playback`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
+      await p.goto(`${BASE}/settings/playfrom`); await p.waitForSelector('#gorder .porder-row', { timeout: 20000 });
       const g = await p.$$eval('#gorder .porder-row', (e) => e.length);
       check(g === globalBefore.length, `Settings lists the global order (${g})`);
       if (OUT) { await p.$eval('#gordercard', (e) => e.scrollIntoView({ block: 'center' })); await sleep(200); await p.screenshot({ path: `${OUT}/settings-play-from-1280-dark.png` }); }

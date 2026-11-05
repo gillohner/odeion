@@ -1,5 +1,7 @@
 # ADR 0015: Where playlist songs play from (pins and play order)
 
+> Current behavior: source order is personal Settings only. The personal `play_order` in `/v1/me/prefs` wins everywhere, including shared collections and item pages. The old `/v1/play-order` API reads/writes that same personal preference. An owner with no personal value retains the old node order as a compatibility fallback; listeners and unidentified callers use the built-in default, never the owner’s old order. Old collection `source_order` data remains readable/writable for API compatibility but is no longer evaluated. Explicit item pins still apply. No saved data is migrated or removed. The older decision below is historical where it conflicts.
+
 Status: accepted (2026-10-21, steward plan step 4, STEWARD-UX-BRIEF §3).
 
 ## Context

@@ -304,9 +304,18 @@ pub struct Manifest {
     pub unkept: Vec<i64>,
 }
 
+/// What `keep` covers: the songs to download, and every track id it keeps.
+struct Kept {
+    /// Kept songs whose file is there, each once, in order.
+    tracks: Vec<pm_model::Track>,
+    /// Every kept track id, also of songs whose file is gone for now (a NAS share not mounted at
+    /// a scan): a device keeps those downloads instead of deleting them (PR #268 review).
+    ids: BTreeSet<i64>,
+}
+
 /// Every song `keep` covers that the library has, each once, in order. Each kept item is read
 /// once (the caps above bound the work); albums and playlists named twice count once.
-fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<pm_model::Track>, ApiError> {
+fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Kept, ApiError> {
     fn push(t: pm_model::Track, seen: &mut BTreeSet<i64>, out: &mut Vec<pm_model::Track>) {
         if let Some(id) = t.id {
             if seen.insert(id.0) {
@@ -330,10 +339,13 @@ fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<pm_model::Track>, ApiEr
         }
         albums.extend(f.albums.iter().filter_map(|a| a.id));
     }
+    let mut ids = BTreeSet::new();
     for a in albums {
         for t in lib.album_tracks(a)? {
             push(t, &mut seen, &mut out);
         }
+        // The album's other copies and songs whose files are gone stay kept
+        ids.extend(lib.album_track_ids(a)?);
     }
     for p in keep.playlists.iter().collect::<BTreeSet<_>>() {
         // A playlist that was deleted keeps nothing; any other failure is an error, or its songs
@@ -354,13 +366,23 @@ fn kept_tracks(s: &NodeState, keep: &Keep) -> Result<Vec<pm_model::Track>, ApiEr
             }
         }
     }
-    Ok(out)
+    ids.extend(seen);
+    // Only songs whose file is there can be downloaded
+    let mut tracks = Vec::with_capacity(out.len());
+    for t in out {
+        if lib.file_by_path(&t.file.path)?.is_some_and(|f| !f.missing) {
+            tracks.push(t);
+        }
+    }
+    Ok(Kept { tracks, ids })
 }
 
 fn manifest(s: &NodeState, d: &Device) -> Result<Manifest, ApiError> {
-    let kept = kept_tracks(s, &d.keep)?;
+    let Kept {
+        tracks: kept,
+        ids: kept_set,
+    } = kept_tracks(s, &d.keep)?;
     let have: BTreeSet<i64> = d.have.iter().map(|h| h.track_id).collect();
-    let kept_set: BTreeSet<i64> = kept.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
     let wanted = kept
         .into_iter()
         .filter(|t| t.id.is_some_and(|i| !have.contains(&i.0)))
