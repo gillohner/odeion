@@ -89,17 +89,20 @@ object AppUpdate {
         if (!waitResumed(activity, ALLOW_WAIT_MS)) return "the app did not come back to the screen"
         val pkg = activity.packageName
         val installer = activity.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-        params.setAppPackageName(pkg)
-        params.setSize(file.length())
-        val id = installer.createSession(params)
-        val session = installer.openSession(id)
+        var id = -1
+        var session: PackageInstaller.Session? = null
         try {
+            val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+            params.setAppPackageName(pkg)
+            params.setSize(file.length())
+            id = installer.createSession(params)
+            val open = installer.openSession(id)
+            session = open
             // The file is read once more as it goes to the installer, so what Android installs
             // is exactly what was checked.
             val digest = MessageDigest.getInstance("SHA-256")
             file.inputStream().use { input ->
-                session.openWrite("odeion.apk", 0, file.length()).use { out ->
+                open.openWrite("odeion.apk", 0, file.length()).use { out ->
                     val buf = ByteArray(256 * 1024)
                     while (true) {
                         val n = input.read(buf)
@@ -107,12 +110,12 @@ object AppUpdate {
                         digest.update(buf, 0, n)
                         out.write(buf, 0, n)
                     }
-                    session.fsync(out)
+                    open.fsync(out)
                 }
             }
             val got = digest.digest().joinToString("") { "%02x".format(it) }
             if (!got.equals(sha256, ignoreCase = true)) {
-                session.abandon()
+                open.abandon()
                 Log.w(TAG, "updates: not installed: the file's SHA-256 is $got, not $sha256")
                 return "the download does not match the update"
             }
@@ -128,18 +131,18 @@ object AppUpdate {
             val pending = android.app.PendingIntent.getBroadcast(
                 activity.applicationContext, id, Intent(action).setPackage(pkg), flags
             )
-            session.commit(pending.intentSender)
+            open.commit(pending.intentSender)
             Log.i(TAG, "updates: handed to the installer (session $id)")
             return ""
         } catch (e: Exception) {
             try {
-                session.abandon()
+                session?.abandon() ?: if (id >= 0) installer.abandonSession(id) else Unit
             } catch (_: Exception) {
             }
             Log.w(TAG, "updates: the installer refused the file: $e")
-            return "the installer refused the file: ${e.message}"
+            return "the installer refused the file (${e.message})"
         } finally {
-            session.close()
+            session?.close()
         }
     }
 
@@ -165,30 +168,48 @@ object AppUpdate {
                 Log.w(TAG, "updates: cannot open the setting: $e")
             }
         }
+        // Until the setting is on, or the user is back in the app without turning it on.
         val deadline = System.currentTimeMillis() + ALLOW_WAIT_MS
+        var left = false
+        var backSince = 0L
         while (System.currentTimeMillis() < deadline) {
             if (pm.canRequestPackageInstalls()) {
                 Log.i(TAG, "updates: installing apps is allowed now")
                 return true
             }
-            Thread.sleep(1000)
+            val resumed = isResumed(activity)
+            if (!resumed) {
+                left = true
+                backSince = 0L
+            } else if (left) {
+                if (backSince == 0L) backSince = System.currentTimeMillis()
+                // A moment for the setting to reach the package manager.
+                if (System.currentTimeMillis() - backSince > 3000) break
+            }
+            Thread.sleep(500)
         }
+        Log.i(TAG, "updates: installing apps was not allowed")
         return false
+    }
+
+    /** Is the app on screen? Read on the UI thread. */
+    private fun isResumed(activity: Activity): Boolean {
+        val owner = activity as? LifecycleOwner ?: return true
+        val resumed = AtomicBoolean(false)
+        val read = CountDownLatch(1)
+        activity.runOnUiThread {
+            resumed.set(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+            read.countDown()
+        }
+        read.await(5, TimeUnit.SECONDS)
+        return resumed.get()
     }
 
     /** Android's confirmation can only open while the app is on screen. */
     private fun waitResumed(activity: Activity, timeoutMs: Long): Boolean {
-        val owner = activity as? LifecycleOwner ?: return true
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            val resumed = AtomicBoolean(false)
-            val read = CountDownLatch(1)
-            activity.runOnUiThread {
-                resumed.set(owner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
-                read.countDown()
-            }
-            read.await(5, TimeUnit.SECONDS)
-            if (resumed.get()) return true
+            if (isResumed(activity)) return true
             if (activity.isDestroyed) return false
             Thread.sleep(500)
         }
@@ -204,13 +225,16 @@ object AppUpdate {
                 PackageInstaller.STATUS_PENDING_USER_ACTION -> {
                     val confirm = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_INTENT, Intent::class.java)
                     Log.i(TAG, "updates: Android asks to confirm the install")
-                    if (confirm != null) {
+                    // Only the installer's own confirmation (CONFIRM_INSTALL, CONFIRM_PERMISSIONS
+                    // before Android 10), only from the app on screen.
+                    val action = confirm?.action ?: ""
+                    if (!action.startsWith("android.content.pm.action.CONFIRM_")) {
+                        Log.w(TAG, "updates: not opening an unexpected confirmation ($action)")
+                    } else if (activity.isDestroyed) {
+                        Log.w(TAG, "updates: the app is gone; Android's confirmation is not shown")
+                    } else {
                         try {
-                            if (activity.isDestroyed) {
-                                context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                            } else {
-                                activity.startActivity(confirm)
-                            }
+                            activity.startActivity(confirm)
                         } catch (e: Exception) {
                             Log.w(TAG, "updates: cannot show Android's confirmation: $e")
                         }

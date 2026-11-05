@@ -94,3 +94,8 @@ download is refused.
 
 `(major·1 000 000 + minor·1 000 + patch) · 1000`, plus the run number for edge builds and 999 for
 releases, so a release installs over every edge build of the same version.
+
+Edge builds use the run number modulo 999, so it wraps every 999 release runs: when it wraps
+without a version bump, the next edge builds have lower versionCodes, the app's updater offers
+them to no edge phone and Android would refuse them. Bump the version (patch is enough) before
+the release workflow's run number reaches the next multiple of 999 (run 298 on 2026-11-05).

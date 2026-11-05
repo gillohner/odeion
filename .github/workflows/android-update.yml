@@ -13,6 +13,9 @@ on:
       - tools/release/android-patch.py
       - tools/release/android/**
       - tools/release/updater-manifest.py
+      - tools/release/aab-check.py
+      - tools/release/android-sign.sh
+      - .github/workflows/release.yml
       - .github/workflows/android-update.yml
   workflow_dispatch:
 concurrency:
@@ -84,20 +87,9 @@ jobs:
       - name: the .aab has no updater
         run: |
           python3 -I ../../tools/release/android-patch.py . --without-updater
-          npx tauri android build --ci --aab --target x86_64 --features update-feed-fixture --config update.conf.json
-          aab=$(find gen/android/app/build/outputs/bundle -name '*release*.aab' | head -1)
-          test -n "$aab"
-          unzip -p "$aab" base/manifest/AndroidManifest.xml > "$RUNNER_TEMP/aab-manifest.pb"
-          if grep -a -q REQUEST_INSTALL_PACKAGES "$RUNNER_TEMP/aab-manifest.pb"; then
-            echo "::error::the .aab asks for REQUEST_INSTALL_PACKAGES"; exit 1
-          fi
-          grep -a -q android.permission.INTERNET "$RUNNER_TEMP/aab-manifest.pb" || { echo "::error::cannot read the .aab manifest"; exit 1; }
-          if unzip -p "$aab" 'base/dex/*.dex' | grep -a -q 'pubkymusic/AppUpdate'; then
-            echo "::error::the .aab has the AppUpdate class"; exit 1
-          fi
-          unzip -p "$GITHUB_WORKSPACE/update/old.apk" '*.dex' | grep -a -q 'pubkymusic/AppUpdate' \
-            || { echo "::error::the APK has no AppUpdate class: this check cannot see it"; exit 1; }
-          echo "the .aab has neither REQUEST_INSTALL_PACKAGES nor AppUpdate"
+          ODEION_UPDATE_CHANNEL= npx tauri android build --ci --aab --target x86_64 --features update-feed-fixture \
+            --config update.conf.json
+          python3 -I ../../tools/release/aab-check.py gen/android/app/build/outputs "$GITHUB_WORKSPACE/update/old.apk"
       - uses: actions/upload-artifact@v7
         with:
           name: update-apks

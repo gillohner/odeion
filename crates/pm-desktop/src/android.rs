@@ -14,6 +14,13 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TLS_READY: AtomicBool = AtomicBool::new(false);
+/// Whether [`init_tls`] succeeded: without the verifier, a TLS handshake panics.
+static TLS_OK: AtomicBool = AtomicBool::new(false);
+
+/// True once the TLS verifier is set up (after [`tls_ready`]); false if it failed or is late.
+pub fn tls_ok() -> bool {
+    TLS_OK.load(Ordering::Acquire)
+}
 
 #[cfg(feature = "ring-transport-probe")]
 #[path = "ring_probe.rs"]
@@ -42,6 +49,7 @@ pub fn init_tls(window: &tauri::WebviewWindow) {
             // callback, on this thread.
             let ok = crate::crash::guarded("the TLS verifier", || unsafe { init_verifier(raw_env, raw_ctx) });
             if ok == Some(true) {
+                TLS_OK.store(true, Ordering::Release);
                 tracing::info!("TLS platform verifier ready");
             } else {
                 tracing::error!("TLS platform verifier failed to initialise; Pubky Ring sign-in will fail");

@@ -133,8 +133,13 @@ pub fn spawn(app: &tauri::AppHandle) {
     };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        // The feed is fetched over TLS, whose verifier is set up on the UI thread.
+        // The feed is fetched over TLS, whose verifier is set up on the UI thread: without it a
+        // handshake panics, so no check then (it only costs Ring sign-in otherwise).
         crate::android::tls_ready().await;
+        if !crate::android::tls_ok() {
+            tracing::warn!("updates: not checked (the TLS verifier is not ready)");
+            return;
+        }
         if let Err(e) = apk::check(&app, &url).await {
             tracing::warn!("update check failed: {e:#}");
         }
