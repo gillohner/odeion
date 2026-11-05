@@ -366,22 +366,31 @@ pub fn serve(
     listener: TcpListener,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
-    on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
+    on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync>,
 ) -> io::Result<()> {
     serve_with(listener, server_port, stream_path, on_player, Limits::default())
 }
 
+/// A player the server keeps an output for, and whether the node took it (`on_player`).
+struct Known {
+    output: Arc<SlimOutput>,
+    announced: bool,
+}
+
+type Players = Mutex<HashMap<[u8; 6], Known>>;
+
 /// Serve players on `listener`; `on_player` is called once per player (by MAC) with its output,
-/// the first time it connects. A player that connects again gets the same output back. A
-/// connection over `limits` is closed at once. Blocks; run on a thread.
+/// the first time it connects, and answers whether the node takes it. A player that connects
+/// again gets the same output back; one the node turned away, or that failed to start, is offered
+/// again when it reconnects. A connection over `limits` is closed at once. Blocks; run on a thread.
 pub fn serve_with(
     listener: TcpListener,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
-    on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
+    on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync>,
     limits: Limits,
 ) -> io::Result<()> {
-    let players: Arc<Mutex<HashMap<[u8; 6], Arc<SlimOutput>>>> = Default::default();
+    let players: Arc<Players> = Default::default();
     let open: Arc<Mutex<Open>> = Default::default();
     for stream in listener.incoming() {
         let stream = match stream {
@@ -426,8 +435,8 @@ fn session(
     stream: TcpStream,
     server_port: u16,
     stream_path: Arc<dyn Fn(&str) -> String + Send + Sync>,
-    players: &Mutex<HashMap<[u8; 6], Arc<SlimOutput>>>,
-    on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync>,
+    players: &Players,
+    on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync>,
     limits: &Limits,
 ) -> Result<(), SlimError> {
     stream.set_nodelay(true)?;
@@ -447,16 +456,20 @@ fn session(
     }
     let hello = parse_hello(&body)?;
     reader.set_read_timeout(Some(limits.idle))?;
-    let (output, new) = {
+    // `announce`: this session offers the player to the node. Marked at once, so two sessions of
+    // one player don't both offer it; undone (`unannounce`) if it fails or the node says no.
+    let (output, announce) = {
         let mut p = players.lock().expect("players");
-        match p.get(&hello.mac) {
-            Some(o) => {
-                if o.hello().max_sample_rate() != hello.max_sample_rate() {
-                    tracing::warn!(player = %hello.mac_string(), was = o.hello().max_sample_rate(),
+        match p.get_mut(&hello.mac) {
+            Some(k) => {
+                if k.output.hello().max_sample_rate() != hello.max_sample_rate() {
+                    tracing::warn!(player = %hello.mac_string(), was = k.output.hello().max_sample_rate(),
                         now = hello.max_sample_rate(),
                         "player came back with another maximum rate; the node keeps the first until it restarts");
                 }
-                (o.clone(), false)
+                let announce = !k.announced;
+                k.announced = true;
+                (k.output.clone(), announce)
             }
             None if p.len() >= limits.players => {
                 tracing::warn!(player = %hello.mac_string(), players = p.len(),
@@ -465,31 +478,45 @@ fn session(
             }
             None => {
                 let o = Arc::new(SlimOutput::new(hello.clone(), server_port, stream_path));
-                p.insert(hello.mac, o.clone());
+                p.insert(
+                    hello.mac,
+                    Known {
+                        output: o.clone(),
+                        announced: true,
+                    },
+                );
                 (o, true)
             }
         }
     };
     tracing::info!(player = %hello.mac_string(), model = %hello.model(), max_rate = hello.max_sample_rate(),
-        reconnected = !new, "slimproto player");
+        announce, "slimproto player");
     let generation = output.link().attach(stream);
     let result = match start(&output, &hello, generation) {
-        Ok(()) => {
-            if new {
-                on_player(output.clone());
-            }
-            listen(&output, &mut reader)
+        Ok(()) if announce && !on_player(output.clone()) => {
+            unannounce(players, &hello.mac, &output);
+            Err(SlimError::Protocol("the node takes no more players".into()))
         }
+        Ok(()) => listen(&output, &mut reader),
         Err(e) => {
-            // A new player that couldn't start is forgotten, so it is announced when it comes back.
-            if new {
-                players.lock().expect("players").remove(&hello.mac);
+            if announce {
+                unannounce(players, &hello.mac, &output);
             }
             Err(e)
         }
     };
     output.link().detach(generation);
     result
+}
+
+/// The node didn't take `output` (yet): its next connection offers it again. The entry stays, so
+/// another session of the same player keeps its output.
+fn unannounce(players: &Players, mac: &[u8; 6], output: &Arc<SlimOutput>) {
+    if let Some(k) = players.lock().expect("players").get_mut(mac) {
+        if Arc::ptr_eq(&k.output, output) {
+            k.announced = false;
+        }
+    }
 }
 
 /// Greet a player on connection `generation` and keep its heartbeat going.
@@ -695,8 +722,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = Mutex::new(tx);
-        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(move |o| {
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new(move |o| {
             let _ = tx.lock().unwrap().send(o);
+            true
         });
         let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
         std::thread::spawn(move || serve_with(listener, 7788, stream_path, on_player, limits).unwrap());
@@ -883,6 +911,41 @@ mod tests {
         assert!(
             !closed_within(&mut back, Duration::from_millis(400)),
             "the known one reconnects"
+        );
+    }
+
+    /// A player the node turns away is closed and offered again when it reconnects, without
+    /// taking a second place among the players.
+    #[test]
+    fn a_player_the_node_turned_away_is_offered_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let room = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let offered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new({
+            let (room, offered) = (room.clone(), offered.clone());
+            move |_| {
+                offered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                room.load(std::sync::atomic::Ordering::SeqCst)
+            }
+        });
+        let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
+        std::thread::spawn(move || serve_with(listener, 7788, stream_path, on_player, tight()).unwrap());
+
+        let mut first = TcpStream::connect(addr).unwrap();
+        first.write_all(&hello(1)).unwrap();
+        assert!(closed_within(&mut first, Duration::from_secs(2)), "turned away");
+        room.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut again = TcpStream::connect(addr).unwrap();
+        again.write_all(&hello(1)).unwrap();
+        assert!(
+            !closed_within(&mut again, Duration::from_millis(400)),
+            "taken this time"
+        );
+        assert_eq!(
+            offered.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "offered on each try"
         );
     }
 }

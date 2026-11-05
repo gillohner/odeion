@@ -937,6 +937,18 @@ impl NodeState {
         false
     }
 
+    /// Register `out`, found on the network, if [`Self::room_for_found_output`]; the check and the
+    /// registration are one step, so outputs found at the same time can't pass the cap together.
+    pub(crate) fn add_found_output(&self, out: Arc<dyn Output>) -> bool {
+        static ADDING: Mutex<()> = Mutex::new(());
+        let _one = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+        if !self.room_for_found_output() {
+            return false;
+        }
+        self.outputs.register(out);
+        true
+    }
+
     /// Start the Slimproto server (players connect to us) and the UDP discovery responder. Call
     /// from inside the tokio runtime. Each connecting player becomes an output with a zone; its
     /// pull stream is registered for the HTTP route.
@@ -962,24 +974,26 @@ impl NodeState {
         let state = self.clone();
         // Players connect on the server's own threads; zones need the runtime.
         let runtime = tokio::runtime::Handle::current();
-        // Once per player: a player that reconnects keeps its output and zone.
-        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
-            let _rt = runtime.enter();
-            if !state.room_for_found_output() {
-                return;
-            }
-            let name = out.pull().stream_name().to_string();
-            state
-                .pulls
-                .lock()
-                .expect("pulls lock")
-                .insert(name, out.pull().clone());
-            let zone_name = out.name();
-            state.outputs.register(out.clone());
-            if state.zones.list().iter().all(|z| z.output != out.id()) {
-                state.create_zone(&zone_name, out);
-            }
-        });
+        // Once per player: a player that reconnects keeps its output and zone. A player the node
+        // has no room for is turned away, and offered again when it reconnects.
+        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) -> bool + Send + Sync> =
+            Arc::new(move |out| {
+                let _rt = runtime.enter();
+                if !state.add_found_output(out.clone()) {
+                    return false;
+                }
+                let name = out.pull().stream_name().to_string();
+                state
+                    .pulls
+                    .lock()
+                    .expect("pulls lock")
+                    .insert(name, out.pull().clone());
+                let zone_name = out.name();
+                if state.zones.list().iter().all(|z| z.output != out.id()) {
+                    state.create_zone(&zone_name, out);
+                }
+                true
+            });
         let name = self.name.clone();
         let port = self.slimproto_port;
         std::thread::Builder::new()
@@ -1056,6 +1070,9 @@ impl NodeState {
                 .with_stream_kind(kind.clone())
                 .with_describe(self.describe_for_renderers()),
         );
+        if !self.add_found_output(out.clone()) {
+            return None;
+        }
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
         if pm_out_upnp::heos::is_heos(&r) {
             self.heos
@@ -1069,7 +1086,6 @@ impl NodeState {
                 .expect("sonos lock")
                 .insert(id.clone(), out.clone());
         }
-        self.outputs.register(out.clone());
         self.create_zone(&r.friendly_name, out);
         Some(id)
     }
@@ -1330,8 +1346,10 @@ impl NodeState {
                 continue;
             }
             tracing::info!(device = %d.friendly_name, output = %id, "Cast device");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1396,8 +1414,10 @@ impl NodeState {
                     continue;
                 }
             }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1436,13 +1456,15 @@ impl NodeState {
             if !self.room_for_found_output() {
                 continue;
             }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             tracing::info!(player = %p.name, output = %id, "BluOS player");
             self.bluos_players
                 .lock()
                 .expect("bluos lock")
                 .insert(id.clone(), out.clone());
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1472,8 +1494,10 @@ impl NodeState {
                 continue;
             }
             tracing::info!(receiver = %d.name, output = %id, "AirPlay receiver");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1508,8 +1532,10 @@ impl NodeState {
                 continue;
             }
             tracing::info!(group = %out.name(), output = %id, "Snapcast group");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1539,8 +1565,10 @@ impl NodeState {
             if !self.room_for_found_output() {
                 continue;
             }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let name = out.name();
-            self.outputs.register(out.clone());
             new.push(id);
             self.create_zone(&name, out);
         }
