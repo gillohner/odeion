@@ -6738,8 +6738,9 @@ mod tests {
         // An output's own mapping: the default (linear) on an output that doesn't override it
         let plain = pm_zones::outputs::NullOutput::with_volume(pm_model::VolumeKind::Percent);
         assert_eq!(
-            cap_volume(Volume::Percent(100), Some(-30.0), |db| plain.percent_for_db(db)),
-            Volume::Percent(50)
+            cap_volume(Volume::Percent(100), Some(-46.0), |db| plain.percent_for_db(db)),
+            Volume::Percent(23),
+            "rounded down (23.3 %)"
         );
         // The null output has no volume control at all: the request is refused as before.
         let (st, body) = call(

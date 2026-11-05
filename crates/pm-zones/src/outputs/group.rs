@@ -706,6 +706,26 @@ impl AudioSink for GroupSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mixed_group_caps_percent_with_its_strictest_member() {
+        use crate::outputs::NullOutput;
+        use pm_model::VolumeKind;
+        // One member linear over -60..0 dB, one over its own -30..0 dB: at -45 dB the first allows
+        // 25 %, the second 0 %; the group sends one percent to both, so 0 %
+        let wide: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Percent));
+        let narrow: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Db {
+            min: -30.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        assert_eq!(wide.percent_for_db(-45.0), 25);
+        assert_eq!(narrow.percent_for_db(-45.0), 0);
+        assert_eq!(narrow.percent_for_db(-15.0), 50, "its own range, not -60..0");
+        let g = GroupOutput::new("g", vec![wide, narrow]).unwrap();
+        assert_eq!(g.percent_for_db(-45.0), 0);
+        assert_eq!(g.percent_for_db(-15.0), 50);
+    }
     use crate::outputs::{read_wav, NullOutput, WavFileOutput};
 
     /// An output that only has an id (for the sync label).

@@ -203,6 +203,11 @@ fn start_session(addr: SocketAddr, auth: bool, text: &Text) -> Result<Session, A
     Ok(s)
 }
 
+/// The highest percent at or below `db` on AirPlay's -30…0 dB scale (0 is mute).
+fn airplay_percent(db: f32) -> u8 {
+    ((db.clamp(-30.0, 0.0) + 30.0) / 30.0 * 100.0).floor() as u8
+}
+
 /// AirPlay volume: -30 dB (quietest) to 0 dB; -144 is mute.
 fn percent_to_db(p: u8) -> f32 {
     if p == 0 {
@@ -216,7 +221,7 @@ fn percent_to_db(p: u8) -> f32 {
 impl Output for AirPlayOutput {
     /// Percent is linear over -30…0 dB here (`percent_to_db`); rounded down for a cap.
     fn percent_for_db(&self, db: f32) -> u8 {
-        ((db.clamp(-30.0, 0.0) + 30.0) / 30.0 * 100.0).floor() as u8
+        airplay_percent(db)
     }
 
     fn id(&self) -> OutputId {
@@ -419,6 +424,15 @@ impl Drop for AirPlaySink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_volume_limit_caps_percent_on_airplays_scale() {
+        assert_eq!(airplay_percent(-15.0), 50);
+        // Never past the limit: 33 % plays at -20.1 dB under a -20 dB limit
+        assert!(percent_to_db(airplay_percent(-20.0)) <= -20.0);
+        assert_eq!(airplay_percent(-46.0), 0, "at or below -30 dB: mute");
+        assert_eq!(airplay_percent(0.0), 100);
+    }
 
     #[test]
     fn instance_names_and_support() {

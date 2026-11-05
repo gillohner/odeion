@@ -272,6 +272,11 @@ impl Output for SlimOutput {
         }))
     }
 
+    /// Percent is a squared gain here (`set_volume`): `10^(dB/40)`, rounded down for a cap.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        squared_percent(db)
+    }
+
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let gain = match v {
             Volume::Db(db) => 10f64.powf(db.clamp(-60.0, 0.0) as f64 / 20.0),
@@ -309,6 +314,11 @@ struct SlimSink {
 /// How far the node runs ahead of what the player has played. Socket and player buffers would
 /// take a minute or more at once; this keeps the position live, `drain` short, and bounds what
 /// a flush throws away.
+/// The highest percent at or below `db` when percent is a squared gain (`(p/100)²`).
+fn squared_percent(db: f32) -> u8 {
+    (10f64.powf(f64::from(db.clamp(-60.0, 0.0)) / 40.0) * 100.0).floor() as u8
+}
+
 const AHEAD: std::time::Duration = std::time::Duration::from_secs(5);
 /// A player that plays nothing for this long while audio waits has stopped taking it.
 const STALLED: std::time::Duration = std::time::Duration::from_secs(30);
@@ -508,6 +518,14 @@ impl Drop for SlimSink {
 mod tests {
     use super::*;
     use crate::read_frame_server;
+
+    #[test]
+    fn a_volume_limit_caps_percent_on_the_squared_gain() {
+        // 17 % is a gain of 0.0289, -30.8 dB: under a -30 dB limit (the linear 50 % was -12 dB)
+        assert_eq!(squared_percent(-30.0), 17);
+        assert_eq!(squared_percent(0.0), 100);
+        assert_eq!(squared_percent(-80.0), 3, "clamped at the -60 dB floor");
+    }
     use std::io::Write;
     use std::net::TcpListener;
 
