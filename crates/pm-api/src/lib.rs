@@ -1311,7 +1311,9 @@ async fn put_output_device(
     let mut settings = device.settings.unwrap_or_default();
     if let Some(m) = body.mode {
         if m == pm_zones::PreferredMode::Unknown {
-            return Err(ApiError::bad_request("mode is auto, bit_perfect, exclusive or shared"));
+            return Err(ApiError::bad_request(
+                "mode is auto, bit_perfect, exclusive or shared",
+            ));
         }
         settings.mode = m;
     }
