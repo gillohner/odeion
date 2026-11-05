@@ -96,7 +96,7 @@ jobs:
       - run: docker compose version
       - run: python3 -I tools/branding-check.py --self-test
       # Every action pinned to a commit SHA (a tag can be moved to other code)
-      - run: python3 -I tools/workflow-pins-check.py
+      - run: python3 -I tools/workflow-pins-check.py --self-test && python3 -I tools/workflow-pins-check.py
       - run: python3 -I tools/bundle-settings-check.py
       - run: python3 -I tools/units-check.py
       - run: python3 -I tools/compose-check.py
