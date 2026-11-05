@@ -301,12 +301,17 @@ impl Who {
         *self == Who::Owner
     }
 
-    /// A name for this person in cache keys: `owner`, a listener's key, or `nobody`.
-    pub fn tag(&self) -> &str {
+    /// A name for this person in cache keys: `owner`, a listener's key, `node:<key>` for a listener
+    /// on the node's sign-ins, or `nobody`. The caches keyed by it hold what an account answered
+    /// (search, item pages, Home, streams), so a listener on the node's sign-ins and the same
+    /// listener on their own never share an entry: a switch never shows one account's answers as
+    /// the other's.
+    pub fn tag(&self) -> String {
         match self {
-            Who::Owner => "owner",
-            Who::Listener(k) | Who::ListenerOnNode(k) => k,
-            Who::Nobody => "nobody",
+            Who::Owner => "owner".into(),
+            Who::Listener(k) => k.clone(),
+            Who::ListenerOnNode(k) => format!("node:{k}"),
+            Who::Nobody => "nobody".into(),
         }
     }
 
@@ -906,12 +911,19 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
         }
         lib.delete_setting(&crate::prefs::storage_key_of(key))?;
         lib.delete_setting(&crate::presence::visible_key(key))?;
-        for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(key))? {
-            lib.delete_setting(&k)?;
+        // What they read with their own sign-ins, and with the node's ([`Who::tag`])
+        let on_node = Who::ListenerOnNode(key.to_string()).tag();
+        for tag in [key, on_node.as_str()] {
+            for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(tag))? {
+                lib.delete_setting(&k)?;
+            }
         }
     }
+    let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
+    crate::tidal::forget_streams_of(&on_node);
     crate::search::forget_answers_of(s, key);
+    crate::search::forget_answers_of(s, &on_node);
     crate::devices::forget_all_of(s, key);
     Ok(())
 }

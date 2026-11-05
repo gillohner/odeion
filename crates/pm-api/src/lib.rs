@@ -20242,9 +20242,26 @@ exec sleep 300
         assert_eq!((st, v["plays_with"].as_str()), (StatusCode::OK, Some("own")), "{v}");
         assert_eq!(play(anna_tok.clone()).await, Ok("Bearer anna-token".into()));
         assert_eq!(play(ben_tok.clone()).await, Ok("Bearer owner-token".into()));
-        // Listeners may sign in again under `choice` (the route is open to them)
-        let (st, _) = send("GET", "/v1/sources/tidal/signin".into(), ben_tok.clone(), None).await;
-        assert_eq!(st, StatusCode::OK);
+        // Listeners may sign in again under `choice`, and what they pick lands at their own keys,
+        // never the node's
+        let (st, si) = send("GET", "/v1/sources/tidal/signin".into(), ben_tok.clone(), None).await;
+        assert_eq!(st, StatusCode::OK, "{si}");
+        let way = si["ways"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["available"] == true)
+            .and_then(|w| w["id"].as_str())
+            .expect("a way open to listeners")
+            .to_string();
+        let node_way = s.library.lock().unwrap().get_setting("tidal.signin_way").unwrap();
+        let (st, v) = send("PUT", "/v1/sources/tidal/signin".into(), ben_tok.clone(), Some(serde_json::json!({"way": way}))).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        {
+            let lib = s.library.lock().unwrap();
+            assert_eq!(lib.get_setting(&format!("person.{ben}.tidal.signin_way")).unwrap().as_deref(), Some(way.as_str()));
+            assert_eq!(lib.get_setting("tidal.signin_way").unwrap(), node_way, "the node's way untouched");
+        }
         // Back to the node's
         let (st, _) = send("PUT", "/v1/me/sources".into(), anna_tok.clone(), Some(serde_json::json!({"use": "node"}))).await;
         assert_eq!(st, StatusCode::OK);
@@ -20275,6 +20292,9 @@ exec sleep 300
         assert_eq!(on.by().as_deref(), Some("k"), "who queued it stays the listener");
         assert!(!on.is_owner());
         assert_eq!(on.own(), accounts::Who::Listener("k".into()));
+        // Caches keyed by the tag never share an entry between the node's account and their own
+        assert_ne!(on.tag(), on.own().tag());
+        assert_ne!(on.tag(), accounts::Who::Owner.tag());
         // The keys the services really use
         for k in [tidal_unofficial::STATE_KEY, qobuz::STATE_KEY, "tidal.user", "spotify.user"] {
             assert!(accounts::SIGNIN_KEYS.contains(&k), "{k}");
