@@ -24,9 +24,11 @@ fi
 
 echo "== booting the installed system"
 CONSOLE=$(dirname "$DISK")/console.sock
+# e1000, not virtio-net: with QEMU's user network, replies Docker forwards from a container (the
+# homeserver's published 6287) never completed a handshake through virtio-net (#270, first runs)
 "${VM[@]}" -boot c \
   -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:17788-:7788,hostfwd=tcp:127.0.0.1:16287-:6287" \
-  -device virtio-net-pci,netdev=n0 \
+  -device e1000,netdev=n0 \
   -chardev "socket,id=s0,path=$CONSOLE,server=on,wait=off,logfile=$LOGS/boot-$MODE.log" -serial chardev:s0 &
 QEMU=$!
 trap 'kill $QEMU 2>/dev/null || true' EXIT
@@ -41,7 +43,9 @@ diagnose() {
     "cd /opt/odeion && odeion-compose ps -a" \
     "ss -ltnp" \
     "nft list ruleset" \
-    "echo | timeout 10 openssl s_client -connect 127.0.0.1:6287 2>&1 | tail -n 25" \
+    "echo | timeout 10 openssl s_client -connect 127.0.0.1:6287 2>&1 | grep -e handshake -e alert" \
+    "echo | timeout 10 openssl s_client -connect 10.0.2.15:6287 2>&1 | grep -e handshake -e alert" \
+    "sysctl net.ipv4.ip_forward net.ipv4.conf.all.rp_filter; ip -br addr; ip route" \
     "cd /opt/odeion && odeion-compose logs --tail 40 homeserver homeserver-config" \
     | tee "$LOGS/inside-$MODE.log" || true
 }
