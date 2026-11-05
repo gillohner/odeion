@@ -5,7 +5,7 @@
 //   * the desktop layout: the sidebar with every desktop place (reachable when the window is short),
 //     no bottom tabs;
 //   * the player bar: no two of its parts overlap (as drawn, after any clipping), nothing leaves the
-//     bar, also with a files job showing, and the title, artist and zone name each keep at least 8
+//     bar, also with a files job showing (on phones too, nothing cut at the edge), and the title, artist and zone name each keep at least 8
 //     characters when cut;
 //   * every desktop feature reachable: the queue, the volume (the bar's slider or its button, never
 //     the Sound panel),
@@ -187,6 +187,19 @@ const visible = (page, sel) => page.evaluate((s) => { const e = document.querySe
     await fx.go(page, '/album/lib-7'); await page.waitForTimeout(800);
     const bar = await page.evaluate(barReport);
     check(!bar.overlaps.length && !bar.outside.length, `${w}${touch ? ' touch' : ''}: the mini player's parts don't overlap or leave it${bar.overlaps.length || bar.outside.length ? ': ' + [...bar.overlaps, ...bar.outside].slice(0, 4).join('; ') : ''}`);
+    // With a files job's chip too (#269 review): nothing overlaps, and nothing is cut at the edge of
+    // its group (the group clips what doesn't fit, so overlaps alone don't show it)
+    await showJob(page); await page.waitForTimeout(150);
+    const jb = await page.evaluate(barReport);
+    // (every part inside the group, not only its children: a shrunk button would clip its own icon)
+    const cut = await page.evaluate(() => { const g = document.querySelector('.player-right').getBoundingClientRect(); return [...document.querySelectorAll('.player-right *')].filter((e) => { const b = e.getBoundingClientRect(); return b.width > 0 && getComputedStyle(e).visibility !== 'hidden'; }).filter((e) => { const b = e.getBoundingClientRect(); return b.right > g.right + 0.5 || b.left < g.left - 0.5; }).map((e) => e.id || e.getAttribute('class') || e.tagName); });
+    // A pill without a quality badge (nothing known of the format) isn't drawn empty beside the chip
+    const bare = await page.evaluate(() => { const b = document.querySelector('#quality .qbadge'); if (!b) return null; const keep = b.outerHTML; b.remove(); const q = document.querySelector('#quality'); const shown = q.getBoundingClientRect().width > 0; q.querySelector('.qshort').insertAdjacentHTML('beforeend', keep); return shown; });
+    check(bare === false, `${w}${touch ? ' touch' : ''} with a files job: a pill without a quality badge isn't drawn empty (${bare})`);
+    const job = await visible(page, '#jobchip'); const zone = await visible(page, '#zonebtn');
+    check(job && zone && !jb.overlaps.length && !jb.outside.length && !cut.length, `${w}${touch ? ' touch' : ''} with a files job: the chip and the zone button show, nothing overlaps or is cut${jb.overlaps.length || jb.outside.length || cut.length ? ': ' + [...jb.overlaps, ...jb.outside, ...cut.map((c) => `${c} cut`)].slice(0, 4).join('; ') : ''}`);
+    await page.screenshot({ path: path.join(SHOTS, `mini-job-${w}${touch ? '-touch' : ''}.png`), clip: { x: 0, y: h - 170, width: w, height: 170 } });
+    await page.evaluate(() => { document.querySelector('#jobchip').hidden = true; });
     if (w !== 390 || touch) { await context.close(); continue; }
     const p = await page.evaluate(() => ({ shell: document.documentElement.dataset.shell, tabs: [...document.querySelectorAll('.bottomnav .bnav')].filter((b) => b.getBoundingClientRect().width > 0).map((b) => b.dataset.bnav).join(',') }));
     check(p.shell === 'phone' && p.tabs === 'home,search,library,zones', `390: the phone, with its four tabs (${p.shell}: ${p.tabs})`);

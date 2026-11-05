@@ -1322,6 +1322,11 @@ html[data-shell="phone"] .quality.idle, html[data-shell="phone"] .quality:not(:h
 html[data-shell="phone"] .player-right { min-width: 0; overflow: hidden; }
 html[data-shell="phone"] .player-right .zone-btn { min-width: 0; flex: 0 1 auto; }
 html[data-shell="phone"] .player-right .zone-btn span { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A files job's chip beside them (#269 review: the parts overlapped or were cut at the card's edge):
+   the zone button is its icon (its label names the zone) and the pill its quality badge (no badge,
+   no pill); on the narrowest phones the pill makes way (the Sound panel is in Now playing) */
+html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) :is(.zone-btn span, .quality .qsrc, .quality:not(:has(.qbadge))) { display: none; }
+@media (max-width: 374px) { html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) .quality { display: none; } }
 html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
 html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
 html[data-shell="phone"] body.np-open .player { display: none; }
