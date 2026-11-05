@@ -2175,12 +2175,27 @@
   // otherwise Android's mixer, which may convert and mixes in other sounds: every headline, badge
   // and label built from this path follows, so none says bit-perfect for a shared DAC
   const zoneNp = (z, np) => {
-    const n = np && np.signal_path && dacNow(z); if (!n) return np;
+    const n = np && np.signal_path && dacNow(z);
+    if (!n) {
+      // The system's shared output (a phone without a DAC, or one the node no longer knows; a
+      // computer's system audio): its mixer is in the path too, so it is never bit-perfect
+      if (!np || !np.signal_path || !/(^|\/)cpal:/.test(String((z && z.output) || ''))) return np;
+      const of = np.output_format;
+      const st = { name: 'system mixer', in_format: of, out_format: of, quality: 'lossless', note: 'shared: the system may convert it and mixes in other sounds' };
+      return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, st] } };
+    }
     const of = np.output_format;
     const stage = n.bp
       ? { name: 'DAC', in_format: of, out_format: of, quality: 'bit_perfect', note: `Android confirmed bit-perfect to ${n.d.name}` }
       : { name: 'Android mixer', in_format: of, out_format: of, quality: 'lossless', note: `shared: Android may convert it and mixes in other sounds${n.why ? `; ${n.why}` : ''}` };
     return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, stage] } };
+  };
+  // Bit-perfect at full level below Android's full volume (the listener agreed): said wherever it
+  // plays, for as long as it applies
+  const fullLevelNote = (z) => {
+    const n = deviceOf(z) && dacNow(z); const d = n && n.d;
+    return n && n.bp && d.settings && d.settings.full_level_ok && d.media_volume != null && d.media_volume < 100
+      ? `Bit-perfect plays at full level: Android’s volume (${d.media_volume}%) does not apply. Set the level on the DAC or amplifier.` : '';
   };
   // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
   const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? 'bit-perfect' : 'shared'}` : ''; };
@@ -2860,7 +2875,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) + fullLevelNote(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -2914,7 +2929,7 @@
     const vmin = hv ? hv.min : -60; const vmax = hv ? hv.max : 0; const vstep = hv ? hv.step || 1 : 1; const vval = Math.min(vmax, Math.max(vmin, Number(bar.value)));
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
-      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span>${fullLevelNote(z) ? `<span class="sub warn-text" role="status">${esc(fullLevelNote(z))}</span>` : ''}</span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? 'Decoded by this browser' : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
@@ -6524,14 +6539,25 @@
           const dacTab = !dv ? '' : group(esc(dv.name), row('Playing through it', esc(dline ? `${dline}.${/^Shared/.test(dline) ? ` ${DAC_HELP.shared}` : ''}` : `${DAC_MODE[dacMode(dv)]}.${dacMode(dv) === 'shared' ? ` ${DAC_HELP.shared}` : ''}`), '')
             + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
-            + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : ''))
+            + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : '')
+            + (dv.settings && dv.settings.mode === 'bit_perfect' && dv.settings.full_level_ok && dv.media_volume != null && dv.media_volume < 100 ? `<div class="notice warn" role="status">Bit-perfect plays at full level: Android’s volume (${esc(String(dv.media_volume))}%) does not apply. Set the level on the DAC or amplifier.</div>` : ''))
             // The choices, from apps that take them (they report `settings`)
             + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${v === 'bit_perfect' && !(dv.modes || []).includes('bit_perfect') ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)) : '');
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           // This phone: the choices go to the node, which passes them to the app's player
           const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
-          const dvm = $('#dvmode', main); if (dvm) dvm.onchange = () => putDev({ mode: dvm.value }, 'Mode saved');
+          // Bit-perfect plays at full level: below Android's full volume only with the listener's OK
+          // (asked here; Cancel keeps the mode as it was)
+          const dvm = $('#dvmode', main); if (dvm) { const was = dvm.value; dvm.onchange = () => {
+            const mv = dv.media_volume;
+            if (dvm.value === 'bit_perfect' && mv !== 100) {
+              const at = mv != null ? ` (${mv}%)` : '';
+              if (!confirm(`Bit-perfect plays at full level; Android’s volume${at} no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?`)) { dvm.value = was; return; }
+              return putDev({ mode: 'bit_perfect', full_level_ok: true }, 'Mode saved');
+            }
+            return putDev({ mode: dvm.value }, 'Mode saved');
+          }; }
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };

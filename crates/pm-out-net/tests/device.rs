@@ -428,6 +428,7 @@ async fn what_the_phone_takes_now_reaches_the_zone_and_settings_reach_the_phone(
     let s = pm_zones::DeviceSettings {
         mode: pm_zones::PreferredMode::Shared,
         dac_volume: false,
+        full_level_ok: false,
     };
     held.configure_device(s).await.unwrap();
     assert_eq!(held.device().unwrap().settings, Some(s));
@@ -454,4 +455,50 @@ async fn a_dac_unplugged_on_the_phone_reaches_the_zone_as_gone() {
     let e = err.expect("the write fails once the endpoint's sink found the DAC gone");
     assert!(matches!(e, SinkError::Gone(..)), "{e}");
     assert_eq!(e.gone_reason().as_deref(), Some("FiiO KA17 was unplugged"));
+}
+
+/// The node plans each source with the formats the phone's DAC lists: 96/24 stays 96/24 even when
+/// the caps alone (16 bit everywhere) would not take it, and it opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listed_format_reaches_the_dac_unchanged() {
+    let (phone, serving, cell) = phone();
+    let held = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    let sixteen = OutputCaps {
+        pcm_rates: vec![44_100, 48_000, 96_000, 192_000],
+        pcm_bits: vec![16],
+        max_pcm_bits: 16,
+        quality_ceiling: pm_model::QualityCeiling::BitPerfect,
+        ..held.caps().clone()
+    };
+    let f = |rate_hz, bits| pm_zones::DeviceFormat {
+        rate_hz,
+        bits,
+        channels: 2,
+    };
+    *phone.live.lock().unwrap() = Some(sixteen);
+    *phone.dac.lock().unwrap() = Some(OutputDevice {
+        formats: vec![
+            f(44_100, 16),
+            f(48_000, 16),
+            f(96_000, 16),
+            f(192_000, 16),
+            f(96_000, 24),
+            f(192_000, 24),
+        ],
+        ..ka17()
+    });
+    NetOutput::connect(serving.addr(), &cell).unwrap();
+    for src in [AudioFormat::pcm(96_000, 24, 2), AudioFormat::pcm(192_000, 24, 2)] {
+        let caps = held.live_caps_for(src);
+        assert_eq!(
+            (caps.pcm_rates.as_slice(), caps.pcm_bits.as_slice()),
+            (&[src.rate_hz][..], &[24][..]),
+            "{src}"
+        );
+        assert!(
+            !held.live_caps().accepts(&src),
+            "the caps alone would requantize {src}"
+        );
+        drop(held.open(src).await.expect("a listed format opens"));
+    }
 }

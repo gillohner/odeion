@@ -70,6 +70,9 @@ class BitPerfect private constructor() {
         /// The DAC whose mixer attributes are set, if any.
         @Volatile private var preferred: AudioDeviceInfo? = null
         /// Listeners and timers run here, never behind the UI thread.
+        /// The thread listeners and timers run on (UsbAudio's device callback too).
+        fun handler(): Handler = worker
+
         private val worker: Handler by lazy {
             val t = HandlerThread("bit-perfect")
             t.start()
@@ -79,12 +82,15 @@ class BitPerfect private constructor() {
         private val idleCheck = object : Runnable {
             override fun run() {
                 val now = System.currentTimeMillis()
-                val idle = synchronized(tracks) {
-                    tracks.values.isNotEmpty() && tracks.values.all { it.pausedAt != 0L && now - it.pausedAt >= IDLE_MS }
-                }
-                if (idle && preferred != null) {
-                    synchronized(tracks) { tracks.values.forEach { it.mixerCleared = true } }
-                    clear()
+                // Checked, marked and cleared under the lock play() and pause() take: a track
+                // resumed meanwhile is never left playing on a cleared mixer as "confirmed"
+                synchronized(tracks) {
+                    val idle = tracks.values.isNotEmpty() &&
+                        tracks.values.all { it.pausedAt != 0L && now - it.pausedAt >= IDLE_MS }
+                    if (idle && preferred != null) {
+                        tracks.values.forEach { it.mixerCleared = true }
+                        clear()
+                    }
                 }
                 worker.postDelayed(this, 10_000)
             }
@@ -96,7 +102,10 @@ class BitPerfect private constructor() {
             // Android's warning before it moves audio off a device that goes (a USB DAC unplugged)
             val noisy = object : BroadcastReceiver() {
                 override fun onReceive(ctx: Context, intent: Intent) {
-                    if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) loseAll()
+                    if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                        loseAll()
+                        UsbAudio.noisy()
+                    }
                 }
             }
             val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
@@ -127,7 +136,8 @@ class BitPerfect private constructor() {
                 val same = mixer != null && mixer.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
                     mixer.format.encoding == p.format.encoding && mixer.format.sampleRate == p.format.sampleRate &&
                     mixer.format.channelMask == p.format.channelMask
-                if (!same && !p.mixerCleared) {
+                // Our own clear while the track is paused is no change to it; anything else is
+                if (!same && !(p.mixerCleared && p.pausedAt != 0L)) {
                     p.unconfirmed = if (mixer == null) "Android's mixer for the DAC was cleared: not bit-perfect any more"
                     else "Android's mixer for the DAC was changed: not bit-perfect any more"
                 }
@@ -231,7 +241,11 @@ class BitPerfect private constructor() {
                 // Undo: no track left, and the mixer as it was when nothing else plays
                 track?.let { runCatching { it.release() } }
                 synchronized(tracks) { if (handle != 0L) tracks.remove(handle) }
-                if (setOk && !hadPreferred && synchronized(tracks) { tracks.isEmpty() }) clear()
+                // Nothing else plays: the mixer back to Android's choice, now or soon (the last
+                // track's own clean-up was cancelled by this open)
+                if (synchronized(tracks) { tracks.isEmpty() }) {
+                    if (setOk && !hadPreferred) clear() else worker.postDelayed(clearLater, 3000)
+                }
                 return refused("another app holds the DAC, or Android would not play this format (${e.message})")
             }
         }
@@ -287,26 +301,38 @@ class BitPerfect private constructor() {
 
         @JvmStatic
         fun pause(handle: Long) {
-            val p = get(handle) ?: return
-            p.track.pause()
-            if (p.pausedAt == 0L) p.pausedAt = System.currentTimeMillis()
+            synchronized(tracks) {
+                val p = tracks[handle] ?: return
+                p.track.pause()
+                if (p.pausedAt == 0L) p.pausedAt = System.currentTimeMillis()
+            }
         }
 
         @JvmStatic
         fun play(handle: Long) {
-            val p = get(handle) ?: return
-            if (p.gone) return
-            // Cleared during a long pause: set again first, and say so if Android won't
-            if (p.mixerCleared && Build.VERSION.SDK_INT >= 34) {
-                val am = audio()
-                val dac = deviceFor(p.dacId)
-                val ok = am != null && dac != null &&
-                    runCatching { am.setPreferredMixerAttributes(media, dac, mixerFor(p.format)) }.getOrDefault(false)
-                if (ok) preferred = dac else p.unconfirmed = "Android refused bit-perfect again after the pause"
-                p.mixerCleared = false
+            synchronized(tracks) {
+                val p = tracks[handle] ?: return
+                if (p.gone) return
+                // Cleared during a long pause: set again first, then confirmed only as at open: the
+                // mixer read back in exactly this format, and the track on the DAC
+                if (p.mixerCleared && Build.VERSION.SDK_INT >= 34) {
+                    val am = audio()
+                    val dac = deviceFor(p.dacId)
+                    val set = am != null && dac != null &&
+                        runCatching { am.setPreferredMixerAttributes(media, dac, mixerFor(p.format)) }.getOrDefault(false)
+                    if (set) preferred = dac
+                    val back = if (set) runCatching { am!!.getPreferredMixerAttributes(media, dac!!) }.getOrNull() else null
+                    val same = back != null && back.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT &&
+                        back.format.encoding == p.format.encoding && back.format.sampleRate == p.format.sampleRate &&
+                        back.format.channelMask == p.format.channelMask
+                    if (!same) p.unconfirmed = "Android refused bit-perfect again after the pause"
+                    p.mixerCleared = false
+                }
+                p.pausedAt = 0L
+                p.track.play()
+                val routed = p.track.routedDevice
+                if (routed != null && routed.id != p.dacId) p.unconfirmed = "Android moved the track off the DAC"
             }
-            p.pausedAt = 0L
-            p.track.play()
         }
 
         @JvmStatic

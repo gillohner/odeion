@@ -312,6 +312,16 @@ impl Output for NetOutput {
             .unwrap_or_else(|| self.remote.caps.clone())
     }
 
+    /// For one source: its own format when the device lists it (a phone's DAC in bit-perfect
+    /// mode takes 96/24 as it is), else the closest listed one.
+    fn live_caps_for(&self, src: AudioFormat) -> OutputCaps {
+        let caps = self.live_caps();
+        match self.device() {
+            Some(d) if !d.formats.is_empty() => pm_zones::caps_for_source(&d.formats, src, &caps),
+            _ => caps,
+        }
+    }
+
     /// Pass the listener's choices to the endpoint, then read its outputs again, so the node (and
     /// every controller) sees the device as it is now.
     async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
@@ -343,7 +353,13 @@ impl Output for NetOutput {
     }
 
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        if !self.live_caps().accepts(&fmt) {
+        // What the endpoint takes now, or a format its device lists exactly
+        let listed = self.device().is_some_and(|d| {
+            d.formats
+                .iter()
+                .any(|f| (f.rate_hz, f.bits, f.channels) == (fmt.rate_hz, fmt.bits, fmt.channels))
+        });
+        if !listed && !self.live_caps().accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         let (addr, key, remote, id) = (self.addr, self.key.clone(), self.remote.id.0.clone(), self.id());

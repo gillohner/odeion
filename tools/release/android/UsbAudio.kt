@@ -45,16 +45,7 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             android.util.Log.w("pubky-music", "USB audio report failed: $e")
             empty()
         }
-        lock.lock()
-        try {
-            if (text != current) {
-                current = text
-                version += 1
-                changed.signalAll()
-            }
-        } finally {
-            lock.unlock()
-        }
+        publish(text)
     }
 
     companion object {
@@ -63,6 +54,30 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
         private var current = ""
         private var version = 0L
         @Volatile private var watcher: UsbAudio? = null
+
+        private fun publish(text: String) {
+            lock.lock()
+            try {
+                if (text != current) {
+                    current = text
+                    version += 1
+                    changed.signalAll()
+                }
+            } finally {
+                lock.unlock()
+            }
+        }
+
+        /// Android's warning that audio is about to move off the device it plays on: the Rust side
+        /// treats the DAC as gone at once (its shared stream goes silent, the zone pauses), before
+        /// the device's removal arrives. A fresh report follows in two seconds either way.
+        fun noisy() {
+            publish(
+                JSONObject().put("v", 1).put("sdk", Build.VERSION.SDK_INT).put("devices", JSONArray())
+                    .put("noisy", true).toString()
+            )
+            BitPerfect.handler().postDelayed({ watcher?.refresh() }, 2000)
+        }
 
         /// Starts watching (once); on the UI thread, whose looper delivers the callbacks.
         @JvmStatic
@@ -86,7 +101,8 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             val w = UsbAudio(context)
             watcher = w
             // Registering reports the devices already attached through onAudioDevicesAdded too
-            am.registerAudioDeviceCallback(w, null)
+            // On a thread of its own, never behind the busy UI thread
+            am.registerAudioDeviceCallback(w, BitPerfect.handler())
             w.refresh()
         }
 

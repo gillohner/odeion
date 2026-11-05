@@ -11,8 +11,9 @@
 //!   32 with the samples left-justified, their values unchanged; 32 as 32), or why not;
 //! * [`volume_handover`]: never louder. Android applies no volume of its own in bit-perfect mode,
 //!   so Auto plays bit-perfect only while Android's media volume is at full (nothing to lose);
-//!   below that it stays shared and says why. Bit-perfect chosen in Settings plays anyway, with a
-//!   warning to set the level on the DAC;
+//!   below that it stays shared and says why. Bit-perfect chosen in Settings plays below full
+//!   volume only with the listener's agreement to full level, given when they chose it, for that
+//!   DAC; without it, shared and why;
 //! * [`live_caps`]: what the phone's output takes then (rates and sizes the DAC lists together),
 //!   so the node stops converting for it;
 //! * [`confirmation`]: confirmed only when Android read the bit-perfect mixer back with exactly
@@ -217,21 +218,27 @@ pub fn choose(dac: &Dac, fmt: AudioFormat) -> Result<MixerChoice, String> {
 }
 
 /// Whether bit-perfect may start without the music getting louder. Android applies no volume of
-/// its own in bit-perfect mode: the level is the DAC's (or the amplifier's). So Auto plays
-/// bit-perfect only while Android's media volume is at full, where nothing is lost; below that
-/// (or unknown) it stays shared, and `Err` says why. Bit-perfect chosen in Settings plays at any
-/// volume, and `Ok(Some(warning))` says to set the level on the DAC.
-pub fn volume_handover(mode: PreferredMode, media_percent: Option<u8>) -> Result<Option<String>, String> {
-    let full = media_percent == Some(100);
-    match (mode, full) {
-        (_, true) => Ok(None),
-        (PreferredMode::BitPerfect, false) => Ok(Some(match media_percent {
-            Some(p) => format!(
-                "Android's volume ({p}%) does not apply in bit-perfect mode: set the level on the DAC or amplifier"
-            ),
-            None => "Android's volume does not apply in bit-perfect mode: set the level on the DAC or amplifier".into(),
-        })),
-        (_, false) => Err(match media_percent {
+/// its own in bit-perfect mode: the level is the DAC's (or the amplifier's). So it plays
+/// bit-perfect only while Android's media volume is at full, where nothing is lost, or, for
+/// Bit-perfect chosen in Settings, when the listener agreed to full level for this DAC
+/// (`full_level_ok`; then `Ok(Some(warning))`). Otherwise it stays shared, and `Err` says why.
+pub fn volume_handover(
+    mode: PreferredMode,
+    media_percent: Option<u8>,
+    full_level_ok: bool,
+) -> Result<Option<String>, String> {
+    if media_percent == Some(100) {
+        return Ok(None);
+    }
+    let at = media_percent.map(|p| format!(" ({p}%)")).unwrap_or_default();
+    match (mode, full_level_ok) {
+        (PreferredMode::BitPerfect, true) => Ok(Some(format!(
+            "Bit-perfect plays at full level: Android's volume{at} does not apply. Set the level on the DAC or amplifier"
+        ))),
+        (PreferredMode::BitPerfect, false) => Err(format!(
+            "Bit-perfect plays at full level, and Android's volume{at} would no longer apply: confirm Bit-perfect in Settings to use it"
+        )),
+        _ => Err(match media_percent {
             Some(p) => format!(
                 "Android's volume is at {p}%, and bit-perfect plays at full level: turn Android's volume up to full and set the level on the DAC, or choose Bit-perfect in Settings"
             ),
@@ -277,14 +284,11 @@ pub fn rectangle(dac: &Dac) -> (Vec<u32>, Vec<u8>) {
 pub fn live_caps(
     dac: Option<&Dac>,
     settings: pm_zones::DeviceSettings,
+    full_level_ok: bool,
     media_percent: Option<u8>,
     shared: &OutputCaps,
 ) -> OutputCaps {
-    let Some(dac) = dac.filter(|d| {
-        offer(d).is_ok()
-            && settings.mode != PreferredMode::Shared
-            && volume_handover(settings.mode, media_percent).is_ok()
-    }) else {
+    let Some(dac) = dac.filter(|d| plays_bit_perfect(d, settings, full_level_ok, media_percent)) else {
         return shared.clone();
     };
     let (rates, bits) = rectangle(dac);
@@ -303,11 +307,77 @@ pub fn live_caps(
     }
 }
 
+/// Whether the phone plays this DAC bit-perfect now (offered, not Shared in Settings, never louder).
+fn plays_bit_perfect(
+    dac: &Dac,
+    settings: pm_zones::DeviceSettings,
+    full_level_ok: bool,
+    media: Option<u8>,
+) -> bool {
+    offer(dac).is_ok()
+        && settings.mode != PreferredMode::Shared
+        && volume_handover(settings.mode, media, full_level_ok).is_ok()
+}
+
+/// Every format the DAC takes bit-perfect: each listed entry's rate and channels, with each sample
+/// size it carries (24 bit also in a 32-bit entry, left-justified).
+pub fn formats(dac: &Dac) -> Vec<pm_zones::DeviceFormat> {
+    let mut v: Vec<pm_zones::DeviceFormat> = Vec::new();
+    for e in bit_perfect_entries(dac) {
+        for bits in [16u8, 24, 32] {
+            let f = pm_zones::DeviceFormat {
+                rate_hz: e.rate,
+                bits,
+                channels: e.channels,
+            };
+            if takes(e, bits) && !v.contains(&f) {
+                v.push(f);
+            }
+        }
+    }
+    v
+}
+
+/// For the device the phone reports: the exact formats it plays bit-perfect now (none when it
+/// plays shared), and Android's media volume.
+pub fn view_extras(
+    dac: &Dac,
+    settings: pm_zones::DeviceSettings,
+    full_level_ok: bool,
+) -> (Vec<pm_zones::DeviceFormat>, Option<u8>) {
+    let media = backend().and_then(|b| b.media_volume());
+    let f = if plays_bit_perfect(dac, settings, full_level_ok, media) {
+        formats(dac)
+    } else {
+        Vec::new()
+    };
+    (f, media)
+}
+
 /// [`live_caps`] for the phone's output now.
 pub fn phone_caps(shared: &OutputCaps) -> OutputCaps {
     let dac = usb_dac::current_dac();
     let media = dac.as_ref().and(backend()).and_then(|b| b.media_volume());
-    live_caps(dac.as_ref(), usb_dac::settings(), media, shared)
+    live_caps(
+        dac.as_ref(),
+        usb_dac::settings(),
+        usb_dac::full_level_consent(),
+        media,
+        shared,
+    )
+}
+
+/// [`phone_caps`] for one source: its own format when the DAC lists it (unchanged), else the
+/// closest listed one.
+pub fn phone_caps_for(shared: &OutputCaps, src: AudioFormat) -> OutputCaps {
+    let caps = phone_caps(shared);
+    if caps.quality_ceiling != QualityCeiling::BitPerfect {
+        return caps;
+    }
+    match usb_dac::current_dac() {
+        Some(d) => pm_zones::caps_for_source(&formats(&d), src, &caps),
+        None => caps,
+    }
 }
 
 /// Confirmed only when Android read the bit-perfect mixer back with exactly the format asked for
@@ -354,7 +424,7 @@ pub fn plan(fmt: AudioFormat) -> Plan {
         Err(why) => return Plan::Shared(Some((dac, why))),
     };
     let media = backend().and_then(|b| b.media_volume());
-    match volume_handover(mode, media) {
+    match volume_handover(mode, media, usb_dac::full_level_consent()) {
         Ok(warning) => Plan::BitPerfect(dac, choice, warning),
         Err(why) => Plan::Shared(Some((dac, why))),
     }
@@ -371,28 +441,87 @@ pub fn record_shared(dac: &Dac, fmt: AudioFormat, why: String) {
     });
 }
 
-/// Open the bit-perfect player for `fmt` and record what Android confirmed. `Err`: the player
-/// could not start (why); the caller plays shared instead.
+/// Why the bit-perfect player gave no track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    /// The player would not start (another app holds the DAC, a format Android won't play): the
+    /// phone plays shared, through the same DAC.
+    Refused(String),
+    /// Android plays the track anywhere but the DAC (it went, or is going, or media moved): nothing
+    /// may open elsewhere, the zone pauses.
+    RouteLost(String),
+}
+
+impl OpenError {
+    pub fn why(&self) -> &str {
+        match self {
+            OpenError::Refused(w) | OpenError::RouteLost(w) => w,
+        }
+    }
+}
+
+/// What the phone's output opens for a format.
+pub enum PhoneOpen {
+    /// The bit-perfect player.
+    BitPerfect(TrackSink),
+    /// Android's shared path; `any_rate`: at the format's own rate even if the shared caps don't
+    /// list it (Android converts), because it was planned for the DAC.
+    Shared { any_rate: bool },
+    /// The DAC went, or Android plays elsewhere: the zone pauses, nothing opens (no speaker).
+    Gone(String),
+}
+
+/// How the phone's output opens `fmt` now: the whole decision, apart from cpal.
+pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
+    match plan(fmt) {
+        Plan::BitPerfect(dac, choice, warning) => match open(id, &dac, choice, warning, fmt) {
+            Ok(s) => PhoneOpen::BitPerfect(s),
+            Err(OpenError::RouteLost(why)) => {
+                tracing::warn!(format = %fmt, "the DAC is not where Android plays: {why}");
+                record_shared(&dac, fmt, why.clone());
+                PhoneOpen::Gone(format!(
+                    "{} is not where Android plays now ({why})",
+                    dac.device.name
+                ))
+            }
+            Err(OpenError::Refused(why)) => {
+                tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
+                record_shared(&dac, fmt, why);
+                PhoneOpen::Shared { any_rate: true }
+            }
+        },
+        // Planned for the DAC's caps but played shared (a mono track, Settings changed since):
+        // Android's mixer takes the track's rate, never a stopped zone
+        Plan::Shared(Some((dac, why))) => {
+            record_shared(&dac, fmt, why);
+            PhoneOpen::Shared { any_rate: true }
+        }
+        Plan::Shared(None) => PhoneOpen::Shared { any_rate: false },
+    }
+}
+
+/// Open the bit-perfect player for `fmt` and record what Android confirmed. `Err`: no track (why,
+/// and whether the DAC is still where Android plays).
 pub fn open(
     id: OutputId,
     dac: &Dac,
     choice: MixerChoice,
     warning: Option<String>,
     fmt: AudioFormat,
-) -> Result<TrackSink, String> {
-    let b = backend().ok_or("this app has no bit-perfect player here")?;
+) -> Result<TrackSink, OpenError> {
+    let b = backend().ok_or_else(|| OpenError::Refused("this app has no bit-perfect player here".into()))?;
     let gone_at_open = usb_dac::gone_count();
     let generation = usb_dac::generation();
-    let (mut track, report) = b.open(dac.id, &choice.entry)?;
+    let (mut track, report) = b.open(dac.id, &choice.entry).map_err(OpenError::Refused)?;
     let confirmed = confirmation(&choice.entry, &report, dac.id);
     tracing::info!(format = %fmt, ?confirmed, "bit-perfect player");
     // A track Android plays anywhere but the DAC is not used at all: the caller plays shared,
     // where Android routes media (no sample of this track reaches another device)
     if report.routed_id != Some(dac.id) {
         track.stop();
-        return Err(confirmed
-            .err()
-            .unwrap_or_else(|| "Android did not say it plays through the DAC".into()));
+        return Err(OpenError::RouteLost(confirmed.err().unwrap_or_else(|| {
+            "Android did not say it plays through the DAC".into()
+        })));
     }
     let confirmed_ok = confirmed.is_ok();
     usb_dac::record_open(LastOpen {
@@ -479,15 +608,13 @@ impl TrackSink {
     }
 
     fn gone_error(&self) -> SinkError {
-        let why = usb_dac::gone_reason();
-        SinkError::Gone(
-            self.id.clone(),
-            if why.is_empty() {
-                format!("{} was unplugged", self.dac)
-            } else {
-                why
-            },
-        )
+        // The reason the app gave when it saw this DAC go; the track saying so first: unplugged
+        let why = if usb_dac::gone_count() != self.gone_at_open {
+            usb_dac::gone_reason()
+        } else {
+            format!("{} was unplugged", self.dac)
+        };
+        SinkError::Gone(self.id.clone(), why)
     }
 
     /// Once a second while confirmed: is it still? If not, the device says shared, and why.
@@ -892,7 +1019,13 @@ mod tests {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         with_player();
         let ka17 = dac(34, ka17_mixer());
-        let caps = live_caps(Some(&ka17), DeviceSettings::default(), Some(100), &shared_caps());
+        let caps = live_caps(
+            Some(&ka17),
+            DeviceSettings::default(),
+            false,
+            Some(100),
+            &shared_caps(),
+        );
         assert_eq!(
             caps.pcm_rates,
             [44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000]
@@ -925,38 +1058,59 @@ mod tests {
         }
         // Auto with Android's volume turned down: shared caps (never louder); Bit-perfect chosen: the DAC's
         assert_eq!(
-            live_caps(Some(&ka17), DeviceSettings::default(), Some(40), &shared_caps()),
+            live_caps(
+                Some(&ka17),
+                DeviceSettings::default(),
+                false,
+                Some(40),
+                &shared_caps()
+            ),
             shared_caps()
         );
         assert_eq!(
-            live_caps(Some(&ka17), DeviceSettings::default(), None, &shared_caps()),
+            live_caps(
+                Some(&ka17),
+                DeviceSettings::default(),
+                false,
+                None,
+                &shared_caps()
+            ),
             shared_caps()
         );
         let chosen = DeviceSettings {
             mode: PreferredMode::BitPerfect,
             ..DeviceSettings::default()
         };
-        assert_eq!(live_caps(Some(&ka17), chosen, Some(40), &shared_caps()), caps);
+        // Bit-perfect chosen below full volume: only with the listener's agreement to full level
+        assert_eq!(
+            live_caps(Some(&ka17), chosen, false, Some(40), &shared_caps()),
+            shared_caps()
+        );
+        assert_eq!(
+            live_caps(Some(&ka17), chosen, true, Some(40), &shared_caps()),
+            caps
+        );
         // Shared in Settings, Android 13, no DAC: the shared caps, as today
         let shared_pref = DeviceSettings {
             mode: PreferredMode::Shared,
             ..DeviceSettings::default()
         };
         assert_eq!(
-            live_caps(Some(&ka17), shared_pref, Some(100), &shared_caps()),
+            live_caps(Some(&ka17), shared_pref, false, Some(100), &shared_caps()),
             shared_caps()
         );
         assert_eq!(
             live_caps(
                 Some(&dac(33, ka17_mixer())),
                 DeviceSettings::default(),
+                false,
                 Some(100),
                 &shared_caps()
             ),
             shared_caps()
         );
         assert_eq!(
-            live_caps(None, DeviceSettings::default(), Some(100), &shared_caps()),
+            live_caps(None, DeviceSettings::default(), false, Some(100), &shared_caps()),
             shared_caps()
         );
     }
@@ -965,22 +1119,30 @@ mod tests {
     /// full volume; Bit-perfect chosen plays anyway, with a warning to set the level on the DAC.
     #[test]
     fn the_volume_hand_over_is_never_louder() {
-        assert_eq!(volume_handover(PreferredMode::Auto, Some(100)), Ok(None));
-        assert_eq!(volume_handover(PreferredMode::BitPerfect, Some(100)), Ok(None));
-        let auto = volume_handover(PreferredMode::Auto, Some(40)).unwrap_err();
-        assert!(
-            auto.starts_with("Android's volume is at 40%, and bit-perfect plays at full level"),
-            "{auto}"
-        );
-        assert!(
-            volume_handover(PreferredMode::Auto, None).is_err(),
-            "unknown volume: shared"
-        );
-        assert!(volume_handover(PreferredMode::Unknown, Some(10)).is_err());
+        use PreferredMode::{Auto, BitPerfect, Unknown};
+        // At full volume nothing is lost: bit-perfect, Auto or chosen
+        assert_eq!(volume_handover(Auto, Some(100), false), Ok(None));
+        assert_eq!(volume_handover(BitPerfect, Some(100), false), Ok(None));
+        // Below full, Auto stays shared, whatever was agreed
+        for ok in [false, true] {
+            let auto = volume_handover(Auto, Some(40), ok).unwrap_err();
+            assert!(
+                auto.starts_with("Android's volume is at 40%, and bit-perfect plays at full level"),
+                "{auto}"
+            );
+            assert!(volume_handover(Auto, None, ok).is_err(), "unknown volume: shared");
+            assert!(volume_handover(Unknown, Some(10), ok).is_err());
+        }
+        // Bit-perfect chosen below full: only with the agreement to full level, and still warned
         assert_eq!(
-            volume_handover(PreferredMode::BitPerfect, Some(40)),
+            volume_handover(BitPerfect, Some(40), false),
+            Err("Bit-perfect plays at full level, and Android's volume (40%) would no longer apply: confirm Bit-perfect in Settings to use it".into())
+        );
+        assert!(volume_handover(BitPerfect, None, false).is_err());
+        assert_eq!(
+            volume_handover(BitPerfect, Some(40), true),
             Ok(Some(
-                "Android's volume (40%) does not apply in bit-perfect mode: set the level on the DAC or amplifier".into()
+                "Bit-perfect plays at full level: Android's volume (40%) does not apply. Set the level on the DAC or amplifier".into()
             ))
         );
     }
@@ -1008,7 +1170,13 @@ mod tests {
         );
         // Every pair the node can plan from these caps opens bit-perfect
         for d in [&odd, &grid, &dac(34, ka17_mixer())] {
-            let caps = live_caps(Some(d), DeviceSettings::default(), Some(100), &shared_caps());
+            let caps = live_caps(
+                Some(d),
+                DeviceSettings::default(),
+                false,
+                Some(100),
+                &shared_caps(),
+            );
             for src in [
                 AudioFormat::pcm(44_100, 16, 2),
                 AudioFormat::pcm(96_000, 24, 2),
@@ -1030,7 +1198,13 @@ mod tests {
             34,
             ka17_mixer().into_iter().filter(|e| e.rate <= 192_000).collect(),
         );
-        let caps = live_caps(Some(&k192), DeviceSettings::default(), Some(100), &shared_caps());
+        let caps = live_caps(
+            Some(&k192),
+            DeviceSettings::default(),
+            false,
+            Some(100),
+            &shared_caps(),
+        );
         for src in [AudioFormat::pcm(352_800, 24, 2), AudioFormat::pcm(384_000, 24, 2)] {
             let out = pm_audio::Plan::negotiate(src, &caps, &pm_audio::PipelineConfig::default())
                 .unwrap()
@@ -1149,10 +1323,8 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            open(OutputId::new("cpal", "phone"), &d, c, w, fmt)
-                .err()
-                .as_deref(),
-            Some("another app holds the DAC")
+            open(OutputId::new("cpal", "phone"), &d, c, w, fmt).err(),
+            Some(OpenError::Refused("another app holds the DAC".into()))
         );
         *player.refuse.lock().unwrap() = None;
 
@@ -1166,6 +1338,7 @@ mod tests {
         usb_dac::set_settings(DeviceSettings {
             mode: PreferredMode::Shared,
             dac_volume: true,
+            full_level_ok: false,
         });
         match plan(fmt) {
             Plan::Shared(Some((_, why))) => assert_eq!(why, "shared, as chosen in Settings"),
@@ -1188,10 +1361,8 @@ mod tests {
                 panic!()
             };
             assert_eq!(
-                open(OutputId::new("cpal", "phone"), &d, c, w, fmt)
-                    .err()
-                    .as_deref(),
-                Some(why)
+                open(OutputId::new("cpal", "phone"), &d, c, w, fmt).err(),
+                Some(OpenError::RouteLost(why.into()))
             );
         }
         assert_eq!(
@@ -1241,6 +1412,7 @@ mod tests {
         usb_dac::set_settings(DeviceSettings {
             mode: PreferredMode::BitPerfect,
             dac_volume: true,
+            full_level_ok: false,
         });
         assert!(sink.reopen_at_track());
         drop(sink);
@@ -1253,10 +1425,31 @@ mod tests {
             Plan::Shared(Some((_, why))) => assert!(why.starts_with("Android's volume is at 40%"), "{why}"),
             other => panic!("{other:?}"),
         }
+        // Bit-perfect chosen without the agreement to full level: shared, and why
         usb_dac::set_settings(DeviceSettings {
             mode: PreferredMode::BitPerfect,
-            dac_volume: true,
+            ..DeviceSettings::default()
         });
+        match plan(fmt) {
+            Plan::Shared(Some((_, why))) => assert!(why.contains("confirm Bit-perfect in Settings"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            usb_dac::current().unwrap().media_volume,
+            Some(40),
+            "the app sees Android's volume"
+        );
+        assert!(
+            usb_dac::current().unwrap().formats.is_empty(),
+            "nothing bit-perfect offered without it"
+        );
+        // ... and with it: bit-perfect, warned
+        usb_dac::set_settings(DeviceSettings {
+            mode: PreferredMode::BitPerfect,
+            full_level_ok: true,
+            ..DeviceSettings::default()
+        });
+        assert!(usb_dac::full_level_consent());
         let Plan::BitPerfect(d, c, w) = plan(fmt) else {
             panic!()
         };
@@ -1265,8 +1458,16 @@ mod tests {
         assert!(v.confirmed);
         assert_eq!(
             v.note.as_deref(),
-            Some("Android's volume (40%) does not apply in bit-perfect mode: set the level on the DAC or amplifier")
+            Some("Bit-perfect plays at full level: Android's volume (40%) does not apply. Set the level on the DAC or amplifier")
         );
+        // The agreement is for that DAC only, and goes with any other mode
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()).replace("FiiO KA17", "Other DAC"));
+        assert!(!usb_dac::full_level_consent(), "another DAC: asked again");
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+        usb_dac::set_settings(DeviceSettings::default());
+        assert!(!usb_dac::settings().full_level_ok);
         *player.volume.lock().unwrap() = Some(100);
         usb_dac::set_settings(DeviceSettings::default());
 
@@ -1299,6 +1500,7 @@ mod tests {
         let s = DeviceSettings {
             mode: PreferredMode::Shared,
             dac_volume: false,
+            full_level_ok: false,
         };
         assert!(usb_dac::set_settings(s));
         assert!(!usb_dac::set_settings(s), "the same again is no change");
@@ -1358,5 +1560,104 @@ mod tests {
             read.into_iter().collect(),
             "BitPerfect.kt writes {written:?}"
         );
+    }
+
+    /// A track Android plays anywhere but the DAC at open (it is being unplugged): the zone pauses
+    /// and nothing opens; a refusal on the same DAC plays shared through it.
+    #[test]
+    fn a_lost_route_pauses_and_a_refusal_plays_shared() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        *player.report.lock().unwrap() = OpenReport {
+            routed_id: Some(2),
+            routed_name: Some("Pixel 8 speaker".into()),
+            ..confirmed_report(bp(P24, 96_000))
+        };
+        match open_phone(OutputId::new("cpal", "phone"), fmt) {
+            PhoneOpen::Gone(why) => assert!(
+                why.starts_with("FiiO KA17 is not where Android plays now"),
+                "{why}"
+            ),
+            _ => panic!("must not fall back to the default route"),
+        }
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        *player.refuse.lock().unwrap() = Some("another app holds the DAC".into());
+        assert!(matches!(
+            open_phone(OutputId::new("cpal", "phone"), fmt),
+            PhoneOpen::Shared { any_rate: true }
+        ));
+        *player.refuse.lock().unwrap() = None;
+        assert!(matches!(
+            open_phone(OutputId::new("cpal", "phone"), fmt),
+            PhoneOpen::BitPerfect(_)
+        ));
+        usb_dac::set_dac(None);
+        assert!(matches!(
+            open_phone(OutputId::new("cpal", "phone"), fmt),
+            PhoneOpen::Shared { any_rate: false }
+        ));
+    }
+
+    /// Android's "becoming noisy" warning: the DAC is gone at once, before its removal arrives.
+    #[test]
+    fn a_noisy_warning_is_a_dac_gone() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        with_player();
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+        let g = usb_dac::gone_count_now();
+        // The warning comes with the DAC still listed (its removal follows): gone all the same
+        let noisy = ka17_report_with(&ka17_mixer()).replace(r#"{"v":1,"#, r#"{"v":1,"noisy":true,"#);
+        assert!(noisy.contains(r#""noisy":true"#));
+        assert!(usb_dac::apply_report(&noisy));
+        assert_eq!(
+            usb_dac::gone_count_now(),
+            g + 1,
+            "the shared stream goes silent at once"
+        );
+        assert_eq!(usb_dac::current(), None);
+        assert_eq!(usb_dac::gone_reason(), "FiiO KA17 was unplugged");
+    }
+
+    /// 96/24 and 192/24 reach the DAC unchanged when it lists them, even where the largest grid of
+    /// its formats is 16 bit: the device lists them, and the node plans each source with them.
+    #[test]
+    fn the_main_goal_96_24_and_192_24_stay_unchanged() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        // 16 bit at every rate, packed 24 only at 96 and 192: the largest grid is 16 bit, and a
+        // node planning from it alone would requantize 96/24 and 192/24 to 16
+        let mut mixer: Vec<MixerEntry> = [44_100, 48_000, 96_000, 192_000]
+            .iter()
+            .map(|r| bp(P16, *r))
+            .collect();
+        mixer.extend([bp(P24, 96_000), bp(P24, 192_000)]);
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&mixer));
+        let listed = usb_dac::current().unwrap().formats;
+        for src in [
+            AudioFormat::pcm(96_000, 24, 2),
+            AudioFormat::pcm(192_000, 24, 2),
+            AudioFormat::pcm(44_100, 16, 2),
+        ] {
+            assert!(
+                listed.contains(&pm_zones::DeviceFormat {
+                    rate_hz: src.rate_hz,
+                    bits: src.bits,
+                    channels: 2
+                }),
+                "{src} listed"
+            );
+            let caps = phone_caps_for(&shared_caps(), src);
+            let plan = pm_audio::Plan::negotiate(src, &caps, &pm_audio::PipelineConfig::default()).unwrap();
+            assert_eq!(plan.output_format(), src, "{src}: unchanged");
+            assert!(choose(&usb_dac::current_dac().unwrap(), src).is_ok());
+        }
+        usb_dac::set_dac(None);
     }
 }

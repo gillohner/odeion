@@ -459,7 +459,8 @@ impl Engine {
         }
         // The output takes other formats now (its USB DAC went away during the pause): the track
         // is planned again for it, from where the listener was
-        if self.sink.is_none() && !self.output.live_caps().accepts(&fmt) {
+        let src = self.current.as_ref().map(|c| c.source.format());
+        if self.sink.is_none() && src.is_some_and(|s| !self.output.live_caps_for(s).accepts(&fmt)) {
             if let Some((index, at)) = self
                 .current
                 .as_ref()
@@ -646,9 +647,11 @@ impl Engine {
 
     fn open(&self, item: &QueueItem) -> Result<Opened, SourceError> {
         let source = self.factory.open(item)?;
-        let proc = self
-            .factory
-            .plan(source.as_ref(), &self.output.live_caps(), &self.output.id())?;
+        let proc = self.factory.plan(
+            source.as_ref(),
+            &self.output.live_caps_for(source.format()),
+            &self.output.id(),
+        )?;
         Ok((source, proc))
     }
 
@@ -698,17 +701,17 @@ impl Engine {
         // The output's settings changed since its sink opened (a phone's DAC: bit-perfect or
         // shared), or it takes other formats now: this song opens afresh, planned for it now
         let stale = self.sink.as_ref().is_some_and(|s| s.reopen_at_track());
-        if self.incoming.is_none() && (stale || !self.output.live_caps().accepts(&proc.output_format())) {
-            match self
-                .factory
-                .plan(source.as_ref(), &self.output.live_caps(), &self.output.id())
-            {
+        let caps = self.output.live_caps_for(source.format());
+        if self.incoming.is_none() && (stale || !caps.accepts(&proc.output_format())) {
+            match self.factory.plan(source.as_ref(), &caps, &self.output.id()) {
                 Ok(p) => proc = p,
                 Err(e) => tracing::warn!(zone = %self.id, "planning again: {e}"),
             }
             if stale {
                 if let Some(mut s) = self.sink.take() {
-                    if let Err(e) = s.drain() {
+                    // A paused device never plays its buffer out: discarded, not waited for
+                    let r = if self.sink_paused { s.flush() } else { s.drain() };
+                    if let Err(e) = r {
                         if let Some(why) = e.gone_reason() {
                             self.pending_gone = Some(why);
                         }
@@ -981,6 +984,11 @@ impl Engine {
         }
         self.xfade_checked = Some(cur.item.id);
         if d < xf * 2 {
+            return false;
+        }
+        // The output's settings changed since its sink opened: the next song opens afresh at an
+        // ordinary boundary (a crossfade would carry it on the old sink)
+        if self.sink.as_ref().is_some_and(|s| s.reopen_at_track()) {
             return false;
         }
         let same_album = matches!((&cur.item.album, &self.prefetch), (Some(a), Some(p)) if p.item.album.as_ref() == Some(a));

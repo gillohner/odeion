@@ -48,6 +48,10 @@ pub struct Report {
     pub sdk: u32,
     #[serde(default)]
     pub devices: Vec<ReportDevice>,
+    /// Android's warning that audio is about to move off the device it plays on (a USB DAC
+    /// being unplugged), sent before the device's removal: the DAC counts as gone at once.
+    #[serde(default)]
+    pub noisy: bool,
 }
 
 /// One output `AudioDeviceInfo`.
@@ -358,6 +362,8 @@ fn describe_device(report: &Report, d: &ReportDevice) -> Option<OutputDevice> {
             }),
         format: None,
         settings: None,
+        formats: Vec::new(),
+        media_volume: None,
     })
 }
 
@@ -374,6 +380,8 @@ struct Phone {
     gone_why: String,
     /// Where the settings are kept (the app's data folder), once known.
     settings_file: Option<std::path::PathBuf>,
+    /// The DAC the listener's agreement to full level (`full_level_ok`) was given for.
+    consent_dac: Option<String>,
 }
 
 /// [`gone_count`] without the lock, for the audio callback.
@@ -452,6 +460,10 @@ fn view(p: &Phone) -> Option<OutputDevice> {
         vec![DeviceMode::Shared]
     };
     dev.settings = Some(p.settings);
+    // What bit-perfect would play now, and Android's volume (it plays at full level)
+    let (formats, media) = crate::bit_perfect::view_extras(d, p.settings, consent(p));
+    dev.formats = formats;
+    dev.media_volume = media;
     match p.last.as_ref().filter(|l| l.dac_id == d.id) {
         Some(l) => {
             dev.mode = l.mode;
@@ -469,6 +481,16 @@ fn view(p: &Phone) -> Option<OutputDevice> {
     Some(dev)
 }
 
+/// Whether the listener agreed to full level for the DAC attached now.
+fn consent(p: &Phone) -> bool {
+    p.settings.full_level_ok && p.dac.as_ref().map(|d| &d.device.name) == p.consent_dac.as_ref()
+}
+
+/// Whether the listener agreed to full level (Bit-perfect below full volume) for the DAC attached now.
+pub fn full_level_consent() -> bool {
+    with_phone(|p| consent(p))
+}
+
 /// The DAC itself, for the bit-perfect player.
 pub fn current_dac() -> Option<Dac> {
     with_phone(|p| p.dac.clone())
@@ -482,7 +504,20 @@ pub fn settings() -> DeviceSettings {
 /// Keep the listener's settings (and save them when the app said where). Returns whether they
 /// changed.
 pub fn set_settings(s: DeviceSettings) -> bool {
+    let mut s = s;
+    // The agreement to full level goes with Bit-perfect, for the DAC attached now
+    if s.mode != pm_zones::PreferredMode::BitPerfect {
+        s.full_level_ok = false;
+    }
     let (changed, file) = with_phone(|p| {
+        if s.full_level_ok {
+            match p.dac.as_ref() {
+                Some(d) => p.consent_dac = Some(d.device.name.clone()),
+                None => s.full_level_ok = false,
+            }
+        } else {
+            p.consent_dac = None;
+        }
         let changed = p.settings != s;
         p.settings = s;
         (changed, p.settings_file.clone())
@@ -504,7 +539,9 @@ pub fn keep_settings_in(path: std::path::PathBuf) {
         .ok()
         .and_then(|b| serde_json::from_slice::<DeviceSettings>(&b).ok());
     with_phone(|p| {
-        if let Some(s) = saved {
+        if let Some(mut s) = saved {
+            // An agreement to full level is for the DAC it was given with: asked again after a start
+            s.full_level_ok = false;
             p.settings = s;
         }
         p.settings_file = Some(path);
@@ -561,9 +598,11 @@ fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
         }
         if other {
             GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        if other {
             p.last = None;
+            // The next DAC's reason, when it goes, is its own
+            if dac.is_some() {
+                p.gone_why.clear();
+            }
         }
         p.dac = dac;
         view(p) != before
@@ -574,6 +613,8 @@ fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
 /// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
 pub fn apply_report(json: &str) -> bool {
     let (dac, why) = match parse_report(json) {
+        // Android is about to move audio off the DAC: gone now, before its removal arrives
+        Ok(r) if r.noisy => (None, None),
         Ok(r) => {
             let dac = dac(&r);
             // The DAC still attached, but media goes elsewhere (Bluetooth, the speaker)
@@ -846,6 +887,7 @@ mod tests {
             "channel_mask",
             "channels",
             "behavior",
+            "noisy",
         ];
         assert_eq!(
             written,

@@ -1119,7 +1119,13 @@ async fn a_device_gone_at_a_song_boundary_pauses_the_next_song() {
     r.rec.drain_gone.store(true, Ordering::SeqCst);
     r.gate.allow(3);
     let mut w = r.zone.watch();
-    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        w.wait_for(|s| s.transport == Transport::Paused),
+    )
+    .await
+    .expect("the zone pauses (it must not play b elsewhere)")
+    .unwrap();
     let st = r.zone.state();
     assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
     assert_eq!(
@@ -1175,4 +1181,28 @@ async fn a_settings_change_applies_at_the_next_song() {
         "b is not gapless: {k:?}"
     );
     assert!(k.contains(&"start:c:true".to_string()), "c is: {k:?}");
+}
+
+/// The output's settings changed before a crossfade (a phone's DAC switched mode): no crossfade
+/// carries the next song on the old sink; it opens afresh, so the change applies there.
+#[tokio::test]
+async fn a_settings_change_skips_the_crossfade_and_reopens() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000)]);
+    r.rec.reopen.store(true, Ordering::SeqCst);
+    r.gate.allow(1000);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    let mut want = frames(0, 1000);
+    want.extend(frames(0, 1000));
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        want,
+        "no mix: a whole, then b whole"
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2, "b on a fresh sink");
+    drop(drain_events(&mut r.events));
 }

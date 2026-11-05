@@ -28,6 +28,9 @@ pub mod usb_dac;
 // Bit-perfect playback to that DAC on Android 14+ (decisions and the sink; built on every host)
 pub mod bit_perfect;
 
+// The shared sink's waits and stream faults, apart from cpal (built and tested on every host)
+pub mod sink_wait;
+
 /// The tests that touch the phone's DAC (one process-wide value) run one at a time.
 #[cfg(test)]
 pub(crate) static PHONE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());

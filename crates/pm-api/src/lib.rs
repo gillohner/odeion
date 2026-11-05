@@ -1269,7 +1269,7 @@ async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
     )
 }
 
-/// `PUT /v1/outputs/{id}/device {mode?, dac_volume?}`: the listener's choices for the hardware
+/// `PUT /v1/outputs/{id}/device {mode?, full_level_ok?}`: the listener's choices for the hardware
 /// behind an output (a phone's USB DAC: `auto`, `bit_perfect` or `shared`, and whether the zone's
 /// volume is the DAC's). The output's app keeps them; the answer is the output as listed.
 async fn put_output_device(
@@ -1294,6 +1294,10 @@ async fn put_output_device(
     if let Some(v) = body.dac_volume {
         settings.dac_volume = v;
     }
+    // The listener's agreement that Bit-perfect plays at full level (asked when they choose it
+    // below Android's full volume); it goes with any other mode
+    settings.full_level_ok =
+        body.full_level_ok.unwrap_or(false) && settings.mode == pm_zones::PreferredMode::BitPerfect;
     out.configure_device(settings)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
@@ -1306,6 +1310,8 @@ struct DeviceSettingsPatch {
     mode: Option<pm_zones::PreferredMode>,
     #[serde(default)]
     dac_volume: Option<bool>,
+    #[serde(default)]
+    full_level_ok: Option<bool>,
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -20240,7 +20246,7 @@ exec sleep 300
         assert_eq!(st, StatusCode::OK, "{out}");
         assert_eq!(
             out["device"]["settings"],
-            serde_json::json!({"mode": "shared", "dac_volume": false})
+            serde_json::json!({"mode": "shared", "dac_volume": false, "full_level_ok": false})
         );
         let (st, _) = call(
             &app,

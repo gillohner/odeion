@@ -108,6 +108,54 @@ pub struct OutputDevice {
     /// The listener's choices for it (`PUT /v1/outputs/{id}/device`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<DeviceSettings>,
+    /// The exact formats it takes bit-perfect now, when it plays bit-perfect: the node plans each
+    /// source with these ([`caps_for_source`]), so a listed format reaches it unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formats: Vec<DeviceFormat>,
+    /// The phone's media volume, 0 to 100, when it matters (bit-perfect plays at full level).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_volume: Option<u8>,
+}
+
+/// One format a device takes bit-perfect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceFormat {
+    pub rate_hz: u32,
+    pub bits: u8,
+    pub channels: u8,
+}
+
+/// The caps to plan `src` with on an output whose device lists the exact formats it takes: the
+/// source's own format when listed (it reaches the device unchanged), else the closest listed one
+/// (the same rate before another; no fewer bits before fewer; the same rate family; the nearest
+/// rate). `caps` as they are when nothing is listed for the source's channels.
+pub fn caps_for_source(formats: &[DeviceFormat], src: AudioFormat, caps: &OutputCaps) -> OutputCaps {
+    if src.kind != pm_model::SampleKind::Pcm {
+        return caps.clone();
+    }
+    let family = |r: u32| r.is_multiple_of(44_100);
+    let best = formats
+        .iter()
+        .filter(|f| f.channels == src.channels)
+        .min_by_key(|f| {
+            (
+                f.rate_hz != src.rate_hz,
+                f.bits < src.bits,
+                family(f.rate_hz) != family(src.rate_hz),
+                f.rate_hz.abs_diff(src.rate_hz),
+                f.bits.abs_diff(src.bits),
+            )
+        });
+    match best {
+        Some(f) => OutputCaps {
+            pcm_rates: vec![f.rate_hz],
+            pcm_bits: vec![f.bits],
+            max_pcm_bits: f.bits,
+            max_channels: caps.max_channels.max(f.channels),
+            ..caps.clone()
+        },
+        None => caps.clone(),
+    }
 }
 
 /// The listener's choices for an [`OutputDevice`].
@@ -120,6 +168,10 @@ pub struct DeviceSettings {
     /// its own (in bit-perfect mode the level is the DAC's).
     #[serde(default = "yes")]
     pub dac_volume: bool,
+    /// The listener agreed that Bit-perfect plays at full level below Android's full volume (asked
+    /// when they chose it); for the DAC attached then only.
+    #[serde(default)]
+    pub full_level_ok: bool,
 }
 
 fn yes() -> bool {
@@ -131,6 +183,7 @@ impl Default for DeviceSettings {
         Self {
             mode: PreferredMode::Auto,
             dac_volume: true,
+            full_level_ok: false,
         }
     }
 }
@@ -459,6 +512,12 @@ pub trait Output: Send + Sync {
         self.caps().clone()
     }
 
+    /// What the output takes now for `src` in particular: [`Output::live_caps`], narrowed to the
+    /// closest exact format when the device lists them (see [`caps_for_source`]).
+    fn live_caps_for(&self, _src: AudioFormat) -> OutputCaps {
+        self.live_caps()
+    }
+
     /// Apply the listener's choices for the hardware behind the output (see [`DeviceSettings`]).
     async fn configure_device(&self, _settings: DeviceSettings) -> Result<(), SinkError> {
         Err(SinkError::Unavailable(
@@ -558,5 +617,69 @@ mod tests {
         let mut v = info_with(serde_json::Value::Null);
         v.as_object_mut().unwrap().remove("device");
         assert_eq!(serde_json::from_value::<OutputInfo>(v).unwrap().device, None);
+    }
+
+    /// A source the device lists plays as it is; another plays as the closest listed format.
+    #[test]
+    fn each_source_is_planned_with_the_closest_listed_format() {
+        let f = |rate_hz, bits| DeviceFormat {
+            rate_hz,
+            bits,
+            channels: 2,
+        };
+        let caps = OutputCaps::unlimited();
+        let pick = |formats: &[DeviceFormat], src: AudioFormat| {
+            let c = caps_for_source(formats, src, &caps);
+            (c.pcm_rates[0], c.pcm_bits[0])
+        };
+        // KA17-like: 16 bit at 44.1/48 only; 24 (in 32) and 32 up to 768 kHz
+        let mut ka17 = vec![f(44_100, 16), f(48_000, 16)];
+        for r in [
+            44_100, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000,
+        ] {
+            ka17.extend([f(r, 24), f(r, 32)]);
+        }
+        assert_eq!(
+            pick(&ka17, AudioFormat::pcm(96_000, 24, 2)),
+            (96_000, 24),
+            "96/24 unchanged"
+        );
+        assert_eq!(
+            pick(&ka17, AudioFormat::pcm(192_000, 24, 2)),
+            (192_000, 24),
+            "192/24 unchanged"
+        );
+        assert_eq!(pick(&ka17, AudioFormat::pcm(44_100, 16, 2)), (44_100, 16));
+        assert_eq!(
+            pick(&ka17, AudioFormat::pcm(96_000, 16, 2)),
+            (96_000, 24),
+            "padded, not resampled"
+        );
+        // 16 bit everywhere, 24 only at 96/192: 96/24 and 192/24 still unchanged
+        let mut mixed: Vec<DeviceFormat> = [44_100, 48_000, 96_000, 192_000]
+            .iter()
+            .map(|r| f(*r, 16))
+            .collect();
+        mixed.extend([f(96_000, 24), f(192_000, 24)]);
+        assert_eq!(pick(&mixed, AudioFormat::pcm(96_000, 24, 2)), (96_000, 24));
+        assert_eq!(pick(&mixed, AudioFormat::pcm(192_000, 24, 2)), (192_000, 24));
+        assert_eq!(
+            pick(&mixed, AudioFormat::pcm(44_100, 24, 2)),
+            (44_100, 16),
+            "same rate before more bits"
+        );
+        // A rate it doesn't list: the nearest of its family, no fewer bits
+        let k192: Vec<DeviceFormat> = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000]
+            .iter()
+            .map(|r| f(*r, 24))
+            .collect();
+        assert_eq!(pick(&k192, AudioFormat::pcm(352_800, 24, 2)), (176_400, 24));
+        assert_eq!(pick(&k192, AudioFormat::pcm(384_000, 24, 2)), (192_000, 24));
+        // Nothing for its channels, or nothing listed: the caps as they are
+        assert_eq!(
+            caps_for_source(&k192, AudioFormat::pcm(96_000, 24, 1), &caps),
+            caps
+        );
+        assert_eq!(caps_for_source(&[], AudioFormat::pcm(96_000, 24, 2), &caps), caps);
     }
 }

@@ -187,8 +187,10 @@ What it does:
 - **Volume, never louder:** Android applies no volume of its own in bit-perfect mode: the level is
   the DAC's (the KA17's buttons) or the amplifier's. So on Auto (the default) the app plays
   bit-perfect only while Android's media volume is at full, where nothing is lost; turned down, it
-  plays shared and says "Android's volume is at N%, and bit-perfect plays at full level". Preferred
-  mode Bit-perfect plays bit-perfect at any volume, with that warning: turn the DAC down first. The
+  plays shared and says "Android's volume is at N%, and bit-perfect plays at full level". Choosing
+  Preferred mode Bit-perfect below full volume asks first ("Bit-perfect plays at full level; Android's
+  volume (N%) no longer applies… Use bit-perfect?"); with OK it plays bit-perfect for that DAC, and
+  Settings and the Sound panel keep saying it plays at full level. The
   zone's software volume (Output and DSP) still works and the signal path then says it changes the
   samples.
 - **Below Android 14,** or when Android refuses, it plays shared as before (48 kHz on nearly every
@@ -221,10 +223,13 @@ What it does:
    (in another format) starts: it must pause too. Plug it in again: the DAC shows again; press Play:
    it carries on where it was, on the DAC (check its display). Report any sound from the speaker,
    however short.
-6. Settings › This phone › Preferred mode: Shared, then play the 96/24 file: the display shows 48 and
+6. With Android's volume at about half, Settings › This phone › Preferred mode: Bit-perfect. The app
+   must ask first; Cancel keeps Auto. Choose it again and press OK, turn the KA17 down, play: the
+   Sound panel says it plays at full level. Report whether it got louder than you expected.
+7. Settings › This phone › Preferred mode: Shared, then play the 96/24 file: the display shows 48 and
    the panel says "Shared · FiiO KA17 · shared, as chosen in Settings". Back to Auto.
-7. Close the app (swipe it away): a notification sound plays from the DAC again.
-8. If something is off, attach `adb logcat -s pubky-music` (USB debugging on): the lines
+8. Close the app (swipe it away): a notification sound plays from the DAC again.
+9. If something is off, attach `adb logcat -s pubky-music` (USB debugging on): the lines
    "USB audio devices changed", "bit-perfect player" and "no bit-perfect player" show what the app
    saw and what Android answered.
 ```

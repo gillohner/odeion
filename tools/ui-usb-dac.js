@@ -152,6 +152,18 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       const all = await page.evaluate(() => ({ pill: document.querySelector('#quality .qtext').textContent, head: (document.querySelector('#qpanel .path-head') || {}).textContent || '' }));
       check(all.pill === 'FLAC 24/96 → 24/96 · Bit-perfect → FiiO KA17 · bit-perfect' && /^Bit-perfect/.test(all.head.trim()), `${at}: confirmed: pill "${all.pill}", headline "${all.head.trim()}"`);
     }
+    // Bit-perfect at full level below Android's full volume (the listener agreed): the panel says so
+    await nodePlug(run, { ...BP, media_volume: 40, settings: { mode: 'bit_perfect', dac_volume: true, full_level_ok: true } });
+    {
+      const warn = await page.evaluate(() => (document.querySelector('#qpanel .qp-zone .warn-text') || {}).textContent || '');
+      check(warn === 'Bit-perfect plays at full level: Android’s volume (40%) does not apply. Set the level on the DAC or amplifier.', `${at}: the Sound panel shows the full-level warning ("${warn}")`);
+    }
+    // The node no longer knows the DAC (unplugged), the node's path unchanged: no bit-perfect claim
+    await nodePlug(run, null);
+    {
+      const all = await page.evaluate(() => ({ pill: document.querySelector('#quality .qtext').textContent, cls: document.querySelector('#quality').className, head: (document.querySelector('#qpanel .path-head') || {}).textContent || '', rows: [...document.querySelectorAll('#qpanel .path-row .pn')].map((e) => e.textContent) }));
+      check(!/bit.?perfect/i.test(all.pill + all.head) && !/q-bit_perfect/.test(all.cls) && all.rows.includes('system mixer'), `${at}: no DAC known: the system's mixer, never bit-perfect (pill "${all.pill}", headline "${all.head.trim()}", rows ${all.rows.join(', ')})`);
+    }
     await setZone(run, zone); await nodePlug(run, KA17);
     await page.keyboard.press('Escape'); await sleep(200);
 
@@ -206,6 +218,35 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     await page.selectOption('#dvmode', 'shared'); await sleep(400);
     const puts = state.hits.slice(h0).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => `${decodeURIComponent(h.v)} ${h.body}`);
     check(puts.length === 1 && puts[0] === `/outputs/${OUT}/device {"mode":"shared"}`, `${at}: each choice is a PUT /v1/outputs/{id}/device (${JSON.stringify(puts)})`);
+    // Bit-perfect below Android's full volume needs the listener's OK: Cancel keeps the mode
+    await nodePlug(run, { ...KA17, modes: ['shared', 'bit_perfect'], media_volume: 40, settings: { mode: 'auto', dac_volume: true, full_level_ok: false } });
+    await page.waitForSelector('#dvmode'); await sleep(200);
+    {
+      let asked = null;
+      page.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
+      const h1 = state.hits.length;
+      await page.selectOption('#dvmode', 'bit_perfect'); await sleep(400);
+      const sent = state.hits.slice(h1).filter((h) => h.m === 'PUT' && h.v.endsWith('/device'));
+      const value = await page.evaluate(() => document.querySelector('#dvmode').value);
+      check(asked === 'Bit-perfect plays at full level; Android’s volume (40%) no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?' && sent.length === 0 && value === 'auto', `${at}: below full volume, Bit-perfect asks first; Cancel sends nothing and keeps Auto (asked ${JSON.stringify(asked)}, sent ${sent.length}, now ${value})`);
+      page.once('dialog', (d) => d.accept());
+      const h2 = state.hits.length;
+      await page.selectOption('#dvmode', 'bit_perfect'); await sleep(400);
+      const ok = state.hits.slice(h2).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
+      check(ok.length === 1 && ok[0] === '{"mode":"bit_perfect","full_level_ok":true}', `${at}: OK sends Bit-perfect with the agreement (${JSON.stringify(ok)})`);
+    }
+    // At full volume nothing to agree to: no question
+    await nodePlug(run, { ...KA17, modes: ['shared', 'bit_perfect'], media_volume: 100, settings: { mode: 'auto', dac_volume: true, full_level_ok: false } });
+    await page.waitForSelector('#dvmode'); await sleep(200);
+    {
+      let asked = false; const onDialog = (d) => { asked = true; d.dismiss(); };
+      page.on('dialog', onDialog);
+      const h3 = state.hits.length;
+      await page.selectOption('#dvmode', 'bit_perfect'); await sleep(400);
+      page.off('dialog', onDialog);
+      const sent = state.hits.slice(h3).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
+      check(!asked && sent.length === 1 && sent[0] === '{"mode":"bit_perfect"}', `${at}: at full volume no question (${JSON.stringify(sent)})`);
+    }
     // An app without bit-perfect here (Android 13): Bit-perfect can't be picked
     await nodePlug(run, { ...KA17, modes: ['shared'], settings: { mode: 'auto', dac_volume: true }, note: 'Android 13: bit-perfect needs Android 14' });
     await page.waitForFunction(() => /Android 13/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});

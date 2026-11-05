@@ -165,6 +165,17 @@ impl Output for CpalOutput {
         self.caps.clone()
     }
 
+    /// On Android, a source the DAC lists plays as it is (96/24 stays 96/24).
+    fn live_caps_for(&self, src: AudioFormat) -> OutputCaps {
+        #[cfg(target_os = "android")]
+        return crate::bit_perfect::phone_caps_for(&self.caps, src);
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = src;
+            self.caps.clone()
+        }
+    }
+
     /// The phone's DAC settings (bit-perfect or shared, the DAC's volume), kept by the app.
     async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
         #[cfg(target_os = "android")]
@@ -184,27 +195,13 @@ impl Output for CpalOutput {
 
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         // A phone with a USB DAC: bit-perfect where Android allows it for this format; otherwise
-        // shared, and the device says why. The bit-perfect player failing to start is no error:
-        // Android's shared path plays it at its own rate then (Android converts, the device says so)
+        // shared through the DAC, and the device says why; the DAC gone or not where Android
+        // plays: the zone pauses, nothing opens (never the phone's speaker)
         #[cfg(target_os = "android")]
-        let any_rate = match crate::bit_perfect::plan(fmt) {
-            crate::bit_perfect::Plan::BitPerfect(dac, choice, warning) => {
-                match crate::bit_perfect::open(self.id(), &dac, choice, warning, fmt) {
-                    Ok(s) => return Ok(Box::new(s)),
-                    Err(why) => {
-                        tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
-                        crate::bit_perfect::record_shared(&dac, fmt, why);
-                        true
-                    }
-                }
-            }
-            // Planned for the DAC's caps but played shared (a mono track, Settings changed since):
-            // Android's mixer takes the track's rate, never a stopped zone
-            crate::bit_perfect::Plan::Shared(Some((dac, why))) => {
-                crate::bit_perfect::record_shared(&dac, fmt, why);
-                true
-            }
-            crate::bit_perfect::Plan::Shared(None) => false,
+        let any_rate = match crate::bit_perfect::open_phone(self.id(), fmt) {
+            crate::bit_perfect::PhoneOpen::BitPerfect(s) => return Ok(Box::new(s)),
+            crate::bit_perfect::PhoneOpen::Gone(why) => return Err(SinkError::Gone(self.id(), why)),
+            crate::bit_perfect::PhoneOpen::Shared { any_rate } => any_rate,
         };
         #[cfg(not(target_os = "android"))]
         let any_rate = false;
@@ -296,7 +293,11 @@ impl CpalSink {
                 let stream = device.build_output_stream(
                     config,
                     move |out: &mut [f32], _| {
-                        if gone_at.is_some_and(|g| crate::usb_dac::gone_count_now() != g) {
+                        // The DAC went (or the stream was moved off it): silence at once, never
+                        // the phone's speaker
+                        if gone_at.is_some_and(|g| {
+                            crate::usb_dac::gone_count_now() != g || s3.dead.load(Ordering::Relaxed)
+                        }) {
                             out.fill(0.0);
                             return;
                         }
@@ -317,9 +318,23 @@ impl CpalSink {
                     },
                     {
                         let s4 = s2.clone();
-                        move |e| {
+                        let with_dac = gone_at.is_some();
+                        move |e: cpal::Error| {
+                            use crate::sink_wait::{ends_stream, StreamFault};
+                            let fault = match e.kind() {
+                                cpal::ErrorKind::Xrun => StreamFault::Xrun,
+                                cpal::ErrorKind::DeviceChanged => StreamFault::Rerouted,
+                                cpal::ErrorKind::DeviceNotAvailable | cpal::ErrorKind::HostUnavailable => {
+                                    StreamFault::DeviceGone
+                                }
+                                cpal::ErrorKind::StreamInvalidated => StreamFault::Invalidated,
+                                _ => StreamFault::Other,
+                            };
                             tracing::warn!("cpal stream error: {e}");
-                            s4.dead.store(true, Ordering::SeqCst);
+                            // An underrun is a glitch; a disconnect (or a move off the DAC) ends it
+                            if ends_stream(fault, with_dac) {
+                                s4.dead.store(true, Ordering::SeqCst);
+                            }
                         }
                     },
                     None,
@@ -383,16 +398,11 @@ impl CpalSink {
     /// Wait until the queue has room for `frames` more; never past a DAC that went away (its
     /// stream stops taking audio, and the wait would never end).
     fn wait_for_room(&self, frames: u64) -> Result<(), SinkError> {
-        while self.queued_frames() + frames > self.capacity_frames * 2 {
-            if self.shared.stop.load(Ordering::Relaxed) {
-                return Ok(());
-            }
-            if let Some(e) = self.gone() {
-                return Err(e);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        Ok(())
+        crate::sink_wait::wait_for_room(
+            || self.queued_frames() + frames <= self.capacity_frames * 2,
+            || self.shared.stop.load(Ordering::Relaxed),
+            || self.gone(),
+        )
     }
 }
 
@@ -448,13 +458,13 @@ impl AudioSink for CpalSink {
     }
 
     fn drain(&mut self) -> Result<(), SinkError> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.queued_frames() > 0 && std::time::Instant::now() < deadline {
-            if let Some(e) = self.gone() {
-                self.flush()?;
-                return Err(e);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        if let Err(e) = crate::sink_wait::wait_drained(
+            || self.queued_frames() == 0,
+            || self.gone(),
+            std::time::Duration::from_secs(5),
+        ) {
+            self.flush()?;
+            return Err(e);
         }
         // Let the device play out what the OS still buffers.
         std::thread::sleep(std::time::Duration::from_millis(50));
