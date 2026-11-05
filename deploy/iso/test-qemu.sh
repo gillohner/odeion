@@ -59,8 +59,13 @@ node_up() {
 # The homeserver: TLS bytes back on :6287 (Pubky TLS uses raw public keys, so the handshake itself
 # may end in an alert; through QEMU's port forward nothing comes back when nothing listens)
 tls_up() {
-  echo | timeout 10 openssl s_client -connect 127.0.0.1:16287 2>&1 | grep -q 'SSL handshake has read [1-9]'
+  local out
+  out=$(echo | timeout 10 openssl s_client -connect 127.0.0.1:16287 2>&1 || true)
+  echo "$out" > "$LOGS/tls-probe-$MODE.log"
+  echo "$out" | grep -q 'SSL handshake has read [1-9]'
 }
+# A listener at all behind the forward (independent of the runner's OpenSSL)
+port_up() { python3 "$(dirname "$0")/port-open.py" 127.0.0.1 16287; }
 
 deadline=$(($(date +%s) + UP_MIN * 60))
 node=no hs=no node_at=0
@@ -80,6 +85,8 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   # The node starts only once the homeserver is healthy: 5 min after it, the homeserver should answer
   if [ "$MODE" = bundle ] && [ $node = yes ] && [ $hs = no ] && [ $(($(date +%s) - node_at)) -gt 300 ]; then
     echo "::error::the node is up but :6287 gives no TLS from outside"
+    echo "== the runner's last TLS probe ($(openssl version))"; cat "$LOGS/tls-probe-$MODE.log"
+    if port_up; then echo "== but something listens on :6287 behind the forward"; else echo "== and nothing holds a connection on :6287"; fi
     diagnose
     exit 1
   fi
