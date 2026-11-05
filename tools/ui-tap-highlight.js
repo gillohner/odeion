@@ -3,9 +3,9 @@
 // fixture origin (tools/ui-fixture.js), the album page with a song playing, at 390 px with touch and at
 // 1280 px with a mouse:
 //   * the page paints no tap highlight (-webkit-tap-highlight-color transparent);
-//   * the round controls (play, previous, next, the heart, ⋯, the chevron, a song row's play, the
-//     account button) keep their 50 %/999 px radius while focused from the keyboard (the global
-//     :focus-visible rule used to set a 6 px radius), and the ring has no square radius;
+//   * the round controls (play, previous, next, a song row's button, the account button) keep their
+//     50 %/999 px radius while focused from the keyboard (a guard: the global :focus-visible rule set a
+//     6 px radius, which these buttons' own rule outranked by order but others may not);
 //   * on a touch screen a tap leaves no hover background behind on an icon button.
 //   node tools/ui-tap-highlight.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -51,8 +51,8 @@ const open = async (browser, w, touch) => {
     await fx.go(page, '/album/lib-7'); await page.waitForSelector('#isongs .srow'); await sleep(300);
     const at = `${w}${touch ? ' touch' : ''}`;
     const phone = w < 600;
-    const tap = await page.evaluate(() => getComputedStyle(document.documentElement).webkitTapHighlightColor);
-    check(/rgba\(0, 0, 0, 0\)|transparent/.test(tap), `${at}: no painted tap highlight (${tap})`);
+    const tap = await page.evaluate(() => [document.documentElement, document.querySelector('#toggle')].map((el) => getComputedStyle(el).webkitTapHighlightColor));
+    check(tap.every((t) => /rgba\(0, 0, 0, 0\)|transparent/.test(t)), `${at}: no painted tap highlight on the page or a button (${tap.join(', ')})`);
     if (phone) {
       // The mini player's play/pause first (it hides once Now playing opens), then Now playing
       const mini = await page.$eval('#toggle', (b) => ({ shown: b.getClientRects().length > 0, radius: getComputedStyle(b).borderRadius }));
@@ -61,17 +61,13 @@ const open = async (browser, w, touch) => {
     }
     // Focus from the keyboard: the control's own radius stays, and the ring's radius is not a square's
     for (const [sel, name] of ROUND(phone)) {
-      const r = await page.evaluate((sel) => {
-        const el = [...document.querySelectorAll(sel)].find((e) => e.getClientRects().length); if (!el) return null;
-        const before = getComputedStyle(el).borderRadius;
-        if (!/^(50%|999px|9999px)/.test(before)) return { skip: before };
-        el.focus(); try { el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab' })); } catch { /* */ }
-        const cs = getComputedStyle(el);
-        return { before, after: cs.borderRadius, outline: cs.outlineStyle, focused: document.activeElement === el, fv: el.matches(':focus-visible') };
-      }, sel);
-      if (!r) { check(false, `${at}: ${name} is on the page (${sel})`); continue; }
-      if (r.skip) { console.log(`skip ${at}: ${name} isn't round here (${r.skip})`); continue; }
-      check(r.focused && r.after === r.before, `${at}: ${name} keeps its radius when focused (${r.before} → ${r.after}${r.fv ? ', focus-visible' : ''})`);
+      // Focus from the keyboard for real: land on the control, step back and forward with Tab
+      const found = await page.evaluate((sel) => { const el = [...document.querySelectorAll(sel)].find((e) => e.getClientRects().length); if (!el) return null; el.dataset.tapProbe = '1'; return getComputedStyle(el).borderRadius; }, sel);
+      if (found == null) { check(false, `${at}: ${name} is on the page (${sel})`); continue; }
+      if (!/^(50%|999px|9999px)/.test(found)) { console.log(`skip ${at}: ${name} isn't round here (${found})`); await page.evaluate(() => { delete document.querySelector('[data-tap-probe]').dataset.tapProbe; }); continue; }
+      await page.focus('[data-tap-probe]'); await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab'); await sleep(30);
+      const r = await page.evaluate((before) => { const el = document.querySelector('[data-tap-probe]'); const cs = getComputedStyle(el); const r = { before, after: cs.borderRadius, outline: cs.outlineStyle, focused: document.activeElement === el, fv: el.matches(':focus-visible') }; delete el.dataset.tapProbe; return r; }, found);
+      check(r.focused && r.fv && r.outline !== 'none' && r.after === r.before, `${at}: ${name} keeps its radius with a keyboard focus ring (${r.before} → ${r.after}${r.focused ? '' : ', focus went elsewhere'}${r.fv ? '' : ', not focus-visible'})`);
     }
     // Keyboard focus on the play button really draws the ring (Tab from the previous button)
     const [from, to] = TAB_FROM(phone);
