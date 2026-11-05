@@ -3,7 +3,8 @@
 // assets on the fixture origin (tools/ui-fixture.js), the page's extras listing a song, an album, an
 // artist and a podcast tagged alike, between a coin, a paper and a place:
 //   * only the music shows, in order (by the item's own kind, not its tags);
-//   * each tile opens its own item (the song's page for a track, the podcast's site), ▶ plays its own;
+//   * each tile opens its own item (the song's page for a track, a podcast's or playlist's site), and
+//     ▶ on each plays its own;
 //   * the page's own "In your library" tiles still open theirs;
 // on an album, an artist and a song page, at 390 (phone) and 1280 px.
 //   node tools/ui-similar-tiles.js [repo] [shots]
@@ -26,10 +27,14 @@ const related = [
   { kind: 'place', title: '47.37, 8.54', uri: 'geo:47.37,8.54', page: 'geo:47.37,8.54' },
   { kind: 'artist', title: 'Tagged Artist', uri: `${MB}/artist/${U.artist}`, page: `${MB}/artist/${U.artist}` },
   { kind: 'podcast', title: 'Tagged Podcast', uri: 'https://example.org/podcast', page: 'https://example.org/podcast' },
+  { kind: 'other', title: 'A game', uri: 'https://example.org/game', page: 'https://example.org/game' },
+  { kind: 'playlist', title: 'Tagged Playlist', uri: 'https://example.org/playlist/9', page: 'https://example.org/playlist/9' },
 ];
-const SHOWN = ['Tagged Song', 'Tagged Album', 'Tagged Artist', 'Tagged Podcast'];
-// Where each shown tile goes: an item path, or the site it opens
-const WANT = [`/song/mb-${U.song}`, `/album/mb-${U.album}`, `/artist/mb-${U.artist}`, 'web:https://example.org/podcast'];
+const music = related.filter((it) => ['track', 'album', 'artist', 'podcast', 'playlist'].includes(it.kind));
+const SHOWN = music.map((it) => it.title);
+// Where each shown tile goes: an item path, or the site it opens (the node has no item page for a
+// podcast or a playlist)
+const WANT = [`/song/mb-${U.song}`, `/album/mb-${U.album}`, `/artist/mb-${U.artist}`, 'web:https://example.org/podcast', 'web:https://example.org/playlist/9'];
 const mine = [{ id: 'lib-9', kind: 'album', title: 'Library Neighbour', subtitle: '2001', image: null }];
 const page = (kind) => ({ kind, id: 'lib-7', uri: null, target: kind === 'artist' ? { artist_id: 11 } : kind === 'song' ? { track_id: 101 } : { album_id: 7 }, title: 'Journey', artist: { name: 'Sefa', id: 'lib-11' }, album: null, year: 2020, image: null, source: 'library', source_id: '7', plays_from: { service: 'library', label: 'Your library' }, connect: [], reading: false, pending: false,
   songs: [{ no: 1, title: 'Opening Song', artist: 'Sefa', artist_id: 'lib-11', duration_ms: 200000, uri: null, track_id: 101, id: 'lib-101', page: 'lib-101' }], total_ms: 200000, albums: [], versions: [], also_on: [], about: [], open_on: [], related: [], concerts: [], about_pending: false, section: 'library' });
@@ -51,6 +56,9 @@ const where = (p) => p.evaluate(() => (window.__opened.length ? `web:${window.__
 
 (async () => {
   const browser = await chromium.launch();
+  // Page errors from every load, not only the last
+  let errors = [];
+  const done = async (run) => { errors.push(...run.state.errors); await run.context.close(); };
   for (const w of [390, 1280]) {
     for (const kind of ['album', 'artist', 'song']) {
       const at = `${kind} page at ${w}`;
@@ -61,27 +69,30 @@ const where = (p) => p.evaluate(() => (window.__opened.length ? `web:${window.__
       await run.page.screenshot({ path: path.join(SHOTS, `${kind}-${w}.png`), fullPage: false });
       // Each tile opens its own item
       for (let k = 0; k < SHOWN.length; k++) {
-        if (k) { await run.context.close(); run = await open(browser, w, kind); }
+        if (k) { await done(run); run = await open(browser, w, kind); }
         await run.page.locator(`#irelated [data-tile="${k}"]`).click({ position: { x: 10, y: 10 } }); await sleep(500);
         const got = await where(run.page);
         check(got === WANT[k], `${at}: "${SHOWN[k]}" opens ${WANT[k]} (${got})`);
       }
-      // ▶ plays its own item (asks the node how to play that one)
-      await run.context.close(); run = await open(browser, w, kind);
-      const n0 = run.state.hits.length;
-      await run.page.locator('#irelated [data-tileplay="1"]').click({ force: true }); await sleep(600);
-      const asked = run.state.hits.slice(n0).filter((h) => h.v === '/discover/play').map((h) => new URLSearchParams(h.q).get('uri'));
-      check(asked.length === 1 && asked[0] === related[3].page, `${at}: ▶ on "${SHOWN[1]}" plays that album (${asked.join(', ') || 'nothing asked'})`);
-      check(await run.page.evaluate(() => location.pathname) === `/${kind}/lib-7`, `${at}: ▶ stays on the page`);
+      // ▶ on each plays its own item (asks the node how to play that one) and stays on the page
+      for (let k = 0; k < SHOWN.length; k++) {
+        await done(run); run = await open(browser, w, kind);
+        const n0 = run.state.hits.length;
+        await run.page.locator(`#irelated [data-tileplay="${k}"]`).click({ force: true }); await sleep(600);
+        const asked = run.state.hits.slice(n0).filter((h) => h.v === '/discover/play').map((h) => new URLSearchParams(h.q).get('uri'));
+        const still = await run.page.evaluate(() => location.pathname) === `/${kind}/lib-7` && !(await run.page.evaluate(() => window.__opened.length));
+        check(asked.length === 1 && asked[0] === music[k].page && still, `${at}: ▶ on "${SHOWN[k]}" plays it, staying on the page (${asked.join(', ') || 'nothing asked'})`);
+      }
       // The page's own library tiles still open theirs (a song page lists songs there instead)
       if (kind !== 'song') {
-        await run.context.close(); run = await open(browser, w, kind);
+        await done(run); run = await open(browser, w, kind);
         await run.page.locator('#isimlib [data-tile="0"]').click({ position: { x: 10, y: 10 } }); await sleep(500);
         const got = await where(run.page);
         check(got === `/${kind}/lib-9`, `${at}: "In your library" still opens its own tile (${got})`);
       }
-      check(run.state.errors.length === 0, `${at}: no page errors${run.state.errors.length ? ': ' + run.state.errors.join(' | ') : ''}`);
-      await run.context.close();
+      await done(run);
+      check(errors.length === 0, `${at}: no page errors in any of its loads${errors.length ? ': ' + errors.join(' | ') : ''}`);
+      errors = [];
     }
   }
   await browser.close();

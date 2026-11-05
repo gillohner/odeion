@@ -4452,9 +4452,10 @@
       + (events.length ? `<div class="list">${events.slice(0, full ? 60 : 6).map((it, k) => `<div class="list-row clickable" data-hopen="${k}"><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.description, it.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div>` : '');
   };
   // Tiles of discovered items (an item page's "Tagged alike on Pubky"), bound to the list they were
-  // drawn from: a tile opens the item's page (a song's for a track; a podcast its site), ▶ plays it
+  // drawn from: a tile opens the item's page (a song's for a track), a podcast or a playlist its site
+  // (the node has item pages for songs, albums and artists only), ▶ plays it
   const SIMILAR_KINDS = ['track', 'album', 'artist', 'podcast', 'playlist'];
-  const openDiscovered = (it) => { if (it.kind === 'podcast') return openWeb(it.page || it.uri); setView('item', { kind: homeKind(it), id: idOf(it.page || it.uri) }); };
+  const openDiscovered = (it) => { if (it.kind === 'podcast' || it.kind === 'playlist') return openWeb(it.page || it.uri); setView('item', { kind: homeKind(it), id: idOf(it.page || it.uri) }); };
   const bindDiscoverTiles = (box, items) => {
     if (!box) return;
     $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; const it = items[Number(b.dataset.tile)]; if (it) openDiscovered(it); });
