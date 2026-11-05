@@ -4,6 +4,16 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-05
+
+- **An installer for a whole Odeion box** (owner's ask): `odeion-<version>-amd64.iso`, with its `.sha256`, on each release (and `odeion-edge-amd64.iso` on edge). Put it on a USB stick, start a spare PC from it, and answer a few questions:
+  - **What to run:** Odeion with its own homeserver (the default) or Odeion only.
+  - The disk to erase, the hostname (`odeion`), Wi-Fi only without a cable, and a console password.
+  - Then open http://odeion.local:7788 for the usual web setup.
+  - The box gets Debian 13 with security updates by themselves, a nightly backup (with the homeserver), a firewall that opens only Odeion's ports to the outside (speakers on the home network get what they need), and a watchdog. No SSH.
+  - When the homeserver is published through a tunnel, the box reaches it directly.
+  - Every change to the installer is installed in a virtual machine in CI, both choices. Guide: [Install an Odeion box from a USB stick](guides/install-iso.md).
+
 ### 2026-11-04
 
 - **Every song shows once, and songs whose files are gone leave the lists** (owner's report, iPad: an album listed each of its 16 songs twice and play-all played only half). The second copy was an old homeserver copy whose file had been removed.
