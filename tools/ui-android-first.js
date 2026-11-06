@@ -41,7 +41,8 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
 const measure = (page) => page.evaluate(() => {
   const vw = document.documentElement.clientWidth; const out = [];
   const name = (e) => (e.id ? '#' + e.id : e.tagName.toLowerCase() + (typeof e.className === 'string' && e.className.trim() ? '.' + e.className.trim().split(/\s+/).join('.') : ''));
-  const clippedBy = (e) => { for (let a = e.parentElement; a && a !== document.body; a = a.parentElement) { const ox = getComputedStyle(a).overflowX; if (ox !== 'visible') { const b = a.getBoundingClientRect(); if (b.left >= -0.5 && b.right <= vw + 0.5) return true; } } return false; };
+  // (the page's own scrollers, #main and Now playing, don't count: content wider than them is the bug)
+  const clippedBy = (e) => { for (let a = e.parentElement; a && a !== document.body; a = a.parentElement) { if (a.id === 'main' || a.classList.contains('overlay')) continue; const ox = getComputedStyle(a).overflowX; if (ox !== 'visible') { const b = a.getBoundingClientRect(); if (b.left >= -0.5 && b.right <= vw + 0.5) return true; } } return false; };
   for (const e of document.querySelectorAll('body *')) {
     if (e.closest('svg defs, svg symbol') || !e.getClientRects().length) continue;
     const b = e.getBoundingClientRect(); if (b.width === 0 || b.height === 0) continue;
@@ -51,7 +52,8 @@ const measure = (page) => page.evaluate(() => {
       out.push(`${name(e)} ${Math.round(b.left)}..${Math.round(b.right)}`);
     }
   }
-  return { vw, iw: innerWidth, sw: document.documentElement.scrollWidth, out };
+  const sideways = [...document.querySelectorAll('#main, .overlay:not([hidden])')].filter((x) => x.scrollWidth > x.clientWidth + 1).map((x) => `${name(x)} scrolls sideways ${x.scrollWidth}/${x.clientWidth}`);
+  return { vw, iw: innerWidth, sw: document.documentElement.scrollWidth, out: [...sideways, ...out] };
 });
 const fits = async (page, at) => {
   await sleep(350);
@@ -128,12 +130,16 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
       const never = new Promise(() => {});
       const answers = { crash_report: null, saved: { node_url: 'http://192.168.1.124:7788' }, has_downloads: false };
       window.__TAURI__ = { core: { invoke: (cmd) => (cmd === 'open_saved' ? never : Promise.resolve(answers[cmd] ?? null)) }, event: { listen: () => Promise.resolve(() => {}) } };
+      // Where the page is in the first frame that shows it (it must never draw at the top first)
+      const first = () => { const m = document.querySelector('main'); if (m && getComputedStyle(m).visibility === 'visible') { const b = m.getBoundingClientRect(); window.__first = { mid: Math.round(b.top + b.height / 2), vh: innerHeight }; return; } requestAnimationFrame(first); };
+      requestAnimationFrame(first);
     });
     const page = await context.newPage(); const errs = []; page.on('pageerror', (e) => errs.push(e.message));
     await page.goto('file://' + path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-desktop/ui/index.html'));
     await page.waitForSelector('#saved:not([hidden])'); await sleep(300);
     const at = async () => page.evaluate(() => { const m = document.querySelector('main').getBoundingClientRect(); const vis = getComputedStyle(document.querySelector('main')).visibility; const q = (id) => !document.getElementById(id).hidden; return { mid: Math.round(m.top + m.height / 2), vh: innerHeight, vis, spin: q('saved-spin'), retry: q('retry'), other: q('other'), msg: document.getElementById('saved-msg').textContent }; });
-    const a = await at();
+    const a = await at(); const f = await page.evaluate(() => window.__first);
+    check(f && Math.abs(f.mid - f.vh / 2) <= 60, `${w}: the connecting page's first visible frame is centred (${f ? `${f.mid} of ${f.vh}` : 'never shown'})`);
     check(a.vis === 'visible' && Math.abs(a.mid - a.vh / 2) <= 24 && a.spin && !a.retry, `${w}: the connecting page is centred and working (${a.mid} of ${a.vh}, "${a.msg}")`);
     await sleep(5200);
     const b = await at();

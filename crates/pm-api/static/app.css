@@ -311,10 +311,11 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 .lyric-lines { max-height: 320px; overflow-y: auto; padding-right: 8px; scrollbar-width: thin; }
 .lyric-line { margin: 0 0 8px; color: var(--muted); font-size: 15px; line-height: 1.45; transition: color .2s, transform .2s; transform-origin: left center; }
 .lyric-line.on { color: var(--fg); font-weight: 600; transform: scale(1.03); }
+/* Toasts above the phone sheets (z-index 60): a change made in a sheet says how it went */
 .toast {
   position: fixed; left: 50%; bottom: calc(var(--player) + 18px); transform: translate(-50%, 8px);
   background: var(--surface-3); color: var(--fg); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
-  padding: 10px 14px; border-radius: 10px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; z-index: 40;
+  padding: 10px 14px; border-radius: 10px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; z-index: 65;
   transition: opacity 0.2s var(--ease), transform 0.2s var(--ease); max-width: min(90vw, 520px);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }

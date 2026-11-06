@@ -141,13 +141,14 @@
     show('saved-spin');
     clearErr();
     $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
-    const slow = setTimeout(() => {
-      if (mine !== attempt) return;
-      $('saved-msg').textContent = 'Your node at ' + nodeUrl + ' hasn’t answered yet. Still trying…';
-      show('retry');
-      show('other');
-    }, SLOW_MS);
     for (let i = 0; ; i++) {
+      // Each attempt that hangs says so after SLOW_MS (a node that stops answering mid-retry too)
+      const slow = setTimeout(() => {
+        if (mine !== attempt) return;
+        $('saved-msg').textContent = 'Your node at ' + nodeUrl + ' hasn’t answered yet. Still trying…';
+        show('retry');
+        show('other');
+      }, SLOW_MS);
       try {
         await invoke('open_saved');
         clearTimeout(slow);
