@@ -69,16 +69,36 @@ pub struct RendererEvents {
 /// SSDP M-SEARCH for media renderers; collects unique LOCATIONs within
 /// `timeout`, then fetches and parses each description.
 pub fn discover(timeout: Duration) -> Result<Vec<Renderer>, UpnpError> {
+    discover_except(timeout, |_| false)
+}
+
+/// [`discover`], without fetching the descriptions `skip` says are known already (a renderer
+/// that has its output: a second pass only describes what is new).
+pub fn discover_except(timeout: Duration, skip: impl Fn(&str) -> bool) -> Result<Vec<Renderer>, UpnpError> {
     let locations = ssdp_search(timeout)?;
     let mut out = Vec::new();
     for loc in locations {
+        if skip(&loc) {
+            continue;
+        }
         match describe(&loc) {
             Ok(Some(r)) => out.push(r),
-            Ok(None) => {}
-            Err(e) => tracing::debug!(%loc, "skipping renderer: {e}"),
+            Ok(None) => tracing::debug!(%loc, "not a renderer"),
+            // (said at info: a renderer that answered but couldn't be described gets no zone)
+            Err(e) => tracing::info!(%loc, "UPnP renderer answered but its description failed: {e}"),
         }
     }
     Ok(out)
+}
+
+/// When, from its start, a search of `timeout` asks again: a datagram can be lost, and a device
+/// busy at the first one (a TV, a Linn waking its UPnP side) may answer a later one. Each comes
+/// early enough for an answer within MX.
+pub fn search_resends(timeout: Duration) -> Vec<Duration> {
+    [Duration::from_millis(1000), Duration::from_millis(2000)]
+        .into_iter()
+        .filter(|d| *d + Duration::from_millis(500) <= timeout)
+        .collect()
 }
 
 /// One SSDP answer, for diagnostics: who answered, what it claims to be,
@@ -421,10 +441,18 @@ pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
         "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {mx}\r\nST: {MEDIA_RENDERER}\r\n\r\n"
     );
     let sockets = multicast_sockets(&msg)?;
-    let deadline = Instant::now() + timeout;
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut resends: Vec<Instant> = search_resends(timeout).into_iter().map(|d| start + d).collect();
     let mut found: Vec<String> = Vec::new();
     let mut buf = [0u8; 4096];
     while Instant::now() < deadline {
+        if resends.first().is_some_and(|t| Instant::now() >= *t) {
+            resends.remove(0);
+            for socket in &sockets {
+                let _ = socket.send_to(msg.as_bytes(), SSDP_GROUP);
+            }
+        }
         for socket in &sockets {
             match socket.recv_from(&mut buf) {
                 Ok((n, _)) => {
@@ -469,8 +497,10 @@ pub fn local_ipv4_addrs() -> Vec<Ipv4Addr> {
 /// One socket per interface, each sending `msg` to the SSDP group through
 /// that interface (the kernel otherwise uses the default route only). Falls
 /// back to a single unbound socket when the interfaces cannot be listed.
+const SSDP_GROUP: &str = "239.255.255.250:1900";
+
 fn multicast_sockets(msg: &str) -> Result<Vec<UdpSocket>, UpnpError> {
-    let dest: SocketAddr = "239.255.255.250:1900".parse().expect("ssdp address");
+    let dest: SocketAddr = SSDP_GROUP.parse().expect("ssdp address");
     let mut sockets = Vec::new();
     for ip in local_ipv4_addrs() {
         let Ok(socket) = UdpSocket::bind((ip, 0)) else {
@@ -661,6 +691,21 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_search_asks_again_within_its_window() {
+        use std::time::Duration;
+        let ms = |v: &[Duration]| v.iter().map(|d| d.as_millis()).collect::<Vec<_>>();
+        assert_eq!(
+            ms(&super::search_resends(Duration::from_secs(3))),
+            vec![1000, 2000]
+        );
+        assert_eq!(
+            ms(&super::search_resends(Duration::from_millis(1500))),
+            vec![1000]
+        );
+        assert!(super::search_resends(Duration::from_secs(1)).is_empty());
+    }
+
     use super::*;
 
     const DESC: &str = r#"<?xml version="1.0"?>

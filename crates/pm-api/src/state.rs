@@ -124,6 +124,8 @@ pub struct NodeState {
     pub bluos_players: Mutex<HashMap<OutputId, Arc<pm_out_bluos::BluosOutput>>>,
     /// The zones as UPnP/DLNA MediaRenderers, once `start_renderer` ran.
     pub renderer: std::sync::OnceLock<Arc<pm_renderer::Renderer>>,
+    /// The API port those renderers' descriptions are served on.
+    renderer_port: std::sync::OnceLock<u16>,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -280,6 +282,9 @@ fn load_sources_off(lib: &Library) -> std::collections::HashSet<String> {
 pub const MAX_FOUND_OUTPUTS: usize = 256;
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
+/// Each UPnP renderer that had a zone: its UDN → its description URL, so a start whose SSDP
+/// search misses it (a lost datagram, a device slow to answer) still finds it.
+const UPNP_KNOWN_KEY: &str = "outputs.upnp_known";
 /// Endpoint addresses (the desktop app's player) it registered.
 const ENDPOINT_ADDRESSES_KEY: &str = "outputs.endpoint_addresses";
 /// Their keys, by address, in the data folder (0600): `{"<host:port>": "<key>"}`. Not in the
@@ -429,6 +434,7 @@ impl NodeState {
             bluos: Default::default(),
             bluos_players: Default::default(),
             renderer: Default::default(),
+            renderer_port: Default::default(),
             name: settings.name,
             version: settings.version,
             library,
@@ -1022,6 +1028,7 @@ impl NodeState {
         let r = pm_renderer::Renderer::new(host, &self.node_id, env!("CARGO_PKG_VERSION"));
         r.spawn_notifier();
         let _ = self.renderer.set(r.clone());
+        let _ = self.renderer_port.set(api_port);
         tracing::info!(zones = r.zones().len(), "zones offered as UPnP/DLNA renderers");
         if announce {
             pm_renderer::ssdp::start(r, api_port)
@@ -1133,7 +1140,18 @@ impl NodeState {
         if !self.upnp {
             return Vec::new();
         }
-        let renderers = match pm_out_upnp::discover(timeout) {
+        // (a description already behind an output isn't fetched again: a later pass is cheap)
+        let known = self.upnp_known();
+        let have = |loc: &str| {
+            known.iter().any(|(udn, l)| {
+                l.eq_ignore_ascii_case(loc)
+                    && self
+                        .outputs
+                        .get(&OutputId::new("upnp", udn.trim_start_matches("uuid:")))
+                        .is_some()
+            })
+        };
+        let renderers = match pm_out_upnp::discover_except(timeout, have) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("UPnP discovery failed: {e}");
@@ -1149,6 +1167,11 @@ impl NodeState {
     /// A renderer as an output with its own pull stream and a zone; `None`
     /// when it is already registered.
     pub fn register_renderer(self: &Arc<Self>, r: pm_out_upnp::Renderer) -> Option<OutputId> {
+        // Our own zones answer the same search once we offer them: one adopted would play into itself
+        if self.is_own_renderer(&r) {
+            tracing::debug!(renderer = %r.friendly_name, "our own renderer; no zone");
+            return None;
+        }
         let name = format!(
             "upnp-{}",
             r.udn
@@ -1202,8 +1225,111 @@ impl NodeState {
                 .expect("sonos lock")
                 .insert(id.clone(), out.clone());
         }
+        self.remember_upnp(&r.udn, &r.location);
         self.create_zone(&r.friendly_name, out);
         Some(id)
+    }
+
+    /// Whether `r` is one of this node's zones offered as a renderer (`start_renderer`): its UDN is
+    /// one of ours, or its description is ours (this host, our API port, a zone's path).
+    pub fn is_own_renderer(&self, r: &pm_out_upnp::Renderer) -> bool {
+        let udn = r.udn.trim_start_matches("uuid:");
+        if let Some(own) = self.renderer.get() {
+            if own
+                .zones()
+                .iter()
+                .any(|(zone, _)| own.udn(zone).eq_ignore_ascii_case(udn))
+            {
+                return true;
+            }
+        }
+        self.is_own_location(&r.location)
+    }
+
+    /// Whether `location` is one of our zones' descriptions: this host, our API port, a zone's path.
+    pub fn is_own_location(&self, location: &str) -> bool {
+        let Some(port) = self.renderer_port.get() else {
+            return false;
+        };
+        let Ok(u) = url::Url::parse(location.trim()) else {
+            return false;
+        };
+        let ours = match u.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || pm_out_upnp::local_ipv4_addrs().contains(&ip),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            None => false,
+        };
+        ours && u.port_or_known_default() == Some(*port) && u.path().starts_with("/upnp/zone/")
+    }
+
+    /// The renderers that had a zone: UDN → description URL.
+    pub fn upnp_known(&self) -> std::collections::BTreeMap<String, String> {
+        let lib = self.library.lock().expect("library poisoned");
+        lib.get_setting(UPNP_KNOWN_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn remember_upnp(&self, udn: &str, location: &str) {
+        let mut known = self.upnp_known();
+        if known.get(udn).map(String::as_str) == Some(location) {
+            return;
+        }
+        known.insert(udn.to_string(), location.to_string());
+        let lib = self.library.lock().expect("library poisoned");
+        let _ = lib.set_setting(
+            UPNP_KNOWN_KEY,
+            &serde_json::to_string(&known).expect("serializes"),
+        );
+    }
+
+    /// The renderers that had a zone and have none now, described at their last URL (no SSDP):
+    /// a start whose search missed one still gives it its zone. One that doesn't answer stays
+    /// known (it may be off). Blocking.
+    pub fn restore_known_upnp(self: &Arc<Self>) -> Vec<OutputId> {
+        let mut new = Vec::new();
+        for (udn, loc) in self.upnp_known() {
+            if self
+                .outputs
+                .get(&OutputId::new("upnp", udn.trim_start_matches("uuid:")))
+                .is_some()
+            {
+                continue;
+            }
+            match pm_out_upnp::describe(&loc) {
+                Ok(Some(r)) => new.extend(self.register_renderer(r)),
+                Ok(None) => {}
+                Err(e) => tracing::info!(%loc, "known UPnP renderer not answering: {e}"),
+            }
+        }
+        new
+    }
+
+    /// UPnP renderers that answer late get their zones without a rescan: a pass `first` after
+    /// the start, then one every `every` (SSDP when discovery is on, then the known ones by URL).
+    /// Only new ones are described. Call from inside the runtime.
+    pub fn spawn_upnp_watch(self: &Arc<Self>, first: std::time::Duration, every: std::time::Duration) {
+        let st = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(first).await;
+            loop {
+                let s = st.clone();
+                let new = tokio::task::spawn_blocking(move || {
+                    let mut new = s.discover_upnp(std::time::Duration::from_secs(3));
+                    new.extend(s.restore_known_upnp());
+                    new
+                })
+                .await
+                .unwrap_or_default();
+                if !new.is_empty() {
+                    tracing::info!(count = new.len(), "UPnP renderers found after the start");
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     /// Renderers the owner added by address (another subnet, VLAN, or a
@@ -1232,12 +1358,20 @@ impl NodeState {
         if addr.is_empty() {
             return Err("address is required".into());
         }
+        // (our own zone's description is refused before it is fetched)
+        let own = || format!("{addr} is this node's own zone offered as a renderer");
+        if self.is_own_location(&addr) {
+            return Err(own());
+        }
         let found = pm_out_upnp::probe_address(&addr, std::time::Duration::from_secs(2))
             .map_err(|e| e.to_string())?;
         if found.is_empty() {
             return Err(format!(
                 "{addr} answered, but nothing there is a MediaRenderer with AVTransport"
             ));
+        }
+        if found.iter().all(|r| self.is_own_renderer(r)) {
+            return Err(own());
         }
         let mut saved = self.upnp_addresses();
         if !saved.contains(&addr) {
@@ -1686,6 +1820,7 @@ impl NodeState {
     pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = self.discover_upnp(std::time::Duration::from_secs(3));
         new.extend(self.restore_upnp_addresses());
+        new.extend(self.restore_known_upnp());
         new.extend(self.restore_endpoint_addresses());
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         new.extend(self.discover_snapcast());
