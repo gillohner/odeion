@@ -2,7 +2,9 @@
 //   1. every <button> has a class from the component set;
 //   2. no emoji or dingbats as icons (icons come from icon()); a line may opt out with
 //      `lint-allow-glyph` when the glyph is a component's own styled text (the rating stars);
-//   3. every class the UI uses has a rule in app.css.
+//   3. every class the UI uses has a rule in app.css;
+//   4. every transition and animation takes its duration from the motion scale (--dur-fast/base/slow),
+//      except a looping indicator (spin, shimmer, pulse, progress bars) and a bar's width.
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
@@ -67,9 +69,24 @@ for (const [c, at] of [...used.entries()].sort()) {
   problems.push(`${at}  class "${c}" has no rule in app.css`);
 }
 
+// 4. durations on the motion scale
+{
+  const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
+  const LOOP = /\b(spin|shimmer|conn-pulse|navprog|nudge)\b|\binfinite\b|\bwidth\b/;
+  for (const f of cssFiles) {
+    const src = fs.readFileSync(path.join(DIR, f), 'utf8');
+    const re = /(transition|animation):([^;{}]*)/g; let m;
+    while ((m = re.exec(src))) {
+      const decl = m[2];
+      if (LOOP.test(decl) || decl.includes('var(--dur-') || /^\s*none\b/.test(decl)) continue;
+      if (/(^|[^\w.-])\d*\.?\d+m?s\b/.test(decl)) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.trim().slice(0, 60)}`);
+    }
+  }
+}
+
 if (problems.length) {
   for (const p of problems) console.log(p);
-  console.log(`\n${problems.length} design problem${problems.length === 1 ? '' : 's'}`);
+console.log(`\n${problems.length} design problem${problems.length === 1 ? '' : 's'}`);
   process.exit(1);
 }
 console.log(`design lint: ok (${used.size} classes, every button classed, no icon glyphs)`);

@@ -3444,7 +3444,17 @@
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
-    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines${l.synced ? ' synced' : ''}">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}" role="button" tabindex="0" title="Play from here"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    // Synced: a tap on a line plays from it; a scroll by hand pauses the following for a few seconds
+    const lines = $('.lyric-lines', box);
+    if (l.synced && lines) {
+      const seekTo = (ln) => transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) });
+      lines.addEventListener('click', (e) => { const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) seekTo(ln); });
+      lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); seekTo(ln); } });
+      lines.addEventListener('scroll', () => { if (lines.dataset.auto) return; state.lyricsHold = Date.now() + 4000; }, { passive: true });
+      lines.addEventListener('touchstart', () => { state.lyricsHold = Date.now() + 4000; }, { passive: true });
+      lines.addEventListener('wheel', () => { state.lyricsHold = Date.now() + 4000; }, { passive: true });
+    }
   };
   // Library songs: their own lyrics, else LRCLIB (the node decides); streamed songs: LRCLIB by title
   const lyricsKey = (it) => { const id = trackIdOf(it); return id != null ? `t${id}` : it && it.title && it.artist ? `s${it.uri || ''}|${it.title}|${it.artist}` : null; };
@@ -3462,10 +3472,24 @@
   const followLyrics = (positionMs) => {
     const lines = $$('#nplyrics .lyric-line[data-ms]'); if (!lines.length) return;
     const at = positionMs - (state.lyricsOffset || 0);
-    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= at) cur = ln; else break; }
-    for (const ln of lines) ln.classList.toggle('on', ln === cur);
-    // (only the lyrics' own box scrolls: on a phone's one screen the page holds them too)
-    if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { const box = cur.closest('.lyric-lines'); if (box) box.scrollTo({ top: cur.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - (box.clientHeight - cur.offsetHeight) / 2, behavior: 'smooth' }); } catch { /* jsdom */ } }
+    let k = -1; for (let i = 0; i < lines.length; i++) { if (Number(lines[i].dataset.ms) <= at) k = i; else break; }
+    const cur = k >= 0 ? lines[k] : null;
+    // The current line, its neighbours by distance (dimmer the further away)
+    lines.forEach((ln, i) => { const d = k < 0 ? 9 : Math.abs(i - k); ln.classList.toggle('on', d === 0); ln.classList.toggle('near1', d === 1); ln.classList.toggle('near2', d === 2); });
+    if (!cur) return;
+    // The box keeps the current line about a third of the way down (only the lyrics' own box
+    // scrolls: on a phone's one screen the page holds them too); a scroll by hand holds it off for
+    // a few seconds, then it eases back
+    const box = cur.closest('.lyric-lines'); if (!box) return;
+    const held = state.lyricsHold && Date.now() < state.lyricsHold;
+    if (held) { delete cur.dataset.seen; return; }
+    if (!cur.dataset.seen) {
+      lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1';
+      const top = cur.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - box.clientHeight / 3 + cur.offsetHeight / 2;
+      box.dataset.auto = '1'; clearTimeout(box.autoT);
+      try { box.scrollTo({ top: Math.max(0, top), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); } catch { /* jsdom */ }
+      box.autoT = setTimeout(() => { delete box.dataset.auto; }, 700);
+    }
   };
   // Keep the overlay's progress moving without rebuilding it on every tick.
   setInterval(() => {
