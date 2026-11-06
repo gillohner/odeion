@@ -178,12 +178,14 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
   // marked Library while Back said Home)
   {
     const album = { ...fx.track.album, album_artist: 'Sefa', year: 2017 };
-    const { page, context } = await fx.create(browser, 390, { mobile: true, fixtures: { ...fixtures, '/library/home': { body: { recently_played: [album], recently_added: [album], forgotten: [] } } } });
+    let slow = false; // (the node's /info held back: what the bar marks before the node answers)
+    const { page, context } = await fx.create(browser, 390, { mobile: true, delay: (v) => (slow && v === '/info' ? 2500 : 0), fixtures: { ...fixtures, '/library/home': { body: { recently_played: [album], recently_added: [album], forgotten: [] } } } });
     await page.setViewportSize({ width: 390, height: 844 });
     const marked = () => page.evaluate(() => [...document.querySelectorAll('.bnav.on')].map((b) => b.dataset.bnav + (b.getAttribute('aria-current') === 'page' ? '' : '(no aria-current)')).join(','));
     const settle = async (pathNot) => { const ok = await page.waitForFunction((p) => location.pathname !== p && document.querySelector('#main') && !document.querySelector('#main > .skeleton'), pathNot, { timeout: 6000 }).then(() => true, () => false); check(ok, `the tabs: the page left ${pathNot}`); await sleep(250); };
-    await fx.go(page, '/'); await page.waitForSelector('#h-played .tile:not(.sk-tile)');
-    check(await page.evaluate(() => document.querySelector('.bnav[data-bnav="home"]').classList.contains('on')), 'the tabs: Home is marked from the start');
+    slow = true; await page.goto(fx.ORIGIN + '/', { waitUntil: 'domcontentloaded' }); await page.waitForSelector('.bnav'); await sleep(300);
+    check(await marked() === 'home' && !(await page.$('#h-played .tile:not(.sk-tile)')), `the tabs: Home is marked before the node answers (${await marked()})`);
+    slow = false; await page.waitForSelector('#h-played .tile:not(.sk-tile)');
     check(await marked() === 'home', `the tabs: Home marks Home (${await marked()})`);
     await page.locator('#h-played .tile:not(.sk-tile)').first().click(); await settle('/');
     const albumPath = await page.evaluate(() => location.pathname + location.search);
@@ -192,7 +194,8 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     check(await marked() === 'home', `Back to Home marks Home (${await marked()})`);
     await page.goForward(); await page.waitForFunction((p) => location.pathname + location.search === p, albumPath); await sleep(250);
     check(await marked() === 'home', `Forward to the album marks Home again, from its history entry (${await marked()})`);
-    await page.reload(); await page.waitForSelector('#main'); await page.waitForFunction(() => document.querySelector('.bnav.on')); await sleep(400);
+    // (the album page drawn: the boot's own navigation has marked the bar, not only the start-up mark)
+    await page.reload(); await page.waitForFunction(() => document.querySelector('#main > :not(.skeleton)') && !document.querySelector('#main > .skeleton')); await sleep(400);
     check(await marked() === 'home', `a reload of the album opened from Home keeps Home marked (${await marked()})`);
     await page.goBack(); await page.waitForFunction(() => location.pathname === '/'); await sleep(250);
     check(await marked() === 'home', `…and Back from it marks Home (${await marked()})`);

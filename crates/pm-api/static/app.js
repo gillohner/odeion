@@ -33,7 +33,7 @@
     sleepAt: {},
     browserSleepTimer: null,
     pubkyUser: undefined,
-    view: 'home', tab: 'home',
+    view: 'home',
     viewArg: null,
     albums: null,
     artists: null,
@@ -2673,6 +2673,8 @@
   window.addEventListener('resize', fadeRows);
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
   applyShell();
+  // Marked before the node answers: the page's own entry says its tab (a reload); Home is Home
+  state.tab = (history.state && history.state.tab) || (location.pathname === '/' ? 'home' : undefined); markTabs();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
   const narrow = () => mq('(max-width: 1100px)'); // the sidebar is icons there unless expanded
   const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
