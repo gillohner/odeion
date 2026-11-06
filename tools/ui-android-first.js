@@ -106,7 +106,7 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     await pull(page, '#zonepop', 40); await sleep(300);
     check(!(await page.$eval('#zonepop', (e) => e.hidden)), `${w}: a short pull leaves Play to open`);
     const kept = await pull(page, '#zonepop', 260); await sleep(300);
-    check(kept >= 5, `${w}: the swipe keeps its moves from the browser's own panning (${kept} of 6)`);
+    check(kept === 6, `${w}: the swipe keeps every move from the browser's own panning, the first included (${kept} of 6)`);
     check(await page.$eval('#zonepop', (e) => e.hidden) && await page.$eval('#scrim', (e) => e.hidden), `${w}: a swipe down closes Play to and its scrim`);
     if (!(await page.$eval('#zonepop', (e) => e.hidden))) await page.keyboard.press('Escape'); // (so the rest still runs where the swipe failed)
     await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden]) #zpsleep');
