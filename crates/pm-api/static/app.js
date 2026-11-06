@@ -3255,10 +3255,14 @@
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npzone').onclick = () => $('#zonebtn').click();
     // On a phone's one screen a part is scrolled to, not opened
-    // (just under the chips row, whatever its height once it holds the song too)
+    // (just under the chips row as it is once it holds the song too; the part asked for stays the
+    // current chip until the listener scrolls, also where the page ends before it reaches the top)
+    let pinnedJump = null;
     const jump = (k, smooth = true) => {
       const sec = $(`#npsec-${k}`, overlay); const bar = $('.np-jump', overlay); if (!sec) return;
-      const top = sec.getBoundingClientRect().top - overlay.getBoundingClientRect().top + overlay.scrollTop - Math.max(bar ? bar.offsetHeight : 0, 104) - 8;
+      let barH = 0; if (bar) { const was = bar.classList.contains('stuck'); bar.classList.add('stuck'); barH = bar.offsetHeight; bar.classList.toggle('stuck', was); }
+      pinnedJump = k;
+      const top = sec.getBoundingClientRect().top - overlay.getBoundingClientRect().top + overlay.scrollTop - barH - 8;
       overlay.scrollTo({ top, behavior: smooth && !matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'auto' });
       const h = $('.np-sec-h', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
     };
@@ -3292,7 +3296,7 @@
     state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };
     npRestore();
     if (sheet === 'sources' && songPage && !one) fillNpSources(songPage, gen);
-    if (!one) overlay.onscroll = null;
+    if (!one) { overlay.onscroll = null; overlay.ontouchstart = overlay.onwheel = null; }
     if (one) {
       overlay.scrollTop = oneScroll;
       const bar = $('.np-jump', overlay); const chips = $$('[data-npjump]', overlay);
@@ -3310,10 +3314,12 @@
       const mark = () => {
         const edge = (bar ? bar.getBoundingClientRect().bottom : 0) + 24; let cur = null;
         $$('.np-sec', overlay).forEach((x) => { if (x.getBoundingClientRect().top <= edge) cur = x.id; });
+        if (pinnedJump) cur = `npsec-${pinnedJump}`;
         chips.forEach((c) => (`npsec-${c.dataset.npjump}` === cur ? c.setAttribute('aria-current', 'true') : c.removeAttribute('aria-current')));
       };
       let queued = false;
       overlay.onscroll = () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; mark(); }); } };
+      overlay.ontouchstart = overlay.onwheel = () => { pinnedJump = null; };
       mark();
       // A part asked for (the quality line, a link from elsewhere) is shown once
       if (state.npSheet) { const k = state.npSheet; state.npSheet = null; requestAnimationFrame(() => jump(k, false)); }

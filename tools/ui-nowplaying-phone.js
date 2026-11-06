@@ -72,10 +72,11 @@ const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:
       const jumped = await page.evaluate(() => {
         const ov = document.querySelector('#nowplaying'); const bar = ov.querySelector('.np-jump').getBoundingClientRect(); const sec = ov.querySelector('#npsec-details').getBoundingClientRect();
         const strip = ov.querySelector('.np-jump-strip'); const play = ov.querySelector('.np-jump-play');
-        return { barTop: Math.round(bar.top), barBottom: Math.round(bar.bottom), secTop: Math.round(sec.top), stuck: ov.querySelector('.np-jump').classList.contains('stuck'), strip: getComputedStyle(strip).display !== 'none', play: getComputedStyle(play).display !== 'none', cur: ov.querySelector('[data-npjump][aria-current="true"]')?.dataset.npjump, scroll: ov.scrollTop, focus: document.activeElement && document.activeElement.id };
+        return { end: ov.scrollTop + ov.clientHeight >= ov.scrollHeight - 2, barTop: Math.round(bar.top), barBottom: Math.round(bar.bottom), secTop: Math.round(sec.top), stuck: ov.querySelector('.np-jump').classList.contains('stuck'), strip: getComputedStyle(strip).display !== 'none', play: getComputedStyle(play).display !== 'none', cur: ov.querySelector('[data-npjump][aria-current="true"]')?.dataset.npjump, scroll: ov.scrollTop, focus: document.activeElement && document.activeElement.id };
       });
       check(jumped.barTop === 0 && jumped.stuck && jumped.strip && jumped.play, `${at}: the chips row stays at the top with the song and Play (${jumped.barTop}, stuck ${jumped.stuck})`);
-      check(jumped.secTop >= jumped.barBottom && jumped.secTop - jumped.barBottom <= 24, `${at}: Details scrolls to just under the chips row (${jumped.secTop - jumped.barBottom} px under it)`);
+      // (where the page ends first, as far as it goes: the part is then below the row, not under it)
+      check(jumped.secTop >= jumped.barBottom && (jumped.end || jumped.secTop - jumped.barBottom <= 24), `${at}: Details scrolls to just under the chips row (${jumped.secTop - jumped.barBottom} px under it${jumped.end ? ', the page ends there' : ''})`);
       check(jumped.cur === 'details' && jumped.focus === 'npsech-details', `${at}: the Details chip is current and its heading has the focus (${jumped.cur}, ${jumped.focus})`);
       if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-details-${w}.png`) });
       // A swipe down on a scrolled section doesn't close it; from the player it does, and focus goes back

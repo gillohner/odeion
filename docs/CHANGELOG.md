@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-06
 
+- **Now playing on a phone is one screen** (owner: "the detail page of a song on android look shit with bad submenu navigation … could be more integrated"). The player fills the first screen, with one side margin for everything and the cover as wide as it; scroll down for Up next, Lyrics, Details, Sources and Tags, each a card. One row of chips takes you to each; it stays at the top with the song and Play once the controls scroll away. The app's tabs make way while Now playing is open, and closing it puts you back on the mini player. Tablets and desktops keep the player beside the open panel.
+- **The mini player sits on the phone's tabs** as one bar (no gap or slivers at the sides), and the Library's filter row and quality chips have room between them.
 - **The Android app fits the phone** (owner's screen recording: screens panned sideways and cut their left edge, Play to opened beside the page, Home jumped as it loaded, a black window at start).
   - **Nothing pans sideways:** the top bar was wider than a phone screen when the status chip showed (the search field couldn't shrink), so the whole page was, and the WebView zoomed it out. The bar fits now, and so does every page and panel.
   - **Panels are bottom sheets on phones:** Play to, the Sound panel, a files job and the volume open from the bottom at the screen's width, with a handle; a swipe down, Back or a tap outside closes them, like the menus.
