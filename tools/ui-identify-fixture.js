@@ -289,17 +289,18 @@ const server = http.createServer(async (req, res) => {
       // songs as a secondary line, Identify stays the main button; "Skip all unsure" marks them
       // reviewed without an identity (undoable); on the review page "Leave as is" does it per album
       const skipRoutes = () => ({
-        'POST /library/suggestions/skip': async (_, b) => [200, { skipped: b.all ? 6 : 4, counts: {} }],
-        'POST /library/suggestions/unskip': async (_, b) => [200, { restored: b.all ? 6 : 4, counts: {} }],
+        // (the count answered is the album's only when its key was sent: the toast then proves the key)
+        'POST /library/suggestions/skip': async (_, b) => [200, { skipped: b.all ? 6 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: {} }],
+        'POST /library/suggestions/unskip': async (_, b) => [200, { restored: b.all ? 6 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: {} }],
       });
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
       await page.goto(`${BASE}/library/node`);
       check(await until(async () => (await page.locator('#idbox .idbar').count()) === 1), `${W} the Identify card draws`);
-      const card = await page.evaluate(() => { const q = (s) => document.querySelector(s); const legend = q('#idbox .idlegend') ? q('#idbox .idlegend').textContent.replace(/\s+/g, ' ') : ''; return { phase: q('#idphase') && q('#idphase').textContent.trim(), warn: !!(q('#idphase') && q('#idphase').classList.contains('warn-text')), unsure: q('#idunsure') && q('#idunsure').textContent.trim(), reviewPrimary: !!q('#idreview'), runPrimary: !!(q('#idrun') && q('#idrun').classList.contains('primary')), legend, skipAll: !!q('#idskipall'), unskip: q('#idunskip') && q('#idunskip').textContent.trim() }; });
+      const card = await page.evaluate(() => { const q = (s) => document.querySelector(s); const legend = q('#idbox .idlegend') ? q('#idbox .idlegend').textContent.replace(/\s+/g, ' ') : ''; return { phase: q('#idphase') && q('#idphase').textContent.trim(), warn: !!(q('#idphase') && q('#idphase').classList.contains('warn-text')), unsure: q('#idunsure') && q('#idunsure').textContent.trim(), review: (() => { const b = q('#idbox .actions [data-view="identify"]'); return b ? { text: b.textContent.trim(), primary: b.classList.contains('primary') } : null; })(), runPrimary: !!(q('#idrun') && q('#idrun').classList.contains('primary')), legend, skipAll: !!q('#idskipall'), unskip: q('#idunskip') && q('#idunskip').textContent.trim() }; });
       check(card.phase === 'Finished' && !card.warn, `${W} the card says "Finished" with no warning tone (${card.phase})`);
       check(/^6 songs unsure \(optional\): songs play and show as usual, identified or not\./.test(card.unsure || ''), `${W} the unsure songs are a secondary line: "${card.unsure}"`);
-      check(!card.reviewPrimary && card.runPrimary, `${W} Identify stays the main button; Review is a plain one`);
-      check(/6 unsure/.test(card.legend) && /3 left as they are/.test(card.legend) && /2 to re-check/.test(card.legend), `${W} the legend counts unsure, left as they are and to re-check (${card.legend.slice(0, 120)})`);
+      check(card.review && /^Review 6 unsure$/.test(card.review.text) && !card.review.primary && card.runPrimary, `${W} Identify stays the main button; "${card.review && card.review.text}" is a plain one`);
+      check(/6 unsure \(2 to re-check\)/.test(card.legend) && /3 left as they are/.test(card.legend) && !/^.*\b2 to re-check\b(?!\))/.test(card.legend.replace(/\(2 to re-check\)/, '')), `${W} the legend counts unsure (with those to re-check among them, not again) and left as they are (${card.legend.slice(0, 120)})`);
       check(card.skipAll && card.unskip === 'Bring back 3 skipped', `${W} "Skip all unsure" and "Bring back 3 skipped" are offered`);
       await page.locator('#idskipall').click();
       check(await until(async () => asked('POST', '/library/suggestions/skip').length === 1), `${W} Skip all unsure asks the node to skip all`);

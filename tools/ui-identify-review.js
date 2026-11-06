@@ -77,7 +77,7 @@ const albumC = { key: '/music/Third/Later', album: 'Later', artist: 'Third', rel
       check(/6 songs unsure \(optional\)/.test(await page.locator('#idunsure').textContent()), `${W} the unsure songs are a second line, optional`);
       const review = page.locator('#idbox .actions [data-view="identify"]');
       check(await review.isVisible() && !/primary/.test(await review.getAttribute('class')), `${W} Review is offered, not as the main action`);
-      check(!/primary/.test(await page.locator('#idrun').getAttribute('class')), `${W} Identify again is secondary then`);
+      check(/primary/.test(await page.locator('#idrun').getAttribute('class')), `${W} Identify again stays the main action`);
       await shot('card-needs-review');
       const expect = { ready: /Finished — nothing to review \(4 not found\)/, running: /Working: 12 of 30/, failed: /It stopped after 12 of 30: the library stayed busy/, interrupted: /cut off when the node stopped \(after 12 of 30\)/, empty: /No songs yet/, new: /30 songs not checked yet/ };
       for (const [ph, re] of Object.entries(expect)) {

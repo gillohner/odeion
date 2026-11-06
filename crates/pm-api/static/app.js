@@ -168,10 +168,15 @@
   const toast = (msg, kind = '', action = null) => {
     const t = $('#toast');
     t.textContent = msg;
-    if (action) { const b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); t.classList.remove('show'); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
+    const hide = () => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); };
+    if (action) { const b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
     t.className = `toast show ${kind}`;
     clearTimeout(toast.h);
-    toast.h = setTimeout(() => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); }, kind === 'error' ? 6000 : action ? 8000 : 3800);
+    // (a toast with an action waits while the pointer or the focus is on it)
+    const stay = kind === 'error' ? 6000 : action ? 8000 : 3800;
+    const arm = (ms) => { clearTimeout(toast.h); toast.h = setTimeout(hide, ms); };
+    arm(stay);
+    if (action) { t.onmouseenter = t.onfocusin = () => clearTimeout(toast.h); t.onmouseleave = t.onfocusout = () => arm(4000); } else { t.onmouseenter = t.onfocusin = t.onmouseleave = t.onfocusout = null; }
   };
   // ---- Every click shows progress and fires once (owner, 2026-11-04) ----
   // busy(el, fn) runs fn. When fn returns a promise, el is busy until it settles: aria-busy and
@@ -5462,6 +5467,7 @@
           const albums = page.albums.slice(); let next = cursor(page);
           // The owner's choice per song, kept while more albums load (a song not touched shows what is offered)
           const choices = new Map();
+          let listGen = 0; // bumped when the list is cleared (Skip all): older answers are dropped
           const MAX_CONFIRM = 500;
           const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags');
           const holdWhy = { search: 'found by its title and artist only', weak: 'a weak match', other_release: 'on another release than the rest of the album' };
@@ -5488,8 +5494,9 @@
           const draw = () => {
             main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
-            const ska = $('#idskipall'); if (ska) ska.onclick = () => busy(ska, async () => { const r = await api('POST', '/library/suggestions/skip', { all: true }); if (!live()) return; toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { await api('POST', '/library/suggestions/unskip', { all: true }); setView('identify', undefined, 'replace'); } }); albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; draw(); });
-            const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live()) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
+            const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw (e && e.status === 404 ? new Error('This node doesn’t offer that yet: update it first') : e); } if (!live()) return; listGen++; toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: st && st.counts && st.counts.skipped ? `Undo (brings back all ${(st.counts.skipped + r.skipped).toLocaleString()} skipped)` : 'Undo', run: async () => { await api('POST', '/library/suggestions/unskip', { all: true }); if (live()) setView('identify', undefined, 'replace'); else toast('Back for review'); } }); albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; draw(); }, ev);
+            // (a "Show more" answer that comes after Skip all is for a list that is gone)
+            const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; const gen = listGen; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live() || gen !== listGen) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
           };
           // One album drawn again from what is known here, after a confirm or a "Not this" (the
           // rest of the page, its choices and where it is scrolled stay; nothing is fetched)
@@ -5505,15 +5512,15 @@
           const wire = (sec) => {
             const btn = $('[data-confirm]', sec); const out = $('[data-confirm-out]', sec);
             // Leave as is: this album's unsure songs are marked reviewed without an identity; undoable
-            const skipBtn = $('[data-skip]', sec); if (skipBtn) skipBtn.onclick = () => busy(skipBtn, async () => {
+            const skipBtn = $('[data-skip]', sec); if (skipBtn) skipBtn.onclick = (ev) => busy(skipBtn, async () => {
               const ai = Number(sec.dataset.album); const a = albums[ai]; const key = a.key; const nSongs = a.songs.length;
-              const r = await api('POST', '/library/suggestions/skip', { albums: [key] });
+              let r; try { r = await api('POST', '/library/suggestions/skip', { albums: [key] }); } catch (e) { throw (e && e.status === 404 ? new Error('This node doesn’t offer that yet: update it first') : e); }
               if (!live()) return;
-              toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { await api('POST', '/library/suggestions/unskip', { albums: [key] }); setView('identify', undefined, 'replace'); } });
+              toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { await api('POST', '/library/suggestions/unskip', { albums: [key] }); if (live()) setView('identify', undefined, 'replace'); else toast('Back for review'); } });
               a.songs.forEach((g) => choices.delete(g.track.id)); a.songs = []; a.ready = 0; a.conflicts = 0;
               page.songs = Math.max(0, page.songs - nSongs);
               redraw(ai);
-            });
+            }, ev);
             // More than one batch takes: the first ones are confirmed (all of them or none), the rest stay
             const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n; };
             label(); $$('input[type=radio]', sec).forEach((r) => r.onchange = () => { choices.set(Number(r.name.slice(5)), r.value); label(); });
@@ -7559,7 +7566,8 @@
         // One bar, one segment per state (owner, 2026-11-04: half purple, half dark read as "half
         // done, half empty" while the rest was to confirm and not found): identified, to confirm,
         // not found, not checked; the counts under it with the segments' colours
-        const parts = [['identified', c.identified, 'identified'], ['suggested', c.suggested, 'unsure'], ['outdated', c.outdated, 'to re-check'], ['skipped', c.skipped, 'left as they are'], ['unknown', c.unknown, 'not found'], ['unchecked', c.unchecked, 'not checked yet']].map(([k, v, w]) => [k, Number(v || 0), w]);
+        // (the songs to re-check are among the unsure ones: said with them, not counted twice)
+        const parts = [['identified', c.identified, 'identified'], ['suggested', c.suggested, c.outdated ? `unsure (${n(c.outdated)} to re-check)` : 'unsure'], ['skipped', c.skipped, 'left as they are'], ['unknown', c.unknown, 'not found'], ['unchecked', c.unchecked, 'not checked yet']].map(([k, v, w]) => [k, Number(v || 0), w]);
         const said = parts.filter(([, v]) => v).map(([, v, w]) => `${n(v)} ${w}`).join(', ');
         const bar = `<div class="idbar" role="img" aria-label="${esc(c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}: ${said}` : 'No songs yet')}">${parts.filter(([, v]) => v).map(([k, v]) => `<span class="idseg ${k}" style="flex-basis:${((v / Math.max(c.total, 1)) * 100).toFixed(3)}%"></span>`).join('')}</div>`;
         const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<a data-view="identify">${n(v)} ${w}</a>` : `${n(v)} ${w}`}</span>`).join(' ');
@@ -7593,8 +7601,10 @@
     const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
-    const sk = $('#idskipall'); if (sk) sk.onclick = () => busy(sk, async () => { const r = await api('POST', '/library/suggestions/skip', { all: true }); toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); } }); renderIdentify(); });
-    const us = $('#idunskip'); if (us) us.onclick = () => busy(us, async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); });
+    // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
+    const noRoute = (e) => (e && e.status === 404 ? new Error('This node doesn’t offer that yet: update it first') : e);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: c.skipped ? `Undo (brings back all ${n(c.skipped + r.skipped)} skipped)` : 'Undo', run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); } }); renderIdentify(); }, ev);
+    const us = $('#idunskip'); if (us) us.onclick = (ev) => busy(us, async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); }, ev);
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
     const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); if ((k && k.value) || (ch && ch.disabled)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
