@@ -140,6 +140,8 @@ def connect_app():
                                     stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     tap(lambda n: "connect by address" in n, "“Or connect by address”")
+    # The address form opens under the link: let it draw before looking for its fields
+    time.sleep(2)
     tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
     adb("shell", "input", "text", "10.0.2.2:7788")
     # The node has a token (as android-endpoint.py sets it up): a node without one answers only at
@@ -147,7 +149,13 @@ def connect_app():
     tap(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field")
     adb("shell", "input", "text", ep.TOKEN)
     adb("shell", "input", "keyevent", "66")
-    until("the node's page in the app", lambda: any("Now playing" in n for n in ui_nodes()), timeout=120, every=3)
+    try:
+        until("the node's page in the app", lambda: any("Now playing" in n for n in ui_nodes()), timeout=120, every=3)
+    except RuntimeError:
+        # What the screen showed instead (kept with the run's artifacts)
+        subprocess.run(["adb", "exec-out", "screencap", "-p"], stdout=open(out / "connect-timeout.png", "wb"), check=False)
+        (out / "connect-timeout-ui.txt").write_text("\n".join(ui_nodes()))
+        raise
     until("the player service", lambda: "player service started" in ep.logcat(), timeout=90)
 
     def registered():
@@ -446,6 +454,9 @@ def part_e():
     ended = None
     while time.time() - t0 < 9 * 60:
         time.sleep(30)
+        # What the service's watch saw (its debug lines) and who holds audio, for a failure's cause
+        lines = [l for l in ep.logcat().splitlines() if "player service: watch" in l or "player service: start" in l]
+        log(f"E2 +{round(time.time() - t0)} s: {lines[-1].split('player service: ')[-1] if lines else 'no watch line yet'}; players {players()}")
         if not service_foreground():
             ended = time.time() - t0
             break

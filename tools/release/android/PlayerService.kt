@@ -48,6 +48,8 @@ class PlayerService : Service() {
             // Counted only while out of sight: time on screen with nothing playing (browsing,
             // paused) must not end the service just after the music starts and the app is left
             idleMs = if (am.isMusicActive || seen) 0L else idleMs + WATCH_MS
+            // (debug: what the watch saw, for tools/android-background-probe.py part E2)
+            android.util.Log.d("pubky-music", "player service: watch music=${am.isMusicActive} seen=$seen importance=${me.importance} idle=${idleMs / 1000} s")
             if (idleMs >= IDLE_MS) {
                 // Only if no start came since: a start still on its way keeps the service
                 if (stopSelfResult(lastStart)) {
@@ -105,6 +107,7 @@ class PlayerService : Service() {
         idleMs = 0L
         tick.removeCallbacks(watch)
         if (!zone) tick.postDelayed(watch, WATCH_MS)
+        android.util.Log.d("pubky-music", "player service: start ${if (zone) "zone" else "app"} mode")
         return START_NOT_STICKY
     }
 
