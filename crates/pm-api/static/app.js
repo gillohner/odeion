@@ -1442,7 +1442,7 @@
   // A YouTube item that can't be embedded (the uploader turned it off, removed, private): say so and go on
   yt.addEventListener('yterror', (e) => {
     const it = state.browserQueue[state.browserIndex];
-    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube only plays it on YouTube', 150: 'YouTube only plays it on youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
+    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube only plays it on youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube only plays it on youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
     toast(`\u201c${(it && it.title) || 'This video'}\u201d can't play here: ${why}.`, 'error');
     if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
   });
@@ -6828,14 +6828,17 @@
           // them that is selected, else playing, else first.
           const protoOf = (z) => String(z.output || z.id).split(':')[0];
           const WAY_WORDS = /\b(airplay|upnp(?:[ -]?av)?|dlna|chromecast|cast|sonos|bluos|heos|snapcast|squeezelite|squeezebox|slimproto)\b/gi;
-          const familyOf = (z) => (z.id === BROWSER || String(z.id).startsWith('group:') ? '' : String(z.name || '').replace(WAY_WORDS, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+          // (the name without its way words, in any script; a name that is only a way word, or one
+          // word of three letters or fewer, is too little to go on)
+          const familyOf = (z) => { if (z.id === BROWSER || String(z.id).startsWith('group:')) return ''; const f = String(z.name || '').replace(WAY_WORDS, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); return f.length >= 4 ? f : ''; };
           const familyName = (z) => String(z.name || '').replace(WAY_WORDS, '').replace(/[\s:·(),-]+$/g, '').replace(/^[\s:·(),-]+/g, '').replace(/\(\s*\)/g, '').replace(/\s{2,}/g, ' ').trim() || z.name;
           const families = new Map();
           for (const z of zs) { const f = familyOf(z); if (f) families.set(f, [...(families.get(f) || []), z]); }
           const seen = new Set();
           const cards = zs.flatMap((z) => {
             const f = familyOf(z); const fam = f ? families.get(f) : null;
-            if (!fam || fam.length < 2 || new Set(fam.map(protoOf)).size < 2) return [{ z, ways: null }];
+            // (two of them playing at once are two devices, not one seen two ways)
+            if (!fam || fam.length < 2 || new Set(fam.map(protoOf)).size < 2 || fam.filter((m) => m.transport === 'playing').length > 1) return [{ z, ways: null }];
             if (seen.has(f)) return []; seen.add(f);
             const lead = fam.find((m) => m.id === state.zone) || fam.find((m) => m.transport === 'playing') || fam[0];
             return [{ z: lead, ways: fam }];

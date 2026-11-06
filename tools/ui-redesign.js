@@ -38,17 +38,29 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
     try { lint = execFileSync(process.execPath, [path.join(REPO, 'tools/design-lint.js'), path.join(REPO, 'crates/pm-api/static')], { encoding: 'utf8' }); } catch (e) { lintOk = false; lint = String(e.stdout || e.message); }
     check(lintOk && !/off the/.test(lint), `every font-size and radius is on its scale (design-lint rule 5)${lintOk ? '' : ': ' + lint.split('\n').filter((l) => /off the/.test(l)).slice(0, 3).join(' | ')}`);
     // (the words in app.js's string literals: a small scan that knows quotes, template strings and
-    // their ${} holes, so code around them doesn't count)
+    // their ${} holes, and reads the code inside a hole for strings of its own)
     const js = fs.readFileSync(path.join(REPO, 'crates/pm-api/static/app.js'), 'utf8');
-    const strings = []; let q = null; let buf = ''; let depth = 0; let line = 1; let at = 1;
-    for (let i = 0; i < js.length; i++) {
-      const c = js[i]; if (c === '\n') line++;
-      if (!q) { if (c === "'" || c === '"' || c === '`') { q = c; buf = ''; at = line; } else if (c === '/' && js[i + 1] === '/') { while (i < js.length && js[i] !== '\n') i++; line++; } continue; }
-      if (c === '\\') { buf += js[i + 1]; i++; continue; }
-      if (q === '`' && c === '$' && js[i + 1] === '{') { depth = 1; i += 2; while (i < js.length && depth) { if (js[i] === '{') depth++; else if (js[i] === '}') depth--; if (js[i] === '\n') line++; i++; } i--; buf += ' '; continue; }
-      if (c === q) { strings.push([at, buf]); q = null; continue; }
-      buf += c;
-    }
+    const strings = [];
+    const scan = (code, base) => {
+      let q = null; let buf = ''; let line = base; let at = base;
+      for (let i = 0; i < code.length; i++) {
+        const c = code[i]; if (c === '\n') line++;
+        if (!q) {
+          if (c === "'" || c === '"' || c === '`') { q = c; buf = ''; at = line; } else if (c === '/' && code[i + 1] === '/') { while (i < code.length && code[i] !== '\n') i++; line++; } else if (c === '/' && code[i + 1] === '*') { const j = code.indexOf('*/', i + 2); line += (code.slice(i, j < 0 ? code.length : j).match(/\n/g) || []).length; i = j < 0 ? code.length : j + 1; }
+          continue;
+        }
+        if (c === '\\') { buf += code[i + 1]; i++; continue; }
+        if (q === '`' && c === '$' && code[i + 1] === '{') {
+          // the hole: to its matching brace, counting braces outside strings; scanned as code
+          let depth = 1; let j = i + 2; let inner = null;
+          while (j < code.length && depth) { const d = code[j]; if (inner) { if (d === '\\') j++; else if (d === inner) inner = null; } else if (d === "'" || d === '"' || d === '`') inner = d; else if (d === '{') depth++; else if (d === '}') depth--; j++; }
+          scan(code.slice(i + 2, j - 1), line); line += (code.slice(i, j).match(/\n/g) || []).length; i = j - 1; buf += ' '; continue;
+        }
+        if (c === q) { strings.push([at, buf]); q = null; continue; }
+        buf += c;
+      }
+    };
+    scan(js, 1);
     const said = strings.filter(([, t]) => /\boutside\b/i.test(t)).map(([l, t]) => `${l}: ${t.trim().slice(0, 60)}`);
     check(!said.length, `no screen says "outside" (the owner's rule: external resources)${said.length ? ': ' + said.slice(0, 2).join(' | ') : ''}`);
   }
@@ -64,13 +76,14 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
       const linn = cards.find((c) => /Linn Klimax DS3/.test(c.querySelector('h3').textContent));
       const ways = linn ? [...linn.querySelectorAll('.zc-ways .chip')].map((c) => ({ t: c.textContent.trim(), on: c.classList.contains('on'), pressed: c.getAttribute('aria-pressed') })) : [];
       const ph = cards.find((c) => c.querySelector('.zc-ph'));
-      const hit = (sel) => { const el = document.querySelector(sel); if (!el) return null; const cs = getComputedStyle(el, '::before'); const r = el.getBoundingClientRect(); const inset = parseFloat(cs.top) || 0; return { box: Math.round(Math.min(r.width, r.height)), reach: Math.round(Math.min(r.width, r.height) - 2 * inset), content: cs.content }; };
+      // (a point 5 px above the control's box must land on the control itself: its reach, not a neighbour)
+      const hit = (sel) => { const el = document.querySelector(sel); if (!el) return null; const cs = getComputedStyle(el, '::before'); const r = el.getBoundingClientRect(); const inset = parseFloat(cs.top) || 0; const above = document.elementFromPoint(r.left + r.width / 2, r.top - 5); const inner = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return { box: Math.round(Math.min(r.width, r.height)), reach: Math.round(r.height - 2 * inset), content: cs.content, aboveHits: above === el || el.contains(above), innerHits: inner === el || el.contains(inner) }; };
       const g = document.querySelector('#zgroup'); const label = g && g.querySelector('.btn-label');
       return { n: cards.length, titles: cards.map((c) => c.querySelector('h3').textContent.trim()), linnTitle: linn && linn.querySelector('h3').textContent.trim(), ways, phIcon: !!(ph && ph.querySelector('.zc-ph svg')), chip: hit('.zc-ways .chip'), iconBtn: hit('.zone-card .icon-btn'), group: { aria: g && g.getAttribute('aria-label'), labelShown: !!label && getComputedStyle(label).display !== 'none' } };
     });
     check(z.n === 5 && z.linnTitle === 'Linn Klimax DS3' && z.ways.length === 2 && z.ways.map((x) => x.t).join('/') === 'AirPlay/UPnP' && z.ways[1].on && z.ways[1].pressed === 'true', `${w}: the Linn seen two ways is one card, "${z.linnTitle}", with the chips ${z.ways.map((x) => x.t).join(' and ')} (UPnP on) among ${z.n} cards`);
     check(z.phIcon, `${w}: a zone with nothing playing shows the zone's mark`);
-    check(z.chip && z.chip.content !== 'none' && z.chip.reach >= 48 && z.iconBtn && z.iconBtn.reach >= 48, `${w}: hit areas reach 48 px on a touch screen (chip ${z.chip && z.chip.box} → ${z.chip && z.chip.reach}, icon button ${z.iconBtn && z.iconBtn.box} → ${z.iconBtn && z.iconBtn.reach})`);
+    check(z.chip && z.chip.content !== 'none' && z.chip.reach >= 48 && z.chip.aboveHits && z.chip.innerHits && z.iconBtn && z.iconBtn.reach >= 48 && z.iconBtn.aboveHits, `${w}: hit areas reach 48 px up and down on a touch screen and a tap 5 px above lands on the control (chip ${z.chip && z.chip.box} → ${z.chip && z.chip.reach}, above ${z.chip && z.chip.aboveHits}; icon button ${z.iconBtn && z.iconBtn.box} → ${z.iconBtn && z.iconBtn.reach}, above ${z.iconBtn && z.iconBtn.aboveHits})`);
     check(z.group.aria === 'Group outputs' && !z.group.labelShown, `${w}: "Group outputs…" is its icon on a phone, named for a screen reader (${z.group.aria})`);
     await page.screenshot({ path: path.join(SHOTS, `zones-${w}.png`) });
     // A way's chip plays to that way: the card follows
@@ -79,8 +92,10 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
     check(sw.on[0] && !sw.on[1] && sw.zone === 'linn-air', `${w}: the AirPlay chip plays to the Linn over AirPlay (${sw.zone})`);
     // The bar's zone button and the status chip keep more of their words
     await fx.go(page, '/'); await page.waitForSelector('#upstreams:not([hidden])', { timeout: 5000 }).catch(() => {}); await sleep(300);
-    const words = await page.evaluate(() => { const zb = document.querySelector('#zonename'); const up = document.querySelector('#upstreams'); const fits = (el) => el && el.scrollWidth <= el.clientWidth + 1; return { zone: zb && zb.textContent, zoneFits: fits(zb), zoneMax: zb && getComputedStyle(zb).maxWidth, upMax: up && getComputedStyle(up).maxWidth, vw: innerWidth }; });
-    check(words.zoneMax && parseFloat(words.zoneMax) >= (w < 400 ? 84 : 96), `${w}: the bar's zone button keeps up to ${words.zoneMax} of its words (was ${w <= 420 ? 64 : 96}px)`);
+    const words = await page.evaluate(() => { const zb = document.querySelector('#zonename'); const up = document.querySelector('#upstreams'); const fits = (el) => el && el.scrollWidth <= el.clientWidth + 1; return { zone: zb && zb.textContent, zoneFits: fits(zb), zoneShown: zb && Math.round(zb.getBoundingClientRect().width), zoneMax: zb && getComputedStyle(zb).maxWidth, upMax: up && getComputedStyle(up).maxWidth, vw: innerWidth }; });
+    // (the words are cut with an ellipsis where the bar is tight: what shows must still be readable)
+    // (a 360 px bar has 36 px for it beside the play button and the quality pill; a 412 px one near 100)
+    check(words.zoneMax && parseFloat(words.zoneMax) >= (w < 400 ? 84 : 96) && words.zoneShown >= (w < 400 ? 32 : 44), `${w}: the bar's zone button may keep up to ${words.zoneMax} of its words (was ${w <= 420 ? 64 : 96}px) and shows ${words.zoneShown} px of them`);
     check(words.upMax && (words.upMax === '48%' || parseFloat(words.upMax) >= words.vw * 0.47), `${w}: the status chip may take ${words.upMax} of the bar (was 40%)`);
     check(!state.errors.length, `${w}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();

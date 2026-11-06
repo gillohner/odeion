@@ -17,7 +17,15 @@ const block = (sel) => {
   return vars;
 };
 const dark = block(':root {');
-const light = { ...dark, ...block(':root[data-theme="light"]') };
+const lightPicked = block(':root[data-theme="light"]');
+const light = { ...dark, ...lightPicked };
+// The light theme is written twice (picked in Settings, and following the system): both must say the same
+const sysIdx = css.indexOf('@media (prefers-color-scheme: light)');
+let drift = 0;
+if (sysIdx >= 0) {
+  const body = css.slice(sysIdx, css.indexOf('}', css.indexOf('{', css.indexOf('{', sysIdx) + 1)) + 1);
+  for (const m of body.matchAll(/--([\w-]+)\s*:\s*([^;]+);/g)) if (lightPicked[m[1]] != null && lightPicked[m[1]] !== m[2].trim()) { drift++; console.log(`FAIL light: --${m[1]} differs between the picked theme (${lightPicked[m[1]]}) and the system one (${m[2].trim()})`); }
+}
 
 // sRGB from #rgb, #rrggbb, rgb()/rgba(), hsl() (what the palette uses)
 const parse = (v, vars) => {
@@ -44,8 +52,8 @@ const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
 // accent as a border or mark on the page (3:1); the status colours as words on the page and cards
 const PAIRS = [
   ['fg', ['bg', 'surface', 'surface-2', 'surface-3'], 4.5],
-  ['fg-2', ['bg', 'surface', 'surface-2'], 4.5],
-  ['muted', ['bg', 'surface', 'surface-2'], 4.5],
+  ['fg-2', ['bg', 'surface', 'surface-2', 'surface-3'], 4.5],
+  ['muted', ['bg', 'surface', 'surface-2', 'surface-3'], 4.5],
   ['on-accent', ['accent'], 4.5],
   ['accent-strong', ['bg', 'surface', 'surface-2', 'accent-soft'], 4.5],
   ['accent', ['bg', 'surface'], 3],
@@ -54,12 +62,12 @@ const PAIRS = [
   ['warn', ['bg', 'surface'], 4.5],
   ['bad', ['bg', 'surface'], 4.5],
 ];
-let problems = 0; let checked = 0;
+let problems = drift; let checked = 0;
 for (const [name, vars] of [['dark', dark], ['light', light]]) {
   for (const [text, bgs, min] of PAIRS) {
     for (const bgName of bgs) {
       const t = parse(vars[text] || '', vars); const bg0 = parse(vars[bgName] || '', vars); const page = parse(vars.bg, vars);
-      if (!t || !bg0) { console.log(`skip ${name}: ${text} on ${bgName} (${vars[text]} / ${vars[bgName]})`); continue; }
+      if (!t || !bg0) { problems++; console.log(`FAIL ${name}: ${text} on ${bgName}: a colour this script can't read (${vars[text]} / ${vars[bgName]}); use hex, rgb() or hsl()`); continue; }
       const bg = over(bg0, page); const r = ratio(over(t, bg), bg); checked++;
       const ok = r >= min;
       if (!ok) problems++;

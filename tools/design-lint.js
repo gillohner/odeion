@@ -77,11 +77,11 @@ for (const [c, at] of [...used.entries()].sort()) {
   const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
   for (const f of cssFiles) {
     const src = fs.readFileSync(path.join(DIR, f), 'utf8');
-    const re = /(font-size|border-radius|font):([^;{}]*)/g; let m;
+    const re = /(font-size|border(?:-[a-z]+)*-radius|font):([^;{}]*)/g; let m;
     while ((m = re.exec(src))) {
       const decl = m[2]; const at = `${f}:${src.slice(0, m.index).split('\n').length}`;
       if (/clamp\(|\d(vw|vh|vmin)\b/.test(decl)) continue; // a fluid display size (the dashboard) scales with the screen
-      if (m[1] === 'border-radius') {
+      if (/radius$/.test(m[1])) {
         const raw = decl.match(/(\d*\.?\d+)px/g) || [];
         if (raw.some((v) => parseFloat(v) > 3)) problems.push(`${at}  border-radius off the scale: use var(--r-sm|md|lg|pill): ${decl.trim()}`);
       } else if (/(^|[^\w.-])\d*\.?\d+px\b/.test(decl.replace(/\/[\d.]+/, ''))) {
