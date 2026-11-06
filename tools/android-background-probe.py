@@ -407,6 +407,15 @@ def part_d():
     time.sleep(3)
     fg = service_foreground()
     log(f"D: back on screen after C: service foreground {fg}")
+    # Where C's stopped service let the player stop (API 37), it stays paused: D is about the
+    # service coming back and carrying playback from here, so play again first if it isn't playing
+    a = secs(mini_time()); time.sleep(3); b = secs(mini_time())
+    if a is None or b is None or b <= a:
+        try:
+            tap_text(['~(?:text|content-desc)="Play"'], "Play (C left the player paused)", timeout=10)
+            time.sleep(3)
+        except RuntimeError:
+            log("D: no Play to tap")
     moved, wall = away(60)
     ok = fg and moved is not None and moved >= wall - 8
     log(f"D verdict: service back {fg}; kept playing {moved} of {wall:.0f} s")
