@@ -5475,7 +5475,7 @@
           const choices = new Map();
           let listGen = 0; // bumped when the list is cleared (Skip all): older answers are dropped
           // Undo of a skip: the page is loaded again when it is still the one on screen (any generation)
-          const undoSkip = (body) => async () => { const u = await api('POST', '/library/suggestions/unskip', body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') setView('identify', undefined, 'replace'); };
+          const undoSkip = (body) => async () => { const u = await api('POST', '/library/suggestions/unskip', body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') setView('identify', undefined, 'replace'); else if ($('#idbox')) renderIdentify(); };
           const MAX_CONFIRM = 500;
           const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags');
           const holdWhy = { search: 'found by its title and artist only', weak: 'a weak match', other_release: 'on another release than the rest of the album' };
@@ -7546,12 +7546,14 @@
   let scanTimer = null;
   const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
   // ---- identify library (Settings card and the review view) ----
-  let idTimer = null;
+  let idTimer = null; let idRenderGen = 0; // an older card draw that answers last is dropped
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
   const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint'], [n('tag_match'), 'by title, artist and length']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
   const renderIdentify = async () => {
     const box = $('#idbox'); if (!box) return;
-    let st; try { st = await api('GET', '/library/identify'); } catch (e) { box.textContent = e.message; return; }
+    const g = ++idRenderGen;
+    let st; try { st = await api('GET', '/library/identify'); } catch (e) { if (g === idRenderGen) box.textContent = e.message; return; }
+    if (g !== idRenderGen || !box.isConnected) return;
     const c = st.counts; const p = st.progress;
     // One line says where identification stands (st.phase), before the numbers
     const n = (x) => Number(x || 0).toLocaleString(); const matches = (x) => `${n(x)} ${x === 1 ? 'match' : 'matches'}`;
@@ -7611,7 +7613,7 @@
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
     // (the Undo button goes with the click: the focus comes back to the card)
-    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); await renderIdentify(); const f = $('#idskipall') || $('#idrun'); if (f) f.focus(); } }); renderIdentify(); }, ev);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); return; } await renderIdentify(); const f = $('#idskipall') || $('#idrun'); if (f) f.focus(); } }); renderIdentify(); }, ev);
     const us = $('#idunskip'); if (us) us.onclick = (ev) => busy(us, async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); }, ev);
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
