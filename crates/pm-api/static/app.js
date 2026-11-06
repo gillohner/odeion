@@ -2002,7 +2002,7 @@
   // (the in-app player's own element, whichever zone the page shows; cancelled if the app goes
   // out of sight again, or the listener seeks or pauses meanwhile)
   let stallCheck = null;
-  document.addEventListener('visibilitychange', () => {
+  const checkStall = () => {
     clearTimeout(stallCheck); stallCheck = null;
     if (document.visibilityState !== 'visible' || !audioEl.getAttribute('src') || state.ytOn || audioEl.paused || audioEl.ended) return;
     const t0 = audioEl.currentTime;
@@ -2012,10 +2012,14 @@
       console.info(`in-app player back on screen: time ${t0.toFixed(1)} -> ${audioEl.currentTime.toFixed(1)} s, paused ${audioEl.paused}, ready ${audioEl.readyState}, seeking ${audioEl.seeking}`);
       if (document.visibilityState === 'visible' && audioEl.getAttribute('src') && !state.ytOn && !audioEl.paused && !audioEl.ended && !audioEl.seeking && audioEl.currentTime === t0 && audioEl.readyState >= 2) {
         console.info('in-app player stood still: playing it again');
-        audioEl.pause(); audioEl.play().catch((e) => console.info(`in-app player: play again failed: ${e && e.message}`));
+        audioEl.pause(); audioEl.play().catch((err) => console.info(`in-app player: play again failed: ${err && err.message}`));
       }
     }, 2000);
-  });
+  };
+  // Back on screen: the page's own signal, and the app's (its WebView doesn't always say)
+  document.addEventListener('visibilitychange', () => (document.visibilityState === 'visible' ? checkStall() : (clearTimeout(stallCheck), stallCheck = null)));
+  window.addEventListener('pmdesktop:resumed', checkStall);
+  window.addEventListener('pmdesktop:suspended', () => { clearTimeout(stallCheck); stallCheck = null; });
 
   const rememberTracks = (tracks) => { for (const t of tracks || []) if (t && t.id != null) state.trackCache.set('track:' + t.id, t); };
   const playTracks = async (tracks, replace = true, at = 'end') => {

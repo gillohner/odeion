@@ -900,9 +900,15 @@ pub fn run() {
             #[cfg(target_os = "android")]
             if let tauri::RunEvent::WindowEvent { event, .. } = &event {
                 match event {
-                    tauri::WindowEvent::Suspended => ring_wait::left(),
+                    tauri::WindowEvent::Suspended => {
+                        ring_wait::left();
+                        page_event(app, "pmdesktop:suspended");
+                    }
                     tauri::WindowEvent::Resumed => {
                         ring_wait::back();
+                        // The page hears it too: the WebView doesn't always tell it it was out of
+                        // sight (the in-app player checks its sound came back, app.js)
+                        page_event(app, "pmdesktop:resumed");
                         // On screen again: the player service as it was (refused from the background,
                         // or ended after a while with nothing playing)
                         android::resume_player_service(app);
@@ -917,6 +923,14 @@ pub fn run() {
             tracing::error!("cannot start: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// An event for the page in the main window (`window.dispatchEvent(new Event(name))`).
+#[cfg(target_os = "android")]
+fn page_event(app: &tauri::AppHandle, name: &str) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        let _ = w.eval(format!("window.dispatchEvent(new Event({name:?}))"));
     }
 }
 

@@ -136,7 +136,7 @@ def connect_app():
     ep.relay(ep.GUEST)
     adb("logcat", "-c")
     global lc_proc
-    lc = lc_proc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "chromium:I", "cr_MediaSession:V", "cr_AwContents:V", "*:S"],
+    lc = lc_proc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "chromium:I", "Tauri/Console:V", "cr_MediaSession:V", "cr_AwContents:V", "*:S"],
                                     stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     tap(lambda n: "connect by address" in n, "“Or connect by address”")
