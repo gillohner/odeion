@@ -11,6 +11,9 @@
 //     row of chips (buttons) that stays at the top with the song and Play once the transport scrolls
 //     away; a chip scrolls its section to just under the row and marks itself current;
 //   * no second row of tabs, no sheet mode and no close button of its own;
+//   * synced lyrics scroll their own box, never the page; a redraw while reading further down keeps
+//     the place and the focus; scrolling by hand moves the current chip; the chips row is as tall
+//     stuck as not;
 //   * a swipe down closes it from the player, not from a scrolled section; focus goes back to the
 //     mini player;
 //   * on the library page the mini player and the tabs share an edge (one surface), the tabs reach
@@ -31,7 +34,9 @@ const queue = TITLES.map((title, i) => ({ id: i + 1, uri: `track:${i + 1}`, titl
 const np = { item: { id: 1, uri: 'track:1', title: 'Come On', artist: 'Dr. Peacock, Sefa', album: 'Frenchcore Worldwide 02', duration_ms: 230000 }, index: 0, position_ms: 61000, duration_ms: 230000, source_format: fmt, output_format: fmt, signal_path: { stages: [{ name: 'decode', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }] }, format: { codec: 'FLAC', lossless: true, service: 'library', preview: false } };
 const zone = { id: 'linn', name: 'Linn Klimax DS3:UPnP AV', output: 'upnp:linn', transport: 'playing', queue, queue_index: 0, queue_version: 1, repeat: 'off', radio: false, error: null, acked: 1, sync: 'single', crossfade_ms: 0, volume: { percent: 20, muted: false }, now_playing: np };
 const albums = Array.from({ length: 8 }, (_, i) => ({ id: 70 + i, title: `Album ${i}`, album_artist: 'Sefa', year: 2017, tracks: 10 }));
-const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:linn', name: 'Linn', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/zones/linn/queue': { body: queue }, '/library/albums': { body: albums } };
+// Synced lyrics: their follower scrolls their own box, never the page (review: it scrolled the one screen)
+const lyrics = { synced: true, source: 'file', lines: Array.from({ length: 40 }, (_, i) => ({ ms: i * 2000, text: `Line ${i + 1} of the song` })) };
+const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:linn', name: 'Linn', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/zones/linn/queue': { body: queue }, '/library/albums': { body: albums } };
 
 (async () => {
   const browser = await chromium.launch();
@@ -67,6 +72,9 @@ const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:
       check(!top.oldTabs && !top.sheet && !top.close, `${at}: no second row of tabs, sheet or close button of its own`);
       check(top.sections.join(',') === 'npsec-queue,npsec-lyrics,npsec-details,npsec-sources,npsec-tags' && top.chips.every((c) => c.tag === 'BUTTON') && top.chips.length === 5, `${at}: Up next, Lyrics, Details, Sources and Tags in the same scroll, with five chip buttons (${top.sections.join(' ')})`);
       if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-${w}.png`) });
+      await sleep(1600);
+      const ly = await page.evaluate(() => ({ top: document.querySelector('#nowplaying').scrollTop, lines: !!document.querySelector('#nplyrics .lyric-line.on'), barH: document.querySelector('.np-jump').getBoundingClientRect().height }));
+      check(ly.top === 0 && ly.lines, `${at}: synced lyrics follow in their own box and the page stays on the player (page at ${ly.top}, a current line ${ly.lines})`);
       // A chip: its section just under the chips row, the row stuck with the song and Play
       await page.click('[data-npjump="details"]'); await sleep(900);
       const jumped = await page.evaluate(() => {
@@ -79,6 +87,19 @@ const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:
       check(jumped.secTop >= jumped.barBottom && (jumped.end || jumped.secTop - jumped.barBottom <= 24), `${at}: Details scrolls to just under the chips row (${jumped.secTop - jumped.barBottom} px under it${jumped.end ? ', the page ends there' : ''})`);
       check(jumped.cur === 'details' && jumped.focus === 'npsech-details', `${at}: the Details chip is current and its heading has the focus (${jumped.cur}, ${jumped.focus})`);
       if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-details-${w}.png`) });
+      const stuckH = await page.evaluate(() => document.querySelector('.np-jump').getBoundingClientRect().height);
+      check(Math.abs(stuckH - ly.barH) <= 0.5, `${at}: the chips row is as tall stuck as not (${ly.barH} → ${stuckH})`);
+      // Further down, Play in the chips row: the redraw after it keeps the place and the focus there
+      await page.click('[data-npjump="tags"]'); await sleep(900);
+      const before = await page.evaluate(() => document.querySelector('#nowplaying').scrollTop);
+      await page.click('.np-jump-play'); await sleep(900);
+      const after = await page.evaluate(() => ({ top: document.querySelector('#nowplaying').scrollTop, focus: !!document.activeElement && document.activeElement.matches('.np-jump [data-npt="toggle"]') }));
+      check(Math.abs(after.top - before) <= 4 && after.focus, `${at}: a redraw further down keeps the place and the focus on the row's Play (${before} → ${after.top}, focus ${after.focus})`);
+      // Scrolling by hand: the part at the top is the current chip
+      await page.mouse.move(w / 2, h / 2); await page.mouse.wheel(0, -1);
+      await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const sec = ov.querySelector('#npsec-lyrics'); ov.scrollTop = sec.offsetTop + 4 - ov.querySelector('.np-jump').offsetHeight; ov.dispatchEvent(new Event('scroll')); }); await sleep(400);
+      const hand = await page.evaluate(() => document.querySelector('[data-npjump][aria-current="true"]')?.dataset.npjump);
+      check(hand === 'lyrics', `${at}: scrolling by hand to Lyrics makes it the current chip (${hand})`);
       // A swipe down on a scrolled section doesn't close it; from the player it does, and focus goes back
       const swipe = (sel) => page.$eval(sel, (el) => {
         const b = el.getBoundingClientRect(); const x = b.left + b.width / 2; const y = Math.max(b.top + 20, 40);
@@ -103,9 +124,9 @@ const fixtures = { '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:
     await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
     await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
     await fx.go(page, '/albums'); await page.waitForSelector('#np'); await sleep(600);
-    await page.keyboard.press('n'); await page.waitForSelector('#nowplaying:not([hidden]) .np-transport', { timeout: 5000 }).catch(() => {});
-    const t = await page.evaluate(() => ({ sheet: !!document.querySelector('#nowplaying .np-sheet:not([hidden])'), one: !!document.querySelector('#nowplaying .np-jump') }));
-    check(t.sheet && !t.one, `1024: a tablet keeps the player beside the open sheet (sheet ${t.sheet}, one screen ${t.one})`);
+    await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-player', { timeout: 5000 });
+    const t = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const p = ov.querySelector('.np-player').getBoundingClientRect(); const sh = ov.querySelector('.np-sheet:not([hidden])'); const r = sh && sh.getBoundingClientRect(); return { open: !ov.hidden, sheet: !!r && r.width > 0, beside: !!r && p.right <= r.left + 1 && r.top < p.bottom, one: !!ov.querySelector('.np-jump') }; });
+    check(t.open && t.sheet && t.beside && !t.one, `1024: a tablet keeps the player beside the open sheet (open ${t.open}, sheet ${t.sheet}, beside ${t.beside}, one screen ${t.one})`);
     await context.close();
   }
   await browser.close();

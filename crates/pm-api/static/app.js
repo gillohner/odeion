@@ -3172,13 +3172,15 @@
     const a = document.activeElement; const body = $('.np-sheet-body', overlay);
     let focus = null;
     if (a && overlay.contains(a)) {
-      const where = a.closest('.np-sheet-tabs') ? '.np-sheet-tabs ' : a.closest('.np-tabs') ? '.np-tabs ' : a.closest('.np-strip') ? '.np-strip ' : a.closest('.np-transport') ? '.np-transport ' : '';
+      const where = a.closest('.np-jump') ? '.np-jump ' : a.closest('.np-sheet-tabs') ? '.np-sheet-tabs ' : a.closest('.np-tabs') ? '.np-tabs ' : a.closest('.np-strip') ? '.np-strip ' : a.closest('.np-transport') ? '.np-transport ' : '';
       if (a.id) focus = '#' + a.id;
-      else for (const k of ['npsheet', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
+      else for (const k of ['npsheet', 'npjump', 'npqi', 'npt']) if (a.dataset && a.dataset[k] != null) { focus = `${where}[data-${k}="${a.dataset[k]}"]`; break; }
     }
     const lines = $('.lyric-lines', overlay);
-    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus };
+    const bar = $('.np-jump', overlay);
+    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus, top: overlay.scrollTop, height: overlay.scrollHeight, stuck: !!bar && bar.classList.contains('stuck') };
   };
+  let npMark = () => {}; // the one screen's current-chip marker (set by each render)
   let npObs = null; // the one screen's observers (sticky chips, the part in view, Sources when near)
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
@@ -3221,8 +3223,8 @@
     const title = np.stream_title ? esc(np.stream_title) : links.title;
     // The parts under the player, each a card with its heading, and one row of chips to reach them:
     // it stays at the top once the transport scrolls away, with the song and Play beside it
-    const oneHtml = () => `<nav class="np-jump" aria-label="More about this song"><div class="np-jump-strip" aria-hidden="true"><span class="np-strip-art">${itemArt(it, '', npSvc(np))}</span><span class="np-strip-text"><span class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</span><span class="sub">${esc(it.artist || '')}</span></span></div><button class="icon-btn play np-jump-play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><div class="chips np-jump-chips">${npSheets().map(([k]) => `<button class="chip" data-npjump="${k}" aria-controls="npsec-${k}">${esc(NP_ONE_LABEL[k])}</button>`).join('')}</div></nav>`
-      + npSheets().map(([k]) => `<section class="np-sec" id="npsec-${k}" aria-labelledby="npsech-${k}"><h2 class="np-sec-h" id="npsech-${k}">${esc(NP_ONE_LABEL[k])}</h2><div class="np-sec-body">${sheetBody(k)}</div></section>`).join('');
+    const oneHtml = () => `<nav class="np-jump${keep.stuck ? ' stuck' : ''}" aria-label="More about this song"><div class="np-jump-strip" aria-hidden="true"><span class="np-strip-art">${itemArt(it, '', npSvc(np))}</span><span class="np-strip-text"><span class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</span><span class="sub">${esc(it.artist || '')}</span></span></div><button class="icon-btn play np-jump-play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><div class="chips np-jump-chips">${npSheets().map(([k]) => `<button class="chip" data-npjump="${k}" aria-controls="npsec-${k}">${esc(NP_ONE_LABEL[k])}</button>`).join('')}</div></nav>`
+      + npSheets().map(([k]) => `<section class="np-sec" id="npsec-${k}" aria-labelledby="npsech-${k}"><h2 class="np-sec-h" id="npsech-${k}" tabindex="-1">${esc(NP_ONE_LABEL[k])}</h2><div class="np-sec-body">${sheetBody(k)}</div></section>`).join('');
     const artist = np.stream_title ? esc(it.artist || '') : links.artistsHtml;
     overlay.innerHTML = `
       <div class="np-page np2${sheet && !one ? ' has-sheet' : ''}${one ? ' compact' : ''}">
@@ -3257,11 +3259,10 @@
     // On a phone's one screen a part is scrolled to, not opened
     // (just under the chips row as it is once it holds the song too; the part asked for stays the
     // current chip until the listener scrolls, also where the page ends before it reaches the top)
-    let pinnedJump = null;
     const jump = (k, smooth = true) => {
       const sec = $(`#npsec-${k}`, overlay); const bar = $('.np-jump', overlay); if (!sec) return;
       let barH = 0; if (bar) { const was = bar.classList.contains('stuck'); bar.classList.add('stuck'); barH = bar.offsetHeight; bar.classList.toggle('stuck', was); }
-      pinnedJump = k;
+      state.npPin = { k, uri: it.uri }; npMark();
       const top = sec.getBoundingClientRect().top - overlay.getBoundingClientRect().top + overlay.scrollTop - barH - 8;
       overlay.scrollTo({ top, behavior: smooth && !matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'auto' });
       const h = $('.np-sec-h', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); }
@@ -3293,11 +3294,14 @@
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
     overlay.dataset.sheet = sheet || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
-    state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };
+    state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: (one || sheet === 'lyrics') && (one || keep.sheet === 'lyrics') ? keep.lyric : null, focus: keep.focus };
     npRestore();
     if (sheet === 'sources' && songPage && !one) fillNpSources(songPage, gen);
-    if (!one) { overlay.onscroll = null; overlay.ontouchstart = overlay.onwheel = null; }
+    if (!one) { overlay.onscroll = null; overlay.ontouchstart = overlay.onwheel = overlay.onkeydown = overlay.onpointerdown = null; npMark = () => {}; }
     if (one) {
+      // The parts fill again after this (Sources, Tags): the page keeps its height meanwhile, so a
+      // listener reading near the end isn't thrown back up
+      const pg = $('.np-page', overlay); if (pg && keep.height) { pg.style.minHeight = `${keep.height}px`; setTimeout(() => { if (pg.isConnected) pg.style.minHeight = ''; }, 3000); }
       overlay.scrollTop = oneScroll;
       const bar = $('.np-jump', overlay); const chips = $$('[data-npjump]', overlay);
       chips.forEach((c) => c.onclick = () => jump(c.dataset.npjump));
@@ -3314,12 +3318,13 @@
       const mark = () => {
         const edge = (bar ? bar.getBoundingClientRect().bottom : 0) + 24; let cur = null;
         $$('.np-sec', overlay).forEach((x) => { if (x.getBoundingClientRect().top <= edge) cur = x.id; });
-        if (pinnedJump) cur = `npsec-${pinnedJump}`;
+        if (state.npPin && state.npPin.uri === it.uri) cur = `npsec-${state.npPin.k}`;
         chips.forEach((c) => (`npsec-${c.dataset.npjump}` === cur ? c.setAttribute('aria-current', 'true') : c.removeAttribute('aria-current')));
       };
       let queued = false;
       overlay.onscroll = () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; mark(); }); } };
-      overlay.ontouchstart = overlay.onwheel = () => { pinnedJump = null; };
+      overlay.ontouchstart = overlay.onwheel = overlay.onkeydown = overlay.onpointerdown = () => { state.npPin = null; };
+      npMark = mark;
       mark();
       // A part asked for (the quality line, a link from elsewhere) is shown once
       if (state.npSheet) { const k = state.npSheet; state.npSheet = null; requestAnimationFrame(() => jump(k, false)); }
@@ -3449,7 +3454,8 @@
     const at = positionMs - (state.lyricsOffset || 0);
     let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= at) cur = ln; else break; }
     for (const ln of lines) ln.classList.toggle('on', ln === cur);
-    if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { cur.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { /* jsdom */ } }
+    // (only the lyrics' own box scrolls: on a phone's one screen the page holds them too)
+    if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { const box = cur.closest('.lyric-lines'); if (box) box.scrollTo({ top: cur.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - (box.clientHeight - cur.offsetHeight) / 2, behavior: 'smooth' }); } catch { /* jsdom */ } }
   };
   // Keep the overlay's progress moving without rebuilding it on every tick.
   setInterval(() => {

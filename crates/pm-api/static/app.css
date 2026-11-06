@@ -1715,18 +1715,22 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np2.compact .np-body { display: block; }
 .np2.compact .np-player { max-width: none; min-height: calc(100dvh - 62px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); justify-content: space-evenly; }
 .np2.compact .np-tabs, .np2.compact .np-sheet { display: none; }
-.np-jump { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px -16px 0; padding: 8px 16px; background: var(--bg); }
-.np-jump.stuck { border-bottom: 1px solid var(--line); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12); }
-.np-jump-strip { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+/* (a narrow desktop window: the overlay stops above the player bar) */
+html:not([data-shell="phone"]) .np2.compact .np-player { min-height: calc(100dvh - 62px - var(--player)); }
+/* One row whose height doesn't change when it sticks (the cover and Play come in beside the chips),
+   so nothing below it moves */
+.np-jump { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; min-height: 60px; margin: 8px -16px 0; padding: 8px 16px; background: var(--bg); }
+.np-jump { border-bottom: 1px solid transparent; }
+.np-jump.stuck { border-bottom-color: var(--line); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12); }
+.np-jump-strip { display: flex; align-items: center; flex: none; order: 0; }
+.np-jump-strip .np-strip-text { display: none; }
+.np2.compact .np-jump-strip .np-strip-art { width: 40px; height: 40px; }
 .np-jump-strip .np-strip-art { width: 40px; height: 40px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
 .np-jump-strip .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.np-jump-strip .np-strip-text { display: flex; flex-direction: column; min-width: 0; }
-.np-jump-strip .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.np-jump-strip .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.np-jump-play { width: 44px; height: 44px; flex: none; }
+.np-jump-play { width: 44px; height: 44px; flex: none; order: 2; }
 .np-jump-strip .src-badge, .np-jump-strip .src-badges { display: none; }
 .np-jump:not(.stuck) .np-jump-strip, .np-jump:not(.stuck) .np-jump-play { display: none; }
-.np-jump-chips { flex: 0 0 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.np-jump-chips { flex: 1 1 auto; min-width: 0; order: 1; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .np-jump-chips::-webkit-scrollbar { display: none; }
 .np-jump-chips .chip { flex: none; min-height: 40px; }
 .np-jump-chips .chip[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
