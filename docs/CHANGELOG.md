@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-06
 
+- **Back after Play to › Sleep timer stays on the page.** The Sleep timer and "Who sees what you play" menus opened before the Play to menu's own Back step was taken back, so they got none: Back then went back a page in the address while the page stayed. They wait for it now.
 - **Seeking in a TIDAL track no longer ends it** (owner's report: dragging the seek bar on a TIDAL full track showed "decode error … out-of-bounds seek for a non-seekable stream" and the next song started). TIDAL's full tracks (DASH), its official HLS stream and SoundCloud's HLS come in segments, and the decoder could only seek in what it had already read. A seek now opens the stream again at the segment that holds the position and plays from the exact point, forward, back or into the last segment. And if any stream takes a seek and then can't read, the track goes on from where it was and the player says "this stream cannot seek", instead of skipping to the next song.
 
 ### 2026-11-05
