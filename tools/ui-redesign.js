@@ -52,7 +52,7 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
             let k = i - 1; while (k >= 0 && /\s/.test(code[k])) k--;
             const before = k >= 0 ? code[k] : ''; const upto = code.slice(Math.max(0, k - 6), k + 1);
             const postfix = (before === '+' || before === '-') && code[k - 1] === before;
-            if (!postfix && (!before || '(,=:[!&|?{};+-*%<>~^'.includes(before) || /\b(return|typeof|case|do|else|in|of)$/.test(upto))) { let j = i + 1; let cls = false; while (j < code.length && (cls || code[j] !== '/') && code[j] !== '\n') { if (code[j] === '\\') j++; else if (code[j] === '[') cls = true; else if (code[j] === ']') cls = false; j++; } i = code[j] === '\n' ? j - 1 : j; }
+            if (!postfix && (!before || '(,=:[!&|?{};+-*%<>~^'.includes(before) || /\b(return|typeof|case|do|else|in|of)$/.test(upto))) { let j = i + 1; let cls = false; while (j < code.length && (cls || code[j] !== '/') && code[j] !== '\n') { if (code[j] === '\\' && code[j + 1] !== '\n') j++; else if (code[j] === '[') cls = true; else if (code[j] === ']') cls = false; j++; } i = code[j] === '\n' ? j - 1 : j; }
           }
           continue;
         }
