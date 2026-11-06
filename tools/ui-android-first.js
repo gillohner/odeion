@@ -69,9 +69,12 @@ const sheet = async (page, sel, at) => {
 const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
   const b = el.getBoundingClientRect(); const x = b.left + b.width / 2; const y = b.top + 12;
   const t = (yy) => new Touch({ identifier: 1, target: el, clientX: x, clientY: yy });
-  el.dispatchEvent(new TouchEvent('touchstart', { touches: [t(y)], changedTouches: [t(y)], bubbles: true }));
-  for (let i = 1; i <= 6; i++) el.dispatchEvent(new TouchEvent('touchmove', { touches: [t(y + (dy * i) / 6)], changedTouches: [t(y + (dy * i) / 6)], bubbles: true }));
+  el.dispatchEvent(new TouchEvent('touchstart', { touches: [t(y)], changedTouches: [t(y)], bubbles: true, cancelable: true }));
+  // (cancelable, as a real finger's moves are: the sheet takes the gesture from the first one)
+  let taken = 0;
+  for (let i = 1; i <= 6; i++) taken += el.dispatchEvent(new TouchEvent('touchmove', { touches: [t(y + (dy * i) / 6)], changedTouches: [t(y + (dy * i) / 6)], bubbles: true, cancelable: true }));
   el.dispatchEvent(new TouchEvent('touchend', { touches: [], changedTouches: [t(y + dy)], bubbles: true }));
+  return 6 - taken; // moves the sheet kept from the browser
 }, dy);
 
 (async () => {
@@ -102,7 +105,8 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     await page.screenshot({ path: path.join(SHOTS, `playto-${w}.png`) });
     await pull(page, '#zonepop', 40); await sleep(300);
     check(!(await page.$eval('#zonepop', (e) => e.hidden)), `${w}: a short pull leaves Play to open`);
-    await pull(page, '#zonepop', 260); await sleep(300);
+    const kept = await pull(page, '#zonepop', 260); await sleep(300);
+    check(kept >= 5, `${w}: the swipe keeps its moves from the browser's own panning (${kept} of 6)`);
     check(await page.$eval('#zonepop', (e) => e.hidden) && await page.$eval('#scrim', (e) => e.hidden), `${w}: a swipe down closes Play to and its scrim`);
     if (!(await page.$eval('#zonepop', (e) => e.hidden))) await page.keyboard.press('Escape'); // (so the rest still runs where the swipe failed)
     await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden]) #zpsleep');

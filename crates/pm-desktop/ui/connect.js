@@ -9,6 +9,10 @@
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
   const $ = (id) => document.getElementById(id);
+  // The saved node's message; a change of state is also said in the live region (the retry
+  // countdown's seconds are not: a screen reader would read every one)
+  const announce = (text) => { const l = $('saved-live'); if (l) l.textContent = text; };
+  const say = (text) => { $('saved-msg').textContent = text; announce(text); };
   let ringUrl = '';
 
   const show = (id, on = true) => { $(id).hidden = !on; };
@@ -111,9 +115,9 @@
     show('saved');
     show('saved-spin', false);
     clearErr();
-    $('saved-msg').textContent = (oldUrl ? 'Your node didn’t answer at ' + oldUrl + ', and a' : 'A')
+    say((oldUrl ? 'Your node didn’t answer at ' + oldUrl + ', and a' : 'A')
       + ' node with its id answers at ' + url + '. If you moved the node or its address changed, use the new address. '
-      + 'Anyone on this network can claim to be your node, so your token goes there only if you say so.';
+      + 'Anyone on this network can claim to be your node, so your token goes there only if you say so.');
     const yes = $('moved-yes');
     yes.textContent = 'Use ' + url;
     yes.disabled = false;
@@ -140,12 +144,12 @@
     show('other', false);
     show('saved-spin');
     clearErr();
-    $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
+    say('Connecting to ' + nodeUrl + '…');
     for (let i = 0; ; i++) {
       // Each attempt that hangs says so after SLOW_MS (a node that stops answering mid-retry too)
       const slow = setTimeout(() => {
         if (mine !== attempt) return;
-        $('saved-msg').textContent = 'Your node at ' + nodeUrl + ' hasn’t answered yet. Still trying…';
+        say('Your node at ' + nodeUrl + ' hasn’t answered yet. Still trying…');
         show('retry');
         show('other');
       }, SLOW_MS);
@@ -160,23 +164,24 @@
         // Away from the node with music on this device: play it now; the app comes back to the
         // node by itself when it answers (open_offline)
         if (i === 0 && String(e).startsWith("Can't reach") && await invoke('has_downloads').catch(() => false)) {
-          $('saved-msg').textContent = String(e) + '. Playing what this device keeps meanwhile…';
+          say(String(e) + '. Playing what this device keeps meanwhile…');
           try { await invoke('open_offline'); return; } catch (err) { /* fall through to the retries */ }
         }
         show('retry');
         show('other');
         // Only an unreachable node is worth waiting for; a refused token is not
         if (i >= RETRIES.length || !String(e).startsWith("Can't reach")) {
-          $('saved-msg').textContent = String(e) + '.';
+          say(String(e) + '.');
           show('saved-spin', false);
           return;
         }
         for (let left = RETRIES[i]; left > 0; left--) {
+          if (left === RETRIES[i]) announce(String(e) + '. Trying again shortly.');
           $('saved-msg').textContent = String(e) + '. Trying again in ' + left + ' s…';
           await new Promise((r) => setTimeout(r, 1000));
           if (mine !== attempt) return;
         }
-        $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
+        say('Connecting to ' + nodeUrl + '…');
       }
     }
   }
