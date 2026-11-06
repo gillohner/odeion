@@ -22992,6 +22992,39 @@ exec sleep 300
             !s.upnp_known().contains_key(linn),
             "the old renderer at that URL is forgotten"
         );
-        assert_eq!(s.upnp_known().get(tv).map(|k| k.location.clone()), Some(url));
+        assert_eq!(
+            s.upnp_known().get(tv).map(|k| k.location.clone()),
+            Some(url.clone())
+        );
+        // Forgetting is for the address it was at: one found elsewhere meanwhile stays
+        s.remember_upnp(linn, "http://192.0.2.7/desc.xml");
+        s.forget_upnp_at(linn, &url);
+        assert_eq!(
+            s.upnp_known().get(linn).map(|k| k.location.clone()).as_deref(),
+            Some("http://192.0.2.7/desc.xml")
+        );
+        // Long unseen ones go before a pass describes them (dead ones don't hold every pass)
+        // (as stored by an earlier run: nothing has pruned it since)
+        let mut known = s.upnp_known();
+        let month_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 31 * 86_400;
+        known.insert(
+            "uuid:gone".into(),
+            crate::state::KnownRenderer {
+                location: "http://192.0.2.8/desc.xml".into(),
+                seen: month_ago,
+            },
+        );
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("outputs.upnp_known", &serde_json::to_string(&known).unwrap())
+            .unwrap();
+        assert!(s.upnp_known().contains_key("uuid:gone"));
+        let _ = restore(&s).await.unwrap();
+        assert!(!s.upnp_known().contains_key("uuid:gone"));
     }
 }

@@ -1150,15 +1150,21 @@ impl NodeState {
         }
         // (a description already behind an output isn't fetched again: a later pass is cheap)
         // (only one answering as itself, by its USN's UUID: another device given its address is described)
+        // (one skipped answered all the same: it is seen, so it stays known)
         let known = self.upnp_known();
+        let answered = std::cell::RefCell::new(Vec::new());
         let have = |loc: &str, uuid: Option<&str>| {
             let Some(uuid) = uuid else { return false };
-            known.iter().any(|(udn, k)| {
+            let hit = known.iter().find(|(udn, k)| {
                 let udn = udn.trim_start_matches("uuid:");
                 udn.eq_ignore_ascii_case(uuid)
                     && k.location.eq_ignore_ascii_case(loc)
                     && self.outputs.get(&OutputId::new("upnp", udn)).is_some()
-            })
+            });
+            if let Some((udn, k)) = hit {
+                answered.borrow_mut().push((udn.clone(), k.location.clone()));
+            }
+            hit.is_some()
         };
         let renderers = match pm_out_upnp::discover_except(timeout, have) {
             Ok(r) => r,
@@ -1167,6 +1173,9 @@ impl NodeState {
                 return Vec::new();
             }
         };
+        for (udn, loc) in answered.into_inner() {
+            self.remember_upnp(&udn, &loc);
+        }
         renderers
             .into_iter()
             .filter_map(|r| self.register_renderer(r))
@@ -1288,10 +1297,13 @@ impl NodeState {
             .unwrap_or_default()
     }
 
-    /// Remember `udn` at `location` (seen now), or forget it (`None`), in one go under the
-    /// library's lock (two passes at once don't lose each other's). Ones not seen for 30 days are
-    /// dropped, and at most 64 are kept (the longest unseen go first).
-    pub(crate) fn remember_upnp_at(&self, udn: &str, location: Option<&str>) {
+    /// Change the remembered renderers in one go under the library's lock (two passes at once
+    /// don't lose each other's), then drop the ones not seen for 30 days and keep at most 64 (the
+    /// longest unseen go first); written only when something changed. Returns what is kept.
+    pub(crate) fn edit_known(
+        &self,
+        f: impl FnOnce(&mut std::collections::BTreeMap<String, KnownRenderer>, u64),
+    ) -> std::collections::BTreeMap<String, KnownRenderer> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -1299,21 +1311,7 @@ impl NodeState {
         let lib = self.library.lock().expect("library poisoned");
         let mut known = Self::read_known(&lib);
         let before = known.clone();
-        match location {
-            Some(loc) => {
-                let k = known.entry(udn.to_string()).or_default();
-                // (a day's precision is enough: no write on every pass)
-                if k.location != loc || now.saturating_sub(k.seen) > 86_400 {
-                    *k = KnownRenderer {
-                        location: loc.to_string(),
-                        seen: now,
-                    };
-                }
-            }
-            None => {
-                known.remove(udn);
-            }
-        }
+        f(&mut known, now);
         known.retain(|_, k| now.saturating_sub(k.seen) <= 30 * 86_400);
         while known.len() > 64 {
             let oldest = known
@@ -1329,10 +1327,30 @@ impl NodeState {
                 &serde_json::to_string(&known).expect("serializes"),
             );
         }
+        known
     }
 
+    /// Remember `udn` at `location`, seen now (a day's precision: no write on every pass).
     pub(crate) fn remember_upnp(&self, udn: &str, location: &str) {
-        self.remember_upnp_at(udn, Some(location));
+        self.edit_known(|known, now| {
+            let k = known.entry(udn.to_string()).or_default();
+            if k.location != location || now.saturating_sub(k.seen) > 86_400 {
+                *k = KnownRenderer {
+                    location: location.to_string(),
+                    seen: now,
+                };
+            }
+        });
+    }
+
+    /// Forget `udn` only if it is still remembered at `location` (another pass may have just
+    /// found it somewhere else).
+    pub(crate) fn forget_upnp_at(&self, udn: &str, location: &str) {
+        self.edit_known(|known, _| {
+            if known.get(udn).is_some_and(|k| k.location == location) {
+                known.remove(udn);
+            }
+        });
     }
 
     /// The renderers that had a zone and have none now, described at their last URL (no SSDP,
@@ -1348,7 +1366,8 @@ impl NodeState {
 
     pub(crate) fn restore_known(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for (udn, k) in self.upnp_known() {
+        // (the ones long unseen go first: dead ones don't hold every pass)
+        for (udn, k) in self.edit_known(|_, _| {}) {
             if self
                 .outputs
                 .get(&OutputId::new("upnp", udn.trim_start_matches("uuid:")))
@@ -1364,7 +1383,7 @@ impl NodeState {
                         .eq_ignore_ascii_case(udn.trim_start_matches("uuid:"))
                     {
                         tracing::info!(location = %k.location, was = %udn, now = %r.udn, "a known UPnP renderer's address is another device's now");
-                        self.remember_upnp_at(&udn, None);
+                        self.forget_upnp_at(&udn, &k.location);
                     }
                     new.extend(self.register_renderer(r));
                 }
