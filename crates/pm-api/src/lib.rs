@@ -23004,7 +23004,21 @@ exec sleep 300
             Some("http://192.0.2.7/desc.xml")
         );
         // Long unseen ones go before a pass describes them (dead ones don't hold every pass)
-        // (as stored by an earlier run: nothing has pruned it since)
+        // (as stored by an earlier run: nothing has pruned it since; it answers, but isn't asked)
+        let gone_hits = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gone_url = format!(
+            "http://127.0.0.1:{}/desc.xml",
+            listener.local_addr().unwrap().port()
+        );
+        fake_renderer_at(
+            listener,
+            "uuid:gone",
+            "Gone",
+            gone_hits.clone(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await;
         let mut known = s.upnp_known();
         let month_ago = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -23014,7 +23028,7 @@ exec sleep 300
         known.insert(
             "uuid:gone".into(),
             crate::state::KnownRenderer {
-                location: "http://192.0.2.8/desc.xml".into(),
+                location: gone_url,
                 seen: month_ago,
             },
         );
@@ -23026,5 +23040,11 @@ exec sleep 300
         assert!(s.upnp_known().contains_key("uuid:gone"));
         let _ = restore(&s).await.unwrap();
         assert!(!s.upnp_known().contains_key("uuid:gone"));
+        assert_eq!(
+            gone_hits.load(Ordering::SeqCst),
+            0,
+            "a long-unseen renderer isn't asked before it is dropped"
+        );
+        assert_eq!(named(&s, "Gone"), 0);
     }
 }

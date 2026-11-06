@@ -1174,7 +1174,7 @@ impl NodeState {
             }
         };
         for (udn, loc) in answered.into_inner() {
-            self.remember_upnp(&udn, &loc);
+            self.seen_upnp_at(&udn, &loc);
         }
         renderers
             .into_iter()
@@ -1339,6 +1339,18 @@ impl NodeState {
                     location: location.to_string(),
                     seen: now,
                 };
+            }
+        });
+    }
+
+    /// `udn` answered at `location`: seen now, only if it is still remembered there (another pass
+    /// may have just found it somewhere else; that address stands). A day's precision.
+    fn seen_upnp_at(&self, udn: &str, location: &str) {
+        self.edit_known(|known, now| {
+            if let Some(k) = known.get_mut(udn) {
+                if k.location == location && now.saturating_sub(k.seen) > 86_400 {
+                    k.seen = now;
+                }
             }
         });
     }
