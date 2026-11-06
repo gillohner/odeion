@@ -1736,6 +1736,7 @@ html:not([data-shell="phone"]) .np2.compact .np-player { min-height: calc(100dvh
 .np-jump-chips .chip[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 .np-sec { margin-top: 12px; padding: 14px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
 .np-sec-h { font-size: 15px; margin: 0 0 10px; }
+.np-sec-body { min-width: 0; }
 .np-sec-h:focus { outline: none; }
 /* (the rules below are for the old sheet mode, unused on the one screen) */
 /* One side inset for everything (16 px): the cover is the content's width wherever the screen is
