@@ -351,6 +351,15 @@ mod tests {
         assert_eq!(src.format().rate_hz, RATE);
         assert_eq!(src.duration_ms(), Some(4000));
         let scale = scale_of(src.as_mut());
+        // The first decoder's reader reads ahead on a thread of its own (TimeoutReader), up to the
+        // last segment here: let it get there, so every request after the seek is the new one's
+        // (CI saw its read-ahead land after the reopen)
+        let t0 = std::time::Instant::now();
+        while !log.lock().unwrap().iter().any(|p| p == "/4.m4s")
+            && t0.elapsed() < std::time::Duration::from_secs(5)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         // Forward past a segment: into the third one (2.5 s). The stream opens again from the
         // init segment and segment 3, never 1 or 2 (the first decoder may have read ahead)
         src.seek_ms(2500).unwrap();
