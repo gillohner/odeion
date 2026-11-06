@@ -3178,7 +3178,7 @@
     }
     const lines = $('.lyric-lines', overlay);
     const bar = $('.np-jump', overlay);
-    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus, top: overlay.scrollTop, height: overlay.scrollHeight, stuck: !!bar && bar.classList.contains('stuck') };
+    return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus, top: overlay.scrollTop, height: overlay.scrollHeight - (parseFloat(getComputedStyle(overlay).paddingTop) || 0) - (parseFloat(getComputedStyle(overlay).paddingBottom) || 0), stuck: !!bar && bar.classList.contains('stuck') };
   };
   let npMark = () => {}; // the one screen's current-chip marker (set by each render)
   let npObs = null; // the one screen's observers (sticky chips, the part in view, Sources when near)
