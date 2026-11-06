@@ -9,7 +9,8 @@
 //   - what Confirm does to the files, as "Write IDs into my files" is set (on, off, unknown), and
 //     files the IDs couldn't be written to are said;
 //   - more than 500 chosen songs: the first 500 confirmed, the rest stay;
-//   - "Not this" and "Which song is this?" send the song and recording they show.
+//   - "Not this" and "Which song is this?" send the song and recording they show;
+//   - review is optional: the card's wording, Skip all unsure with Undo, Leave as is per album.
 // Any request outside the loopback server fails the run.
 //   node tools/ui-identify-fixture.js [static dir] [screenshot dir]
 const http = require('http');
@@ -283,6 +284,46 @@ const server = http.createServer(async (req, res) => {
       await until(async () => (await page.locator('section.idalbum').count()) === 1);
       await page.locator('section.idalbum [data-confirm]').click();
       check(await until(async () => /Nothing to confirm/.test(await page.locator('#main').textContent())), `${W} after the last song is confirmed the page says there is nothing to confirm`);
+
+      // 8. Review is optional (TASK-identify-less-review-1106): the card says Finished with the unsure
+      // songs as a secondary line, Identify stays the main button; "Skip all unsure" marks them
+      // reviewed without an identity (undoable); on the review page "Leave as is" does it per album
+      const skipRoutes = () => ({
+        'POST /library/suggestions/skip': async (_, b) => [200, { skipped: b.all ? 6 : 4, counts: {} }],
+        'POST /library/suggestions/unskip': async (_, b) => [200, { restored: b.all ? 6 : 4, counts: {} }],
+      });
+      fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
+      await page.goto(`${BASE}/library/node`);
+      check(await until(async () => (await page.locator('#idbox .idbar').count()) === 1), `${W} the Identify card draws`);
+      const card = await page.evaluate(() => { const q = (s) => document.querySelector(s); const legend = q('#idbox .idlegend') ? q('#idbox .idlegend').textContent.replace(/\s+/g, ' ') : ''; return { phase: q('#idphase') && q('#idphase').textContent.trim(), warn: !!(q('#idphase') && q('#idphase').classList.contains('warn-text')), unsure: q('#idunsure') && q('#idunsure').textContent.trim(), reviewPrimary: !!q('#idreview'), runPrimary: !!(q('#idrun') && q('#idrun').classList.contains('primary')), legend, skipAll: !!q('#idskipall'), unskip: q('#idunskip') && q('#idunskip').textContent.trim() }; });
+      check(card.phase === 'Finished' && !card.warn, `${W} the card says "Finished" with no warning tone (${card.phase})`);
+      check(/^6 songs unsure \(optional\): songs play and show as usual, identified or not\./.test(card.unsure || ''), `${W} the unsure songs are a secondary line: "${card.unsure}"`);
+      check(!card.reviewPrimary && card.runPrimary, `${W} Identify stays the main button; Review is a plain one`);
+      check(/6 unsure/.test(card.legend) && /3 left as they are/.test(card.legend) && /2 to re-check/.test(card.legend), `${W} the legend counts unsure, left as they are and to re-check (${card.legend.slice(0, 120)})`);
+      check(card.skipAll && card.unskip === 'Bring back 3 skipped', `${W} "Skip all unsure" and "Bring back 3 skipped" are offered`);
+      await page.locator('#idskipall').click();
+      check(await until(async () => asked('POST', '/library/suggestions/skip').length === 1), `${W} Skip all unsure asks the node to skip all`);
+      const skipBody = asked('POST', '/library/suggestions/skip')[0].body;
+      check(skipBody && skipBody.all === true && Object.keys(skipBody).length === 1, `${W} …with exactly {all: true} (${JSON.stringify(skipBody)})`);
+      check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} a toast says 6 songs were left as they are, with Undo`);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
+      // The review page: Leave as is on one album
+      fx = base({ routes: skipRoutes() });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      const loads0 = asked('GET', '/library/suggestions/albums').length;
+      check((await page.locator('#idskipall').count()) === 1, `${W} the review page offers Skip all unsure`);
+      await section(0).locator('[data-skip]').click();
+      check(await until(async () => asked('POST', '/library/suggestions/skip').length === 1), `${W} Leave as is asks the node to skip the album`);
+      const leave = asked('POST', '/library/suggestions/skip')[0].body;
+      check(leave && Array.isArray(leave.albums) && leave.albums.length === 1 && leave.albums[0] === '/music/Band/Album', `${W} …by its key (${JSON.stringify(leave)})`);
+      check(await until(async () => (await page.locator('section.idalbum').count()) === 1), `${W} the album leaves the page`);
+      check(asked('GET', '/library/suggestions/albums').length === loads0, `${W} the page isn't loaded again after Leave as is`);
+      check(await until(async () => /4 songs left as they are/.test(await page.locator('#toast').textContent())), `${W} the toast says 4 songs were left as they are`);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && JSON.stringify(asked('POST', '/library/suggestions/unskip')[0].body) === JSON.stringify({ albums: ['/music/Band/Album'] })), `${W} Undo asks the node to bring that album back`);
+      check(await until(async () => asked('GET', '/library/suggestions/albums').length > loads0 && (await page.locator('section.idalbum').count()) === 2), `${W} …and the page is loaded again with it`);
 
       check(!errors.length, `${W} no page errors ${errors.slice(0, 3).join(' | ')}`);
       check(!outside.length, `${W} nothing asked outside the loopback server ${outside.slice(0, 3).join(' ')}`);

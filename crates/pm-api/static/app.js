@@ -164,12 +164,14 @@
     if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
     return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls, svc, quiet);
   };
-  const toast = (msg, kind = '') => {
+  // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then
+  const toast = (msg, kind = '', action = null) => {
     const t = $('#toast');
     t.textContent = msg;
+    if (action) { const b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); t.classList.remove('show'); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
     t.className = `toast show ${kind}`;
     clearTimeout(toast.h);
-    toast.h = setTimeout(() => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); }, kind === 'error' ? 6000 : 3800);
+    toast.h = setTimeout(() => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); }, kind === 'error' ? 6000 : action ? 8000 : 3800);
   };
   // ---- Every click shows progress and fires once (owner, 2026-11-04) ----
   // busy(el, fn) runs fn. When fn returns a promise, el is busy until it settles: aria-busy and
@@ -5481,11 +5483,12 @@
               return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${note}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${opts}<div class="idopt idpick idlater"><input type="radio" id="idlater-${t.id}" name="${name}" value="" ${isChecked(g, '') ? 'checked' : ''}><label class="grow small muted" for="idlater-${t.id}">Leave for later</label></div></div></div>`;
             }).join('');
             if (!a.songs.length) return '';
-            return `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${head}</h3><span class="muted small">${parts}</span></div>${rel}<div class="list">${songs}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-confirm="${ai}"></button><span class="small muted" role="status" data-confirm-out="${ai}"></span></div></section>`;
+            return `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${head}</h3><span class="muted small">${parts}</span></div>${rel}<div class="list">${songs}</div><div class="actions idconfirm"><button class="btn ghost" type="button" data-skip="${ai}" title="Leave these songs as they are: they play and show as usual, and Identify again leaves them alone">Leave as is</button><button class="btn primary" type="button" data-confirm="${ai}"></button><span class="small muted" role="status" data-confirm-out="${ai}"></span></div></section>`;
           };
           const draw = () => {
-            main.innerHTML = pageHead('Confirm matches', page.songs) + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
+            const ska = $('#idskipall'); if (ska) ska.onclick = () => busy(ska, async () => { const r = await api('POST', '/library/suggestions/skip', { all: true }); if (!live()) return; toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { await api('POST', '/library/suggestions/unskip', { all: true }); setView('identify', undefined, 'replace'); } }); albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; draw(); });
             const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live()) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live()) return; toast(e.message, 'error'); more.disabled = false; } };
           };
           // One album drawn again from what is known here, after a confirm or a "Not this" (the
@@ -5501,6 +5504,16 @@
           const chosen = (sec) => $$('.idrow', sec).map((row) => { const r = $('input[type=radio]:checked', row); return r && r.value ? { track_id: Number(row.dataset.track), suggestion_id: Number(r.value), recording_mbid: r.dataset.rec } : null; }).filter(Boolean);
           const wire = (sec) => {
             const btn = $('[data-confirm]', sec); const out = $('[data-confirm-out]', sec);
+            // Leave as is: this album's unsure songs are marked reviewed without an identity; undoable
+            const skipBtn = $('[data-skip]', sec); if (skipBtn) skipBtn.onclick = () => busy(skipBtn, async () => {
+              const ai = Number(sec.dataset.album); const a = albums[ai]; const key = a.key; const nSongs = a.songs.length;
+              const r = await api('POST', '/library/suggestions/skip', { albums: [key] });
+              if (!live()) return;
+              toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { await api('POST', '/library/suggestions/unskip', { albums: [key] }); setView('identify', undefined, 'replace'); } });
+              a.songs.forEach((g) => choices.delete(g.track.id)); a.songs = []; a.ready = 0; a.conflicts = 0;
+              page.songs = Math.max(0, page.songs - nSongs);
+              redraw(ai);
+            });
             // More than one batch takes: the first ones are confirmed (all of them or none), the rest stay
             const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n; };
             label(); $$('input[type=radio]', sec).forEach((r) => r.onchange = () => { choices.set(Number(r.name.slice(5)), r.value); label(); });
@@ -7530,20 +7543,23 @@
     const ph = st.phase || (p.running ? 'running' : c.suggested ? 'needs_review' : c.unchecked ? 'new' : 'ready');
     const head = {
       running: `Working: ${n(p.done)} of ${n(p.total)}…`,
-      needs_review: `Finished — ${matches(c.suggested)} need${c.suggested === 1 ? 's' : ''} your review`,
+      needs_review: 'Finished',
       ready: c.unknown ? `Finished — nothing to review (${n(c.unknown)} not found)` : 'Finished — nothing to review',
       new: `${n(c.unchecked)} ${c.unchecked === 1 ? 'song' : 'songs'} not checked yet`,
       interrupted: `The last run was cut off when the node stopped${p.total ? ` (after ${n(p.done)} of ${n(p.total)})` : ''}. Identify carries on from there.`,
       failed: `It stopped after ${n(p.done)} of ${n(p.total)}: ${esc(p.stopped || 'an error')}. Identify carries on from there.`,
       empty: 'No songs yet: add music first.',
     }[ph] || '';
-    const reviewFirst = ph === 'needs_review';
-    box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>
+    // Review is optional (TASK-identify-less-review-1106): songs play and show as usual either way,
+    // so the unsure ones are a secondary line, not a warning, and Identify stays the main button
+    const reviewFirst = false;
+    const unsure = ph === 'needs_review' && c.suggested ? `<p class="small muted idsub" id="idunsure">${n(c.suggested)} ${c.suggested === 1 ? 'song' : 'songs'} unsure (optional): songs play and show as usual, identified or not.</p>` : '';
+    box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>${unsure}
       ${(() => {
         // One bar, one segment per state (owner, 2026-11-04: half purple, half dark read as "half
         // done, half empty" while the rest was to confirm and not found): identified, to confirm,
         // not found, not checked; the counts under it with the segments' colours
-        const parts = [['identified', c.identified, 'identified'], ['suggested', c.suggested, 'to confirm'], ['unknown', c.unknown, 'not found'], ['unchecked', c.unchecked, 'not checked yet']].map(([k, v, w]) => [k, Number(v || 0), w]);
+        const parts = [['identified', c.identified, 'identified'], ['suggested', c.suggested, 'unsure'], ['outdated', c.outdated, 'to re-check'], ['skipped', c.skipped, 'left as they are'], ['unknown', c.unknown, 'not found'], ['unchecked', c.unchecked, 'not checked yet']].map(([k, v, w]) => [k, Number(v || 0), w]);
         const said = parts.filter(([, v]) => v).map(([, v, w]) => `${n(v)} ${w}`).join(', ');
         const bar = `<div class="idbar" role="img" aria-label="${esc(c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}: ${said}` : 'No songs yet')}">${parts.filter(([, v]) => v).map(([k, v]) => `<span class="idseg ${k}" style="flex-basis:${((v / Math.max(c.total, 1)) * 100).toFixed(3)}%"></span>`).join('')}</div>`;
         const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<a data-view="identify">${n(v)} ${w}</a>` : `${n(v)} ${w}`}</span>`).join(' ');
@@ -7562,7 +7578,7 @@
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
-      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
+      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button><button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip">Bring back ${n(c.skipped)} skipped</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
@@ -7576,6 +7592,9 @@
     const wr = $('#idwrite'); if (wr) wr.onchange = async () => { try { await api('PUT', '/library/identify/settings', { write_ids: wr.checked }); toast(wr.checked ? 'IDs will be written into your files' : 'Your files stay as they are'); renderIdentify(); } catch (e) { toast(e.message, 'error'); wr.checked = !wr.checked; } };
     const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
+    // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
+    const sk = $('#idskipall'); if (sk) sk.onclick = () => busy(sk, async () => { const r = await api('POST', '/library/suggestions/skip', { all: true }); toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: 'Undo', run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); } }); renderIdentify(); });
+    const us = $('#idunskip'); if (us) us.onclick = () => busy(us, async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); });
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
     const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); if ((k && k.value) || (ch && ch.disabled)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };

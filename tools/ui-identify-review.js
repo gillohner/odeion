@@ -72,9 +72,11 @@ const albumC = { key: '/music/Third/Later', album: 'Later', artist: 'Third', rel
       const phaseLine = page.locator('#idphase');
       check(await until(async () => (await phaseLine.count()) > 0, 15000), `${W} the Identify card shows its state line`);
       await phaseLine.scrollIntoViewIfNeeded();
-      check(/Finished — 6 matches need your review/.test(await phaseLine.textContent()), `${W} finished with matches to review, said as such`);
-      const review = page.locator('#idreview');
-      check(await review.isVisible() && /primary/.test(await review.getAttribute('class')), `${W} Review is the primary action when matches wait`);
+      // Review is optional (TASK-identify-less-review-1106): "Finished", the unsure songs a quiet second line
+      check(/^Finished$/.test((await phaseLine.textContent()).trim()), `${W} finished: said as "Finished" (${(await phaseLine.textContent()).trim()})`);
+      check(/6 songs unsure \(optional\)/.test(await page.locator('#idunsure').textContent()), `${W} the unsure songs are a second line, optional`);
+      const review = page.locator('#idbox .actions [data-view="identify"]');
+      check(await review.isVisible() && !/primary/.test(await review.getAttribute('class')), `${W} Review is offered, not as the main action`);
       check(!/primary/.test(await page.locator('#idrun').getAttribute('class')), `${W} Identify again is secondary then`);
       await shot('card-needs-review');
       const expect = { ready: /Finished — nothing to review \(4 not found\)/, running: /Working: 12 of 30/, failed: /It stopped after 12 of 30: the library stayed busy/, interrupted: /cut off when the node stopped \(after 12 of 30\)/, empty: /No songs yet/, new: /30 songs not checked yet/ };

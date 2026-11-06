@@ -320,6 +320,8 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast.error { border-left-color: var(--bad); }
+/* (the toast itself lets taps through; its Undo takes them) */
+.toast .toast-act { margin-left: 10px; vertical-align: middle; pointer-events: auto; }
 .dialog { background: var(--surface-2); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 14px; padding: 24px; width: min(92vw, 420px); box-shadow: var(--shadow); }
 .dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .dialog h2 { margin-bottom: 6px; }
@@ -721,7 +723,11 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .idseg.suggested, .idswatch.suggested { background: var(--warn); }
 .idseg.unknown, .idswatch.unknown { background: var(--muted); }
 .idseg.unchecked, .idswatch.unchecked { background: var(--surface-3); }
+/* Left as they are (reviewed without an identity) and to re-check (an older suggestion the next run looks at again) */
+.idseg.skipped, .idswatch.skipped { background: var(--line-strong); }
+.idseg.outdated, .idswatch.outdated { background: var(--info); }
 .idlegend { margin: 0 0 8px; }
+.idsub { margin: -2px 0 8px; }
 .idkeys { display: inline-flex; flex-wrap: wrap; gap: 4px 14px; margin-left: 6px; }
 .idkey { display: inline-flex; align-items: center; gap: 6px; }
 .idswatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
