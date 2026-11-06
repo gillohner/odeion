@@ -2642,9 +2642,15 @@
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
   // The phone's tabs mark the current place; again when the shell changes
   const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'releases', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
-  const markTabs = (v = state.view) => {
+  // A page opened from a tab (an album from Home, an artist from Search) keeps that tab marked: Back
+  // goes there. The tab rides in the page's history entry, so Back and Forward mark it again. A page
+  // opened on its own (a link, a reload without the entry) is marked as before: Library's pages are Library's
+  const DETAIL_VIEWS = new Set(['item', 'album', 'artist', 'releases', 'person', 'playlist', 'genre', 'tag', 'source-item', 'source-artist', 'shared', 'home-section', 'smart', 'smart-edit', 'lossless', 'lossy', 'dsd']);
+  const TAB_ROOTS = { home: 'home', search: 'search', zones: 'zones' };
+  const tabFor = (v, from) => TAB_ROOTS[v] || (DETAIL_VIEWS.has(v) && from ? from : LIB_VIEWS.includes(v) ? 'library' : null);
+  const markTabs = () => {
     // Sources is a Library section on phones
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    $$('.bnav').forEach((b) => { const on = b.dataset.bnav === state.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   };
   const applyShell = () => {
     const now = shellFor(window.innerWidth, layoutPref());
@@ -3673,6 +3679,8 @@
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
+    // (on Back or Forward, history.state is already the entry being shown)
+    const tab = tabFor(v, how === 'pop' ? history.state && history.state.tab : state.tab);
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
       const cur = history.state || {};
@@ -3681,15 +3689,15 @@
       // A page opened from a menu takes the menu's transient entry (still a new page for back).
       const viaTransient = !!cur.transient && how !== 'replace';
       const replace = how === 'replace' || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
-      const entry = { transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      const entry = { transient: false, v, arg: histArg(v, arg), tab, backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
     // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
-    state.view = v; state.viewArg = arg;
+    state.view = v; state.viewArg = arg; state.tab = tab;
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
-    markTabs(v);
+    markTabs();
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
