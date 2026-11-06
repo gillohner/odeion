@@ -156,10 +156,19 @@ pub struct Zone {
     state: watch::Receiver<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
     crossfade: Arc<AtomicU64>,
-    /// A set and its read-back, or a poll's read, one at a time: a poll that started before a
-    /// set can't publish after it. Holds the level last published, in order (the engine's
-    /// state can lag the commands still queued).
-    volume_lock: Arc<tokio::sync::Mutex<Option<pm_model::ZoneVolume>>>,
+    /// A set and its read-back, or a poll's read, one at a time (the device's I/O): a poll that
+    /// started before a set can't publish after it.
+    volume_io: Arc<tokio::sync::Mutex<()>>,
+    /// The level last published, changed only together with the command that publishes it (the
+    /// engine's state can lag the commands still queued). Never held across an await.
+    volume_published: Arc<std::sync::Mutex<Published>>,
+}
+
+/// What a zone last said its level was, and how many levels the device announced itself.
+#[derive(Default)]
+struct Published {
+    level: Option<pm_model::ZoneVolume>,
+    announced: u64,
 }
 
 impl Zone {
@@ -207,7 +216,8 @@ impl Zone {
             state,
             events,
             crossfade,
-            volume_lock: Arc::new(tokio::sync::Mutex::new(None)),
+            volume_io: Default::default(),
+            volume_published: Default::default(),
         }
     }
 
@@ -341,20 +351,31 @@ impl Zone {
         self.send(Command::Seek(ms));
     }
 
+    fn published(&self) -> std::sync::MutexGuard<'_, Published> {
+        self.volume_published.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Hardware volume on the output; the audio path is untouched. The level is read back into
     /// the state afterwards, so every controller shows what the device took. An output that
     /// can't read its level keeps the last absolute level set (and the mute), so a change still
-    /// shows; up and down leave it as it was. A read that fails keeps the last level read (the
-    /// poll catches up). Controllers always hear the result, also when it equals what they had:
-    /// one that showed the level it asked for learns that the device kept another.
+    /// shows; up and down leave it as it was. A read that fails keeps the last level published
+    /// (the poll catches up). Controllers always hear the result, also when it equals what they
+    /// had: one that showed the level it asked for learns that the device kept another. A level
+    /// the device announced while this ran is newer than this read-back: it stays.
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        let mut last = self.volume_lock.lock().await;
+        let _io = self.volume_io.lock().await;
+        let seen = self.published().announced;
         self.output.set_volume(v).await?;
-        let next = match self.output.volume().await {
+        let read = self.output.volume().await;
+        let mut p = self.published();
+        if p.announced != seen {
+            return Ok(());
+        }
+        let next = match read {
             Ok(Some(read)) => Some(read),
             Err(_) => None,
             Ok(None) => {
-                let was = *last;
+                let was = p.level;
                 let level = match v {
                     Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
                     Volume::Percent(p) => Some(pm_model::VolumeLevel::Percent(p.min(100))),
@@ -368,39 +389,42 @@ impl Zone {
             }
         };
         if next.is_some() {
-            *last = next;
+            p.level = next;
         }
-        self.send(Command::Volume(*last));
+        self.send(Command::Volume(p.level));
         Ok(())
     }
 
     /// Read the output's level and publish it in the state (the poll). A read that fails, or an
-    /// output that can't say, leaves the last value.
+    /// output that can't say, leaves the last value; so does a level the device announced while
+    /// the read ran (it is newer).
     pub async fn refresh_volume(&self) -> Option<pm_model::ZoneVolume> {
-        let mut last = self.volume_lock.lock().await;
-        match self.output.volume().await {
-            Ok(Some(v)) => {
+        let _io = self.volume_io.lock().await;
+        let seen = self.published().announced;
+        let read = self.output.volume().await;
+        let mut p = self.published();
+        match read {
+            Ok(Some(v)) if p.announced == seen => {
                 // Nothing is sent when it is the level last published
-                if *last != Some(v) {
-                    *last = Some(v);
+                if p.level != Some(v) {
+                    p.level = Some(v);
                     self.send(Command::Volume(Some(v)));
                 }
                 Some(v)
             }
-            Ok(None) => *last,
+            Ok(_) => p.level,
             Err(_) => None,
         }
     }
 
     /// A level the device announced itself (UPnP events), through the engine. Always sent: the
-    /// state may not show a level announced just before yet, and events must land in order.
-    /// It is also the level last published, so a later poll that reads it again sends nothing,
-    /// and one that reads another level sends that. While a set or a poll holds the lock, that
-    /// one publishes its own read-back after this.
+    /// state may not show a level announced just before yet, and events must land in order. It
+    /// becomes the level last published, so a poll that reads it again sends nothing and one
+    /// that reads another level later sends that; a set or a poll in flight leaves it standing.
     pub fn announce_volume(&self, v: pm_model::ZoneVolume) {
-        if let Ok(mut last) = self.volume_lock.try_lock() {
-            *last = Some(v);
-        }
+        let mut p = self.published();
+        p.level = Some(v);
+        p.announced += 1;
         self.send(Command::Volume(Some(v)));
     }
 

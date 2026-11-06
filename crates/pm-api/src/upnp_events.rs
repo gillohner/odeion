@@ -105,9 +105,11 @@ pub(crate) async fn notify(
         // Nothing the node could read (a channel it doesn't follow): the poll stays on
         return StatusCode::OK;
     }
-    sub.following.live.store(true, Ordering::Relaxed);
     let was = sub.last.or(z.state().volume);
     if let Some(v) = merge(was, change) {
+        // The poll steps aside only once an event gave a whole level: a mute alone, before any
+        // level is known, leaves it reading
+        sub.following.live.store(true, Ordering::Relaxed);
         sub.last = Some(v);
         // Still under the lock: events reach the zone in the order the renderer sent them (the
         // engine leaves an unchanged level alone)
