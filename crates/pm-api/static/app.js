@@ -5592,6 +5592,19 @@
           // The owner's choice per song, kept while more albums load (a song not touched shows what is offered)
           const choices = new Map();
           let listGen = 0; // bumped when the list is cleared (Skip all): older answers are dropped
+          // One change at a time per album (Leave as is, Confirm, Not this), and none while Skip all runs
+          // (nor Skip all while one does): two answers would take the same songs off the count, and the
+          // later toast would replace the first one's Undo. The other buttons wait meanwhile; the pressed
+          // one keeps the focus (busy() marks it)
+          const locked = new Map(); // album index, or 'all', → the button pressed
+          const isLocked = (ai) => locked.has(ai) || locked.has('all');
+          const lockSec = (sec) => { const ai = Number(sec.dataset.album); const by = locked.get(ai) || locked.get('all'); $$('[data-skip],[data-reject]', sec).forEach((b) => { b.disabled = !!by && b !== by; }); if (sec.relabel) sec.relabel(); };
+          const hold = (k, by) => {
+            if (by) locked.set(k, by); else locked.delete(k);
+            if (!live()) return;
+            (k === 'all' ? $$('[data-album]', main) : $$(`[data-album="${k}"]`, main)).forEach(lockSec);
+            const ska = $('#idskipall', main); if (ska) ska.disabled = [...locked.values()].some((b) => b !== ska);
+          };
           // Undo of a skip: the page is loaded again when it is still the one on screen (any generation)
           const undoSkip = (body) => async () => { const u = await api('POST', '/library/suggestions/unskip', body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') setView('identify', undefined, 'replace'); else if ($('#idbox')) renderIdentify(); };
           const MAX_CONFIRM = 500;
@@ -5620,7 +5633,7 @@
           const draw = () => {
             main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
-            const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); if (!live()) return; listGen++; albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; draw(); focusUndo(ub); }, ev);
+            const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => { if (locked.size) return undefined; hold('all', ska); return busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { hold('all', null); throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); if (!live()) return; listGen++; albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; hold('all', null); draw(); focusUndo(ub); }, ev); };
             // (a "Show more" answer that comes after Skip all is for a list that is gone)
             const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; const gen = listGen; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live() || gen !== listGen) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live() || gen !== listGen) return; toast(e.message, 'error'); more.disabled = false; } };
           };
@@ -5638,21 +5651,24 @@
           const wire = (sec) => {
             const btn = $('[data-confirm]', sec); const out = $('[data-confirm-out]', sec);
             // Leave as is: this album's unsure songs are marked reviewed without an identity; undoable
-            const skipBtn = $('[data-skip]', sec); if (skipBtn) skipBtn.onclick = (ev) => busy(skipBtn, async () => {
-              const ai = Number(sec.dataset.album); const a = albums[ai]; const key = a.key; const nSongs = a.songs.length;
-              let r; try { r = await api('POST', '/library/suggestions/skip', { albums: [key] }); } catch (e) { throw noRoute(e); }
+            const skipBtn = $('[data-skip]', sec); if (skipBtn) skipBtn.onclick = (ev) => { const ai = Number(sec.dataset.album); if (isLocked(ai)) return undefined; hold(ai, skipBtn); return busy(skipBtn, async () => {
+              const a = albums[ai]; const key = a.key; const nSongs = a.songs.length;
+              let r; try { r = await api('POST', '/library/suggestions/skip', { albums: [key] }); } catch (e) { hold(ai, null); throw noRoute(e); }
               // (the toast and its Undo come even when the page was left meanwhile: the songs are skipped)
               const ub = toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: undoSkip({ albums: [key] }) });
               if (!live()) return;
               a.songs.forEach((g) => choices.delete(g.track.id)); a.songs = []; a.ready = 0; a.conflicts = 0;
               page.songs = Math.max(0, page.songs - nSongs);
-              redraw(ai); focusUndo(ub);
-            }, ev);
+              hold(ai, null); redraw(ai); focusUndo(ub);
+            }, ev); };
             // More than one batch takes: the first ones are confirmed (all of them or none), the rest stay
-            const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n; };
-            label(); $$('input[type=radio]', sec).forEach((r) => r.onchange = () => { choices.set(Number(r.name.slice(5)), r.value); label(); });
+            const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n || isLocked(Number(sec.dataset.album)); };
+            // (a list gone stale keeps its "Reload this list"; it waits like the rest)
+            sec.relabel = () => { if (sec.dataset.stale) btn.disabled = isLocked(Number(sec.dataset.album)); else label(); };
+            lockSec(sec); $$('input[type=radio]', sec).forEach((r) => r.onchange = () => { choices.set(Number(r.name.slice(5)), r.value); label(); });
             btn.onclick = async () => {
-              const batch = chosen(sec).slice(0, MAX_CONFIRM); if (!batch.length) return; btn.disabled = true; out.textContent = 'Confirming…';
+              const ai = Number(sec.dataset.album); if (isLocked(ai)) return;
+              const batch = chosen(sec).slice(0, MAX_CONFIRM); if (!batch.length) return; hold(ai, btn); btn.disabled = true; out.textContent = 'Confirming…';
               try {
                 const r = await api('POST', '/library/suggestions/confirm', { choices: batch });
                 const skipped = (r.files && r.files.skipped) || [];
@@ -5660,15 +5676,17 @@
                 if (!live()) return;
                 // The confirmed songs leave this album; the page isn't loaded again
                 const done = new Set(r.confirmed || batch.map((c) => c.track_id));
-                const ai = Number(sec.dataset.album); const a = albums[ai];
+                const a = albums[ai];
                 a.songs = a.songs.filter((g) => !done.has(g.track.id)); done.forEach((id) => choices.delete(id));
                 a.ready = a.songs.filter((g) => g.pick != null).length; a.conflicts = a.songs.filter((g) => g.status === 'conflict').length;
                 page.songs = Math.max(0, page.songs - done.size);
-                redraw(ai);
+                hold(ai, null); redraw(ai);
               } catch (e) {
                 if (!live()) return;
                 const stale = (e.body && e.body.stale) || [];
                 stale.forEach((x) => { const row = $(`.idrow[data-track="${x.track_id}"]`, sec); if (row) row.classList.add('idstale'); });
+                if (stale.length) sec.dataset.stale = '1';
+                hold(ai, null);
                 out.textContent = e.message; out.classList.add('warn-text'); btn.disabled = false;
                 if (stale.length) { btn.textContent = 'Reload this list'; btn.onclick = () => render(); }
               }
@@ -5676,11 +5694,14 @@
             // "Not this" names the song and recording the page shows: one changed meanwhile is refused
             $$('[data-reject]', sec).forEach((b) => b.onclick = async (ev) => {
               ev.preventDefault();
+              const ai = Number(sec.dataset.album); if (isLocked(ai)) return;
+              hold(ai, b);
               try {
                 await api('DELETE', `/library/suggestions/${b.dataset.reject}?track_id=${encodeURIComponent(b.dataset.track)}&recording_mbid=${encodeURIComponent(b.dataset.rec)}`);
                 if (!live()) return;
+                hold(ai, null);
                 // That option leaves its song; a song with none left leaves the album
-                const ai = Number(sec.dataset.album); const a = albums[ai]; const tid = Number(b.dataset.track); const sid = Number(b.dataset.reject);
+                const a = albums[ai]; const tid = Number(b.dataset.track); const sid = Number(b.dataset.reject);
                 const g = a.songs.find((x) => x.track.id === tid);
                 if (g) {
                   g.options = g.options.filter((o) => o.id !== sid);
@@ -5691,7 +5712,7 @@
                   a.ready = a.songs.filter((x) => x.pick != null).length; a.conflicts = a.songs.filter((x) => x.status === 'conflict').length;
                 }
                 redraw(ai);
-              } catch (e) { toast(e.message, 'error'); }
+              } catch (e) { hold(ai, null); toast(e.message, 'error'); }
             });
           };
           draw();

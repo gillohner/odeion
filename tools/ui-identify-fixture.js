@@ -12,7 +12,7 @@
 //   - "Not this" and "Which song is this?" send the song and recording they show;
 //   - review is optional: the card's wording, Skip all unsure with Undo, Leave as is per album; the
 //     focus goes to the Undo when the pressed button is gone; an answer after the page was left still
-//     shows the toast and its Undo.
+//     shows the toast and its Undo; one change at a time per album (the others wait).
 // Any request outside the loopback server fails the run.
 //   node tools/ui-identify-fixture.js [static dir] [screenshot dir]
 const http = require('http');
@@ -368,6 +368,27 @@ const server = http.createServer(async (req, res) => {
         check(await page.evaluate(() => !document.activeElement || !document.activeElement.matches('#toast .toast-act')), `${W} …without taking the focus`);
         if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
         check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and its Undo brings the songs back`);
+      }
+      // One change at a time per album: while Leave as is (or Confirm) is on its way, the album's other
+      // changes and Skip all wait, so the songs come off the count once and a later toast can't replace
+      // the Undo. (The presses are a script's clicks: a disabled button takes none.)
+      for (const first of ['Leave as is', 'Confirm']) {
+        const slow = skipRoutes(); const skip = slow['POST /library/suggestions/skip'];
+        if (first === 'Leave as is') slow['POST /library/suggestions/skip'] = async (u, b) => [...(await skip(u, b)).slice(0, 2), 1200];
+        fx = base({ routes: slow, confirmDelay: first === 'Confirm' ? 1200 : 0 });
+        await page.goto(`${BASE}/identify`);
+        await until(async () => (await page.locator('section.idalbum').count()) === 2);
+        const before = await page.evaluate(() => ({ count: Number(document.querySelector('.page-head .count').textContent), rows: document.querySelectorAll('[data-album="0"] .idrow').length }));
+        await section(0).locator(first === 'Leave as is' ? '[data-skip]' : '[data-confirm]').click();
+        await until(async () => asked('POST', first === 'Leave as is' ? '/library/suggestions/skip' : '/library/suggestions/confirm').length === 1);
+        const waiting = await page.evaluate(() => { const q = (s) => document.querySelector(s); const others = ['[data-album="0"] [data-confirm]', '[data-album="0"] [data-skip]', '[data-album="0"] [data-reject]', '#idskipall'].map(q).filter(Boolean); others.forEach((b) => b.click()); return others.filter((b) => b.disabled).length; });
+        await sleep(1600);
+        const sent = { skip: asked('POST', '/library/suggestions/skip').length, confirm: asked('POST', '/library/suggestions/confirm').length, reject: fx.log.filter((x) => x.method === 'DELETE').length };
+        check(sent.skip === (first === 'Leave as is' ? 1 : 0) && sent.confirm === (first === 'Confirm' ? 1 : 0) && sent.reject === 0, `${W} ${first} on its way: the album's other changes and Skip all wait (${JSON.stringify(sent)}; ${waiting} buttons disabled)`);
+        const confirmed = first === 'Confirm' ? asked('POST', '/library/suggestions/confirm')[0].body.choices.length : before.rows;
+        check(await until(async () => Number(await page.locator('.page-head .count').textContent()) === before.count - confirmed), `${W} …the songs come off the count once (${before.count} - ${confirmed})`);
+        if (first === 'Leave as is') check(/left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1, `${W} …and the toast keeps its Undo`);
+        check(await until(async () => await page.evaluate(() => [...document.querySelectorAll('[data-album] [data-skip], [data-album] [data-reject], #idskipall')].every((b) => !b.disabled))), `${W} …and the buttons take presses again after the answer`);
       }
 
       check(!errors.length, `${W} no page errors ${errors.slice(0, 3).join(' | ')}`);
