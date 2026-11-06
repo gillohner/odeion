@@ -542,6 +542,8 @@ def main():
         dump("processes-final", "activity", "processes", PKG)
         dump("audio-final", "audio")
     finally:
+        # The whole log too, every tag (the page's console lines, whatever Tauri calls them)
+        subprocess.run(["adb", "logcat", "-d", "-v", "time"], stdout=open(out / "logcat-all.txt", "w"), stderr=subprocess.STDOUT, check=False)
         for p_ in (lc, lc_proc):
             if p_:
                 p_.terminate()
