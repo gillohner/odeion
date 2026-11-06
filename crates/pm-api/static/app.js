@@ -2176,9 +2176,11 @@
     const index = shuffle ? Math.floor(Math.random() * items.length) : 0;
     startWait('play', zid, items[index].title || '', true);
     try {
-      const ev0 = evOf(zid);
-      const st = await api('POST', `/zones/${encodeURIComponent(zid)}/load`, { items, index, transport: 'playing', shuffle, repeat: z.repeat || 'off', radio: !!z.radio });
-      applyAnswer(st, ev0);
+      await zoneOp(zid, async () => {
+        const ev0 = evOf(zid);
+        const st = await api('POST', `/zones/${encodeURIComponent(zid)}/load`, { items, index, transport: 'playing', shuffle, repeat: z.repeat || 'off', radio: !!z.radio });
+        applyAnswer(st, ev0);
+      });
       startSent(); renderModes(); refreshQueue();
     } catch (e) { startFail(e.message); }
   };
@@ -2272,8 +2274,7 @@
       // the zone in use when pressed
       const zid = state.zone;
       startWait('play', zid, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
-      if (zoneShuffle()) await setZoneShuffle(false, zid);
-      const r = await api('POST', `/playlists/${id}/play`, { zone: zid });
+      const r = await zoneOp(zid, async () => { if ((state.zones[zid] || {}).shuffle) await setZoneShuffle(false, zid); return api('POST', `/playlists/${id}/play`, { zone: zid }); });
       startSent();
       toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
     } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
@@ -2296,7 +2297,11 @@
   const zoneEvents = new Map();
   const evOf = (id) => zoneEvents.get(id) || 0;
   const countEvent = (id) => zoneEvents.set(id, evOf(id) + 1);
-  const applyAnswer = (st, ev0) => { if (st && st.id && evOf(st.id) === ev0) state.zones[st.id] = st; };
+  const applyAnswer = (st, ev0) => { if (st && st.id && state.zones[st.id] && evOf(st.id) === ev0) state.zones[st.id] = st; };
+  // One change of a zone's mode or queue at a time from this app, in the order asked (a toggle,
+  // a page's Play or Shuffle, a playlist's shuffle off): the last one asked is the node's last word
+  const zoneOps = new Map();
+  const zoneOp = (zid, fn) => { const run = (zoneOps.get(zid) || Promise.resolve()).then(fn); zoneOps.set(zid, run.catch(() => {})); return run; };
   const browserRepeat = () => { try { return localStorage.getItem('pm.repeat') || 'off'; } catch { return 'off'; } };
   const zoneRepeat = () => (isBrowser() ? browserRepeat() : (state.zones[state.zone] || {}).repeat || 'off');
   const browserShuffle = () => { try { return localStorage.getItem('pm.shuffle') === 'on'; } catch { return false; } };
@@ -2345,7 +2350,7 @@
     if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid] && evOf(zid) === ev0) state.zones[zid].shuffle = on;
   };
   // (two presses before the node answers, on two copies: the second turns the first's choice back)
-  let shufflePending = null; const shuffleWrites = new Map();
+  const shufflePending = new Map(); // zone → the mode its last press asked for, until it is in
   const toggleShuffle = async () => {
     if (isBrowser()) {
       const on = !browserShuffle();
@@ -2355,11 +2360,9 @@
       setBrowserShuffle(on); renderModes(); if (state.view === 'queue') render(); if (!$('#nowplaying').hidden) renderNowPlaying(); return;
     }
     // (one write at a time per zone, in the order pressed: the last press is the node's last word)
-    const zid = state.zone; const on = !(shufflePending && shufflePending.zone === zid ? shufflePending.on : zoneShuffle());
-    const mine = { zone: zid, on }; shufflePending = mine;
-    const run = (shuffleWrites.get(zid) || Promise.resolve()).then(() => setZoneShuffle(on, zid));
-    shuffleWrites.set(zid, run.catch(() => {}));
-    try { await run; renderModes(); refreshQueue(); } catch (e) { toast(e.message, 'error'); } finally { if (shufflePending === mine) shufflePending = null; }
+    const zid = state.zone; const on = !(shufflePending.has(zid) ? shufflePending.get(zid).on : zoneShuffle());
+    const mine = { on }; shufflePending.set(zid, mine);
+    try { await zoneOp(zid, () => setZoneShuffle(on, zid)); renderModes(); refreshQueue(); } catch (e) { toast(e.message, 'error'); } finally { if (shufflePending.get(zid) === mine) shufflePending.delete(zid); }
   };
   $('#repeatbtn').onclick = cycleRepeat;
   $('#shufflebtn').onclick = toggleShuffle;
@@ -4705,6 +4708,8 @@
     // (a page's Play or Shuffle starts from the songs that play; discovery when none does)
     const playsDirectly = (t) => t.track_id != null || t.uri;
     if (first && first.track_id == null && !first.uri && first.page && (o.shuffle === undefined || !songs.slice(k).some(playsDirectly))) {
+      // (the mode a page's Play or Shuffle asked for holds for what discovery plays)
+      if (o.shuffle !== undefined && o.shuffle !== zoneShuffle()) { if (isBrowser()) { setBrowserShuffle(o.shuffle); renderModes(); } else { const zid = state.zone; zoneOp(zid, () => setZoneShuffle(o.shuffle, zid)).then(renderModes, (e) => toast(e.message, 'error')); } }
       // A song only known by its link: the resolver finds where it plays.
       return discoverPlay({ uri: first.page, page: first.page, title: first.title, artist: first.artist, image: first.image }, null, anchorEl);
     }
@@ -7779,7 +7784,7 @@
     const libChanged = !first && (restarted || (ev.library_rev != null && ev.library_rev !== link.libRev));
     const downFor = link.downSince ? Date.now() - link.downSince : 0;
     link.seq = ev.seq ?? null; link.boot = ev.boot ?? null; link.libRev = ev.library_rev ?? null;
-    state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ev.zones.forEach((z) => countEvent(z.id)); state.zonesSeen = true; ensureZone(); renderZoneName();
+    Object.keys(state.zones || {}).forEach(countEvent); state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ev.zones.forEach((z) => countEvent(z.id)); state.zonesSeen = true; ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
     setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
@@ -7969,7 +7974,7 @@
         // A group of yours went: rebuilt (follow it) or ended (back to your own zone). Ask first,
         // then fall back as for any zone that goes
         const yours = ev.zone === state.zone && (state.along || state.hosting || state.alongHome);
-        delete state.zones[ev.zone];
+        delete state.zones[ev.zone]; countEvent(ev.zone);
         if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
