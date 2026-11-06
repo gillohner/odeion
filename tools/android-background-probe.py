@@ -255,7 +255,14 @@ def away(seconds, screen_off=False, during=None):
     Now playing's time moved (None when it can't be read)."""
     tag = f"{seconds}{'-off' if screen_off else ''}"
     f0 = track_frames(flinger(f"before-{tag}"))
-    t0 = secs(mini_time()); w0 = time.time()
+    # (the time can be missing for a moment while the page redraws: read it again before leaving)
+    t0 = None
+    for _ in range(6):
+        t0 = secs(mini_time())
+        if t0 is not None:
+            break
+        time.sleep(1)
+    w0 = time.time()
     adb("shell", "input", "keyevent", "3")
     if screen_off:
         screen(False)
