@@ -31,6 +31,9 @@ pub(crate) enum Command {
     Previous,
     Seek(u64),
     QueueChanged,
+    /// The output's level as read back; published in the state (controllers hear of it after
+    /// every command, as of every other).
+    Volume(Option<pm_model::ZoneVolume>),
     Shutdown,
 }
 
@@ -357,6 +360,7 @@ impl Engine {
                 }
             }
             Command::Seek(ms) => self.seek(ms),
+            Command::Volume(level) => self.state.send_modify(|s| s.volume = level),
         }
         Flow::Continue
     }

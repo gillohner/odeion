@@ -1,12 +1,18 @@
 :root {
   color-scheme: light dark;
-  --bg: #f6f6f9; --fg: #17171c; --muted: #5d5d6b; --card: #ffffff; --line: #d9d9e2;
+  /* --line borders buttons, inputs and boxes: at least 3:1 against the page and the card (WCAG 1.4.11);
+     light 3.35:1 / 3.61:1, dark 3.41:1 / 3.14:1 */
+  --bg: #f6f6f9; --fg: #17171c; --muted: #5d5d6b; --card: #ffffff; --line: #85859a;
   --accent: #785adc; --accent-fg: #ffffff; --err: #b3261e;
+  /* The fill of a main button: white on it at least 4.5:1 (WCAG 1.4.3; the light accent is 4.89:1,
+     the dark one 3.48:1, so the dark fill is a deeper step of it, 4.5:1) */
+  --accent-fill: var(--accent);
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #0f0f14; --fg: #ececf1; --muted: #a7a7b4; --card: #181822; --line: #2a2a36; --accent: #8b74ff; --err: #ff8f8f; }
+  :root { --bg: #0f0f14; --fg: #ececf1; --muted: #a7a7b4; --card: #181822; --line: #66667a; --accent: #8b74ff; --accent-fill: #765bf0; --err: #ff8f8f; }
 }
 * { box-sizing: border-box; }
+html { -webkit-tap-highlight-color: transparent; }
 body {
   margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -19,11 +25,15 @@ p { color: var(--muted); margin: 0 0 16px; }
 button {
   font: inherit; padding: 12px 18px; border-radius: 12px; cursor: pointer; width: 100%; font-weight: 600;
 }
-button.primary { border: 0; background: var(--accent); color: var(--accent-fg); }
+button.primary { border: 1px solid transparent; background: var(--accent-fill); color: var(--accent-fg); }
 button.secondary { border: 1px solid var(--line); background: var(--card); color: var(--fg); }
 button:disabled { opacity: 0.6; cursor: default; }
+/* A main action that waits ("Waiting for Pubky Ring…") steps back to the card look, so the one accent
+   on the screen is the next step (Open Pubky Ring) */
+button.primary:disabled { opacity: 1; background: var(--card); color: var(--muted); border: 1px solid var(--line); }
 .row { display: grid; gap: 10px; }
 .out { margin-top: 18px; }
+.out p { margin-bottom: 12px; }
 .qr { background: #fff; border-radius: 12px; padding: 8px; width: max-content; margin: 0 auto 12px; }
 .qr svg { display: block; width: 220px; height: 220px; }
 .muted { margin-top: 12px; }

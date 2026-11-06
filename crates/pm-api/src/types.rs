@@ -1453,11 +1453,24 @@ pub struct PageLink {
     pub id: Option<String>,
 }
 
+/// What kind of thing a fact is: something to read about the music (origin, years, genres, a
+/// label), or a reference (an identifier, a raw URL, a file) the page keeps at its foot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FactKind {
+    #[default]
+    Fact,
+    Ref,
+}
+
 /// One fact in an item page's About section.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Fact {
     pub label: String,
     pub value: String,
+    /// `fact` (read about the music) or `ref` (an id, a URL, a file: the Details at the foot).
+    #[serde(default)]
+    pub kind: FactKind,
     /// A link, sent only when it is http or https (`web::web_link`): a Fact's link can
     /// come from anyone's data, and a `javascript:` one would run in the node's page.
     #[serde(
@@ -1531,6 +1544,10 @@ pub struct ItemPage {
     /// country"); none when it plays the page's own source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plays_note: Option<String>,
+    /// Why nothing on this page can play (the Internet Archive restricts the item): shown where
+    /// the songs would be, with Play and Shuffle off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
     /// The song (album, artist) itself, on every source: its MusicBrainz or ISRC link. Tags
     /// "on the song" attach here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1640,6 +1657,10 @@ pub struct ItemContents {
     pub total_ms: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub albums: Vec<ItemAlbum>,
+    /// Why nothing here can play, when the source says so (an item the Internet Archive
+    /// restricts): the page shows it instead of an empty list, with Play off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 /// Where an item plays from (the "Plays from" chip).

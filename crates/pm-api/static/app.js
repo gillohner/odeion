@@ -5,6 +5,23 @@
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
   const BROWSER = 'browser';
+  // Where the page's own player is, in words. The apps (window.pmDesktop, set by pm-desktop before
+  // this script) never say "browser": on Android the in-app player is "This phone", on a desktop app
+  // "This computer"; the plain web UI keeps "This browser". Every string that names it goes through
+  // these (TASK-android-no-browser-wording).
+  const appPlatform = () => (window.pmDesktop ? (window.pmDesktop.platform === 'android' ? 'android' : 'desktop') : null);
+  const hereName = () => ({ android: 'This phone', desktop: 'This computer' }[appPlatform()] || 'This browser');
+  // In a sentence: "in this browser", "on this phone", "on this computer"
+  const hereIn = () => (appPlatform() ? `on ${hereName().toLowerCase()}` : 'in this browser');
+  // "… only in This browser" / "… only on This phone"
+  const hereOnly = () => `${appPlatform() ? 'on' : 'in'} ${hereName()}`;
+  // What plays the sound: a browser decodes the file itself; the app decodes it and the system mixes
+  // it (Android to its own rate: a USB DAC shows that rate, not the file's), no bit-perfect claim
+  const playedBy = () => ({ android: 'Played by Android', desktop: 'Played by the app' }[appPlatform()] || 'Played by this browser');
+  const decodedBy = () => (appPlatform() ? 'Decoded by the app' : 'Decoded by this browser');
+  // index.html's own two sentences about the player (the YouTube panel's head, the token hint)
+  const wordHere = () => { const y = $('#ytpanel .embedhead .muted'); if (y) y.textContent = `YouTube’s own player · its ads and terms apply · plays only ${hereOnly().replace('This', 'this')}`; const t = $('#tokhint'); if (t) t.innerHTML = `It’s in the <code>api-token</code> file in the node’s data folder, and stays ${hereIn()}.`; };
+  const decodeNote = () => ({ android: 'The app decodes the file and Android mixes it to the system rate; the node makes no signal-path claim.', desktop: 'The app decodes the file and the system mixes it; the node makes no signal-path claim.' }[appPlatform()] || 'This browser decodes the file itself; the node makes no signal-path claim.');
 
   const state = {
     token: localStorage.getItem('pm.token') || '',
@@ -71,7 +88,7 @@
   const fileFormat = (file) => (!file ? '' : LOSSY[file.container] || fmtFormat(file.format));
   // "1 track", "2 tracks" (n may be a formatted number)
   const countOf = (n, many) => `${n} ${String(n).replace(/[^0-9]/g, '') === '1' ? many.replace(/s$/, '') : many}`;
-  // Which service a page link belongs to ("Open on Audius", not "Open on")
+  // Which service a page link belongs to ("Open in Audius", not "Open in")
   const SERVICE_HOSTS = { 'audius.co': 'audius', 'archive.org': 'archive', 'deezer.com': 'deezer', 'tidal.com': 'tidal', 'listen.tidal.com': 'tidal', 'open.spotify.com': 'spotify', 'jamendo.com': 'jamendo', 'musicbrainz.org': 'musicbrainz' };
   const serviceOfUrl = (u) => { try { return SERVICE_HOSTS[new URL(u).hostname.replace(/^www\./, '')] || ''; } catch { return ''; } };
   // A Pubky key as people read it: no "pubky" prefix, shortened in the middle; the copy button
@@ -585,7 +602,7 @@
       if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
       video.srcObject = stream; try { await video.play(); } catch { /* shows the first frame anyway */ }
       // A browser can have the API without reading QR codes: the camera goes off and it says so
-      let det; try { det = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; msg.textContent = `This browser can’t read QR codes (${e.message || e.name}). Paste their key instead.`; return; }
+      let det; try { det = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; msg.textContent = `${hereName()} can’t read QR codes (${e.message || e.name}). Paste their key instead.`; return; }
       const look = async () => {
         if (over) return;
         try { for (const c of await det.detect(video)) { const k = keyFrom(c.rawValue); if (k) return done(k); msg.textContent = 'That QR code isn’t a Pubky key.'; } } catch { /* the next frame */ }
@@ -620,7 +637,7 @@
   // What someone is typing survives the page's re-renders (an item still being read renders
   // again every few seconds): kept per item, and per comment for a reply
   const commentDrafts = new Map();
-  const commentTyping = () => $$('.comment-form textarea').some((t) => t.value.trim() || t === document.activeElement);
+  const commentTyping = () => $$('.comment-form textarea, #htags input[data-htag-add]').some((t) => t.value.trim() || t === document.activeElement);
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
     const draftKey = (f) => `${uri}|${(f && f.dataset.replyTo) || ''}`;
@@ -809,7 +826,7 @@
       box.innerHTML = rowsOf(ROOT) || (node(ROOT).kids ? '<p class="muted small">No music folders on this node yet.</p>' : '');
       const n = node(ROOT); if (n.loading) slowNote(box, () => n.loading);
       $$('.ctwait', box).forEach((w) => { const p = w.parentElement; if (p) slowNote(w, () => w.isConnected); });
-      if (had != null) { const r = box.querySelector(`[data-cpath="${CSS.escape(had)}"]`); if (r) r.focus(); }
+      if (had != null) { const r = box.querySelector(`[data-cpath="${cssStr(had)}"]`); if (r) r.focus(); }
     };
     // Only the boxes change on a tick: no redraw of the whole tree
     const refreshBoxes = () => $$('#ctree .ctrow', d).forEach((r) => r.setAttribute('aria-checked', boxState(r.dataset.cpath)));
@@ -1365,6 +1382,7 @@
   // The browser zone plays through one of two engines: the <audio> element, or YouTube's
   // official player (IFrame Player API) for YouTube links. `audio` stands for whichever is in use,
   // so the player bar, transport, media keys and repeat drive both the same way.
+  wordHere();
   const audioEl = $('#browser');
   const ytOf = (u) => { const m = /^youtube:video:([A-Za-z0-9_-]{11})$/.exec(u || '') || /^(?:https?:\/\/)?(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/.exec(u || ''); return m ? m[1] : null; };
   const yt = (() => {
@@ -1422,7 +1440,7 @@
   // A YouTube item that can't be embedded (the uploader turned it off, removed, private): say so and go on
   yt.addEventListener('yterror', (e) => {
     const it = state.browserQueue[state.browserIndex];
-    const why = { 2: 'the link is not a valid video', 5: 'this browser cannot play it', 100: 'the video is gone or private', 101: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
+    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
     toast(`\u201c${(it && it.title) || 'This video'}\u201d can't play here: ${why}.`, 'error');
     if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
   });
@@ -1430,7 +1448,7 @@
   const browserState = () => {
     const it = state.browserQueue[state.browserIndex];
     return {
-      id: BROWSER, name: 'This browser', output: 'browser',
+      id: BROWSER, name: hereName(), output: 'browser',
       transport: audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing',
       queue_index: state.browserIndex,
       now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null } : null,
@@ -1462,7 +1480,7 @@
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
-  const zoneList = () => [browserState(), ...Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z))];
+  const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
   // links are rebuilt on load (they carry the token), live radio is not kept.
   let lastSavedQueue = '';
@@ -1489,7 +1507,105 @@
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
-  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; };
+  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
+  // ---- One volume, one source (TASK-volume-one-source) ----
+  // Every slider for a zone reads the same thing: the level the node read back from the output
+  // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
+  // audio element. `value` is null while the node hasn't read it: nothing is made up.
+  const zoneVolume = (z) => {
+    if (!z) return null;
+    if (z.id === BROWSER) return { kind: 'db', min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))), muted: !!audio.muted };
+    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume; const hk = typeof hv === 'string' ? hv : hv && hv.kind;
+    const v = z.volume || null;
+    // No level yet and no output list to say the scale (a listener never gets one): a plain 0–100
+    // slider still lets them set a level; the owner's bar waits for the list instead
+    const kind = v && v.percent != null ? 'percent' : v && v.db != null ? 'db' : hk === 'db' ? 'db' : hk === 'percent' ? 'percent' : (!state.outputs && !isOwner()) ? 'percent' : null;
+    if (!kind) return null;
+    if (kind === 'percent') return { kind, min: 0, max: 100, step: 1, value: v && v.percent != null ? v.percent : null, muted: !!(v && v.muted) };
+    const r = hk === 'db' ? hv : { min: -60, max: 0, step: 1 };
+    return { kind, min: r.min, max: r.max, step: r.step || 1, value: v && v.db != null ? Math.min(r.max, Math.max(r.min, v.db)) : null, muted: !!(v && v.muted) };
+  };
+  // A zone id inside an attribute selector (no CSS.escape: ui-smoke's jsdom has none)
+  const cssStr = (v) => String(v).replace(/["\\]/g, '\\$&').replace(/[\n\r\f]/g, (c) => `\\${c.charCodeAt(0).toString(16)} `);
+  const levelText = (r) => (!r ? '' : r.muted ? 'Muted' : r.value == null ? 'Level unknown' : r.kind === 'percent' ? `${Math.round(r.value)} %` : `${Math.round(r.value)} dB`);
+  // A slider shows the zone's level; one being dragged is left alone until it is let go
+  const applyVol = (el, r) => {
+    if (!el || !r || el.dataset.dragging) return;
+    el.min = r.min; el.max = r.max; el.step = r.step;
+    el.classList.toggle('unknown', r.value == null); el.classList.toggle('muted', !!r.muted);
+    el.value = r.value == null ? r.min : r.value;
+    el.setAttribute('aria-valuetext', levelText(r)); setFill(el);
+  };
+  const volSliders = (z) => { const els = new Set(); if (z.id === state.zone) for (const el of [$('#vol'), $('#npvol'), $('#volpopvol')]) if (el) els.add(el); for (const el of $$(`[data-zvol="${cssStr(z.id)}"]`)) els.add(el); return [...els]; };
+  const syncVolumeSliders = (z, except) => {
+    if (!z) return;
+    // The owner's output list says the scale (and whether there is a volume at all); asked once
+    if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; for (const cur of Object.values(state.zones || {})) syncVolumeSliders(cur); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); }).catch(() => {}).finally(() => { state.outputsP = null; });
+    const r = zoneVolume(z);
+    if (z.id === state.zone) $('.player').classList.toggle('novol', !r);
+    if (!r) return;
+    for (const el of volSliders(z)) if (el !== except) applyVol(el, r);
+    for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = levelText(r);
+    for (const b of $$(`[data-volmute="${cssStr(z.id)}"]`)) { b.setAttribute('aria-pressed', String(!!r.muted)); b.title = r.muted ? 'Unmute' : 'Mute'; }
+  };
+  const setZoneVol = async (z, value, from) => {
+    const r = zoneVolume(z); if (!r) return;
+    const num = Number(value);
+    if (z.id === BROWSER) { audio.volume = Math.pow(10, num / 20); syncVolumeSliders(z, from); return; }
+    const body = r.kind === 'percent' ? { percent: Math.round(num) } : { db: num };
+    // Shown as set until the node's read-back arrives (its zone event syncs every slider); a
+    // refused request puts the old value back
+    const was = z.volume;
+    z.volume = { ...(z.volume || {}), ...body };
+    syncVolumeSliders(z, from);
+    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: body }); } catch (e) { z.volume = was; syncVolumeSliders(z); toast(e.message, 'error'); }
+  };
+  const setZoneMute = async (z, m) => {
+    if (!z) return;
+    if (z.id === BROWSER) { audio.muted = m; syncVolumeSliders(z); return; }
+    const was = z.volume;
+    z.volume = { ...(z.volume || {}), muted: m };
+    syncVolumeSliders(z);
+    try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { mute: m } }); } catch (e) { z.volume = was; syncVolumeSliders(z); toast(e.message, 'error'); }
+  };
+  const bindVolSlider = (el, zoneOf) => {
+    if (!el) return;
+    const done = () => { delete el.dataset.dragging; };
+    el.addEventListener('pointerdown', () => { el.dataset.dragging = '1'; });
+    // Let go: the slider catches up with the zone (after `change`, which follows the pointer)
+    const letGo = () => { done(); setTimeout(() => syncVolumeSliders(zoneOf()), 0); };
+    el.addEventListener('pointerup', letGo); el.addEventListener('pointercancel', letGo);
+    el.addEventListener('input', () => { setFill(el); const z = zoneOf(); const r = zoneVolume(z); if (!r) return; const now = levelText({ ...r, value: Number(el.value), muted: false }); el.classList.remove('unknown'); el.setAttribute('aria-valuetext', now); for (const t of $$(`[data-vollevel="${cssStr(z.id)}"]`)) t.textContent = now; });
+    el.addEventListener('change', () => { done(); const z = zoneOf(); if (z) setZoneVol(z, el.value, el); });
+  };
+  const volPop = () => $('#volpop');
+  const closeVolPop = (fromBack) => {
+    const vp = volPop(); if (!vp || vp.hidden) return;
+    const inside = vp.contains(document.activeElement) || document.activeElement === document.body;
+    vp.hidden = true; $('#scrim').hidden = true; $('#volbtn').setAttribute('aria-expanded', 'false');
+    const k = transients.indexOf(volTr); if (k >= 0) transients.splice(k, 1);
+    if (fromBack !== true) popTransient();
+    if (inside) $('#volbtn').focus();
+  };
+  const volTr = { open: () => !volPop().hidden, close: closeVolPop };
+  // Where the bar has no room for the slider: the volume button opens this, the zone's one slider
+  // What the open popover shows: its zone and scale (a redraw would drop the slider being moved)
+  const volPopKey = () => { const z = currentZone(); const r = zoneVolume(z); return `${z ? `${z.id}|${z.name}` : ''}|${r ? r.kind : ''}`; };
+  const drawVolPop = () => {
+    const vp = volPop(); const z = currentZone(); const r = zoneVolume(z); vp.dataset.drawn = volPopKey();
+    vp.innerHTML = `<div class="pop-title">Volume · ${esc(z ? z.name : 'Zone')}</div>` + (r && z
+      ? `<div class="volpop-row"><button class="icon-btn" data-volmute="${esc(z.id)}" aria-pressed="${!!r.muted}" title="${r.muted ? 'Unmute' : 'Mute'}" aria-label="Mute">${icon('volume')}</button><input type="range" id="volpopvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}">${esc(levelText(r))}</span></div>`
+      : '<p class="qp-note">This zone sets its volume on the device.</p>');
+    const el = $('#volpopvol', vp); if (el) { applyVol(el, r); bindVolSlider(el, currentZone); }
+    const m = $('[data-volmute]', vp); if (m) m.onclick = () => setZoneMute(currentZone(), m.getAttribute('aria-pressed') !== 'true');
+  };
+  const openVolPop = () => {
+    closePop(); closeJobPop(); closeQPanel(); drawVolPop();
+    volPop().hidden = false; $('#scrim').hidden = false; $('#volbtn').setAttribute('aria-expanded', 'true');
+    transients.push(volTr); pushTransient();
+    const el = $('#volpopvol'); if (el) el.focus();
+  };
+  bindVolSlider($('#vol'), currentZone);
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
   const streamUrlFor = (uri) => { const local = /^track:(\d+)$/.exec(uri || ''); if (local) return `/v1/library/tracks/${local[1]}/file${tokenQ()}`; if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
@@ -1500,10 +1616,10 @@
     if (!isBrowser() && !ytZones && qitems.some((q) => ytOf(q.uri))) {
       const rest = qitems.filter((q) => !ytOf(q.uri));
       if (!rest.length) {
-        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: 'YouTube plays only in This browser' }, { label: 'Play in This browser', icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at); } }]);
+        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: `YouTube plays only ${hereOnly()}` }, { label: `Play ${hereOnly()}`, icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at); } }]);
         return;
       }
-      toast(`${countOf(qitems.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
+      toast(`${countOf(qitems.length - rest.length, 'YouTube items')} left out: YouTube plays only ${hereOnly()}`);
       qitems = rest;
     }
     if (isBrowser()) {
@@ -1658,7 +1774,7 @@
       const r = await api('POST', '/sources/tidal/unofficial/browser');
       h.m.browserUrl = r.url; h.m.way = 'browser';
       if (inApp) window.open(r.url, '_blank');
-      else if (tab) { tab.opener = null; tab.location.href = r.url; } else toast('Your browser kept the tab from opening: use Open TIDAL’s sign-in', 'error');
+      else if (tab) { tab.opener = null; tab.location.href = r.url; } else toast(`${appPlatform() ? 'The app' : 'Your browser'} kept the tab from opening: use Open TIDAL’s sign-in`, 'error');
     } catch (e) { if (tab) tab.close(); toast(e.message, 'error'); }
     // The chooser is drawn again: whoever comes back from TIDAL's tab lands on the address field
     await h.refill();
@@ -1678,7 +1794,7 @@
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       const own = !u.from && u.signed_in;
       if (pick === 'browser') return own && u.session_client === 'pkce' ? h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') : tidalPkceSteps(u, h);
-      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
+      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in ${appPlatform() ? 'your browser' : 'this browser'} and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
         if (u.pending) return tidalCodeBox(u.pending);
         if (own && u.session_client === 'device') return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '');
@@ -1946,7 +2062,7 @@
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
       // Ask what came back: a busy node or a proxy in front of it can answer with an error page
       // instead of the file (owner, 2026-10-22: a library FLAC during a big copy)
-      let why = 'its source sent no audio this browser can play';
+      let why = `its source sent no audio ${hereName().toLowerCase()} can play`;
       try { const r = await fetch(audio.src, { headers: { range: 'bytes=0-1' } }); const ct = r.headers.get('content-type') || ''; if (!r.ok) why = `the node answered ${r.status}${r.status >= 500 ? ' (busy or not reachable just now)' : ''}`; else if (!/^audio\/|octet-stream|mpegurl|video\/mp2t/.test(ct)) why = `the node sent ${ct.split(';')[0] || 'something'} instead of audio`; } catch { why = 'the node did not answer'; }
       if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
@@ -2067,7 +2183,7 @@
   };
   const playStation = async (st) => {
     if (isBrowser()) {
-      if (location.protocol === 'https:' && /^http:\/\//i.test(st.url)) { toast('This page is served over HTTPS, so the browser will not play an http:// stream. Pick a node zone, or a station with an https stream.', 'error'); return; }
+      if (location.protocol === 'https:' && /^http:\/\//i.test(st.url)) { toast(`This page is served over HTTPS, so ${hereName().toLowerCase()} will not play an http:// stream. Pick a node zone, or a station with an https stream.`, 'error'); return; }
       state.browserQueue = [{ id: Date.now(), uri: st.url, stream: st.url, title: st.name, artist: [st.country, (st.tags || []).slice(0, 3).join(', ')].filter(Boolean).join(' · '), album: 'Internet radio', duration_ms: 0 }];
       browserPlay(0); toast(`Tuning to ${st.name}`); return;
     }
@@ -2098,9 +2214,9 @@
         });
         const local = (d.local_tracks || []).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms }));
         const left = [...elsewhere].map(([name, n]) => (name ? `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} only through ${name}` : `${countOf(n, 'songs')} ${n === 1 ? 'plays' : 'play'} nowhere you are connected`)).join('; ');
-        if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
+        if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
         // Say what was omitted before starting: a playback failure must remain the last notice.
-        if (left) toast(`${left}; left out of this browser's queue`);
+        if (left) toast(`${left}; left out of ${hereName().toLowerCase()}'s queue`);
         await playSongs([...songs, ...local]);
         return;
       }
@@ -2154,13 +2270,7 @@
     const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0;
     transport({ action: 'seek', position_ms: Math.round((seek.value / 1000) * d) });
   });
-  const vol = $('#vol');
-  setFill(vol);
-  vol.addEventListener('input', () => setFill(vol));
-  vol.addEventListener('change', () => {
-    if (isBrowser()) { audio.volume = Math.pow(10, vol.value / 20); return; }
-    api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(vol.value) } }).catch((e) => toast(e.message, 'error'));
-  });
+  // The bar's volume slider is bound with the other volume sliders (zoneVolume, above).
 
   // Zone picker.
   const zonePop = $('#zonepop');
@@ -2168,7 +2278,7 @@
   // What a device is, in words (owner, 2026-10-29: the line showed raw ids like airplay:9056…):
   // the protocol of its output id, and the device's maker and model when the node knows them
   // (`model` in GET /v1/outputs); the id itself stays as the tooltip.
-  const PROTO_WORDS = { alsa: 'ALSA DAC', cpal: 'System audio', null: 'Null output, for developers', pull: 'Pull stream', upnp: 'UPnP', airplay: 'AirPlay', cast: 'Chromecast', slim: 'Squeezelite', snapcast: 'Snapcast', mpd: 'MPD', net: 'The app', group: 'Group', rec: 'Recording', wav: 'WAV file', clock: 'Clock', bluos: 'BluOS', heos: 'HEOS', browser: 'This browser' };
+  const PROTO_WORDS = { alsa: 'ALSA DAC', cpal: 'System audio', null: 'Null output, for developers', pull: 'Pull stream', upnp: 'UPnP', airplay: 'AirPlay', cast: 'Chromecast', slim: 'Squeezelite', snapcast: 'Snapcast', mpd: 'MPD', net: 'The app', group: 'Group', rec: 'Recording', wav: 'WAV file', clock: 'Clock', bluos: 'BluOS', heos: 'HEOS', get browser() { return hereName(); } };
   // A USB DAC on the app's own output (a phone): the node reports it as that output's `device`
   // (GET /v1/outputs). Android's mixer still plays it ("shared"); a mode other than shared shows
   // only when the node says the phone confirmed it for what plays now.
@@ -2264,7 +2374,7 @@
   const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
   window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
-    if (z.id === BROWSER) return 'Streams the files to this browser';
+    if (z.id === BROWSER) return appPlatform() ? 'The app plays the files itself' : 'Streams the files to this browser';
     if (deviceOf(z)) return dacWordsFor(z);
     const id = String(z.output || ''); const o = (state.outputs || []).find((x) => x.id === id);
     return [PROTO_WORDS[id.split(':')[0]] || id.split(':')[0], o && o.model].filter(Boolean).join(' · ');
@@ -2298,7 +2408,7 @@
     if (target === from || moving) return;
     moving = true; $$('[data-move]', zonePop).forEach((b) => { b.disabled = true; });
     // Zone to zone can take a while (the node opens the track first): say so at once when the menu is closed
-    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: 'This browser' } : state.zones[target]; toast(`Moving to ${(tz0 && tz0.name) || 'the zone'}…`); }
+    if (zonePop.hidden) { const tz0 = target === BROWSER ? { name: hereName() } : state.zones[target]; toast(`Moving to ${(tz0 && tz0.name) || 'the zone'}…`); }
     let resume = null; // the browser, paused for the move: back on when the move fails
     const cur = currentZone(); const curTitle = cur && cur.now_playing ? cur.now_playing.item.title || '' : '';
     const wasPlaying = cur && cur.transport === 'playing';
@@ -2309,9 +2419,9 @@
         // YouTube plays in this page: a zone takes it only with yt-dlp on (as playSourceItems)
         const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
         if (!ytZones && queue.some((q) => ytOf(q.uri))) {
-          if (cur && ytOf(cur.uri)) throw new Error('YouTube plays only in This browser');
+          if (cur && ytOf(cur.uri)) throw new Error(`YouTube plays only ${hereOnly()}`);
           const rest = queue.filter((q) => !ytOf(q.uri));
-          toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only in This browser`);
+          toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only ${hereOnly()}`);
           queue = rest;
         }
         const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null, limit: it.limit || null }));
@@ -2419,7 +2529,7 @@
     const free = (id) => id !== BROWSER && !!state.zones[id] && !String(id).startsWith('group:') && !busy.has(id) && !skip.has(id) && (!l.zone || id !== l.zone.id);
     if (!skip.size && free(state.zone)) return doJoinAlong(l, state.zone, b, skip);
     const mine = zoneList().filter((z) => free(z.id));
-    if (!mine.length) { if (quiet) return; toast(skip.size ? 'Someone else is listening on your other speakers too: Listen along needs free ones.' : 'Listening along needs speakers on this node that nobody else is using: This browser can’t join.', 'error'); return; }
+    if (!mine.length) { if (quiet) return; toast(skip.size ? 'Someone else is listening on your other speakers too: Listen along needs free ones.' : `Listening along needs speakers on this node that nobody else is using: ${hereName()} can’t join.`, 'error'); return; }
     showMenu(b, [{ title: skip.size ? 'Someone listens there: listen from' : 'Listen from' }, ...mine.map((z) => ({ label: z.name, icon: 'zone', run: () => doJoinAlong(l, z.id, b, skip) }))], { all: true });
   };
   const doJoinAlong = async (l, zone, b, skip = new Set()) => {
@@ -2516,7 +2626,7 @@
     const jp = jobPop(); if (!jp.hidden) { closeJobPop(); return; }
     closePop(); drawJobPop(); jp.hidden = false; $('#scrim').hidden = false; pushTransient();
   };
-  $('#scrim').onclick = () => { closePop(); closeJobPop(); closeQPanel(); };
+  $('#scrim').onclick = () => { closePop(); closeJobPop(); closeQPanel(); closeVolPop(); };
   // The menu button (desktop): collapses the sidebar to icons and back, remembered per browser.
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
@@ -2584,7 +2694,7 @@
     const h = np.signal_path ? headline(np.signal_path) : null;
     const fmtLine = np.signal_path ? fmtFormat(np.source_format) + ' → ' + fmtFormat(np.output_format) : '';
     return `<div class="path${cls ? ' ' + cls : ''}">
-      <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? Q_COLOUR[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : 'Played by this browser'}<span class="muted" style="font-weight:400;margin-left:auto">${esc(fmtLine)}</span></div>
+      <div class="path-head"><span class="qdot" style="width:10px;height:10px;border-radius:50%;background:${h ? Q_COLOUR[h] : 'var(--muted)'}"></span>${h ? LABEL[h] : playedBy()}<span class="muted" style="font-weight:400;margin-left:auto">${esc(fmtLine)}</span></div>
       ${np.signal_path ? np.signal_path.stages.map((st) => `<div class="path-row"><span class="pd" style="background:${Q_COLOUR[st.quality]}"></span><span class="pn">${esc(st.name)}</span><span class="pf">${esc(fmtFormat(st.in_format))} → ${esc(fmtFormat(st.out_format))}</span>${st.note ? `<span class="pnote">${esc(st.note)}</span>` : ''}</div>`).join('') : ''}
     </div>`;
   };
@@ -2699,17 +2809,6 @@
   };
   // A zone's volume slider: the output's hardware range and the zone's level, or this browser's
   // own volume; null when the device sets it
-  const zoneVolRange = (z) => {
-    if (!z) return null;
-    if (z.id === BROWSER) return { min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))) };
-    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume && out.caps.hw_volume.kind === 'db' ? out.caps.hw_volume : null;
-    return hv ? { min: hv.min, max: hv.max, step: hv.step || 1, value: z.volume_db != null ? Math.min(hv.max, Math.max(hv.min, z.volume_db)) : hv.max } : null;
-  };
-  const setZoneVol = (z, db) => {
-    const bar = $('#vol'); if (bar && z.id === state.zone) { bar.value = db; setFill(bar); }
-    if (z.id === BROWSER) { audio.volume = Math.pow(10, db / 20); return; }
-    api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { db: Number(db) } }).catch((e) => toast(e.message, 'error'));
-  };
   // Title, artists and album of what plays, each a link to its page (player bar and Now Playing);
   // `plain` is text only, for a bar that opens Now playing as a whole
   const npLinksHtml = (it, live, plain) => {
@@ -2832,7 +2931,7 @@
       const err = z && z.transport === 'stopped' && z.error;
       $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
       $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek);
-      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, DSP and volume';
+      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, and DSP';
       q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
       syncQPanel();
       return;
@@ -2857,13 +2956,13 @@
     const svc = npSvc(np); const svcName = svc === 'library' ? 'your library' : svc ? srcName(svc) : null;
     $('.qsrc', q).innerHTML = svc ? svcIcon(svc) : '';
     const dv = deviceOf(z);
-    const words = (np.signal_path || np.format ? pathSummary(zp) : 'Played by this browser') + (dv ? ` → ${dacWordsFor(z)}` : '');
+    const words = (np.signal_path || np.format ? pathSummary(zp) : playedBy()) + (dv ? ` → ${dacWordsFor(z)}` : '');
     $('.qtext', q).textContent = words;
     $('.qdsp', q).hidden = !dsp;
     const badge = np.output_format ? rateBits(np.output_format) : np.format ? (np.format.lossless ? 'Lossless' : np.format.codec || '') : '';
     $('.qshort', q).innerHTML = `<span class="qdev">${esc(z.name)}</span>${badge ? `<span class="qbadge">${esc(badge)}</span>` : ''}`;
     q.setAttribute('aria-label', `Sound: ${svcName ? `from ${svcName}, ` : ''}${words}${dsp ? ', DSP on' : ''}. Playing on ${z.name}. Open the sound panel`);
-    q.title = zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : 'This browser decodes the original file itself; the node makes no signal-path claim.';
+    q.title = zp.signal_path ? zp.signal_path.stages.map((s) => `${s.name}: ${fmtFormat(s.in_format)} → ${fmtFormat(s.out_format)} (${s.quality})${s.note ? ' · ' + s.note : ''}`).join('\n') : decodeNote();
     syncQPanel();
   };
   // ---- immediate feedback on play (owner, 2026-10-29) ----
@@ -2894,7 +2993,7 @@
     // The song still playing (a refused replace leaves it on) doesn't clear the error: a new one does
     const zf = state.zones[s.zone]; const still = zf && zf.transport === 'playing' && zf.now_playing ? zf.now_playing.item.id : null;
     state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now(), still };
-    if (!quiet) toast(`${(state.zones[s.zone] || {}).name || (s.zone === BROWSER ? 'This browser' : 'The zone')}: ${state.startError.msg}`, 'error');
+    if (!quiet) toast(`${(state.zones[s.zone] || {}).name || (s.zone === BROWSER ? hereName() : 'The zone')}: ${state.startError.msg}`, 'error');
     renderBar(); setTimeout(renderBar, 10500);
   };
   // The browser's own player: it starts (or fails) by itself
@@ -2948,7 +3047,7 @@
     const svc = np && npSvc(np);
     const row = (id, label, on, disabled, note) => `<label class="qp-row${disabled ? ' off' : ''}"><span class="grow"><span class="name">${label}</span>${note ? `<span class="sub">${esc(note)}</span>` : ''}</span><input type="checkbox" class="switch" data-dsp="${id}" ${on ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${esc(label)}"></label>`;
     let dsp;
-    if (isBrowser()) dsp = '<p class="qp-note">This browser plays the file as it is: the node’s DSP is for its zones.</p>';
+    if (isBrowser()) dsp = `<p class="qp-note">${hereName()} plays the file as it is: the node’s DSP is for its zones.</p>`;
     else if (!cfg) dsp = '<p class="qp-note"><span class="spin"></span> Reading this zone’s DSP…</p>';
     else if (cfg.error) dsp = `<p class="qp-note">${esc(cfg.error)}</p>`;
     else {
@@ -2959,27 +3058,19 @@
         + row('crossfeed', 'Headphone crossfeed', !!(cf && cf.enabled !== false), ro, cf && cf.enabled !== false ? `${cf.level_db} dB below ${cf.cutoff_hz} Hz` : 'off')
         + (isOwner() ? `<button class="btn sm ghost" id="qpdsp">${icon('settings')} All DSP settings</button>` : '');
     }
-    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume && out.caps.hw_volume.kind === 'db' ? out.caps.hw_volume : null;
-    const bar = $('#vol');
-    const vmin = hv ? hv.min : -60; const vmax = hv ? hv.max : 0; const vstep = hv ? hv.step || 1 : 1; const vval = Math.min(vmax, Math.max(vmin, Number(bar.value)));
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
       <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span>${fullLevelNote(z) ? `<span class="sub warn-text" role="status">${esc(fullLevelNote(z))}</span>` : ''}</span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
       <div class="pop-title">Source</div>
-      <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? 'Decoded by this browser' : ''))}</span>` : ''}</span></div>
+      <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? decodedBy() : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
-      ${np && np.signal_path ? pathHtml(zoneNp(z, np), 'compact') : `<p class="qp-note">${isBrowser() ? 'This browser decodes the file itself; the node makes no signal-path claim.' : 'Nothing playing.'}</p>`}
+      ${np && np.signal_path ? pathHtml(zoneNp(z, np), 'compact') : `<p class="qp-note">${isBrowser() ? decodeNote() : 'Nothing playing.'}</p>`}
       <div class="pop-title">DSP · ${esc(z.name)}</div>
-      <div class="qp-dsp">${dsp}</div>
-      <div class="pop-title">Volume</div>
-      <div class="qp-vol"><svg class="ic" aria-hidden="true"><use href="#i-volume"/></svg><input type="range" id="qpvol" min="${vmin}" max="${vmax}" step="${vstep}" value="${vval}" aria-label="Volume of ${esc(z.name)}${hv ? '' : ', in dB'}"></div>`;
+      <div class="qp-dsp">${dsp}</div>`;
     qPanelKey = qpKey();
     $$('[data-dsp]', qPanel).forEach((c) => { if (state.dspBusy) c.disabled = true; c.onchange = () => toggleDsp(c.dataset.dsp, c.checked); });
     const qd = $('#qpdsp', qPanel); if (qd) qd.onclick = () => { closeQPanel(); state.dspOpen = state.zone; setView('settings', 'playback'); };
-    const v = $('#qpvol', qPanel); setFill(v);
     if (had) { const back = $(had, qPanel); if (back) back.focus(); }
-    v.oninput = () => setFill(v);
-    v.onchange = () => { bar.value = v.value; setFill(bar); if (isBrowser()) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); };
   };
   // Opened from `opener` (the pill or the volume button): only that one says it is expanded, and
   // the focus goes back to it on close
@@ -2993,15 +3084,12 @@
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#quality');
-    const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
+    // Its first control; with none (the in-page player: no DSP, no volume here) the panel itself,
+    // so Escape and the arrows work and a screen reader lands in it
+    const first = $('[data-dsp]:not(:disabled), button', qPanel) || qPanel; first.focus();
   };
-  // Where the bar has no room for the slider (a desktop under 1100 px, tablets too): the Sound panel, at its volume
-  $('#volbtn').onclick = () => {
-    if (!qPanel.hidden) { closeQPanel(); return; }
-    openQPanel('#volbtn');
-    // At its volume; without a zone (no slider) the panel's first control, so focus is inside
-    const v = $('#qpvol', qPanel) || $('[data-dsp]:not(:disabled), button', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); }
-  };
+  // Where the bar has no room for the slider (narrow tablets and desktops): a small volume popover
+  $('#volbtn').onclick = () => { if (!volPop().hidden) closeVolPop(); else openVolPop(); };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page
   // The heart in the title row and the Tags sheet, for the song on screen. The heart draws at once
@@ -3034,7 +3122,7 @@
     if (target) { try { tags = (await api('GET', `/tags?${new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)]))}`)).tags || []; } catch { tags = []; } }
     const box = $('#nppubky', overlay); if (!box || !live()) return;
     box.innerHTML = pageRow + (target
-      ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `<span class="chip tag"><button class="chiplink" data-np-tag="${esc(x.label)}">#${esc(x.label)}</button>${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}</span>`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
+      ? `<div class="np-tags"><span class="eyebrow">Tags</span>${tags.map((x) => `${tagChip(x.label, { own: true, attrs: `data-np-tag="${esc(x.label)}"`, title: `Your tag · open ${x.label}` })}${x.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}`).join('')}<input class="input taginput" id="nptagadd" placeholder="Add a tag…" maxlength="20" aria-label="Add a tag to this song"></div>`
       : t ? '<p class="muted small">Pick which song this is (the ? on its row) to tag it and keep it in playlists.</p>'
         : `<p class="muted">Nothing to tag here: ${it.stream || np2Stream(it) ? 'this is a live stream' : 'this song has no page yet'}.</p>`);
     const pb = $('#nppage', overlay); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
@@ -3136,9 +3224,9 @@
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
-            <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
+            <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : hereName()}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
             <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
           </section>
           <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -3152,7 +3240,7 @@
     // Now playing's own transport (phones: the mini player hides behind it)
     // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
-    const nv = $('#npvol', overlay); if (nv) { setFill(nv); nv.oninput = () => setFill(nv); nv.onchange = () => setZoneVol(z, nv.value); }
+    const nv = $('#npvol', overlay); if (nv) { applyVol(nv, zoneVolume(z)); bindVolSlider(nv, currentZone); syncVolumeSliders(z); }
     else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = loadOutputs().then(() => { if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
@@ -3232,7 +3320,7 @@
     const previewOnly = (svc) => /^previews\b/i.test(String(((state.sources || []).find((x) => x.id === svc) || {}).status || ''));
     const canPlay = (v) => { const svc = srcSvc(v.source); if (svc === 'youtube' || /^youtube:/.test(switchUri(v) || '') || previewOnly(svc)) return false; return rk ? rk.healthy.has(svc) : svc === 'library'; };
     const canSwitch = (v) => !isBrowser() && cur && switchUri(v) && switchUri(v) !== cur.uri && canPlay(v);
-    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open on ${esc(v.label || v.source)}" title="Open on ${esc(v.label || v.source)}">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
+    box.innerHTML = (also.length ? `<div class="list">${also.map((v, k) => `<div class="list-row">${svcBadge(srcSvc(v.source))}<span class="grow name">${esc(v.label || srcName(srcSvc(v.source)))}</span>${canSwitch(v) ? `<button class="btn sm" data-npswitch="${k}" aria-label="Play from here: ${esc(v.label || srcName(srcSvc(v.source)))}">${icon('play')} Play from here</button>` : ''}${webUrl(v.url) ? `<a class="icon-btn" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" aria-label="Open in ${esc(v.label || v.source)} (new tab)" title="Open in ${esc(v.label || v.source)} (new tab)">${icon('external')}</a>` : ''}</div>`).join('')}</div>` : '<p class="muted">No other sources found for this song.</p>')
       + `<div class="np-sheet-foot"><button class="btn sm ghost" id="npsongpage">${icon('compass')} Song page: versions and every source</button></div>`;
     $('#npsongpage', overlay).onclick = () => setView('item', { kind: 'song', id: songPage });
     $$('[data-npswitch]', box).forEach((b) => b.onclick = () => switchSource(also[Number(b.dataset.npswitch)], b, cur.id));
@@ -3657,7 +3745,7 @@
 
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); return; }
+    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
@@ -3777,13 +3865,6 @@
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
   const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
-  const tagRow = (tags, ref) => `<div class="tagrow" data-tagref='${esc(JSON.stringify(ref))}'><span class="eyebrow" title="Public on Pubky">Tags</span>${tags.map((t) => `<span class="chip tag"><button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}</button><button class="chipx" data-tag-del="${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`).join('')}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20"></div>`;
-  const bindTagRow = (ref) => {
-    const add = $('#tagadd'); if (!add) return;
-    add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; try { await api('PUT', '/tags', { ...ref, label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label: b.dataset.tagDel }).toString()); render(); } catch (er) { toast(er.message, 'error'); } });
-    $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
-  };
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
@@ -3792,24 +3873,33 @@
     return [...new Set(ids)].map((x) => profileCache.get(x)).filter(Boolean);
   };
   const face = (c, size = 'sm') => (c.avatar ? `<img class="face ${size}" src="${esc(imgSrc(c.avatar))}" alt="" loading="lazy" data-err="hide">` : `<span class="face ${size} mono" style="background:hsl(${hue(c.id)} 35% 34%)">${esc(initials(c.name))}</span>`);
-  const faceStack = (cards, total) => `<span class="facestack">${cards.slice(0, 3).map((c) => face(c)).join('')}</span>${total > 3 ? `<span class="muted small">+${total - 3}</span>` : ''}`;
-  const peopleMenu = (anchor, title, cards) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), icon: 'artist', run: () => setView('person', c.id) }))]);
-  // The faces beside each tag chip in a box, and on the "N people tagged this" line
-  const fillTagFaces = async (box, faces, counts) => {
-    if (!box || !faces) return;
-    const all = Object.values(faces).flat();
-    if (!all.length) return;
-    await loadProfiles(all);
-    $$('[data-tag-open]', box).forEach((el) => {
-      const label = el.dataset.tagOpen; const ids = faces[label]; if (!ids || !ids.length) return;
-      const chip = el.closest('.chip') || el; if (chip.nextElementSibling && chip.nextElementSibling.dataset.faces === label) return;
-      const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (!cards.length) return;
-      chip.insertAdjacentHTML('afterend', `<button class="faces" data-faces="${esc(label)}" title="Who tagged #${esc(label)}" aria-label="Who tagged #${esc(label)}">${faceStack(cards, counts.get(label) || cards.length)}</button>`);
-      chip.nextElementSibling.onclick = (e) => peopleMenu(e.currentTarget, `#${label}`, cards);
-    });
-    const line = $('[data-taggers]', box.closest('section') || box);
-    if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
+  const peopleMenu = (anchor, title, cards, more = 0) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), icon: 'artist', run: () => setView('person', c.id) })), ...(more > 0 ? [{ title: `and ${more} more on Pubky` }] : [])]);
+  // Tag colours as pubky.app draws them, so a label looks the same there and here: its
+  // generateRandomColor and hexToRgba (pubky/pubky-app @7cb809a, src/libs/utils/utils.ts) ported as
+  // they are, the hash that outgrows 32 bits and the mixed-case hex included (tools/tag-colour-check.js)
+  const TAG_COLOURS = new Map([['bitcoin', '#FF9900'], ['synonym', '#FF6600'], ['bitkit', '#FF4400'], ['pubky', '#C8FF00'], ['blocktank', '#FFAE00'], ['tether', '#26A17B'], ['ai', '#00C8FF']]);
+  const tagColour = (label) => {
+    const s = String(label);
+    if (TAG_COLOURS.has(s.toLowerCase())) return TAG_COLOURS.get(s.toLowerCase());
+    const hash = Math.abs(Array.from(s).reduce((h, ch) => ch.charCodeAt(0) + ((h << 5) - h), 0));
+    const byte = hash & 0xff; const hex = byte.toString(16).padStart(2, '0'); const n = hash % 6;
+    // The two blue patterns turn teal while their changing channel is low
+    if ((n === 3 || n === 4) && byte <= 85) { const cyan = (255 - Math.round(byte * 0.75)).toString(16).padStart(2, '0'); return n === 3 ? `#00${cyan}FF` : `#00FF${cyan}`; }
+    return `#${[`FF00${hex}`, `FF${hex}00`, `${hex}FF00`, `${hex}00FF`, `00${hex}FF`, `00FF${hex}`][n]}`;
   };
+  const tagRgba = (hex, a) => { const [r, g, b] = hex.match(/\w\w/g).map((x) => parseInt(x, 16)); return `rgba(${r}, ${g}, ${b}, ${a})`; };
+  // One tag chip wherever tags show (pubky.app's Tag): the label in its colour, no "#", how many
+  // people used it, your own with a border. `attrs` go on the chip's button; `del` (the remove
+  // button's attributes) only where there is a remove, like the close on pubky.app's post tags.
+  const tagChip = (label, { count, own, attrs = '', title, del, extra = '' } = {}) => {
+    const c = tagColour(label);
+    const style = `--tag-bg:${tagRgba(c, 0.3)};--tag-line:${tagRgba(c, 0.5)}`;
+    const body = `<span class="ptag-l">${esc(label)}</span>${count ? `<span class="ptag-n">${count}</span>` : ''}`;
+    if (!del) return `<button class="ptag ${own ? 'own' : ''}" style="${style}" ${attrs} title="${esc(title || label)}">${body}</button>`;
+    return `<span class="ptag ${own ? 'own' : ''}" style="${style}"><button class="chiplink" ${attrs} title="${esc(title || label)}">${body}</button>${extra}<button class="chipx" ${del} aria-label="Remove ${esc(label)}" title="Remove">×</button></span>`;
+  };
+  // Who used a label (pubky.app's TaggedItem): up to four faces, then "+N" for the rest
+  const tagFaces = (cards, total) => { const shown = cards.slice(0, 4); return `${shown.map((c) => face(c, 'md')).join('')}${total > shown.length ? `<span class="face-more">+${total - shown.length}</span>` : ''}`; };
   // Your library › Node library › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
@@ -3866,24 +3956,108 @@
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     $('#wdurl', d).focus();
   });
-  // An item page's own tags: on the song (every source) or only on this source's link; each
-  // shows its scope and can move to the other one.
-  const scopedTagRow = (songTags, linkTags, linkName, kind, others = []) => {
-    const count = new Map(others.map(([l, c]) => [l, c]));
-    const mine = new Set([...songTags, ...linkTags].map((t) => t.label));
-    const chip = (t, scope) => `<span class="chip tag ${scope === 'link' ? 'tag-link' : ''}" title="${scope === 'link' ? `Only on this ${esc(linkName)} link` : `On the ${kind}, whatever source plays it`}">${scope === 'link' ? svcBadge(String(linkName).toLowerCase()) : ''}<button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}${count.get(t.label) ? ` <span class="muted">${count.get(t.label)}</span>` : ''}</button>${t.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}${linkName ? `<button class="chipx" data-tag-move="${scope}:${esc(t.label)}" title="${scope === 'link' ? `Put it on the ${kind} instead` : `Keep it on this ${esc(linkName)} link only`}" aria-label="Move #${esc(t.label)}">${icon(scope === 'link' ? 'compass' : 'disc')}</button>` : ''}<button class="chipx" data-tag-del="${scope}:${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`;
-    const theirs = others.filter(([l]) => !mine.has(l)).map(([l, c]) => `<button class="chip tag-chip" data-tag-open="${esc(l)}" title="Others' tag · open in Discover">#${esc(l)} <span class="muted">${c}</span></button>`).join('');
-    return `<div class="tagrow">${songTags.map((t) => chip(t, 'song')).join('')}${linkTags.map((t) => chip(t, 'link')).join('')}${theirs}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20">${linkName ? `<select class="input sm" id="tagscope" aria-label="Where the tag goes"><option value="song">on the ${kind}</option><option value="link">on this ${esc(linkName)} link only</option></select>` : ''}</div><p class="muted small tag-hint">Public on your homeserver.${linkName ? ` A tag on the ${kind} shows wherever it plays from; a tag on this ${esc(linkName)} link stays on that link.` : ''}</p>`;
+  // ---- An item page's tags, in its top card (TASK-tags-in-hero-pubky-design) ----
+  // Each identity the page has is a group of its own: the item, whatever source plays it, and this
+  // source's link (STEWARD-UX-INSTANCES 3). A group reads, adds, removes and counts on its own URI
+  // only, and the people beside a label are that URI's for that label, never a page-wide lookup by
+  // label. Others' tags first by how many used them, yours among them with a border; about two rows,
+  // then "+N more" shows the rest in place.
+  //   ht: { key, kind, groups: [{ scope, name, ref, own: [tag] | null, pub: { state, tags, faces } }],
+  //         canEdit, note, match, open: Set of the groups shown whole }
+  const qsOf = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
+  // "On the TIDAL link" inside a sentence: only its first letter goes small
+  const lower1 = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+  const cardOf = (id) => profileCache.get(id) || { id, name: shortKey(id), known: false };
+  const heroTagGroup = (g, ht) => {
+    const pub = g.pub; const counts = new Map(pub.tags || []);
+    const mine = new Map((g.own || []).map((t) => [t.label, t]));
+    const edit = ht.canEdit && !!g.own;
+    const other = ht.groups.find((x) => x !== g);
+    const moves = edit && other && !!other.own;
+    const list = [...new Set([...(pub.tags || []).map(([l]) => l), ...mine.keys()])]
+      .map((label, i) => ({ label, count: Math.max(counts.get(label) || 0, mine.has(label) ? 1 : 0), own: mine.get(label), i }))
+      .sort((a, b) => b.count - a.count || a.i - b.i);
+    const items = list.map((t) => {
+      const ids = (pub.faces || {})[t.label] || [];
+      const move = t.own && moves ? `<button class="chipx" data-htag-move="${g.scope}" data-label="${esc(t.label)}" aria-label="Move ${esc(t.label)} ${esc(lower1(other.name))}" title="${g.scope === 'link' ? `Put it on the ${esc(ht.kind)} instead` : `Keep it on the ${esc(ht.linkName)} link only`}">${icon(g.scope === 'link' ? 'compass' : 'disc')}</button>` : '';
+      const chip = tagChip(t.label, { count: t.count, own: !!t.own, attrs: `data-htag-open="${esc(t.label)}"`, title: `${t.own ? `Your tag${t.own.synced ? '' : ', not pushed yet'}` : `${t.count} ${t.count === 1 ? 'person' : 'people'}`} · open ${t.label}`, del: t.own && edit ? `data-htag-del="${g.scope}" data-label="${esc(t.label)}"` : null, extra: move });
+      const wait = t.own && t.own.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : '';
+      const who = ids.length ? `<button class="faces tagfaces" data-htag-faces="${g.scope}" data-label="${esc(t.label)}" aria-label="Who tagged ${esc(t.label)}" title="Who tagged ${esc(t.label)}">${tagFaces(ids.map(cardOf), t.count)}</button>` : '';
+      return `<span class="tagitem" data-label="${esc(t.label)}">${chip}${wait}${who}</span>`;
+    }).join('');
+    const status = pub.state === 'loading' ? '<span class="ptag tag-skel" aria-hidden="true"></span><span class="ptag tag-skel" aria-hidden="true"></span>'
+      : pub.state === 'error' ? '<span class="muted small">Pubky tags didn\'t load</span>' : list.length ? '' : '<span class="muted small">No tags yet</span>';
+    const mineFailed = ht.canEdit && !g.own ? '<span class="muted small">Your tags didn\'t load</span>' : '';
+    const more = ht.open.has(g.scope) ? '' : `<button class="ptag ptag-more" data-htag-more="${g.scope}" hidden></button>`;
+    const add = edit ? `<button class="ptag ptag-add" data-htag-plus="${g.scope}" aria-label="Add a tag ${esc(lower1(g.name))}" title="Add a tag: public on your homeserver">${icon('plus')}</button>` : '';
+    return `<div class="tgroup" data-tag-scope="${g.scope}" role="group" aria-label="Tags ${esc(lower1(g.name))}"><span class="tgroup-name">${g.scope === 'link' ? svcBadge(String(ht.linkName).toLowerCase()) : ''}${esc(g.name)}</span>${items}${status}${mineFailed}${more}${add}</div>`;
   };
-  const bindScopedTags = (songRef, linkRef) => {
-    const add = $('#tagadd'); if (!add) return;
-    const refOf = (scope) => (scope === 'link' && linkRef ? linkRef : songRef);
-    const del = (ref, label) => api('DELETE', '/tags?' + new URLSearchParams({ ...Object.fromEntries(Object.entries(ref).map(([k, v]) => [k, String(v)])), label }).toString());
-    add.onkeydown = async (e) => { if (e.key !== 'Enter' || !add.value.trim()) return; const sc = $('#tagscope') ? $('#tagscope').value : 'song'; try { await api('PUT', '/tags', { ...refOf(sc), label: add.value.trim() }); toast(`Tagged #${add.value.trim().toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); } };
-    $$('[data-tag-del]', main).forEach((b) => b.onclick = async () => { const [sc, ...l] = b.dataset.tagDel.split(':'); try { await del(refOf(sc), l.join(':')); render(); } catch (er) { toast(er.message, 'error'); } });
-    $$('[data-tag-move]', main).forEach((b) => b.onclick = async () => { const [sc, ...l] = b.dataset.tagMove.split(':'); const label = l.join(':'); try { await api('PUT', '/tags', { ...refOf(sc === 'link' ? 'song' : 'link'), label }); await del(refOf(sc), label); toast(sc === 'link' ? `#${label} is on the song now` : `#${label} is on this link only now`); render(); } catch (er) { toast(er.message, 'error'); } });
-    $$('[data-tag-open]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
+  // About two rows: the chips that would start a third wait behind "+N more" (measured, so it
+  // holds at any width; a row is chips whose tops are within a few pixels)
+  const foldHeroTags = (box) => {
+    const rows = (els) => { const tops = els.map((el) => el.getBoundingClientRect().top).sort((a, b) => a - b); return tops.filter((t, k) => k === 0 || t - tops[k - 1] > 8).length; };
+    $$('.tgroup', box).forEach((gr) => {
+      const more = $('[data-htag-more]', gr); if (!more) return;
+      const items = $$('.tagitem', gr); items.forEach((it) => { it.hidden = false; }); more.hidden = true;
+      const shown = () => [...items.filter((it) => !it.hidden), ...$$('.tgroup-name, [data-htag-more]:not([hidden]), [data-htag-plus]:not([hidden]), input[data-htag-add], .tag-hint, .tgroup > .muted.small', gr)].filter((el) => el.getClientRects().length);
+      for (let k = items.length - 1; k > 0 && rows(shown()) > 2; k--) { items[k].hidden = true; more.hidden = false; more.textContent = `+${items.length - k} more`; }
+    });
   };
+  // Suggestions while adding: the labels on this page, then your own from everywhere (read once)
+  const tagLabels = { mine: null };
+  const openHeroAdd = async (box, ht, b, focus = true) => {
+    const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
+    b.hidden = true;
+    b.insertAdjacentHTML('afterend', `<input class="taginput" data-htag-add="${g.scope}" list="htagsugg" maxlength="20" autocomplete="off" placeholder="Add a tag…" aria-label="Add a tag ${esc(lower1(g.name))}"><span class="muted small tag-hint">Public on your homeserver</span>`);
+    const inp = b.nextElementSibling; const hint = inp.nextElementSibling;
+    const close = () => { inp.remove(); hint.remove(); b.hidden = false; };
+    if (focus) inp.focus();
+    inp.onkeydown = async (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); b.focus(); return; }
+      if (e.key !== 'Enter' || e.isComposing || inp.disabled || !inp.value.trim()) return;
+      const label = inp.value.trim(); inp.disabled = true;
+      try { await api('PUT', '/tags', { ...g.ref, label }); toast(`Tagged ${label.toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); inp.disabled = false; inp.focus(); }
+    };
+    inp.onblur = () => setTimeout(() => { if (inp.isConnected && !inp.value.trim() && !inp.disabled && document.activeElement !== inp) close(); }, 150);
+    const here = ht.groups.flatMap((x) => [...(x.pub.tags || []).map(([l]) => l), ...(x.own || []).map((t) => t.label)]);
+    const fill = () => { const dl = $('#htagsugg', box); if (dl) dl.innerHTML = [...new Set([...here, ...(tagLabels.mine || [])])].slice(0, 200).map((l) => `<option value="${esc(l)}"></option>`).join(''); };
+    fill();
+    if (!tagLabels.mine) { try { tagLabels.mine = [...new Set(((await api('GET', '/tags')).tags || []).map((t) => t.label))]; fill(); } catch { /* this page's labels will do */ } }
+  };
+  const bindHeroTags = (box, ht) => {
+    const groupOf = (scope) => ht.groups.find((g) => g.scope === scope);
+    const del = (ref, label) => api('DELETE', `/tags?${qsOf({ ...ref, label })}`);
+    $$('[data-htag-open]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.htagOpen }));
+    $$('[data-htag-more]', box).forEach((b) => b.onclick = () => { ht.open.add(b.dataset.htagMore); const gr = b.closest('.tgroup'); const next = $('.tagitem[hidden] button', gr); $$('.tagitem', gr).forEach((it) => { it.hidden = false; }); b.remove(); if (next) next.focus(); });
+    $$('[data-htag-faces]', box).forEach((b) => b.onclick = () => { const g = groupOf(b.dataset.htagFaces); const label = b.dataset.label; const ids = (g.pub.faces || {})[label] || []; const cards = ids.map(cardOf); peopleMenu(b, label, cards, (new Map(g.pub.tags || []).get(label) || ids.length) - cards.length); });
+    $$('[data-htag-del]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagDel); if (!g || b.disabled) return; b.disabled = true; try { await del(g.ref, b.dataset.label); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
+    // A move writes the other URI first: when that fails, the tag stays where it was
+    $$('[data-htag-move]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagMove); const to = ht.groups.find((x) => x !== g); const label = b.dataset.label; if (!g || !to || b.disabled) return; b.disabled = true; try { await api('PUT', '/tags', { ...to.ref, label }); await del(g.ref, label); toast(`${label} is ${lower1(to.name)} now`); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
+    $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => openHeroAdd(box, ht, b));
+    const m = $('[data-htag-match]', box); if (m) m.onclick = () => setView('identify', { tracks: ht.match.tracks });
+  };
+  // The faces come with the people's names and pictures once their profiles are read
+  const fillHeroFaces = async (box, ht) => {
+    const ids = ht.groups.flatMap((g) => Object.values(g.pub.faces || {}).flat());
+    if (!ids.length || ids.every((x) => profileCache.has(x))) return;
+    await loadProfiles(ids);
+    if (!box.isConnected || box.dataset.for !== ht.key) return;
+    $$('[data-htag-faces]', box).forEach((b) => { const g = ht.groups.find((x) => x.scope === b.dataset.htagFaces); const fids = (g.pub.faces || {})[b.dataset.label] || []; b.innerHTML = tagFaces(fids.map(cardOf), new Map(g.pub.tags || []).get(b.dataset.label) || fids.length); });
+  };
+  let heroTagsRo = null;
+  const drawHeroTags = (ht) => {
+    const box = $('#htags'); if (!box || box.dataset.for !== ht.key) return;
+    // A half-typed tag stays when the public tags come in meanwhile
+    const drafts = $$('input[data-htag-add]', box).map((t) => ({ scope: t.dataset.htagAdd, value: t.value, focus: document.activeElement === t }));
+    box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
+    bindHeroTags(box, ht);
+    drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); const inp = $(`input[data-htag-add="${d.scope}"]`, box); if (inp) inp.value = d.value; } });
+    foldHeroTags(box);
+    // One observer, on the current box (a redrawn page has a new one)
+    if (!box.dataset.fold && window.ResizeObserver) { box.dataset.fold = '1'; if (heroTagsRo) heroTagsRo.disconnect(); let w = box.clientWidth; heroTagsRo = new ResizeObserver(() => { if (!box.isConnected) { heroTagsRo.disconnect(); return; } if (box.clientWidth !== w) { w = box.clientWidth; foldHeroTags(box); } }); heroTagsRo.observe(box); }
+    fillHeroFaces(box, ht);
+  };
+  let heroTagsGen = 0;
   // Ratings are 1–10: five stars in halves (7 shows three and a half).
   const starsText = (v) => (v ? `${Math.floor(v / 2) || ''}${v % 2 ? '½' : ''}` : '');
   const starFill = (v, n) => (!v ? 0 : v >= 2 * n ? 2 : v === 2 * n - 1 ? 1 : 0);
@@ -4145,7 +4319,7 @@
     const st = String(x.status || '');
     if (st === 'ready' || /^signed in\b/.test(st)) return { cls: 'ok', label: 'Connected', long: st === 'signed in' ? 'Signed in.' : st === 'ready' ? 'Ready.' : st.charAt(0).toUpperCase() + st.slice(1) + '.' };
     if (st === 'previews') return { cls: 'ok', label: 'Connected', long: '30-second previews, no account needed.' };
-    if (/^browser\b/.test(st)) return { cls: 'ok', label: 'Ready', long: `Plays in This browser, in YouTube\u2019s own player${/zones/.test(st) ? ', and on the speakers through yt-dlp' : ''}.${/search/.test(st) ? ' Search uses your YouTube Data API key.' : ''}` };
+    if (/^browser\b/.test(st)) return { cls: 'ok', label: 'Ready', long: `Plays ${hereOnly()}, in YouTube\u2019s own player${/zones/.test(st) ? ', and on the speakers through yt-dlp' : ''}.${/search/.test(st) ? ' Search uses your YouTube Data API key.' : ''}` };
     if (st === 'needs_config' || /^not configured/.test(st) || st === 'needs sign-in') return { cls: 'none', label: 'Not set up', long: st === 'needs sign-in' ? 'Not signed in yet.' : 'Not set up on this node yet.' };
     if (/^ready\b/.test(st)) return { cls: 'ok', label: 'Ready', long: st.charAt(0).toUpperCase() + st.slice(1) + '.' };
     // Only a real failure is red; any other note is shown as it is
@@ -4270,7 +4444,16 @@
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
       ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
       ...(o.albumId && !onThis('album', o.albumId) ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
-      ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })()}`, icon: 'external', run: () => openWeb(v.url) })),
+      // Where it opens elsewhere, one row: "Open in…" lists every site in a second menu; one site is a direct row
+      ...(() => {
+        const name = (v) => SERVICE_NAMES[v.source] || (v.label || '').split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })();
+        const outs = (o.openOn || []).filter((v) => webUrl(v.url));
+        if (!outs.length) return [];
+        if (outs.length === 1) return [{ label: `Open in ${name(outs[0])}`, icon: 'external', run: () => openWeb(outs[0].url) }];
+        // (the second menu opens once this one's history entry is popped, so it gets its own Back step)
+        return [{ label: 'Open in…', icon: 'external', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Open in' }, ...outs.map((v) => ({ label: name(v), svc: srcSvc(v.source), run: () => openWeb(v.url) }))]); }, 0); } }];
+      })(),
+      ...(o.alsoHere && o.alsoHere.length ? [{ label: 'Also on…', icon: 'compass', run: () => { setTimeout(async () => { if (popPending) await popPending; showMenu(anchorEl.isConnected ? anchorEl : ($('#imore') || anchorEl), [{ title: 'Also on' }, ...o.alsoHere.map((x) => ({ label: x.label, svc: x.svc, run: () => o.switchTo(x.k) }))]); }, 0); } }] : []),
       ...(o.extra || []),
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
       ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
@@ -4511,7 +4694,7 @@
     // A Top result only when it really matches; a fuzzy hit is not promoted
     const top = [byKind.artist.find((x) => x.sources.includes('library')), byKind.song.find((x) => x.sources.includes('library')), byKind.artist[0], byKind.album[0], byKind.song[0]].find((x) => x && closeMatch(x, run.q));
     const anyHits = SEARCH_KINDS.some(([k]) => byKind[k].length);
-    const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => `<button class="chip on" data-stag="${esc(t.label)}" title="Your tag">Your #${esc(t.label)} <span class="muted">${countOf(t.count, 'items')}</span></button>`).join('')}${(tg.others || []).map((l) => `<button class="chip" data-stag="${esc(l)}">#${esc(l)}</button>`).join('')}</div></section>`);
+    const tg = run.tags; if (tg && ((tg.mine || []).length || (tg.others || []).length)) sections.push(`<section class="section fadein" id="stags"><div class="section-head"><h3>Tags</h3><span class="muted small">on Pubky</span></div><div class="chips">${(tg.mine || []).map((t) => tagChip(t.label, { own: true, count: t.count, attrs: `data-stag="${esc(t.label)}"`, title: `Your tag · ${countOf(t.count, 'items')}` })).join('')}${(tg.others || []).map((l) => tagChip(l, { attrs: `data-stag="${esc(l)}"` })).join('')}</div></section>`);
     if (!top && anyHits && !run.q.includes('#')) sections.push('<p class="muted small" id="snomatch">No exact match. The closest results are below.</p>');
     if (top) sections.push(`<section class="section fadein" id="stop"><div class="section-head"><h3>Top result</h3></div><div class="card toprow"><div class="art ${top.kind === 'artist' ? 'round' : ''}">${top.image ? `<img src="${esc(imgSrc(top.image))}" alt="" data-err="remove">` : ''}</div><div class="grow"><div class="name big"><a class="lnk" data-sopen="top">${esc(top.title)}</a></div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist', playlist: 'Playlist', podcast: 'Podcast', concert: 'Concert' }[top.kind], top.subtitle].filter(Boolean).join(' · '))} <span class="src-badges">${top.sources.map((x) => svcBadge(x === 'library' ? 'library' : x)).join('')}</span></div></div><button class="btn primary" data-splaytop>${icon('play')} Play</button></div></section>`);
     const songCap = run.allSongs ? 50 : 6;
@@ -4568,7 +4751,7 @@
     if (sec.needs === 'pubky') return `<div class="card small">${esc(sec.note)} <button class="btn sm primary" data-home-signin>Sign in with Pubky Ring</button></div>`;
     if (sec.needs === 'location') return `<div class="card small">${esc(sec.note)} <span class="row" style="gap:6px;display:inline-flex"><input class="input" data-city placeholder="Your city" style="width:180px"><button class="btn sm primary" data-city-save>Save</button></span></div>`;
     if (sec.needs === 'contact') return `<p class="muted small">${esc(sec.note)}</p>`;
-    if (name === 'tags') return sec.tags.length ? `<div class="chips">${sec.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : `<p class="muted small">${esc(sec.note || '')}</p>`;
+    if (name === 'tags') return sec.tags.length ? `<div class="chips">${sec.tags.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-open="${esc(l)}"`, title: `${l}: ${c} ${c === 1 ? 'person' : 'people'}` })).join('')}</div>` : `<p class="muted small">${esc(sec.note || '')}</p>`;
     if (!sec.items.length) return `<p class="muted small">${esc(sec.note || 'Nothing yet.')}</p>`;
     const songs = sec.items.filter((it) => it.kind === 'track');
     const tiles = sec.items.filter((it) => it.kind === 'album' || it.kind === 'artist' || it.kind === 'podcast' || it.kind === 'playlist');
@@ -4577,11 +4760,21 @@
       + (tiles.length ? `<div data-hgrid>${itemTileGrid(tiles.slice(0, full ? 60 : 12).map(asTile), 'album')}</div>` : '')
       + (events.length ? `<div class="list">${events.slice(0, full ? 60 : 6).map((it, k) => `<div class="list-row clickable" data-hopen="${k}"><div class="grow"><div class="name">${esc(itemName(it))}</div><div class="sub">${esc([it.description, it.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div>` : '');
   };
+  // Tiles of discovered items (an item page's "Tagged alike on Pubky"), bound to the list they were
+  // drawn from: a tile opens the item's page (a song's for a track), a podcast or a playlist its site
+  // (the node has item pages for songs, albums and artists only), ▶ plays it
+  const SIMILAR_KINDS = ['track', 'album', 'artist', 'podcast', 'playlist'];
+  const openDiscovered = (it) => { if (it.kind === 'podcast' || it.kind === 'playlist') return openWeb(it.page || it.uri); setView('item', { kind: homeKind(it), id: idOf(it.page || it.uri) }); };
+  const bindDiscoverTiles = (box, items) => {
+    if (!box) return;
+    $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; const it = items[Number(b.dataset.tile)]; if (it) openDiscovered(it); });
+    $$('[data-tileplay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.tileplay)]; if (it) return discoverPlay(it, null, b); });
+  };
   const bindHome = (el, sec) => {
     const songs = sec.items.filter((it) => it.kind === 'track'); const tiles = sec.items.filter((it) => ['album', 'artist', 'podcast', 'playlist'].includes(it.kind)); const events = sec.items.filter((it) => it.kind === 'concert' || it.kind === 'other');
     if (songs.length) bindSongRows(el, songs.map(asRow), {});
     // Only this section's own tiles (an item page has other tile grids with their own handlers)
-    $$('[data-hgrid] [data-tile]', el).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; const it = tiles[Number(b.dataset.tile)]; if (!it) return; if (it.kind === 'podcast') return openWeb(it.page || it.uri); setView('item', { kind: homeKind(it), id: idOf(it.page || it.uri) }); });
+    $$('[data-hgrid] [data-tile]', el).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; const it = tiles[Number(b.dataset.tile)]; if (it) openDiscovered(it); });
     $$('[data-hgrid] [data-tileplay]', el).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = tiles[Number(b.dataset.tileplay)]; if (it) discoverPlay(it, null, b); });
     $$('[data-hopen]', el).forEach((r) => r.onclick = () => { const it = events[Number(r.dataset.hopen)]; openWeb(it.page || it.uri); });
     $$('[data-tag-open]', el).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagOpen));
@@ -4617,7 +4810,7 @@
     $$('[data-ditem]', main).forEach((row) => row.onclick = (e) => { if (e.target.closest('[data-dplay],[data-dmore]')) return; { const it = items[Number(row.dataset.ditem)]; setView('discover-item', { uri: it.uri, kind: it.kind }); } });
     $$('[data-dplay]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); discoverPlay(items[Number(b.dataset.dplay)], null, b); });
     $$('[data-view="sources"]', main).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('sources'); });
-    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'on ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
+    $$('[data-dmore]', main).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const it = items[Number(b.dataset.dmore)]; showMenu(b, [{ title: it.title || it.uri }, { label: 'Details, tags and notes', icon: 'compass', run: () => setView('discover-item', { uri: it.uri, kind: it.kind }) }, ...(it.in_library ? [{ label: 'Play from library', icon: 'play', run: () => playTracks([it.in_library], true) }, { label: 'Open album', icon: 'disc', run: () => it.in_library.album && it.in_library.album.id ? setView('album', { id: it.in_library.album.id }) : toast('No album for this track') }] : []), ...(it.playable ? [{ label: `Play on ${it.site || 'service'}`, icon: 'zone', run: () => discoverPlay(it) }] : []), ...it.also_on.filter((v) => v.uri).map((v) => ({ label: `Play on ${v.source.toUpperCase()}`, icon: 'zone', run: () => discoverPlay(it, v) })), { label: `Open ${it.site ? 'in ' + it.site : 'link'}`, icon: 'external', run: () => openWeb(it.uri) }]); });
   };
   const emptyState = (iconName, title, text, action) => `<div class="empty">${icon(iconName)}<h3>${esc(title)}</h3><p>${esc(text)}</p>${action ? `<button class="btn primary" data-empty-action="${action.view}">${esc(action.label)}</button>` : ''}</div>`;
   const LAYOUTS = [['auto', 'Automatic', 'Phone under 600 px wide, desktop from there (tablets too)'], ['phone', 'Phone', 'Tabs and a mini player, at any width'], ['desktop', 'Desktop', 'The sidebar and the full player bar, also in windows from 480 px']];
@@ -4796,7 +4989,7 @@
         <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from ${(state.sources || []).some((x) => x.id === 'jamendo' && x.status === 'ready') ? 'Internet Archive, Audius or Jamendo' : 'Internet Archive or Audius'}</a>, no account needed.</p>`;
     const text = {
       music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Your library › Node library.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
-      play: () => ['Play something', tracks ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : musicTodo ? 'Once your music is in.' : 'Search for a song, or browse your services on Sources. It plays in this browser, or on a speaker from the zone button.', tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
+      play: () => ['Play something', tracks ? `It plays ${hereIn()}. To play on speakers or another device, use the zone button at the bottom right.` : musicTodo ? 'Once your music is in.' : `Search for a song, or browse your services on Sources. It plays ${hereIn()}, or on a speaker from the zone button.`, tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
       contact: () => ['See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>'],
       speakers: () => ['Play on your speakers (optional)', 'No speaker found yet. Speakers and streamers on your network show up by themselves; Snapcast and MPD need a line in the node’s config.', `<button class="btn sm" id="setupspeakers">Look for speakers</button> <a class="lnk small" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/speakers.md" target="_blank" rel="noopener">Which speakers work</a>`],
       pubky: () => (hsHere && !has.pubky
@@ -5018,9 +5211,10 @@
           if (state.view !== 'tag') return;
           sc.items = sc.items || []; sc.tags = sc.tags || [];
           const co = sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24);
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => `<button class="chip tag-chip" data-tag-add="${esc(l)}" title="Narrow to both tags">+ #${esc(l)} <span class="muted">${c}</span></button>`).join('')}${labels.length > 1 ? labels.map((l) => `<button class="chip tag-chip on" data-tag-rm="${esc(l)}" title="Remove this tag">#${esc(l)} ×</button>`).join('') : ''}</div>` : '';
+          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => tagChip(l, { count: c, attrs: `data-tag-add="${esc(l)}"`, title: `Narrow to ${labels.join(', ')} and ${l}` })).join('')}${labels.length > 1 ? labels.map((l) => tagChip(l, { attrs: `data-tag-solo="${esc(l)}"`, title: `Only ${l}`, del: `data-tag-rm="${esc(l)}"` })).join('') : ''}</div>` : '';
           $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
           $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
+          $$('[data-tag-solo]', main).forEach((b) => b.onclick = () => setView('tag', b.dataset.tagSolo, 'replace'));
           const el = $('#tagbody'); el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
           break;
         }
@@ -5199,6 +5393,15 @@
             });
           };
           draw();
+          // From an album page ("Match this album to tag it"): to its folder, when it waits here
+          // (once: a later redraw of the list stays where the owner is)
+          const want = state.viewArg && state.viewArg.tracks;
+          if (want && want.length) {
+            state.viewArg = { ...state.viewArg, tracks: null };
+            const row = want.map((t) => $(`.idrow[data-track="${Number(t)}"]`, main)).find(Boolean); const sec = row && row.closest('.idalbum');
+            if (sec) { sec.scrollIntoView({ block: 'start' }); const h = $('h3', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
+            else toast(next != null ? 'This album isn\'t among the first folders here: Show more at the end lists the rest.' : 'This album has no matches waiting to be confirmed. Identify (Settings) looks for it again.');
+          }
           break;
         }
         case 'genres': {
@@ -5207,7 +5410,7 @@
           const [genres, mine, ns] = await Promise.all([api('GET', '/library/genres'), api('GET', '/tags').then((r) => r.tags || []).catch(() => []), api('GET', '/node/settings').catch(() => ({}))]);
           if (state.view !== 'genres') return;
           const byLabel = new Map(); for (const t of mine) byLabel.set(t.label, (byLabel.get(t.label) || 0) + 1);
-          const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => `<button class="chip tag-chip" data-mytag="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label></section>`;
+          const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => tagChip(l, { own: true, count: n, attrs: `data-mytag="${esc(l)}"`, title: `Your tag · ${countOf(n, 'items')}` })).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label></section>`;
           main.innerHTML = pageHead('Genres', genres.length) + tagsSec + `<section class="section"><div class="section-head"><h3>From your files</h3><span class="muted small">the genres in your files' metadata</span></div>` + (genres.length ? `<div class="cards">${genres.map((g) => `<button class="card genre" data-genre="${g.id}" style="text-align:left;cursor:pointer;background:linear-gradient(135deg, hsl(${hue(g.name)} 32% 22%), var(--surface))"><h3 style="margin-bottom:4px">${esc(g.name)}</h3><div class="muted small">${g.albums} album${g.albums === 1 ? '' : 's'} · ${g.tracks} track${g.tracks === 1 ? '' : 's'}</div></button>`).join('')}</div>` : emptyState('genre', 'No genres yet', 'Genres come from the files\' tags; tag your music and rescan.'));
           main.insertAdjacentHTML('beforeend', '</section>');
           $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
@@ -5490,7 +5693,7 @@
             ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : 'Public copy pending: shared on the next sync with your homeserver.')
             : (d.summary.synced ? 'Private on your homeserver.' : 'Private on this node; saved to your homeserver on the next sync.');
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
-              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button>${shellMode() === 'desktop' && window.innerWidth > 1024 ? `<button class="btn danger" id="pldel">${icon('trash')} Delete</button>` : ''}</div><p class="muted small" role="status">${sharingNote}</p></div></div>`
+              <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
             + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`
@@ -5512,8 +5715,8 @@
           // never played alone in place of the rest (review of #258); a zone (Shuffle on a speaker) keeps them, as before
           const playAll = (shuffle, anchorEl) => {
             const all = [...playable(songs), ...localSongs]; const list = isBrowser() ? all.filter((t) => t.track_id != null || t.uri) : all; const out = all.length - list.length;
-            if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays in this browser` : 'Nothing here plays on your services', 'error');
-            if (out) toast(`${countOf(out, 'songs')} left out of this browser's queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
+            if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
+            if (out) toast(`${countOf(out, 'songs')} left out of ${hereName().toLowerCase()}'s queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
             return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
           };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
@@ -5528,7 +5731,8 @@
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
           $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) },
-            ...($('#pldel') ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+            // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
+            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); state.plPf = null; render(); } catch (er) { toast(er.message, 'error'); } });
           const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; render(); } catch (e) { toast(e.message, 'error'); } };
@@ -5643,7 +5847,7 @@
               if (u.health) rows.push(row('Health', esc(u.health.ok ? `Working: ${u.health.detail}.` : `Last try: ${u.health.detail}`), `<span class="pill ${u.health.ok ? 'ok' : 'bad'}">${u.health.ok ? 'OK' : 'Problem'}</span>`));
             }
             yz.innerHTML = group('On your speakers', rows.join(''));
-            $('#yzon').onchange = async (e) => { try { await api('PUT', '/sources/youtube/unofficial', { enabled: e.target.checked }); toast(e.target.checked ? 'YouTube can play on your speakers' : 'YouTube plays only in This browser'); } catch (er) { toast(er.message, 'error'); } render(); };
+            $('#yzon').onchange = async (e) => { try { await api('PUT', '/sources/youtube/unofficial', { enabled: e.target.checked }); toast(e.target.checked ? 'YouTube can play on your speakers' : `YouTube plays only ${hereOnly()}`); } catch (er) { toast(er.message, 'error'); } render(); };
             const get = async (b, msg) => { b.disabled = true; b.textContent = 'Downloading…'; try { await api('POST', '/sources/youtube/unofficial/ytdlp'); toast(msg); } catch (er) { toast(er.message, 'error'); } render(); };
             const yg = $('#yzget'); if (yg) yg.onclick = () => get(yg, 'yt-dlp downloaded');
             const yu = $('#yzupdate'); if (yu) yu.onclick = () => get(yu, 'yt-dlp updated');
@@ -5906,9 +6110,16 @@
         case 'source-item': {
           loading();
           const { source, id } = state.viewArg;
-          const it = await api('GET', `/sources/${encodeURIComponent(source)}/items/${encodeURIComponent(id)}`);
-          if (state.view !== 'source-item') return;
           const srcName = ((state.sources || []).find((x) => x.id === source) || { name: source }).name;
+          let it;
+          try { it = await api('GET', `/sources/${encodeURIComponent(source)}/items/${encodeURIComponent(id)}`); }
+          catch (e) {
+            if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
+            // An item the service won't play (the archive restricts it): the plain reason, nothing to play
+            main.innerHTML = backBtn('sources', srcName) + `<div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(id)}</h1></div></div><p class="notice warn" role="status">${esc(e.message)}</p>`;
+            break;
+          }
+          if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
           const playFrom = async (i, replace = true) => {
             const items = qitems.slice(i);
@@ -5973,18 +6184,38 @@
           // What comments are about: the song's own link, else this item's (a web link only)
           const commentUri = [pg.song_uri, target && target.uri, pg.link].find((u) => /^https?:\/\//.test(u || '')) || '';
           const qs = new URLSearchParams(Object.entries(target).map(([k, v]) => [k, String(v)])).toString();
-          // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3)
-          const songRef = target.track_id != null || target.album_id != null || target.artist_id != null ? target : pg.song_uri ? { uri: pg.song_uri } : target;
-          const linkRef = pg.link && pg.link !== songRef.uri ? { uri: pg.link } : null;
+          // Tags go on the song (every source) or on exactly this source's link (STEWARD-UX-INSTANCES 3),
+          // each on its own URI: without a MusicBrainz identity there is only the link, never a guess
+          const localRef = target.track_id != null || target.album_id != null || target.artist_id != null;
+          const songRef = localRef ? target : pg.song_uri ? { uri: pg.song_uri } : /^https:\/\/musicbrainz\.org\//.test(target.uri || '') ? target : null;
+          const linkRef = pg.link && pg.link !== (songRef && songRef.uri) ? { uri: pg.link } : !songRef && target.uri ? target : null;
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
-          const [myTags, linkTags, myReview] = isListener() ? [null, [], undefined] : await Promise.all([
-            // An item with no identity yet (needs_match): the "match it first" message, no editor
-            api('GET', `/tags?${refQs(songRef)}`).then((r) => (r.needs_match ? null : r.tags)).catch(() => null),
-            linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
-            api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
+          // An item with no identity yet (needs_match) takes no tags: the hero says so and leads to a match
+          const ownTags = (ref) => (!ref || isListener() ? Promise.resolve({ tags: null }) : api('GET', `/tags?${refQs(ref)}`).then((r) => ({ tags: r.needs_match ? null : r.tags || [], needsMatch: !!r.needs_match, uri: r.uri || null })).catch(() => ({ tags: null })));
+          const [songOwn, linkOwn, myReview] = await Promise.all([
+            ownTags(songRef), ownTags(linkRef),
+            isListener() ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
+          // The hero's tag groups. Public tags and people come from Pubky for each group's own URI: for a
+          // library item the one the node keeps its tags on (GET /tags says; a listener's page asks
+          // Pubky), never the page's guess. The page's on_pubky stands in only when it is that URI.
+          const shownSong = !!songRef && !songOwn.needsMatch;
+          const songUri = localRef ? songOwn.uri : songRef && songRef.uri;
+          const pubFrom = (uri) => (uri && pg.on_pubky && pg.on_pubky.uri === uri ? { state: 'ok', tags: pg.on_pubky.tags || [], faces: pg.on_pubky.faces || {} } : { state: 'loading', tags: [], faces: {} });
+          const linkName = pg.source || 'source';
+          const tagGroups = [
+            ...(shownSong ? [{ scope: 'song', name: `On this ${kind}`, ref: songRef, own: songOwn.tags, pub: pubFrom(songUri) }] : []),
+            ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri) }] : []),
+          ];
+          const htKey = `${kind}:${id}:${++heroTagsGen}`;
+          const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
+          // No identity: say so; the owner's album leads to its folder in the matches to confirm
+          const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.track_id).filter((x) => x != null) } : null; };
+          if (localRef && songOwn.needsMatch) unmatched();
+          else if (!songRef && linkRef) ht.note = `Tags here go on this ${linkName} link only: no MusicBrainz ${kind} is known for it here.`;
+          state.heroTagsOpen = { page: `${kind}:${id}`, set: ht.open };
           const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
           const sectionName = { albums: 'Albums', artists: 'Artists', tracks: 'Tracks', home: 'Home', playlists: 'Playlists' }[pg.section] || 'Home';
           const pf = pg.plays_from;
@@ -6011,17 +6242,24 @@
           const alsoAll = rankSvc(pg.also_on.map((v, k) => ({ v, k })).filter(({ v }) => !(rk && rk.off.has(alsoSvc(v)))), ({ v }) => alsoSvc(v));
           const alsoFirst = rk ? alsoAll.filter(({ v }) => rk.healthy.has(alsoSvc(v))) : alsoAll;
           const alsoMore = rk ? alsoAll.filter(({ v }) => !rk.healthy.has(alsoSvc(v))) : [];
-          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${webUrl(v.url) ? `<a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open on ${esc(instName(v))}" aria-label="Open on ${esc(instName(v))}">${icon('external')}</a>` : ''}</span>`;
+          const alsoItem = ({ v, k }) => `<span class="src">${svcBadge(alsoSvc(v))}${v.page ? `<button type="button" class="lnk" data-also="${k}" title="${esc(v.label)}">${esc(instName(v))}</button>` : `<span>${esc(instName(v))}</span>`}${v.uri || v.source === 'library' || /^(tidal|deezer)$/.test(v.source) || ytOf(v.url) ? `<button class="chiplink" data-aplay="${k}" title="Play from ${esc(instName(v))}" aria-label="Play from ${esc(instName(v))}">${icon('play')}</button>` : ''}${webUrl(v.url) ? `<a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open in ${esc(instName(v))} (new tab)" aria-label="Open in ${esc(instName(v))} (new tab)">${icon('external')}</a>` : ''}</span>`;
           // Artists and albums (TASK-pinakes-social-ux F6): "Also on" is a row of service icons next to
           // Play/Shuffle, the working services first. One opens the service's page here when the node
           // plays from it (on and working: Play is there), else the service's site (every link has a
           // page here, so `page` alone says nothing). Songs keep the source line with its play buttons.
           const iconAlso = kind === 'artist' || kind === 'album';
           const playsHereFrom = (v) => !!v.page && (rk ? rk.healthy.has(alsoSvc(v)) : alsoSvc(v) === 'library');
-          const alsoIcon = ({ v, k }) => { const name = instName(v); return playsHereFrom(v) || (v.page && !webUrl(v.url)) ? `<button type="button" class="icon-btn also-ico" data-also="${k}" title="${esc(name)}" aria-label="Open on ${esc(name)}">${svcBadge(alsoSvc(v))}</button>` : webUrl(v.url) ? `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="${esc(name)}" aria-label="Open on ${esc(name)} (opens a new tab)">${svcBadge(alsoSvc(v))}</a>` : ''; };
-          const alsoIcons = iconAlso && alsoAll.length ? `<span class="also-icons" role="group" aria-labelledby="alsolabel"><span class="also-label muted small" id="alsolabel">Also on</span>${alsoAll.map(alsoIcon).join('')}</span>` : '';
+          // Two groups (owner, 2026-11-04): "Also on" switches to that service's page here (the node
+          // plays from it, or only its page exists); "Open in" leaves Odeion for the service's site in
+          // a new tab. A service that does both sits in Also on; its site is in ⋯ › Open in…
+          const switchHere = ({ v }) => playsHereFrom(v) || (!!v.page && !webUrl(v.url));
+          const alsoHere = alsoAll.filter(switchHere); const openOut = alsoAll.filter((x) => !switchHere(x) && webUrl(x.v.url));
+          const alsoIcon = ({ v, k }) => { const name = instName(v); return `<button type="button" class="icon-btn also-ico" data-also="${k}" title="Switch to ${esc(name)}" aria-label="Switch to ${esc(name)}">${svcBadge(alsoSvc(v))}</button>`; };
+          const openIcon = ({ v }) => { const name = instName(v); return `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open in ${esc(name)} (new tab)" aria-label="Open in ${esc(name)} (new tab)">${svcBadge(alsoSvc(v))}</a>`; };
+          const alsoIcons = !iconAlso ? '' : (alsoHere.length ? `<span class="also-icons" role="group" aria-labelledby="alsolabel"><span class="also-label muted small" id="alsolabel">Also on</span>${alsoHere.map(alsoIcon).join('')}</span>` : '')
+            + (openOut.length ? `<span class="also-icons open-in" role="group" aria-labelledby="openinlabel"><span class="also-label muted small" id="openinlabel">Open in ${icon('external')}</span>${openOut.map(openIcon).join('')}</span>` : '');
           const [lineFirst, lineMore] = iconAlso ? [[], []] : [alsoFirst, alsoMore];
-          const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
+          const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open in ${esc(ownName)} (new tab)" aria-label="Open in ${esc(ownName)} (new tab)">${icon('external')}</a>` : ''}</span>`;
           const alsoLine = (isGlobal && !lineFirst.length && !lineMore.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && lineFirst.length ? '<span class="muted">· also</span>' : ''}${lineFirst.map(alsoItem).join('')}${lineMore.length ? `${!isGlobal && !lineFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${lineMore.length} more source${lineMore.length === 1 ? '' : 's'}">${lineFirst.length || !isGlobal ? `${lineMore.length} more` : `${lineMore.length} services`}</button><span class="srcrest" hidden>${lineMore.map(alsoItem).join('')}</span>` : ''}</div>`
             + (pg.source_id !== 'global' && pg.song_uri ? `<p class="small to-global"><a class="lnk" id="iglobal">All about this ${kind} →</a> <span class="muted">every source, versions and tags</span></p>` : '');
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${webUrl(v.url) ? ` <a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
@@ -6037,6 +6275,26 @@
           const aboutTop = !!(pg.about_text && pg.about_text.text); // artist, album and song (F5: the same About everywhere)
           // A file is its name; where it is on the node's disk is a tooltip, not page text (UX sweep A21)
           const fileFact = (f) => { if (f.label !== 'File' || !/[\\/]/.test(String(f.value || ''))) return esc(f.value); const v = String(f.value); const name = v.split(/[\\/]/).pop(); return `<span class="filefact" title="${esc(v)}">${esc(name)}</span>`; };
+          // With an article the page shows the music first (owner, 2026-11-05: "the page shows
+          // artist metadata and songs but not less relevant metadata directly"): the blurb and one
+          // facts line under the hero, the ids, links and credits in Details at the foot. The node
+          // says which fact is which (`kind`: fact or ref).
+          const isRef = (f) => f.kind === 'ref';
+          const factValue = (f) => (webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : fileFact(f));
+          const aboutTopHtml = (p) => {
+            const at = p.about_text;
+            // The text's source right after it (Wikipedia, TheAudioDB…); its licence sits in Details
+            const wiki = at && at.url && at.source && webUrl(at.url) ? ` <a class="small wikilink" href="${esc(webUrl(at.url))}" target="_blank" rel="noopener">${esc(at.source)}</a>` : '';
+            const facts = p.about.filter((f) => !isRef(f) && f.label !== 'In your library');
+            const lib = p.about.find((f) => f.label === 'In your library');
+            return `<section class="section about-top" id="iabout"><div class="section-head"><h3>About</h3></div><p class="blurb clamp" id="iblurb"${at.lang ? ` lang="${esc(at.lang)}"` : ''}>${esc(at.text)}</p><p class="blurb-foot"><button type="button" class="lnk small" id="iblurbmore" aria-controls="iblurb" aria-expanded="false" hidden>More</button>${wiki}</p>${facts.length ? `<p class="facts-line">${facts.map((f) => `<span class="fact" title="${esc(f.label)}">${f.label === 'Active' ? 'Active ' : ''}${esc(f.value)}</span>`).join('<span class="dot" aria-hidden="true"> · </span>')}</p>` : ''}${lib ? `<p class="muted small libline">In your library: ${esc(lib.value)}</p>` : ''}</section>`;
+          };
+          const aboutDetailsHtml = (p) => {
+            const refs = p.about.filter(isRef);
+            const credit = aboutCredit(p);
+            if (!refs.length && !credit) return '';
+            return `<details class="section idetails" id="idetails"${window.innerWidth >= 600 ? ' open' : ''}><summary><h3>Details</h3></summary>${credit}${refs.length ? `<dl class="kv">${refs.map((f) => `<dt>${esc(f.label)}</dt><dd>${factValue(f)}</dd>`).join('')}</dl>` : ''}</details>`;
+          };
           const aboutHtml = (p) => {
             const at = p.about_text;
             const clamp = !!(at && at.text);
@@ -6046,19 +6304,19 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}
+            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               </div></div>`
-            + (aboutTop ? aboutHtml(pg) : '')
-            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
+            + (aboutTop ? aboutTopHtml(pg) : '')
+            + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
             + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
-            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip tag-chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + (myReview !== undefined ? `<section class="section" id="ireview">${reviewRow(myReview)}</section>` : '')
             + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
-            + (aboutTop ? '' : aboutHtml(pg));
+            + (aboutTop ? aboutDetailsHtml(pg) : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // The article's opening is clamped to a few lines; More shows it all. Whether it is cut off
           // is measured again when its width or the text size changes (zoom, rotation, a late font)
@@ -6093,10 +6351,13 @@
               const mineSongs = kind === 'song' ? mine.map((h) => ({ ...h, artist: h.subtitle })) : [];
               const mineTiles = kind === 'song' ? [] : mine.map((h) => ({ ...h, year: h.subtitle || h.year || '' }));
               const part = (label, body, id) => `<div class="simpart" id="${id}"><h4 class="simhead muted small">${label}</h4>${body}</div>`;
+              // Tagged alike on Pubky: music only, by the item's own kind (a coin, a paper, a place or a
+              // game tagged alike isn't similar music); drawn and bound from this one list
+              const rel = pg.related.filter((it) => SIMILAR_KINDS.includes(it.kind));
               const parts = [
                 mine.length ? part('In your library', kind === 'song' ? songRows(mineSongs, { showAlbum: true, covers: true }) : itemTileGrid(mineTiles, kind), 'isimlib') : '',
                 fmArtists.length ? part('From Last.fm', `<div class="chips">${fmArtists.map((a) => a.library_artist_id != null ? `<button class="chip" data-simlib="${a.library_artist_id}">${esc(a.name)}</button>` : `<button class="chip" data-simq="${esc(a.name)}" title="Not in your library: search">${esc(a.name)}</button>`).join('')}</div>`, 'isimfm') : '',
-                pg.related.length ? part('Tagged alike on Pubky', itemTileGrid(pg.related.map(asTile), 'album'), 'irelated') : '',
+                rel.length ? part('Tagged alike on Pubky', itemTileGrid(rel.map(asTile), 'album'), 'irelated') : '',
               ].filter(Boolean);
               if (!parts.length) { ss.remove(); return; }
               ss.outerHTML = `<section class="section" id="isimilar"><div class="section-head"><h3>Similar</h3></div>${parts.join('')}</section>`;
@@ -6104,7 +6365,7 @@
               if (lib && kind === 'song') bindSongRows(lib, mineSongs, {}); else if (lib) bindItemTiles(lib, mineTiles, kind);
               $$('[data-simlib]', main).forEach((b) => b.onclick = () => setView('item', { kind: 'artist', id: 'lib-' + b.dataset.simlib }));
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
-              if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });
+              if (rel.length) bindDiscoverTiles($('#irelated', main), rel);
             })();
             // In collections (TASK-in-collections-client): the public collections on Pubky holding this
             // item, from Pinakes; the count, the first few (yours first, marked), each opening the
@@ -6122,32 +6383,44 @@
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
-          if (myTags) bindScopedTags(songRef, linkRef);
+          drawHeroTags(ht);
+          for (const g of tagGroups) {
+            if (g.pub.state !== 'loading') continue;
+            api('GET', `/discover/uri?${refQs(g.ref)}`).then((r) => ({ state: 'ok', tags: r.tags || [], faces: r.faces || {} }))
+              // No contact for Pubky (412) or no identity (422): nothing to show, not a failure
+              .catch((e) => ({ state: [404, 412, 422].includes(e.status) ? 'none' : 'error', tags: [], faces: {}, unknown: e.status === 422 }))
+              .then((p) => {
+                g.pub = p;
+                // A library item with no identity, seen without own tags (a listener, or GET /tags failed)
+                if (p.unknown && g.scope === 'song' && localRef && !g.own) { ht.groups = ht.groups.filter((x) => x !== g); unmatched(); }
+                drawHeroTags(ht);
+              });
+          }
           if (myReview !== undefined) bindReviewRow(target, myReview);
           $$('[data-view="sources"]', main).forEach((a) => a.onclick = () => setView('sources'));
           const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
           const iq = $('#iartistq'); if (iq) iq.onclick = () => { search.value = pg.artist.name; runSearch(); };
           const ial = $('#ialbum'); if (ial) ial.onclick = () => setView('item', { kind: 'album', id: pg.album.id });
-          const playAll = (shuffle, how = 'replace', anchorEl) => { if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
+          const playAll = (shuffle, how = 'replace', anchorEl) => { if (pg.unavailable) return toast(pg.unavailable, 'error'); if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
           $('#iplay').onclick = (e) => playAll(false, 'replace', e.currentTarget);
           stickyHead(state.itemTitle, (el) => playAll(false, 'replace', el));
           const sh = $('#ishuffle'); if (sh) sh.onclick = (e) => playAll(true, 'replace', e.currentTarget);
+          // Nothing here plays (the archive restricts the item): Play and Shuffle say why, off
+          if (pg.unavailable) for (const b of [$('#iplay'), sh]) if (b) { b.disabled = true; b.title = pg.unavailable; }
           $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
           $('#ifav').onclick = async () => {
             // A file not matched yet: "Which song is this?" first, then the heart
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
-          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, path: `/${kind}/${id}`, uri: pg.uri, extra });
+          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
           $$('[data-also]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.also_on[Number(a.dataset.also)].page }));
           const smore = $('[data-srcmore]', main); if (smore) smore.onclick = () => { const rest = smore.nextElementSibling; rest.hidden = false; smore.remove(); const first = $('a[href], button', rest); if (first) first.focus(); };
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
-          $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
-          if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
           // Not while someone types a comment: the render would take the box away under them
           if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
           // About from open sources comes in the background: ask for the page again and redraw only
@@ -6163,7 +6436,17 @@
               const sources = (p) => JSON.stringify([(p.also_on || []).map((v) => v.url), (p.open_on || []).map((v) => v.url)]);
               if (sources(np) !== sources(pg)) { const redraw = () => { if (!here()) return; if (commentTyping()) { setTimeout(redraw, 3000); return; } render(); }; redraw(); return; }
               if (isListener()) np.about = (np.about || []).filter((f) => f.label !== 'File');
-              const sec = $('#iabout', main); if (sec) { sec.outerHTML = aboutHtml({ ...np, about: np.about || [] }); bindBlurb(); }
+              // With an article now: the top part in place and Details at the foot; else About whole, as drawn
+              const sec = $('#iabout', main); const got = { ...np, about: np.about || [] };
+              if (sec) {
+                if (got.about_text && got.about_text.text) {
+                  // The music first: the top part goes under the hero (About was at the foot while pending)
+                  sec.remove(); const old = $('#idetails', main); if (old) old.remove();
+                  const hero = $('.hero', main); if (hero) hero.insertAdjacentHTML('afterend', aboutTopHtml(got)); else main.insertAdjacentHTML('afterbegin', aboutTopHtml(got));
+                  main.insertAdjacentHTML('beforeend', aboutDetailsHtml(got));
+                } else sec.outerHTML = aboutHtml(got);
+                bindBlurb();
+              }
               const ph = np.image && !pg.image && $('.hero .art.placeholder', main);
               if (ph) ph.outerHTML = `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(np.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>`;
               Object.assign(pg, { about: np.about, blurb: np.blurb, about_text: np.about_text, image_credit: np.image_credit, image: np.image || pg.image, about_pending: false });
@@ -6248,7 +6531,7 @@
           };
           const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
-            const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: 'Queue · this browser' } : { zone: state.zone };
+            const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };
             try { const r = await api('POST', '/playlists/from-queue', body); state.playlists = await api('GET', '/playlists'); toast(r.skipped.length ? `Saved “${r.playlist.summary.name}”; ${countOf(r.skipped.length, 'songs')} left out: not matched to a song yet (press the ? next to a song to pick which one it is)` : `Saved “${r.playlist.summary.name}”`); } catch (e) { toast(e.message, 'error'); }
           };
           const qc = $('#qclear'); if (qc) qc.onclick = async () => { try { await api('DELETE', `/zones/${state.zone}/queue`); refreshQueue(); } catch (e) { toast(e.message, 'error'); } };
@@ -6271,7 +6554,7 @@
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
                 <button class="icon-btn" data-zt="next" data-repeat title="Next">${icon('next')}</button>
-                ${hv ? `<input type="range" data-zvol="${esc(z.id)}" min="${hv.min}" max="${hv.max}" step="${hv.step || 1}" value="${z.volume_db != null ? z.volume_db : hv.max}" aria-label="Volume of ${esc(z.name)}">` : z.id === BROWSER ? `<input type="range" data-zvol="${BROWSER}" min="-60" max="0" value="${Math.round(20 * Math.log10(audio.volume || 1))}" aria-label="Browser volume">` : '<span class="muted small">Volume: set on the device</span>'}
+                ${zoneVolume(z) ? `<input type="range" data-zvol="${esc(z.id)}" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span>` : '<span class="muted small">Volume: set on the device</span>'}
                 ${z.id === state.zone ? '<span class="pill ok">selected</span>' : `<button class="btn sm" data-zsel="${esc(z.id)}">Play to</button>`}
                 ${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Ungroup</button>` : ''}
               </div></div>`;
@@ -6284,7 +6567,7 @@
           $$('[data-zcard]', main).forEach((card) => {
             const zid = card.dataset.zcard;
             $$('[data-zt]', card).forEach((b) => b.onclick = () => zoneTransport(zid, b.dataset.zt));
-            const v = $('[data-zvol]', card); if (v) { setFill(v); v.addEventListener('input', () => setFill(v)); v.addEventListener('change', () => { if (zid === BROWSER) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${encodeURIComponent(zid)}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); }); }
+            const v = $('[data-zvol]', card); if (v) { const zoneOf = () => (zid === BROWSER ? browserState() : state.zones[zid]); applyVol(v, zoneVolume(zoneOf())); bindVolSlider(v, zoneOf); syncVolumeSliders(zoneOf()); }
           });
           $$('[data-zsel]', main).forEach((b) => b.onclick = () => { state.zone = b.dataset.zsel; localStorage.setItem('pm.zone', state.zone); renderZoneName(); renderBar(); refreshQueue(); render(); });
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) { ensureZone(); renderZoneName(); } render(); } catch (e) { toast(e.message, 'error'); } });
@@ -6463,7 +6746,7 @@
             const srcCtl = ms && ms.may_choose ? `<div class="chips" role="radiogroup" aria-label="Whose sign-ins">${[['node', 'This node’s'], ['own', 'My own']].map(([v, l]) => `<button class="chip scope ${ms.use === v ? 'on' : ''}" role="radio" aria-checked="${ms.use === v}" data-mysrc="${v}">${l}</button>`).join('')}</div>` : '';
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), `<button class="btn" id="lsignout">${icon('logout')} Log out</button>`)
-                + row(`On ${esc(info.name)}`, `You can play its music in this browser and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, '')
+                + row(`On ${esc(info.name)}`, `You can play its music ${hereIn()} and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, '')
                 + (ms ? row('Music services', srcNote + (ms.may_choose ? ' You choose; your own sign-ins stay kept either way.' : ''), srcCtl) : ''))
               + group('Play from', row('Your personal source order', 'Applies to every playlist you play.', '<div id="gorder"></div>'))
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
@@ -6505,7 +6788,7 @@
           state.devOutputs = !!ns.dev_outputs;
           const shownOuts = outs.filter((o) => state.devOutputs || !devOutput(o.id));
           const outList = shownOuts.length ? `<div class="set-list">${shownOuts.map((o) => `<div class="set-item"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small caps">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted small">No outputs found.</p>';
-          const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.output || ''), `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
+          const zoneRows = zoneList().map((z) => row(esc(z.name), esc(z.id === BROWSER ? deviceWords(z) : z.output || ''), `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>${z.id !== BROWSER ? `<button class="btn sm ${state.dspOpen === z.id ? 'primary' : 'ghost'}" data-dsp="${esc(z.id)}">DSP</button>` : ''}${String(z.id).startsWith('group:') ? `<button class="btn sm ghost" data-zone-del="${esc(z.id)}">Remove</button>` : ''}`)).join('');
           const personalPlayFrom = group('Play from', block('Where songs play from', 'Your personal source order applies to every playlist. A pinned song keeps its source.', '<div id="gordercard"><div id="gorder"><div class="skeleton" style="height:120px"></div></div></div>'));
           const playback = group('Playback', ''
             + row('Prefer full tracks', 'On a service\u2019s song page, Play plays that service, even a 30 s preview. With this on, a preview gives way to the full track from your Play from order.', `<label><input type="checkbox" id="preferfull" ${ns.prefer_full ? 'checked' : ''}> On</label>`))
@@ -6531,7 +6814,7 @@
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
           const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
-            + group('Access', (state.token ? row('This browser', 'Log out ends this browser’s session and brings back the Log in screen. The node’s token for apps stays as it is.', `<button class="btn ghost" id="logout">${icon('logout')} Log out</button>`) : '')
+            + group('Access', (state.token ? row(appPlatform() ? 'This app' : 'This browser', `Log out ends ${appPlatform() ? 'this app' : 'this browser'}’s session and brings back the Log in screen. The node’s token for apps stays as it is.`, `<button class="btn ghost" id="logout">${icon('logout')} Log out</button>`) : '')
               + (ns.token_replaceable
                 ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you invited stay logged in.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
                 : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
@@ -6841,7 +7124,7 @@
             keyIn.onchange = () => setKey(keyIn.value);
             keyIn.oninput = () => { if (!keyErr.hidden) checkKey(); };
             const paste = $('#pinvpaste', box); paste.hidden = !(navigator.clipboard && navigator.clipboard.readText);
-            paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t, true)) toast('The clipboard has no Pubky key', 'error'); } catch { toast('The browser didn’t allow reading the clipboard: paste into the field instead', 'error'); } };
+            paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t, true)) toast('The clipboard has no Pubky key', 'error'); } catch { toast(`${appPlatform() ? 'The app' : 'The browser'} didn’t allow reading the clipboard: paste into the field instead`, 'error'); } };
             const scan = $('#pinvscan', box); scan.hidden = !canScan();
             scan.onclick = async () => { const k = await scanKey(); if (k) setKey(k); };
             $('#pinvgo', box).onclick = async () => {
@@ -7019,7 +7302,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { state.devOutputs = !!ns.dev_outputs; }).catch(() => {});
+    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {
@@ -7041,7 +7324,6 @@
     const box = $('#idbox'); if (!box) return;
     let st; try { st = await api('GET', '/library/identify'); } catch (e) { box.textContent = e.message; return; }
     const c = st.counts; const p = st.progress;
-    const pct = c.total ? Math.round((c.identified / c.total) * 100) : 0;
     // One line says where identification stands (st.phase), before the numbers
     const n = (x) => Number(x || 0).toLocaleString(); const matches = (x) => `${n(x)} ${x === 1 ? 'match' : 'matches'}`;
     const ph = st.phase || (p.running ? 'running' : c.suggested ? 'needs_review' : c.unchecked ? 'new' : 'ready');
@@ -7056,8 +7338,16 @@
     }[ph] || '';
     const reviewFirst = ph === 'needs_review';
     box.innerHTML = `<p class="idphase ${ph === 'failed' || ph === 'interrupted' ? 'warn-text' : ''}" id="idphase" data-phase="${esc(ph)}" role="status">${ph === 'running' ? '<span class="spin"></span> ' : ''}${head}</p>
-      <div class="idbar"><span style="width:${pct}%"></span></div>
-      <p class="small">${c.identified} of ${c.total} identified${c.suggested ? ` · <a data-view="identify">${c.suggested} to confirm</a>` : ''}${c.unknown ? ` · ${c.unknown} not found` : ''}${c.unchecked ? ` · ${c.unchecked} not checked yet` : ''}</p>
+      ${(() => {
+        // One bar, one segment per state (owner, 2026-11-04: half purple, half dark read as "half
+        // done, half empty" while the rest was to confirm and not found): identified, to confirm,
+        // not found, not checked; the counts under it with the segments' colours
+        const parts = [['identified', c.identified, 'identified'], ['suggested', c.suggested, 'to confirm'], ['unknown', c.unknown, 'not found'], ['unchecked', c.unchecked, 'not checked yet']].map(([k, v, w]) => [k, Number(v || 0), w]);
+        const said = parts.filter(([, v]) => v).map(([, v, w]) => `${n(v)} ${w}`).join(', ');
+        const bar = `<div class="idbar" role="img" aria-label="${esc(c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}: ${said}` : 'No songs yet')}">${parts.filter(([, v]) => v).map(([k, v]) => `<span class="idseg ${k}" style="flex-basis:${((v / Math.max(c.total, 1)) * 100).toFixed(3)}%"></span>`).join('')}</div>`;
+        const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<a data-view="identify">${n(v)} ${w}</a>` : `${n(v)} ${w}`}</span>`).join(' ');
+        return `${bar}<p class="small idlegend">${c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}:` : ''}${legend ? ` <span class="idkeys">${legend}</span>` : ''}</p>`;
+      })()}
       ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
       ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : ''}
       ${(() => {
@@ -7165,6 +7455,7 @@
       if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
       if (ev.type === 'zone') {
         const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
+        syncVolumeSliders(ev.state);
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
           if (state.starting.sent !== false && ((ev.state.transport === 'playing' && fresh) || (state.starting.what === 'move' && ev.state.transport !== 'stopped'))) startDone(true);
