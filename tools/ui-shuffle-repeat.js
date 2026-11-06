@@ -14,6 +14,9 @@
 //   * a smart playlist's Play and Shuffle load the zone's queue in its order with shuffle off / on
 //     (one POST load; Shuffle starts on a random song; repeat stays);
 //   * a playlist's Play on the zone turns shuffle off before it plays;
+//   * the zone's loads and toggles go one after another, in the order asked: a toggle after a queued
+//     Shuffle turns it off, a queued load takes the repeat set meanwhile, and a press shows at once;
+//   * a page with no songs of its own (found elsewhere) loads what is found with the mode asked for;
 //   * Shuffle starts on a random song (on the zone and here: not always the first, over three);
 //   * This browser: Play loads in order with shuffle off; shuffle on keeps the current song and draws
 //     the rest, and Now playing's Up next shows the new order; off puts the queue back in its order
@@ -77,6 +80,10 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         const Z = zoneOf(); const sent = [];
         const fixtures = { '/zones': { body: [Z] }, '/zones/z1': { get body() { return Z; } }, '/zones/z1/queue': { get body() { return Z.queue; } }, '/outputs': { body: [{ id: 'upnp:sp', name: 'Speaker', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/smart/s1/tracks': { body: { playlist: { id: 's1', name: 'Mix', rules: [], matches: 'all' }, tracks, matched: N } } };
         for (const t of tracks) fixtures[`/library/tracks/${t.id}`] = { body: t };
+        // A page with no songs of its own: discovery finds three library songs for it
+        fixtures['/discover/play'] = { body: { plays_from: { service: 'library', label: 'Your library' }, track_ids: [1, 2, 3] } };
+        fixtures['/item/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'] = { body: { kind: 'album', id: 'mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e', title: 'Found elsewhere', section: 'albums', source: 'musicbrainz', target: { uri: 'https://musicbrainz.org/release-group/1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e' }, uri: 'https://example.com/album', open_on: [{ url: 'https://example.com/album' }], songs: [], releases: [], links: [], also_on: [], tags: [] } };
+        let slowLoad = 0;
         const { page, context, state } = await fx.create(browser, w, { mobile: w < 600, fixtures });
         await page.setViewportSize({ width: w, height: w < 600 ? 800 : 900 });
         await page.emulateMedia({ colorScheme: scheme });
@@ -93,7 +100,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
           if (/\/shuffle$/.test(v)) { Z.shuffle = true; return r.fulfill({ status: 204, body: '' }); }
           if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; return r.fulfill({ status: 204, body: '' }); }
           if (/\/queue$/.test(v)) { if (req.method() === 'DELETE') { Z.queue = []; Z.now_playing = null; Z.transport = 'stopped'; return r.fulfill({ status: 204, body: '' }); } return json(r, Z.queue); }
-          if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; event(); await sleep(50); return json(r, Z); }
+          if (/\/load$/.test(v)) { if (slowLoad) { const d = slowLoad; slowLoad = 0; await sleep(d); } Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; event(); await sleep(50); return json(r, Z); }
           return json(r, Z);
         });
         await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.fulfill({ status: 200, contentType: 'audio/wav', body: WAV }));
@@ -175,6 +182,30 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await until(async () => sent.slice(n0).some((x) => x.v === '/playlists/c1/play')), `${T} a playlist's Play plays it on the zone`);
         const pl = sent.slice(n0).map((x) => `${x.m} ${x.v}${x.body && 'shuffle' in x.body ? ` ${x.body.shuffle}` : ''}`);
         check(pl.indexOf('PUT /zones/z1/shuffle false') >= 0 && pl.indexOf('PUT /zones/z1/shuffle false') < pl.indexOf('POST /playlists/c1/play'), `${T} …after turning shuffle off (${pl.join(', ')})`);
+
+        // Loads and toggles, one after another in the order asked
+        await fx.go(page, '/smart/s1'); await page.waitForSelector('#smplay'); await sleep(200);
+        Z.shuffle = false; Z.repeat = 'all'; snapshot(); await sleep(150);
+        const n1 = sent.length; slowLoad = 900;
+        await page.click('#smplay'); await sleep(50); await page.click('#smshuffle'); await sleep(50);
+        check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} a queued Shuffle shows at once, before the node answers: ${say((await modes(page)).shuffle)}`);
+        Z.repeat = 'one'; snapshot(); await sleep(100);
+        if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        await pressMode(page, 'shuffle');
+        check(allAre((await modes(page)).shuffle, false, 'Shuffle: off'), `${T} …and the toggle after it shows off at once: ${say((await modes(page)).shuffle)}`);
+        check(await until(async () => sent.slice(n1).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').length === 3, 8000), `${T} the three go out`);
+        const order = sent.slice(n1).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}:${x.body.shuffle}`);
+        check(order.join() === 'load:false,load:true,shuffle:false' && Z.shuffle === false, `${T} …in the order asked, the toggle turning the queued Shuffle off (${order.join(', ')}; shuffle ${Z.shuffle})`);
+        const queued = sent.slice(n1).filter((x) => /\/load$/.test(x.v))[1];
+        check(!!queued && queued.body.repeat === 'one', `${T} …and the queued load takes the repeat set while it waited (${queued && queued.body.repeat})`);
+        await closeNp(page);
+        // A page with no songs of its own: Shuffle loads what is found, with shuffle on
+        await fx.go(page, '/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'); await page.waitForSelector('#ishuffle'); await sleep(200);
+        const n2 = asked('POST', /\/zones\/z1\/load$/).length;
+        await page.click('#ishuffle');
+        check(await until(async () => asked('POST', /\/zones\/z1\/load$/).length === n2 + 1, 6000), `${T} Shuffle on a page found elsewhere loads what discovery found`);
+        const found = asked('POST', /\/zones\/z1\/load$/)[n2];
+        check(!!found && found.body.shuffle === true && found.body.items.length === 3, `${T} …with shuffle on, the three songs found (${found && JSON.stringify({ shuffle: found.body.shuffle, n: found.body.items.length })})`);
 
         // ---- This browser
         await page.evaluate(() => { sessionStorage.setItem('pm.test.zone', 'browser'); localStorage.removeItem('pm.repeat'); });
