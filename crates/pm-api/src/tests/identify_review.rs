@@ -2376,6 +2376,218 @@ async fn identify_replay_pending_7k() {
     }
 }
 
+/// The re-check replay (owner, 2026-11-06; on demand: `cargo test -p pm-api --lib
+/// identify_replay_recheck -- --ignored --nocapture`; `PM_REPLAY_REPORT=<file>` writes the report).
+/// The node's starting point: 7,412 songs already waiting for review with the rows older rules
+/// left (its candidate histogram, 22,443 rows, 7,122 by fingerprint), no input key, no rules
+/// version; fingerprints kept. Then "Identify again" (a retry). The answers per cohort are those
+/// of [`identify_replay_pending_7k`] (assumed, not the node's): reports how many songs settle,
+/// keep waiting or end not found, the requests made and what is left of the old rows.
+#[tokio::test]
+#[ignore = "benchmark: run on demand"]
+async fn identify_replay_recheck_7k() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    // (cohort letter, songs)
+    const COHORTS: [(char, u32); 9] = [
+        ('A', 1852), // one audio, three recordings of the same song
+        ('G', 150),  // the fingerprint names three different songs
+        ('B', 3000), // tag search: three exact recordings
+        ('C', 1500), // tag search: one exact recording
+        ('L', 250),  // tag search: only a live recording
+        ('R', 200),  // tag search: only someone's remix
+        ('O', 200),  // tag search: another artist's song
+        ('D', 160),  // tag search: a length 20 s off
+        ('W', 100),  // tag search: no length to compare
+    ];
+    let recordings = Arc::new(AtomicUsize::new(0));
+    let releases = Arc::new(AtomicUsize::new(0));
+    let port = pending_mock(recordings.clone(), releases.clone()).await;
+    let rid = pending_id;
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    s.set_contact("tests@example.org").unwrap();
+    *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+    *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+        api_key: "test-key".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        configured: String::new(),
+    };
+    let music = dir.path().join("music");
+    let built = std::time::Instant::now();
+    let mut total = 0u32;
+    let mut seeded = 0u32;
+    {
+        let lib = s.library.lock().unwrap();
+        lib.begin_batch().unwrap();
+        for (cohort, count) in COHORTS {
+            for n in 0..count {
+                if total.is_multiple_of(500) {
+                    lib.commit_batch().unwrap();
+                    lib.begin_batch().unwrap();
+                }
+                total += 1;
+                let folder = music.join(format!("{cohort}/{:04}", n / 12));
+                std::fs::create_dir_all(&folder).unwrap();
+                let path = folder.join(format!("{:02} {cohort}{n:05}.flac", n % 12 + 1));
+                // A few bytes of its own: the content key is the file's, nothing is decoded
+                std::fs::write(&path, format!("{cohort}{n:05} {}", "x".repeat(40))).unwrap();
+                let title = format!("{cohort}{n:05} Song");
+                let artist = format!("Artist {}", n / 12);
+                let len = 200_000 + (n as u64 % 50) * 1000;
+                let mut t = untagged_track(path.clone(), &title, &artist);
+                t.track_no = Some(n % 12 + 1);
+                t.disc_no = None;
+                t.duration_ms = Some(len);
+                t.file.duration_ms = Some(len);
+                // Each song of its own album, so the folder is no album and the fingerprint
+                // and the search decide (as for the node's pending songs)
+                t.album = Some(pm_model::Album {
+                    id: None,
+                    title: format!("Album {}", n / 12),
+                    album_artist: None,
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: None,
+                    upc: None,
+                    total_discs: None,
+                });
+                if n % 2 == 1 {
+                    t.artists[0].name = format!("{artist} ");
+                }
+                let lib_id = lib.upsert_track(&t).unwrap().0;
+                // What an earlier run's fingerprint found
+                let key = Library::file_key(&path).unwrap();
+                lib.save_fingerprint(&key, len / 1000, "AQfake").unwrap();
+                let rec = |k: u32, t: &str, kinds: (&str, Vec<&str>), relt: &str, total: u32, pos: u32| {
+                    serde_json::json!({"id": rid(0xa0, n, k), "title": t, "duration": (len / 1000) as f64,
+                        "artists": [{"name": artist}],
+                        "releasegroups": [{"id": rid(0xd0, n, k), "title": relt, "type": kinds.0, "secondarytypes": kinds.1,
+                            "releases": [{"id": rid(0xe0, n, k), "title": relt, "track_count": total, "mediums": [{"position": 1, "track_count": total, "tracks": [{"position": pos}]}]}]}]})
+                };
+                let results = match cohort {
+                    'A' => serde_json::json!([{"id": format!("acoustid-{n}"), "score": 0.96, "recordings": [
+                        rec(0, &title, ("Album", vec!["Compilation"]), "Greatest Hits", 18, 3),
+                        rec(1, &title, ("Album", vec![]), &format!("Album {}", n / 12), 10, 2),
+                        rec(2, &title, ("Single", vec![]), &title, 2, 1),
+                    ]}]),
+                    'G' => serde_json::json!([{"id": format!("acoustid-{n}"), "score": 0.95, "recordings": [
+                        rec(0, &title, ("Album", vec![]), "One", 10, 2),
+                        rec(1, "Quite Another Song", ("Album", vec![]), "Two", 10, 2),
+                        rec(2, "A Third Song", ("Album", vec![]), "Three", 10, 2),
+                    ]}]),
+                    _ => serde_json::json!([]),
+                };
+                lib.save_lookup(
+                    &key,
+                    &serde_json::json!({"status": "ok", "results": results}).to_string(),
+                )
+                .unwrap();
+                // What older rules left: the node's candidate histogram (1→2054, 2→1404, 3→825,
+                // 4→539, 5→2590 songs: 22,443 rows), the first 7,122 rows by fingerprint
+                let song = total - 1;
+                // Spread over the cohorts: the bucket by a stride through all songs
+                let rows = match (song * 7919) % 7412 {
+                    s if s < 2054 => 1,
+                    s if s < 2054 + 1404 => 2,
+                    s if s < 2054 + 1404 + 825 => 3,
+                    s if s < 2054 + 1404 + 825 + 539 => 4,
+                    _ => 5,
+                };
+                let old: Vec<pm_library::identify::Candidate> = (0..rows)
+                    .map(|k| {
+                        let source = if seeded < 7122 { "fingerprint" } else { "search" };
+                        seeded += 1;
+                        pm_library::identify::Candidate {
+                            recording: pm_model::Mbid::parse(&rid(0xf0, song, k)).unwrap(),
+                            release: None,
+                            title: Some(title.clone()),
+                            artist: Some(artist.clone()),
+                            release_title: Some(format!("Album {}", n / 12)),
+                            score: 0.8,
+                            source: source.into(),
+                        }
+                    })
+                    .collect();
+                lib.add_suggestions(lib_id, &old).unwrap();
+                lib.set_identify_state(lib_id, "suggested", None).unwrap();
+            }
+        }
+        lib.commit_batch().unwrap();
+    }
+    assert_eq!(total, 7412);
+    {
+        let lib = s.library.lock().unwrap();
+        let c = lib.identity_counts().unwrap();
+        assert_eq!((c.suggested, c.outdated, c.unchecked), (7412, 7412, 0));
+        assert_eq!(lib.suggestions().unwrap().len(), 22443);
+        assert_eq!(seeded, 22443);
+    }
+    let built = built.elapsed();
+    let t0 = std::time::Instant::now();
+    identify::run_with(&s, identify::RunOptions::quick(true))
+        .await
+        .unwrap();
+    let took = t0.elapsed();
+    let p = s.identify.lock().unwrap().clone();
+    let c = s.library.lock().unwrap().identity_counts().unwrap();
+    // Per cohort: how many end identified / waiting / not found
+    let mut by: std::collections::BTreeMap<char, (u32, u32, u32)> = Default::default();
+    {
+        let lib = s.library.lock().unwrap();
+        let waiting: std::collections::HashSet<i64> = lib
+            .suggestions()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.track_id)
+            .collect();
+        for t in lib.all_tracks().unwrap() {
+            let cohort = t.title.chars().next().unwrap();
+            let e = by.entry(cohort).or_default();
+            if t.canonical.is_some() {
+                e.0 += 1;
+            } else if t.id.is_some_and(|i| waiting.contains(&i.0)) {
+                e.1 += 1;
+            } else {
+                e.2 += 1;
+            }
+        }
+    }
+    let cohorts: serde_json::Map<String, serde_json::Value> = by
+        .iter()
+        .map(|(k, (i, w, u))| {
+            (
+                k.to_string(),
+                serde_json::json!({"identified": i, "pending_review": w, "not_found": u}),
+            )
+        })
+        .collect();
+    let old_rows_left = s
+        .library
+        .lock()
+        .unwrap()
+        .suggestions()
+        .unwrap()
+        .iter()
+        .filter(|r| r.recording_mbid.starts_with("000000f0"))
+        .count();
+    let rows_now = s.library.lock().unwrap().suggestions().unwrap().len();
+    let out = serde_json::json!({
+        "start": {"songs_waiting": 7412, "rows": 22443, "outdated": 7412},
+        "old_rows_left": old_rows_left, "rows_now": rows_now, "outdated_after": c.outdated,
+        "paced_estimate_secs": recordings.load(SeqCst) + releases.load(SeqCst),
+        "songs": total, "identified": c.identified, "pending_review": c.suggested, "not_found": c.unknown,
+        "identified_by": p.identified_by, "cohorts": cohorts,
+        "musicbrainz_recording_searches": recordings.load(SeqCst), "musicbrainz_release_searches": releases.load(SeqCst),
+        "acoustid_requests": p.work.acoustid_asked, "decoded": p.work.decoded,
+        "measured_unpaced_secs": (took.as_secs_f64() * 100.0).round() / 100.0, "built_secs": built.as_secs_f64(),
+        "scope": "re-check of 7,412 songs already waiting with old-rule rows (the node's histogram); what MusicBrainz and AcoustID answer per cohort is the #250 replay's assumption, not the node's data",
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    if let Ok(path) = std::env::var("PM_REPLAY_REPORT") {
+        std::fs::write(path, serde_json::to_string_pretty(&out).unwrap()).unwrap();
+    }
+}
+
 /// REV2 at the job: an exact tag match on several recordings is identified (the one on the
 /// file's album, with that release), so is one audio under several recordings; live and remix
 /// hits stay for the owner; a song left waiting by an earlier version is checked again and
@@ -2856,4 +3068,265 @@ async fn a_rescan_right_after_the_run_reads_the_library_is_caught() {
         canonical(x).unwrap().0.to_url(),
         format!("https://musicbrainz.org/recording/{}", rec(1))
     );
+}
+
+// ---- owner, 2026-11-06: fewer songs to review, and review optional ----
+
+/// A song shaped like the pending replay's (`cohort`, `n`: what [`pending_mock`] answers for it),
+/// in a folder of its own, with an earlier fingerprint kept.
+fn pending_song(s: &NodeState, dir: &std::path::Path, cohort: char, n: u32) -> i64 {
+    let folder = dir.join(format!("music/{cohort}{n}"));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("01 song.flac");
+    std::fs::write(&path, format!("{cohort}{n} audio")).unwrap();
+    let len = 200_000 + (n as u64 % 50) * 1000;
+    let mut t = untagged_track(
+        path.clone(),
+        &format!("{cohort}{n:05} Song"),
+        &format!("Artist {}", n / 12),
+    );
+    t.track_no = Some(1);
+    t.duration_ms = Some(len);
+    t.file.duration_ms = Some(len);
+    t.album = Some(pm_model::Album {
+        id: None,
+        title: format!("Album {}", n / 12),
+        album_artist: None,
+        release_mbid: None,
+        release_group_mbid: None,
+        year: None,
+        upc: None,
+        total_discs: None,
+    });
+    let lib = s.library.lock().unwrap();
+    let id = lib.upsert_track(&t).unwrap().0;
+    let key = Library::file_key(&path).unwrap();
+    lib.save_fingerprint(&key, len / 1000, "AQfake").unwrap();
+    lib.save_lookup(
+        &key,
+        &serde_json::json!({"status": "ok", "results": []}).to_string(),
+    )
+    .unwrap();
+    id
+}
+
+/// Waiting for review since older rules (as on a node before this version): their options, no
+/// input key, no rules version.
+fn left_by_older_rules(s: &NodeState, track: i64, recordings: &[u32]) {
+    let options: Vec<_> = recordings
+        .iter()
+        .map(|r| option(&rec(*r), None, "Old option", 0.8, "search"))
+        .collect();
+    suggest(s, track, &options);
+}
+
+async fn recheck_state(
+    dir: &std::path::Path,
+    recordings: Arc<std::sync::atomic::AtomicUsize>,
+    contact: bool,
+) -> Arc<NodeState> {
+    let port = pending_mock(recordings, Default::default()).await;
+    let s = state(dir, None).await;
+    if contact {
+        s.set_contact("tests@example.org").unwrap();
+    }
+    *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+    *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+        api_key: "test-key".into(),
+        base_url: format!("http://127.0.0.1:{port}"),
+        configured: String::new(),
+    };
+    s
+}
+
+/// "Identify again" (a retry: the node has nothing unchecked) checks the songs older rules left
+/// waiting: the file's song on one exact recording is identified, its old options gone; a song
+/// with only a live recording keeps waiting, with the options the rules find now; a song the
+/// owner left as it is isn't touched. Checked under the current rules, nothing is asked again.
+#[tokio::test]
+async fn identify_again_checks_songs_older_rules_left_waiting() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings.clone(), true).await;
+    let exact = pending_song(&s, dir.path(), 'C', 5);
+    let live = pending_song(&s, dir.path(), 'L', 1);
+    let left = pending_song(&s, dir.path(), 'C', 7);
+    left_by_older_rules(&s, exact, &[91, 92]);
+    left_by_older_rules(&s, live, &[93]);
+    left_by_older_rules(&s, left, &[94]);
+    assert_eq!(s.library.lock().unwrap().skip_review(&[left]).unwrap(), 1);
+    let c = s.library.lock().unwrap().identity_counts().unwrap();
+    assert_eq!((c.suggested, c.outdated, c.skipped, c.unchecked), (2, 2, 1, 0));
+    identify::run_with(&s, identify::RunOptions::quick(true))
+        .await
+        .unwrap();
+    {
+        let lib = s.library.lock().unwrap();
+        let t = lib.get_track(pm_model::TrackId(exact)).unwrap().unwrap();
+        assert_eq!(
+            t.canonical.map(|(_, c)| c),
+            Some(pm_model::Confidence::TagMatch {
+                score: identify::TAG_MATCH_SCORE
+            })
+        );
+        assert!(lib.suggestions_for(exact).unwrap().is_empty());
+        let options: Vec<String> = lib
+            .suggestions_for(live)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.recording_mbid)
+            .collect();
+        assert_eq!(
+            options,
+            vec![pending_id(0xb0, 1, 0)],
+            "the live recording, the old option gone"
+        );
+        assert!(lib
+            .get_track(pm_model::TrackId(left))
+            .unwrap()
+            .unwrap()
+            .canonical
+            .is_none());
+        assert_eq!(
+            lib.suggestions_for_tracks(&[left]).unwrap().len(),
+            1,
+            "its options kept"
+        );
+        let c = lib.identity_counts().unwrap();
+        assert_eq!((c.suggested, c.outdated, c.skipped), (1, 0, 1));
+    }
+    // Again: nothing changed, nothing asked
+    let asked = recordings.load(SeqCst);
+    assert!(asked > 0);
+    identify::run_with(&s, identify::RunOptions::quick(true))
+        .await
+        .unwrap();
+    assert_eq!(recordings.load(SeqCst), asked);
+    assert_eq!(s.identify.lock().unwrap().total, 0);
+}
+
+/// At start the node checks songs older rules left waiting once, by itself: only when
+/// MusicBrainz can be asked, and not again once they are checked.
+#[tokio::test]
+async fn the_node_checks_old_suggestions_again_once_by_itself() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, false).await;
+    let exact = pending_song(&s, dir.path(), 'C', 5);
+    left_by_older_rules(&s, exact, &[91]);
+    let poll = std::time::Duration::from_millis(10);
+    assert!(
+        !identify::recheck_when_idle(&s, poll).await,
+        "no MusicBrainz contact"
+    );
+    s.set_contact("tests@example.org").unwrap();
+    assert!(identify::recheck_when_idle(&s, poll).await);
+    for _ in 0..1000 {
+        if !s.identify.lock().unwrap().running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!s.identify.lock().unwrap().running);
+    {
+        let lib = s.library.lock().unwrap();
+        assert!(lib
+            .get_track(pm_model::TrackId(exact))
+            .unwrap()
+            .unwrap()
+            .canonical
+            .is_some());
+        assert_eq!(lib.identity_counts().unwrap().outdated, 0);
+    }
+    assert!(
+        !identify::recheck_when_idle(&s, poll).await,
+        "nothing left to check again"
+    );
+}
+
+/// "Leave as is" per album, by songs, or every unsure song; undone the same ways; owner only.
+#[tokio::test]
+async fn songs_can_be_left_as_they_are_and_brought_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("owner-token")).await;
+    let app = router(s.clone());
+    let owner = |u: &'static str, b: serde_json::Value| {
+        let app = app.clone();
+        async move { send_as(&app, "owner-token", "POST", u, Some(b)).await }
+    };
+    let album: Vec<i64> = (1..=2)
+        .map(|i| song(&s, dir.path(), "Band/Album", i, &format!("Song {i}")))
+        .collect();
+    let other = song(&s, dir.path(), "Band/Other", 1, "Other");
+    for (i, t) in album.iter().chain([&other]).enumerate() {
+        suggest(&s, *t, &[option(&rec(i as u32 + 1), None, "Song", 0.8, "search")]);
+    }
+    let (st, page) = send_as(&app, "owner-token", "GET", "/v1/library/suggestions/albums", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let key = page["albums"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["songs"].as_array().unwrap().len() == 2)
+        .unwrap()["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, b) = owner(
+        "/v1/library/suggestions/skip",
+        serde_json::json!({"albums": [key]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["skipped"], 2);
+    assert_eq!(
+        (b["counts"]["suggested"].as_u64(), b["counts"]["skipped"].as_u64()),
+        (Some(1), Some(2))
+    );
+    let (_, page) = send_as(&app, "owner-token", "GET", "/v1/library/suggestions/albums", None).await;
+    assert_eq!(page["songs"], 1);
+    let (_, st_now) = send_as(&app, "owner-token", "GET", "/v1/library/identify", None).await;
+    assert_eq!(st_now["counts"]["skipped"], 2, "{st_now}");
+    let (st, b) = owner(
+        "/v1/library/suggestions/unskip",
+        serde_json::json!({"albums": [key]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    assert_eq!(b["restored"], 2);
+    let (_, b) = owner("/v1/library/suggestions/skip", serde_json::json!({"all": true})).await;
+    assert_eq!(
+        (b["skipped"].as_u64(), b["counts"]["suggested"].as_u64()),
+        (Some(3), Some(0))
+    );
+    let (_, b) = owner("/v1/library/suggestions/unskip", serde_json::json!({"all": true})).await;
+    assert_eq!(b["restored"], 3);
+    let (_, b) = owner(
+        "/v1/library/suggestions/skip",
+        serde_json::json!({"track_ids": [other]}),
+    )
+    .await;
+    assert_eq!(b["skipped"], 1);
+    // One way at a time
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"all": true, "track_ids": [other]}),
+    ] {
+        let (st, _) = owner("/v1/library/suggestions/skip", bad).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+    // The owner only
+    let pk = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &serde_json::json!({"people": [{"key": pk, "access": "music", "music_enabled": true, "added_at": 1}]}).to_string())
+        .unwrap();
+    let tok = accounts::mint(&s, pk).unwrap();
+    for u in ["/v1/library/suggestions/skip", "/v1/library/suggestions/unskip"] {
+        let (st, _) = send_as(&app, &tok, "POST", u, Some(serde_json::json!({"all": true}))).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{u}");
+    }
+    assert_eq!(s.library.lock().unwrap().identity_counts().unwrap().skipped, 1);
 }

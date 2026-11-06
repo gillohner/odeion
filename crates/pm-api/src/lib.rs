@@ -439,6 +439,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/suggestions", get(identify::suggestions))
         .route("/library/suggestions/albums", get(identify::review_albums))
         .route("/library/suggestions/confirm", post(identify::confirm))
+        .route("/library/suggestions/skip", post(identify::skip))
+        .route("/library/suggestions/unskip", post(identify::unskip))
         .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))

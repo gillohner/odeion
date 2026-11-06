@@ -492,6 +492,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::podcasts::spawn_background(&state);
     pm_api::gpodder::spawn_background(&state);
     pm_api::audiobookshelf::spawn_background(&state);
+    pm_api::identify::spawn_recheck(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
     pm_api::serve_listener(state, listener).await

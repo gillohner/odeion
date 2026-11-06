@@ -32,6 +32,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (16, include_str!("migrations/0016_bookmarks.sql")),
     (17, include_str!("migrations/0017_library_edits.sql")),
     (18, include_str!("migrations/0018_identify_review.sql")),
+    (19, include_str!("migrations/0019_identify_recheck.sql")),
 ];
 
 pub struct Library {
@@ -177,12 +178,20 @@ pub enum SuggestionCheck {
 pub struct IdentityCounts {
     pub total: u64,
     pub identified: u64,
-    /// Tracks with suggestions to confirm.
+    /// Tracks with suggestions to confirm (not those the owner left as they are).
     pub suggested: u64,
     /// Tracks identification found nothing for (or failed on).
     pub unknown: u64,
     /// Tracks identification has not looked at yet.
     pub unchecked: u64,
+    /// Tracks the owner left as they are without an identity ("Leave as is", "Skip all unsure"):
+    /// not in `suggested`, not checked again.
+    #[serde(default)]
+    pub skipped: u64,
+    /// Tracks waiting for review that older rules checked (included in `suggested`): the next run
+    /// checks them again.
+    #[serde(default)]
+    pub outdated: u64,
     /// How the identified ones were identified.
     #[serde(default)]
     pub by: IdentifiedBy,
@@ -2563,10 +2572,11 @@ impl Library {
 
     /// Tracks without a canonical identity that identification has not
     /// looked at yet (with `retry`, also those it found nothing for or
-    /// failed on; suggestions wait for the owner either way).
+    /// failed on; suggestions wait for the owner either way, and songs the owner left as they are
+    /// stay so).
     pub fn tracks_to_identify(&self, retry: bool) -> Result<Vec<Track>> {
         let clause = if retry {
-            "t.canonical_uri IS NULL AND ?1 = '' AND COALESCE((SELECT state FROM identify_state s WHERE s.track_id = t.id), '') <> 'suggested'"
+            "t.canonical_uri IS NULL AND ?1 = '' AND COALESCE((SELECT state FROM identify_state s WHERE s.track_id = t.id), '') NOT IN ('suggested', 'skipped')"
         } else {
             "t.canonical_uri IS NULL AND ?1 = '' AND NOT EXISTS (SELECT 1 FROM identify_state s WHERE s.track_id = t.id)"
         };
@@ -2643,7 +2653,7 @@ impl Library {
         let mut stmt = conn.prepare(
             "SELECT s.id, s.track_id, s.recording_mbid, s.release_mbid, s.title, s.artist, s.release_title, s.score, s.source
              FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id
-             WHERE t.canonical_uri IS NULL
+             WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')
              ORDER BY t.album_id, t.disc_no, t.track_no, s.track_id, s.score DESC",
         )?;
         let rows = stmt
@@ -2773,6 +2783,7 @@ impl Library {
         let mut stmt = conn.prepare(
             "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND f.missing = 0
              WHERE t.canonical_uri IS NULL AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)
+               AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')
              ORDER BY t.id",
         )?;
         let rows = stmt
@@ -2814,9 +2825,77 @@ impl Library {
     /// Songs with open suggestions, in one query (album review groups them by folder).
     pub fn suggested_tracks(&self) -> Result<Vec<Track>> {
         self.tracks_where(
-            "t.canonical_uri IS NULL AND ?1 = '' AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)",
+            "t.canonical_uri IS NULL AND ?1 = '' AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id) AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')",
             String::new(),
         )
+    }
+
+    /// "Leave as is" for songs waiting for review: each is kept without an identity, out of
+    /// review and of every later run, its options kept for [`Self::unskip_review`]. Songs with an
+    /// identity, nothing to review or already left are not changed. How many were left.
+    pub fn skip_review(&self, tracks: &[i64]) -> Result<usize> {
+        immediately(&mut self.lock(), |conn| {
+            let tx = conn.savepoint()?;
+            let mut n = 0;
+            for t in tracks {
+                n += tx.execute(
+                    "INSERT INTO identify_state(track_id, state, detail, checked_at)
+                     SELECT t.id, 'skipped', NULL, ?2 FROM tracks t
+                     WHERE t.id = ?1 AND t.canonical_uri IS NULL
+                       AND EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = t.id)
+                     ON CONFLICT(track_id) DO UPDATE SET state = 'skipped', detail = NULL
+                     WHERE identify_state.state <> 'skipped'",
+                    params![t, now_unix()],
+                )?;
+            }
+            tx.commit()?;
+            Ok(n)
+        })
+    }
+
+    /// Undo [`Self::skip_review`]: the songs wait for review again with their options (none left:
+    /// "unknown"). How many came back.
+    pub fn unskip_review(&self, tracks: &[i64]) -> Result<usize> {
+        immediately(&mut self.lock(), |conn| {
+            let tx = conn.savepoint()?;
+            let mut n = 0;
+            for t in tracks {
+                n += tx.execute(
+                    "UPDATE identify_state SET state = CASE
+                       WHEN EXISTS (SELECT 1 FROM identify_suggestions s WHERE s.track_id = ?1) THEN 'suggested'
+                       ELSE 'unknown' END
+                     WHERE track_id = ?1 AND state = 'skipped'",
+                    params![t],
+                )?;
+            }
+            tx.commit()?;
+            Ok(n)
+        })
+    }
+
+    /// Songs the owner left as they are, with their file's path (to find them by album).
+    pub fn skipped_track_paths(&self) -> Result<Vec<(i64, String)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND f.missing = 0
+             JOIN identify_state s ON s.track_id = t.id
+             WHERE t.canonical_uri IS NULL AND s.state = 'skipped'
+             ORDER BY t.id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Whether songs wait for review that older rules checked (the node checks them again once).
+    pub fn has_outdated_suggestions(&self) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "SELECT EXISTS (SELECT 1 FROM tracks t JOIN identify_state s ON s.track_id = t.id
+               WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1)",
+            params![crate::identify::RULES_VERSION],
+            |r| r.get(0),
+        )?)
     }
 
     /// One suggestion by id, whatever its song's state.
@@ -2968,15 +3047,27 @@ impl Library {
             if identified != Some(false) {
                 return Ok(Settled::Kept);
             }
+            let (now, open_before): (Option<String>, i64) = tx.query_row(
+                "SELECT (SELECT state FROM identify_state WHERE track_id = ?1),
+                        (SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1)",
+                params![track],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            // The owner left it as it is ("Leave as is"): no run changes that
+            if now.as_deref() == Some("skipped") {
+                return Ok(Settled::Kept);
+            }
+            let rules = crate::identify::RULES_VERSION;
             let put_state = |state: &str,
                              detail: Option<&str>,
                              release: Option<String>,
                              input: Option<&str>| {
                 tx.execute(
-                "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, input_key) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, input_key, rules) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
-                   release_mbid = excluded.release_mbid, input_key = COALESCE(excluded.input_key, identify_state.input_key)",
-                params![track, state, detail, now_unix(), release, input],
+                   release_mbid = excluded.release_mbid, input_key = COALESCE(excluded.input_key, identify_state.input_key),
+                   rules = excluded.rules",
+                params![track, state, detail, now_unix(), release, input, rules],
             )
             };
             let done = match answer {
@@ -2992,7 +3083,11 @@ impl Library {
                         MusicUri::Recording { mbid } => mbid.to_string(),
                         other => other.to_url(),
                     };
-                    if rejected(&tx, track, &rec)? {
+                    if rejected(&tx, track, &rec)? && open_before > 0 {
+                        // Checked again: its open options still wait for the owner
+                        put_state("suggested", None, None, input_key.as_deref())?;
+                        Settled::Kept
+                    } else if rejected(&tx, track, &rec)? {
                         put_state("unknown", Some("rejected by you"), None, input_key.as_deref())?;
                         Settled::Rejected
                     } else {
@@ -3025,6 +3120,18 @@ impl Library {
                     candidates,
                     input_key,
                 } => {
+                    if open_before > 0 {
+                        // Checked again: options older rules offered and these don't go; one that
+                        // stays keeps its id, so a review page showing it still acts on it
+                        let keep: Vec<String> = candidates.iter().map(|c| c.recording.to_string()).collect();
+                        let marks = vec!["?"; keep.len()].join(",");
+                        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&track];
+                        args.extend(keep.iter().map(|k| k as &dyn rusqlite::ToSql));
+                        tx.execute(
+                            &format!("DELETE FROM identify_suggestions WHERE track_id = ?1 AND recording_mbid NOT IN ({marks})"),
+                            args.as_slice(),
+                        )?;
+                    }
                     insert_suggestions(&tx, track, candidates)?;
                     let open: i64 = tx.query_row(
                         "SELECT COUNT(*) FROM identify_suggestions WHERE track_id = ?1",
@@ -3039,6 +3146,20 @@ impl Library {
                         put_state("unknown", why, None, input_key.as_deref())?;
                         Settled::Empty
                     }
+                }
+                SettleAnswer::State {
+                    state,
+                    detail: _,
+                    input_key,
+                } if open_before > 0 => {
+                    // Checked again and nothing new: an error leaves it to a later run (nothing
+                    // is written); "nothing found" keeps the options older rules offered, for the
+                    // owner, and marks it checked by these rules
+                    if state != "error" {
+                        put_state("suggested", None, None, input_key.as_deref())?;
+                        tx.commit()?;
+                    }
+                    return Ok(Settled::Kept);
                 }
                 SettleAnswer::State {
                     state,
@@ -3159,8 +3280,17 @@ impl Library {
             total: q("SELECT COUNT(*) FROM tracks")?,
             identified: q("SELECT COUNT(*) FROM tracks WHERE canonical_uri IS NOT NULL")?,
             suggested: q(
-                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL",
+                "SELECT COUNT(DISTINCT s.track_id) FROM identify_suggestions s JOIN tracks t ON t.id = s.track_id WHERE t.canonical_uri IS NULL AND NOT EXISTS (SELECT 1 FROM identify_state k WHERE k.track_id = t.id AND k.state = 'skipped')",
             )?,
+            skipped: q(
+                "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state = 'skipped'",
+            )?,
+            outdated: conn.query_row(
+                "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id
+                 WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1",
+                params![crate::identify::RULES_VERSION],
+                |r| r.get::<_, i64>(0),
+            )? as u64,
             unknown: q(
                 "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state IN ('unknown','error')",
             )?,
@@ -4660,7 +4790,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 18);
+        assert_eq!(lib.schema_version().unwrap(), 19);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -6388,5 +6518,183 @@ mod identify_tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    fn rules_of(lib: &Library, track: i64) -> Option<i64> {
+        lib.lock()
+            .query_row(
+                "SELECT rules FROM identify_state WHERE track_id = ?1",
+                params![track],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A song an older version of the rules left waiting, as on a node from before them: its
+    /// options, "suggested", no input key and no rules.
+    fn left_by_older_rules(lib: &Library, path: &str, options: &[Candidate]) -> i64 {
+        let id = lib.upsert_track(&untagged(path, "X")).unwrap().0;
+        lib.add_suggestions(id, options).unwrap();
+        lib.set_identify_state(id, "suggested", None).unwrap();
+        assert_eq!(rules_of(lib, id), None);
+        id
+    }
+
+    /// Checking a waiting song again (owner, 2026-11-06): the options become what the rules find
+    /// now (one that stays keeps its id); an error changes nothing, so a later run tries again;
+    /// "nothing found" keeps the options for the owner and marks the song checked; a rejected pick
+    /// leaves it waiting; every check stores the rules' version, and older ones count as outdated.
+    #[test]
+    fn checking_a_waiting_song_again_replaces_or_keeps_its_options() {
+        let lib = Library::open_in_memory().unwrap();
+        let ids = |lib: &Library, t: i64| -> Vec<(i64, String)> {
+            lib.suggestions_for(t)
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.id, r.recording_mbid))
+                .collect()
+        };
+        let a = left_by_older_rules(
+            &lib,
+            "/m/a.flac",
+            &[cand(R[0], "X", 0.8, "search"), cand(R[1], "X", 0.7, "search")],
+        );
+        assert_eq!(lib.identity_counts().unwrap().outdated, 1);
+        assert!(lib.has_outdated_suggestions().unwrap());
+        let kept_id = ids(&lib, a).into_iter().find(|(_, r)| r == R[1]).unwrap().0;
+        let now = SettleAnswer::Suggest {
+            candidates: vec![cand(R[1], "X", 0.75, "search"), cand(R[2], "X", 0.7, "search")],
+            input_key: Some("k".into()),
+        };
+        assert_eq!(lib.settle(a, &now).unwrap(), Settled::Stored);
+        let after = ids(&lib, a);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(
+            after.contains(&(kept_id, R[1].to_string())),
+            "kept its id: {after:?}"
+        );
+        assert!(after.iter().any(|(_, r)| r == R[2]));
+        assert!(!after.iter().any(|(_, r)| r == R[0]), "an older option is gone");
+        assert_eq!(rules_of(&lib, a), Some(crate::identify::RULES_VERSION as i64));
+        let c = lib.identity_counts().unwrap();
+        assert_eq!((c.suggested, c.outdated), (1, 0));
+        assert!(!lib.has_outdated_suggestions().unwrap());
+
+        // An error: nothing written, the song still outdated for the next run
+        let b = left_by_older_rules(&lib, "/m/b.flac", &[cand(R[3], "X", 0.8, "search")]);
+        let err = SettleAnswer::State {
+            state: "error".into(),
+            detail: Some("MusicBrainz answered 503".into()),
+            input_key: Some("k".into()),
+        };
+        assert_eq!(lib.settle(b, &err).unwrap(), Settled::Kept);
+        assert_eq!(state_of(&lib, b).unwrap().0, "suggested");
+        assert_eq!(rules_of(&lib, b), None);
+        assert_eq!(ids(&lib, b).len(), 1);
+        // Nothing found: the options stay for the owner, the song is marked checked
+        let nothing = SettleAnswer::State {
+            state: "unknown".into(),
+            detail: None,
+            input_key: Some("k".into()),
+        };
+        assert_eq!(lib.settle(b, &nothing).unwrap(), Settled::Kept);
+        assert_eq!(state_of(&lib, b).unwrap().0, "suggested");
+        assert_eq!(rules_of(&lib, b), Some(crate::identify::RULES_VERSION as i64));
+        assert_eq!(ids(&lib, b).len(), 1);
+
+        // The rules pick a recording the owner rejected for it: it keeps waiting with what's open
+        let c = left_by_older_rules(
+            &lib,
+            "/m/c.flac",
+            &[cand(R[0], "X", 0.8, "search"), cand(R[4], "X", 0.8, "search")],
+        );
+        let r4 = ids(&lib, c).into_iter().find(|(_, r)| r == R[4]).unwrap().0;
+        assert!(lib.reject_suggestion(r4).unwrap());
+        let pick = SettleAnswer::Identified {
+            recording: rec_uri(R[4]),
+            confidence: Confidence::TagMatch { score: 0.9 },
+            acoustid: None,
+            detail: "tag_match".into(),
+            release: None,
+            input_key: Some("k".into()),
+        };
+        assert_eq!(lib.settle(c, &pick).unwrap(), Settled::Kept);
+        assert_eq!(state_of(&lib, c).unwrap().0, "suggested");
+        assert!(lib.get_track(TrackId(c)).unwrap().unwrap().canonical.is_none());
+        // A clear pick settles it, its options gone
+        let pick = SettleAnswer::Identified {
+            recording: rec_uri(R[0]),
+            confidence: Confidence::TagMatch { score: 0.9 },
+            acoustid: None,
+            detail: "tag_match".into(),
+            release: None,
+            input_key: Some("k".into()),
+        };
+        assert_eq!(lib.settle(c, &pick).unwrap(), Settled::Stored);
+        assert!(ids(&lib, c).is_empty());
+        assert_eq!(rules_of(&lib, c), Some(crate::identify::RULES_VERSION as i64));
+    }
+
+    /// "Leave as is" (owner, 2026-11-06): left songs are out of review, the counts and every run,
+    /// keep their options, and come back with them; songs with an identity or nothing open are not
+    /// touched; a run's answer for a left song changes nothing.
+    #[test]
+    fn songs_left_as_they_are_stay_out_of_review_and_runs_until_brought_back() {
+        let lib = Library::open_in_memory().unwrap();
+        let a = left_by_older_rules(&lib, "/m/one/a.flac", &[cand(R[0], "X", 0.8, "search")]);
+        let b = left_by_older_rules(&lib, "/m/one/b.flac", &[cand(R[1], "X", 0.8, "search")]);
+        let none = lib.upsert_track(&untagged("/m/two/c.flac", "C")).unwrap().0;
+        lib.set_identify_state(none, "unknown", None).unwrap();
+        assert_eq!(lib.skip_review(&[a, none, 999]).unwrap(), 1);
+        assert_eq!(lib.skip_review(&[a]).unwrap(), 0, "already left");
+        let c = lib.identity_counts().unwrap();
+        assert_eq!((c.suggested, c.skipped, c.outdated), (1, 1, 1));
+        let listed: Vec<i64> = lib
+            .suggested_track_paths()
+            .unwrap()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(listed, vec![b]);
+        assert!(lib.suggestions().unwrap().iter().all(|r| r.track_id == b));
+        assert_eq!(
+            lib.suggested_tracks()
+                .unwrap()
+                .iter()
+                .map(|t| t.id.unwrap().0)
+                .collect::<Vec<_>>(),
+            vec![b]
+        );
+        assert_eq!(lib.skipped_track_paths().unwrap().len(), 1);
+        let retry: Vec<i64> = lib
+            .tracks_to_identify(true)
+            .unwrap()
+            .iter()
+            .map(|t| t.id.unwrap().0)
+            .collect();
+        assert_eq!(retry, vec![none], "a retry leaves it");
+        assert!(!lib
+            .tracks_to_identify(false)
+            .unwrap()
+            .iter()
+            .any(|t| t.id == Some(TrackId(a))));
+        assert!(!lib.identify_inputs().unwrap().contains_key(&a));
+        // A run's answer for it changes nothing
+        let pick = SettleAnswer::Identified {
+            recording: rec_uri(R[0]),
+            confidence: Confidence::TagMatch { score: 0.9 },
+            acoustid: None,
+            detail: "tag_match".into(),
+            release: None,
+            input_key: None,
+        };
+        assert_eq!(lib.settle(a, &pick).unwrap(), Settled::Kept);
+        assert!(lib.get_track(TrackId(a)).unwrap().unwrap().canonical.is_none());
+        // Back, with its option
+        assert_eq!(lib.unskip_review(&[a, b]).unwrap(), 1);
+        assert_eq!(state_of(&lib, a).unwrap().0, "suggested");
+        assert_eq!(lib.suggestions_for(a).unwrap().len(), 1);
+        let c = lib.identity_counts().unwrap();
+        assert_eq!((c.suggested, c.skipped), (2, 0));
     }
 }

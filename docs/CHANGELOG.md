@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-06
+
+- **Fewer songs to review, and reviewing is optional** (owner: "still too much matched that could be easier or can we not do this?"). Songs an older version of identification left waiting are now checked again under the current rules: "Identify again" checks them, and the node does it once by itself after it starts. Most turn out to be one recording on several editions, or exactly the file's song, and settle on their own; real differences (live, remix, another artist, another length) still wait. No audio is decoded again; MusicBrainz is asked at its one request a second, so a large backlog takes an hour or two in the background. With "Write IDs" on, the IDs found are written into the files as after any run (tags backed up first). New: "Leave as is" for an album and "Skip all unsure" keep songs without an identity, out of review and of later checks, and can be undone. Nothing changes how songs play or show.
+
 ### 2026-11-05
 
 - **Exclusive USB: the app plays a USB DAC with its own driver** (owner: "we need to support usb DACs with bit perfect stream"), also on phones below Android 14 and where Android refuses bit-perfect. Settings › This phone › Preferred mode: Exclusive USB. Android asks once whether the app may use the DAC; the app then takes the DAC from Android's driver, sets the DAC's clock to each song's rate and reads it back, and sends the samples untouched, paced by the DAC's own clock. Not yet tried on a phone: the next device test says whether it works.
