@@ -322,6 +322,7 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 .toast.error { border-left-color: var(--bad); }
 /* (the toast itself lets taps through; its Undo takes them) */
 .toast .toast-act { margin-left: 10px; vertical-align: middle; pointer-events: auto; }
+.toast:not(.show) .toast-act { pointer-events: none; visibility: hidden; }
 .dialog { background: var(--surface-2); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 14px; padding: 24px; width: min(92vw, 420px); box-shadow: var(--shadow); }
 .dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
 .dialog h2 { margin-bottom: 6px; }

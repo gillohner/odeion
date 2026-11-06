@@ -290,8 +290,9 @@ const server = http.createServer(async (req, res) => {
       // reviewed without an identity (undoable); on the review page "Leave as is" does it per album
       const skipRoutes = () => ({
         // (the count answered is the album's only when its key was sent: the toast then proves the key)
-        'POST /library/suggestions/skip': async (_, b) => [200, { skipped: b.all ? 6 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: {} }],
-        'POST /library/suggestions/unskip': async (_, b) => [200, { restored: b.all ? 6 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: {} }],
+        // (counts.skipped is the node's total after the skip: 3 were skipped before, so 9 after all 6)
+        'POST /library/suggestions/skip': async (_, b) => [200, { skipped: b.all ? 6 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: { skipped: b.all ? 9 : 7 } }],
+        'POST /library/suggestions/unskip': async (_, b) => [200, { restored: b.all ? 9 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: { skipped: 0 } }],
       });
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
       await page.goto(`${BASE}/library/node`);
@@ -307,9 +308,27 @@ const server = http.createServer(async (req, res) => {
       const skipBody = asked('POST', '/library/suggestions/skip')[0].body;
       check(skipBody && skipBody.all === true && Object.keys(skipBody).length === 1, `${W} …with exactly {all: true} (${JSON.stringify(skipBody)})`);
       check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} a toast says 6 songs were left as they are, with Undo`);
+      check(/^Undo \(brings back all 9 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim()), `${W} …and the Undo says it brings back the 3 skipped earlier too (from the node's count)`);
       await page.locator('#toast .toast-act').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
-      // The review page: Leave as is on one album
+      check(await until(async () => /9 songs back for review/.test(await page.locator('#toast').textContent())), `${W} …and the toast says how many came back`);
+      check(await until(async () => await page.evaluate(() => document.activeElement && ['idskipall', 'idrun'].includes(document.activeElement.id))), `${W} the focus is back on the card after Undo`);
+      // A node without the route (405: the path is another method's route there) says to update it
+      fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 0, outdated: 0, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: { 'POST /library/suggestions/skip': async () => [405, {}] } });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idskipall').count()) === 1);
+      await page.locator('#idskipall').click();
+      check(await until(async () => /doesn’t offer that yet: update it first/.test(await page.locator('#toast').textContent())), `${W} on an older node Skip all says to update it (405)`);
+      check((await page.locator('#toast .toast-act').count()) === 0, `${W} …with no Undo`);
+      // The review page: Skip all unsure, then Leave as is on one album
+      fx = base({ routes: skipRoutes() });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      await page.locator('#idskipall').click();
+      check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && /^Undo \(brings back all 9 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim())), `${W} on the review page Skip all says what its Undo brings back (from the node's count)`);
+      check(await until(async () => /Nothing to confirm/.test(await page.locator('#main').textContent())), `${W} …and the page empties`);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && (await page.locator('section.idalbum').count()) === 2), `${W} Undo brings the albums back on the page`);
       fx = base({ routes: skipRoutes() });
       await page.goto(`${BASE}/identify`);
       await until(async () => (await page.locator('section.idalbum').count()) === 2);
