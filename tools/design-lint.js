@@ -5,7 +5,9 @@
 //   3. every class the UI uses has a rule in app.css;
 //   4. every transition and animation takes its duration from the motion scale (--dur-fast/base/slow),
 //      except a looping indicator (spin, shimmer, pulse, progress bars) and a bar's width; the
-//      long-hand duration and delay properties too.
+//      long-hand duration and delay properties too;
+//   5. every font-size and border-radius takes a step of the type or radius scale (--fs-*, --r-*);
+//      a radius of 3 px or less (bars, marks), 50%, relative units and a fluid clamp() are fine.
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
@@ -68,6 +70,25 @@ const hasRule = (c) => new RegExp(`\\.${c.replace(/[-]/g, '\\-')}(?![\\w-])`).te
 for (const [c, at] of [...used.entries()].sort()) {
   if (IGNORE_CLASSES.has(c) || hasRule(c)) continue;
   problems.push(`${at}  class "${c}" has no rule in app.css`);
+}
+
+// 5. type and radius on their scales
+{
+  const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
+  for (const f of cssFiles) {
+    const src = fs.readFileSync(path.join(DIR, f), 'utf8');
+    const re = /(font-size|border-radius|font):([^;{}]*)/g; let m;
+    while ((m = re.exec(src))) {
+      const decl = m[2]; const at = `${f}:${src.slice(0, m.index).split('\n').length}`;
+      if (/clamp\(|\d(vw|vh|vmin)\b/.test(decl)) continue; // a fluid display size (the dashboard) scales with the screen
+      if (m[1] === 'border-radius') {
+        const raw = decl.match(/(\d*\.?\d+)px/g) || [];
+        if (raw.some((v) => parseFloat(v) > 3)) problems.push(`${at}  border-radius off the scale: use var(--r-sm|md|lg|pill): ${decl.trim()}`);
+      } else if (/(^|[^\w.-])\d*\.?\d+px\b/.test(decl.replace(/\/[\d.]+/, ''))) {
+        problems.push(`${at}  ${m[1]} off the type scale: use var(--fs-2xs|xs|sm|md|lg|xl|2xl|3xl|display|art): ${decl.trim().slice(0, 50)}`);
+      }
+    }
+  }
 }
 
 // 4. durations on the motion scale

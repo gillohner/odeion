@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-06
 
+- **One look across the app** (owner: "consistent … sizing of elements", "better colors", "optimizing UX and texts"). Every text size and corner now comes from one scale each, and the borders of buttons and fields show against the page in both themes (every colour pair of the palette is checked at WCAG AA). On a phone every small control answers to a 48 px touch, without growing. Zones: a device the node sees two ways (a Linn over AirPlay and UPnP) is one card with a chip per way; a zone with nothing playing shows the zone's mark. The bar's zone button and the status chip keep more of their words; "Group outputs" is its icon on a phone; the node's address check says "the internet", not "outside".
 - **Lyrics read like a player's, and the app moves a little** (owner: "scrollbars on lyrics … make the entire playing now screen animated … small subtle animations … a more premium feeling").
   - **Lyrics:** no scrollbars, long lines wrap. With synced lyrics the current line is larger and full colour, its neighbours dimmer the further away, and the panel keeps it about a third of the way down. Tap a line to play from it; scroll by hand and it waits a few seconds before following again.
   - **Now playing:** the cover settles back a little while paused; a new song cross-fades the cover, slides the title in and shifts the tint; the seek bar glides and its thumb grows under your finger; play/pause pops its icon; on tablets and desktops a mark slides under the open tab.

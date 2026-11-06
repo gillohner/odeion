@@ -1442,7 +1442,7 @@
   // A YouTube item that can't be embedded (the uploader turned it off, removed, private): say so and go on
   yt.addEventListener('yterror', (e) => {
     const it = state.browserQueue[state.browserIndex];
-    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
+    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube only plays it on YouTube', 150: 'YouTube only plays it on youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
     toast(`\u201c${(it && it.title) || 'This video'}\u201d can't play here: ${why}.`, 'error');
     if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
   });
@@ -6822,12 +6822,33 @@
           const zs = zoneList();
           // Two zones with one name get their kind after it; an output id is never the text (UX sweep A14)
           const named = (z) => zs.filter((y) => y.name === z.name).length > 1 ? `${esc(z.name)} <span class="muted small">· ${esc(PROTO_WORDS[String(z.output || z.id).split(':')[0]] || String(z.output || '').split(':')[0])}</span>` : esc(z.name);
-          main.innerHTML = pageHead('Zones', `${zs.length} · multi-room overview`, `<button class="btn" id="zgroup">${icon('plus')} Group outputs…</button>`) + `<div class="cards">${zs.map((z) => {
+          // One device seen two ways (the owner's Linn: AirPlay and UPnP) is one card with a chip per
+          // way (owner's recording, 2026-11-06: "same device listed twice"). Zones are of one family
+          // when their names agree once the way's words are taken out; the card shows the one of
+          // them that is selected, else playing, else first.
+          const protoOf = (z) => String(z.output || z.id).split(':')[0];
+          const WAY_WORDS = /\b(airplay|upnp(?:[ -]?av)?|dlna|chromecast|cast|sonos|bluos|heos|snapcast|squeezelite|squeezebox|slimproto)\b/gi;
+          const familyOf = (z) => (z.id === BROWSER || String(z.id).startsWith('group:') ? '' : String(z.name || '').replace(WAY_WORDS, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+          const familyName = (z) => String(z.name || '').replace(WAY_WORDS, '').replace(/[\s:·(),-]+$/g, '').replace(/^[\s:·(),-]+/g, '').replace(/\(\s*\)/g, '').replace(/\s{2,}/g, ' ').trim() || z.name;
+          const families = new Map();
+          for (const z of zs) { const f = familyOf(z); if (f) families.set(f, [...(families.get(f) || []), z]); }
+          const seen = new Set();
+          const cards = zs.flatMap((z) => {
+            const f = familyOf(z); const fam = f ? families.get(f) : null;
+            if (!fam || fam.length < 2 || new Set(fam.map(protoOf)).size < 2) return [{ z, ways: null }];
+            if (seen.has(f)) return []; seen.add(f);
+            const lead = fam.find((m) => m.id === state.zone) || fam.find((m) => m.transport === 'playing') || fam[0];
+            return [{ z: lead, ways: fam }];
+          });
+          main.innerHTML = pageHead('Zones', `${cards.length} · multi-room overview`, `<button class="btn iconic" id="zgroup" aria-label="Group outputs">${icon('plus')}<span class="btn-label">Group outputs…</span></button>`) + `<div class="cards">${cards.map(({ z, ways }) => {
             const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
+            const title = ways ? esc(familyName(z)) : named(z);
+            const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
-              <div class="zc-head">${icon('zone')}<h3>${named(z)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
-              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
+              <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
+              ${wayChips}
+              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
@@ -7439,7 +7460,7 @@
                 ? row('Homeserver', `<code>${esc(t.homeserver_domain || '')}</code>${t.published === false ? ' · not published yet' : t.published ? ' · published: Pubky apps find it at this address' : ''}`, yes(t.homeserver_reachable, 'Reachable', 'Not reachable'))
                   + (t.music_hostname ? row('This node', `<code>${esc(t.music_hostname)}</code>`, yes(t.music_reachable, 'Reachable', 'Not reachable')) : '')
                   + (t.restart_needed ? `<div class="notice warn" role="status">Restart the homeserver once so it publishes the address. ${t.restart_hint ? esc(t.restart_hint) : `On the machine, in <code>deploy/bundle</code>: <code>${esc(t.restart_command || '')}</code> <button class="btn sm ghost" data-copylink="${esc(t.restart_command || '')}">Copy</button>`}</div>` : '')
-                  + row('Check from outside', 'Opens both addresses over HTTPS, as someone outside your network would.', '<button class="btn" id="rtcheck">Check now</button>')
+                  + row('Check from the internet', 'Opens both addresses over HTTPS, as someone on the internet would.', '<button class="btn" id="rtcheck">Check now</button>')
                 : row('Not set up', 'Reach this node and its homeserver from anywhere, with no open ports or static IP.', ''))
               + block(t.configured ? 'Change the tunnel' : 'Set up', 'In Cloudflare Zero Trust › Networks › Tunnels, create a tunnel and give it two public hostnames: one to <code>http://localhost:6286</code> (the homeserver), one to <code>http://localhost:7788</code> (this node). Paste the tunnel’s token and the hostnames here. With the compose bundle, start cloudflared once: <code>docker compose --profile tunnel up -d</code> (the bare-metal install starts it by itself).', `<form class="stack" id="rtform"><input class="input" id="rttoken" type="password" autocomplete="off" placeholder="${t.configured ? 'Tunnel token (saved; paste to replace)' : 'Tunnel token'}" aria-label="Cloudflare tunnel token"><input class="input" id="rths" placeholder="Homeserver hostname, e.g. pubky.example.org" aria-label="Homeserver hostname" value="${esc(t.homeserver_domain || '')}"><input class="input" id="rtmusic" placeholder="This node’s hostname (optional), e.g. music.example.org" aria-label="This node's hostname" value="${esc(t.music_hostname || '')}"><div class="actions"><button class="btn primary" id="rtsave" type="submit">Save tunnel</button>${t.configured ? '<button class="btn ghost" id="rtdel" type="button">Remove tunnel</button>' : ''}</div></form>`))
               + group('Other ways', row('Your own domain', 'A static IP, ports 80, 443 and 6287 forwarded, and Caddy in front: see “With its own Pubky homeserver” in the deploy guide (docs/deploy.md).', ''));
