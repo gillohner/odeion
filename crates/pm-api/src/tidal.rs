@@ -2657,7 +2657,11 @@ pub(crate) fn open_track_blocking(
             if let Ok(lib) = library.lock() {
                 let _ = lib.delete_setting(PLAYBACK_LIMIT_KEY);
             }
-            return crate::sources::frame_source_from_reader(f.reader, Some(f.ext), &uri);
+            // DASH seeks by segment; a single file streams as it comes
+            return match f.segments {
+                Some(segs) => crate::sources::frame_source_from_segments(segs, Some(f.ext), &uri),
+                None => crate::sources::frame_source_from_reader(f.reader, Some(f.ext), &uri),
+            };
         }
         Ok(None) => {}
         Err(e) => tracing::warn!(
@@ -2711,13 +2715,13 @@ pub(crate) fn open_track_blocking(
         };
     }
     tracing::info!(track = id, formats = ?m.formats, presentation = %m.presentation, "TIDAL manifest");
-    let reader = crate::hls::HlsReader::open(client, &m.uri).map_err(err)?;
+    let segs = crate::hls::open_segments(client, &m.uri).map_err(err)?;
     let ext = if m.formats.iter().any(|f| f.starts_with("FLAC")) {
         Some("m4a")
     } else {
         Some("aac")
     };
-    crate::sources::frame_source_from_reader(Box::new(reader), ext, &uri)
+    crate::sources::frame_source_from_segments(segs, ext, &uri)
 }
 
 #[cfg(test)]

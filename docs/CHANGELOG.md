@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-06
+
+- **Seeking in a TIDAL track no longer ends it** (owner's report: dragging the seek bar on a TIDAL full track showed "decode error … out-of-bounds seek for a non-seekable stream" and the next song started). TIDAL's full tracks (DASH), its official HLS stream and SoundCloud's HLS come in segments, and the decoder could only seek in what it had already read. A seek now opens the stream again at the segment that holds the position and plays from the exact point, forward, back or into the last segment. And if any stream takes a seek and then can't read, the track goes on from where it was and the player says "this stream cannot seek", instead of skipping to the next song.
+
 ### 2026-11-05
 
 - **A playlist's Delete follows the window** (from #269's review): beside Play in a desktop window wider than 1024 px, in ⋯ otherwise, also when the window is resized with the playlist open (it was decided when the page was drawn, so a window made narrower kept Delete beside Play and none in ⋯).

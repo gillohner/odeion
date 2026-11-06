@@ -64,6 +64,18 @@ struct PatternSource {
     title: Option<String>,
     /// Streams MP3 (a uri ending in `.mp3`), else FLAC.
     mp3: bool,
+    /// How a seek goes (from the uri): `brokenseek` takes it and then fails to read (TIDAL's
+    /// segmented streams before TASK-seek-segmented-streams-1104), `noseek` refuses it (radio).
+    seek: SeekKind,
+    /// A broken seek happened: the next read fails.
+    broken: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SeekKind {
+    Works,
+    Broken,
+    Refused,
 }
 
 impl FrameSource for PatternSource {
@@ -76,6 +88,11 @@ impl FrameSource for PatternSource {
     }
 
     fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        if self.broken {
+            return Err(SourceError::Decode(
+                "isomp4: out-of-bounds seek for a non-seekable stream".into(),
+            ));
+        }
         if self.pos >= self.total {
             return Ok(None);
         }
@@ -90,6 +107,14 @@ impl FrameSource for PatternSource {
     }
 
     fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        match self.seek {
+            SeekKind::Works => {}
+            SeekKind::Broken => {
+                self.broken = true;
+                return Ok(());
+            }
+            SeekKind::Refused => return Err(SourceError::Seek("a live stream".into())),
+        }
         self.pos = (ms * self.fmt.rate_hz as u64 / 1000).min(self.total);
         Ok(())
     }
@@ -149,6 +174,14 @@ impl SourceFactory for Factory {
             gate: self.gate.clone(),
             title: item.uri.contains("icy").then(|| "Nils Frahm - Says".to_string()),
             mp3: item.uri.ends_with(".mp3"),
+            seek: if item.uri.contains("brokenseek") {
+                SeekKind::Broken
+            } else if item.uri.contains("noseek") {
+                SeekKind::Refused
+            } else {
+                SeekKind::Works
+            },
+            broken: false,
         }))
     }
 
@@ -595,6 +628,54 @@ async fn pause_resume_seek_positions() {
             "stopped"
         ]
     );
+}
+
+/// A stream that takes a seek and then can't read (TIDAL's DASH before the segmented seek) goes
+/// on from where it was: the track doesn't end and the queue doesn't move on, and the caller
+/// hears that this stream cannot seek. One that refuses the seek (radio) keeps playing as it was.
+#[tokio::test]
+async fn a_seek_the_stream_cannot_follow_keeps_the_track_playing() {
+    for (uri, reopened) in [("a-brokenseek", true), ("a-noseek", false)] {
+        let mut r = rig(&[(uri, RATE, 1000), ("b", RATE, 300)]);
+        r.zone
+            .enqueue(vec![QueueItem::new(uri), QueueItem::new("b")], Insert::End);
+        r.zone.play();
+        r.gate.allow(3);
+        wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+        // The seek is handled after the in-flight block (300..400): from 40 ms
+        r.gate.blocked().await;
+        r.zone.seek_ms(70);
+        r.gate.allow(1);
+        wait_for(|| r.rec.samples.lock().unwrap().len() == 400).await;
+        r.gate.allow(1000);
+        let st = r.zone.wait_stopped().await;
+        assert_eq!(st.error, None, "{uri}");
+        let mut want = frames(0, 1000);
+        want.extend(frames(0, 300));
+        assert_eq!(
+            *r.rec.samples.lock().unwrap(),
+            want,
+            "{uri}: on from 40 ms, then the next track"
+        );
+        let evs = kinds(&drain_events(&mut r.events));
+        let mut expect = vec![format!("start:{uri}:false")];
+        if reopened {
+            expect.extend([
+                "seek:70".to_string(),
+                "seek:40".into(),
+                "error:this stream cannot seek (decode error: isomp4: out-of-bounds seek for a non-seekable stream)".into(),
+            ]);
+        } else {
+            expect.push("error:this stream cannot seek (seek failed: a live stream)".into());
+        }
+        expect.extend([
+            format!("end:{uri}"),
+            "start:b:true".into(),
+            "end:b".into(),
+            "stopped".into(),
+        ]);
+        assert_eq!(evs, expect, "{uri}");
+    }
 }
 
 /// A sink whose device buffers (UPnP, BluOS) is told to pause, not flushed: the renderer stops
