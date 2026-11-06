@@ -1359,7 +1359,10 @@ html[data-shell="phone"] .np-transport { display: flex; align-items: center; jus
 html[data-shell="phone"] .np-transport .icon-btn { width: 44px; height: 44px; }
 html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
 /* Now playing fills the screen down to the tabs */
-html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
+/* Now playing takes the whole phone screen: the tabs would be a second row of icons under its own
+   (owner, 2026-11-05: "bad submenu navigation"); its chevron and a swipe down close it */
+html[data-shell="phone"] body.np-open .bottomnav { display: none; }
+html[data-shell="phone"] body.np-open .overlay { bottom: 0; }
 
 /* Volume: the slider when the bar has room, else a button that opens a small volume popover (one
    slider for the zone in the bar area at any width; the Sound panel has none) */
@@ -1695,10 +1698,33 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np2:not(.compact) .np-body { grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 32px; }
 .np2:not(.compact) .np-sheet { border-left: 1px solid var(--line); padding-left: 24px; }
 .np2:not(.compact) .np-player { justify-content: flex-start; padding-top: 8px; }
-/* Compact (phones, windows up to 720 px): the five sheets in a row under the transport; an open sheet takes the screen below a strip */
-.np2.compact { padding: 6px 16px 8px; }
-.np2.compact .np-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); margin-top: auto; }
-.np2.compact.has-sheet .np-player, .np2.compact.has-sheet .np-top { display: none; }
+/* Compact (phones, windows up to 720 px): one screen that scrolls. The player fills the first
+   screen (the free height spread around the cover); under it the five parts as cards, reached by
+   one row of chips that stays at the top once the transport scrolls away. */
+.np2.compact { height: auto; min-height: 100%; padding: 6px 16px calc(24px + env(safe-area-inset-bottom, 0px)); }
+.np2.compact .np-top { margin-bottom: 12px; }
+.np2.compact .np-body { display: block; }
+.np2.compact .np-player { max-width: none; min-height: calc(100dvh - 62px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); justify-content: space-evenly; }
+.np2.compact .np-tabs, .np2.compact .np-sheet { display: none; }
+.np-jump { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px -16px 0; padding: 8px 16px; background: var(--bg); }
+.np-jump.stuck { border-bottom: 1px solid var(--line); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12); }
+.np-jump-strip { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.np-jump-strip .np-strip-art { width: 40px; height: 40px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
+.np-jump-strip .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np-jump-strip .np-strip-text { display: flex; flex-direction: column; min-width: 0; }
+.np-jump-strip .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-jump-strip .sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.np-jump-play { width: 44px; height: 44px; flex: none; }
+.np-jump-strip .src-badge, .np-jump-strip .src-badges { display: none; }
+.np-jump:not(.stuck) .np-jump-strip, .np-jump:not(.stuck) .np-jump-play { display: none; }
+.np-jump-chips { flex: 0 0 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.np-jump-chips::-webkit-scrollbar { display: none; }
+.np-jump-chips .chip { flex: none; min-height: 40px; }
+.np-jump-chips .chip[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.np-sec { margin-top: 12px; padding: 14px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
+.np-sec-h { font-size: 15px; margin: 0 0 10px; }
+.np-sec-h:focus { outline: none; }
+/* (the rules below are for the old sheet mode, unused on the one screen) */
 .np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 520px))); }
 .np2.compact .np-strip { display: flex; align-items: center; gap: 12px; padding: 4px 0 12px; }
 .np2.compact .np-strip-art { width: 48px; height: 48px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
