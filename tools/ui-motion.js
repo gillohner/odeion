@@ -9,6 +9,9 @@
 //   * a tap on a line seeks there; a scroll by hand holds the following off for a few seconds;
 //   * Now playing: a pause settles the cover back and pops the play icon; a track change cross-fades
 //     the cover (the last one fades out over the new) and slides the title in;
+//   * app-wide: a fresh page rises in and its first tiles follow one after another (the 13th and
+//     later don't); Play to rises in as a sheet (phone) or a popover (desktop); the mini player
+//     cross-fades on a track change;
 //   * under reduced motion every transition and animation is off (the motion scale is 0);
 //   * every transition and animation in app.css takes a duration from the scale (design-lint);
 //   * no horizontal overflow on any main page.
@@ -87,11 +90,33 @@ const lyricBox = (page) => page.evaluate(() => {
     // A track change: the last cover fades out over the new one, the title slides in
     const next = { ...zone, transport: 'playing', queue_index: 1, now_playing: { ...np, item: { ...np.item, id: 2, uri: 'track:2', title: 'Flowing River' }, position_ms: 1000 } };
     state.send(next); await sleep(150);
+    const mini = await page.evaluate(() => { const el = document.querySelector('#np'); return { swap: el.classList.contains('swap'), anim: getComputedStyle(el).animationName }; });
+    check(mini.swap && mini.anim === 'fadein', `${at}: the mini player cross-fades on the track change (${mini.anim})`);
     const swap = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const prev = ov.querySelector('.np-big .np-prev'); return { cls: ov.classList.contains('np-swap'), prev: !!prev, fading: !!prev && getComputedStyle(prev).animationName === 'fadeout', title: ov.querySelector('.np-titles h1').textContent.trim(), anim: getComputedStyle(ov.querySelector('.np-titles')).animationName }; });
     await sleep(900);
     const after = await page.evaluate(() => ({ prev: !!document.querySelector('#nowplaying .np-big .np-prev'), scale: new DOMMatrix(getComputedStyle(document.querySelector('#nowplaying .np-big')).transform).a }));
     check(swap.cls && swap.title === 'Flowing River' && swap.anim === 'npslide' && swap.fading && !after.prev && after.scale > 0.99, `${at}: a track change slides the title in (${swap.anim}), fades the last cover out over the new (${swap.fading}) and the cover is back at rest (×${after.scale.toFixed(2)}; old cover gone ${!after.prev})`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+    await context.close();
+  }
+  // A fresh page rises in, its first tiles one after another; Play to rises in
+  for (const [w, h] of [[390, 844], [1440, 900]]) {
+    const { page, context } = await fx.create(browser, w, { mobile: w < 600, fixtures: { ...fixtures, '/library/albums': { body: Array.from({ length: 16 }, (_, i) => ({ id: 70 + i, title: `Album ${i}`, album_artist: 'Sefa', year: 2017, tracks: 10 })) } } });
+    await page.setViewportSize({ width: w, height: h }); await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
+    await fx.go(page, '/'); await page.waitForSelector('#main'); await sleep(400);
+    // To Albums the way the app's own Back and links go (a fresh page, not a reload)
+    await page.evaluate(() => { history.pushState({}, '', '/albums'); dispatchEvent(new PopStateEvent('popstate', { state: null })); });
+    await page.waitForSelector('#main .grid .tile', { timeout: 8000 }); await sleep(80);
+    const r = await page.evaluate(() => { const m = document.querySelector('#main'); const tiles = [...document.querySelectorAll('#main .grid > .tile')]; const d = (i) => tiles[i] ? getComputedStyle(tiles[i]).animationDelay : null; const a = (i) => tiles[i] ? getComputedStyle(tiles[i]).animationName : null; return { view: m.classList.contains('view-in'), anim: getComputedStyle(m).animationName, n: tiles.length, d1: d(0), d3: d(2), a3: a(2), a13: a(12) }; });
+    check(r.view && r.anim === 'viewin', `${w}: a fresh page rises in (${r.anim})`);
+    check(r.n >= 13 && r.a3 === 'fadein' && parseFloat(r.d3) > parseFloat(r.d1) && r.a13 === 'none', `${w}: the first tiles follow one after another (3rd ${r.d3} after the 1st ${r.d1}); the 13th doesn't move (${r.a13})`);
+    await sleep(1000);
+    const later = await page.evaluate(() => document.querySelector('#main').classList.contains('view-in'));
+    check(!later, `${w}: the page's entrance is over after a second (so what arrives later doesn't move)`);
+    await page.click('#zonebtn'); await sleep(50);
+    const pop = await page.evaluate(() => getComputedStyle(document.querySelector('#zonepop')).animationName);
+    check(pop === (w < 600 ? 'sheetin' : 'popin-rise'), `${w}: Play to rises in (${pop})`);
     await context.close();
   }
   // Reduced motion: the scale is 0, and no element has a running transition or animation

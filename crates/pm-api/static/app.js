@@ -2934,6 +2934,9 @@
     const it = np.item;
     const live = np.stream_title;
     const links = npLinksHtml(it, live, barPlain());
+    // A track change cross-fades the mini player
+    const npEl = $('#np'); const wasUri = npEl.dataset.uri || ''; npEl.dataset.uri = it.uri || '';
+    if (wasUri && wasUri !== (it.uri || '') && !waitHtml && !errHtml) { npEl.classList.remove('swap'); void npEl.offsetWidth; npEl.classList.add('swap'); clearTimeout(npEl.swapT); npEl.swapT = setTimeout(() => npEl.classList.remove('swap'), 500); }
     $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
     // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
     // its title there); with a mouse the bar's title and artist are links of their own
@@ -5229,7 +5232,10 @@
     // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
     // (a sidebar place) and the bar never stay busy for good
     let mo = null; let cap = 0; let drawing = null;
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    // A fresh page comes in with a short rise (and its first tiles and rows after one another); the
+    // class goes after that, so what arrives later on the page doesn't move
+    const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
     const rendering = render(); navRendering = rendering; drawing = lastDrawing;
     return Promise.race([rendering, superseded, drawn]).finally(end);

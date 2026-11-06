@@ -823,6 +823,42 @@ html[data-shell="phone"] .idbar { max-width: none; }
 .chip.scope .spin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .fadein { animation: fadein var(--dur-base) var(--ease) both; }
+/* App-wide motion (TASK-ui-motion-polish-1106 §3), all on the one scale, transform and opacity only:
+   a page comes in with a short fade and rise; its first tiles and rows follow one after another
+   (the first twelve, on that first draw only: never on a longer list, never while it scrolls);
+   tiles lift under the pointer and give under the finger; a focus ring fades in; sheets, menus and
+   dialogs rise in; the mini player cross-fades on a track change. */
+.main.view-in { animation: viewin var(--dur-base) var(--ease) both; }
+@keyframes viewin { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(-n+12) { animation: fadein var(--dur-base) var(--ease) both; animation-delay: calc(var(--stagger, 0) * 28ms); }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(2) { --stagger: 1; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(3) { --stagger: 2; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(4) { --stagger: 3; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(5) { --stagger: 4; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(6) { --stagger: 5; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(7) { --stagger: 6; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(8) { --stagger: 7; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(9) { --stagger: 8; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(10) { --stagger: 9; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(11) { --stagger: 10; }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(12) { --stagger: 11; }
+.tile .art { transition: transform var(--dur-base) var(--ease), box-shadow var(--dur-base) var(--ease); }
+.tile:active .art { transform: scale(0.97); transition-duration: var(--dur-fast); }
+.chip, .pop-item, .bnav, .list-row.clickable { transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.chip:active, .pop-item:active, .bnav:active { transform: scale(0.97); }
+:focus-visible { animation: focusin var(--dur-fast) var(--ease); }
+@keyframes focusin { from { outline-color: transparent; } }
+.popover:not([hidden]) { animation: popin-rise var(--dur-base) var(--ease); }
+@keyframes popin-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+html[data-shell="phone"] .popover:not([hidden]):not(.menu), .popover.menu.sheet:not([hidden]) { animation-name: sheetin; }
+@keyframes sheetin { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+.popover.sheet-drag { animation: none; }
+.scrim:not([hidden]) { animation: scrimin var(--dur-base) var(--ease); }
+@keyframes scrimin { from { opacity: 0; } }
+.dialog[open] { animation: dialogin var(--dur-base) var(--ease); }
+@keyframes dialogin { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+.dialog[open]::backdrop { animation: scrimin var(--dur-base) var(--ease); }
+.player-now.swap { animation: fadein var(--dur-base) var(--ease); }
 @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .fadein, .chip.scope .spin, .sprog > span { animation: none; transition: none; } }
 .toprow { display: flex; align-items: center; gap: 16px; padding: 14px; }
