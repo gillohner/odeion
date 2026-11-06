@@ -12,6 +12,8 @@
 //     closes the top one and the page stays; a swipe down closes Play to, a short pull doesn't;
 //   * the chip says what is wrong ("Change the API token") and its panel is "External resources";
 //   * the last zone card scrolls fully above the mini player.
+//   * Home doesn't move while it loads: opened again, each row's placeholder is the size it had
+//     (covers as tiles, songs as rows, Pubky rows their height), so every header stays within 4 px.
 //   node tools/ui-android-first.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -116,6 +118,26 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     check(z.last <= z.bar, `${w}: the last of ${z.n} zone cards ends above the mini player (${z.last} <= ${z.bar})`);
     check(!state.errors.length, `${w}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
+  }
+  // Home, slow to answer: the headers while it loads vs once it has
+  {
+    const albums = Array.from({ length: 6 }, (_, i) => ({ id: 70 + i, title: `Album ${i}`, album_artist: 'Sefa', year: 2017 }));
+    const forgotten = Array.from({ length: 3 }, (_, i) => ({ ...fx.track, id: 200 + i, title: `Song ${i}` }));
+    for (const [w, h] of [[360, 800], [412, 915]]) {
+      const { page, context } = await fx.create(browser, w, { mobile: true, delay: (v) => (v === '/library/home' || v.startsWith('/home/') ? 1200 : 0), fixtures: { ...fixtures, '/library/home': { body: { recently_played: albums, recently_added: albums.slice(0, 3), forgotten } } } });
+      await page.setViewportSize({ width: w, height: h });
+      const heads = () => page.evaluate(() => [...document.querySelectorAll('#main .section-head h3')].map((x) => [x.textContent, Math.round(x.getBoundingClientRect().top + document.querySelector('#main').scrollTop)]));
+      const loaded = () => page.waitForFunction(() => document.querySelector('#h-played .tile:not(.sk-tile)') && !document.querySelector('#main .hbody > .skeleton'), null, { timeout: 8000 });
+      await fx.go(page, '/'); await loaded(); await sleep(300); // the first visit: what each row holds
+      await fx.go(page, '/albums'); await page.waitForSelector('#main');
+      await fx.go(page, '/'); await page.waitForSelector('#h-played .sk-tile'); await sleep(200);
+      const before = await heads(); await page.screenshot({ path: path.join(SHOTS, `home-loading-${w}.png`) });
+      await loaded(); await sleep(400);
+      const after = await heads();
+      const moved = before.map(([t, y]) => { const a = after.find(([u]) => u === t); return [t, a ? a[1] - y : null]; }).filter(([, d]) => d == null || Math.abs(d) >= 4);
+      check(before.length > 3 && !moved.length, `${w}: Home opened again doesn't move while it loads (${before.length} headers${moved.length ? `; moved: ${moved.map(([t, d]) => `${t} ${d}`).join(', ')}` : ''})`);
+      await context.close();
+    }
   }
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all passed'); console.log(`screenshots: ${SHOTS}`);

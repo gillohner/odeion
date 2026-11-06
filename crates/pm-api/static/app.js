@@ -4592,6 +4592,18 @@
     $$('[data-smore]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const t = all[Number(b.dataset.smore)]; itemMenu(b, { title: t.title, songs: [t], plays_from: ctx.plays_from, fallback: ctx.fallback, artistId: t.artist_id, artistName: t.artist, albumId: t.album_id, openOn: t.page ? [{ source: serviceOfUrl(t.page) || (t.uri || '').split(':')[0], url: t.page, label: '' }] : [], path: t.id ? `/song/${t.id}` : null, extra: ctx.rowExtra ? ctx.rowExtra(Number(b.dataset.smore), b.closest('.srow')) : [] }); });
   };
   // One tile for albums and artists: click opens the item page, the hover Play plays it.
+  // Tiles while a grid loads: the same grid, square covers and the two text lines a tile has
+  const tileSkeleton = (n) => (n ? `<div class="grid" aria-hidden="true">${'<div class="tile sk-tile"><div class="art skeleton"></div><div class="t"><span class="skeleton sk-text">&nbsp;</span></div><div class="a"><span class="skeleton sk-text short">&nbsp;</span></div></div>'.repeat(n)}</div>` : '<p class="muted small"><span class="skeleton sk-text">&nbsp;</span></p>');
+  // Song rows while a list loads: a song row's own parts (number, play, cover, two lines, length,
+  // More), so each is as tall as the row that replaces it
+  const rowSkeleton = (n) => (n ? `<div class="list" aria-hidden="true">${'<div class="list-row srow sk-srow"><span class="num muted small">&nbsp;</span><span class="icon-btn"></span><span class="thumbwrap"><span class="thumb skeleton"></span></span><div class="grow"><div class="name"><span class="skeleton sk-text">&nbsp;</span></div><div class="sub"><span class="skeleton sk-text short">&nbsp;</span></div></div><span class="muted small">&nbsp;</span><span class="icon-btn"></span></div>'.repeat(n)}</div>` : '');
+  // How many tiles (or rows) a Home row had last time (`n` given: remember it)
+  const homeCount = (k, n, first = 4) => {
+    let all = {}; try { all = JSON.parse(localStorage.getItem('pm.homeCounts') || '{}') || {}; } catch { /* none kept */ }
+    if (n == null) return Number.isInteger(all[k]) ? all[k] : first;
+    if (all[k] !== n) { all[k] = n; try { localStorage.setItem('pm.homeCounts', JSON.stringify(all)); } catch { /* private window */ } }
+    return n;
+  };
   const itemTileGrid = (tiles, kind) => `<div class="grid">${tiles.map((a, k) => `<button class="tile" data-tile="${k}" title="${esc(a.title)}"><div class="art" style="background:linear-gradient(135deg, hsl(${hue(a.title)} 38% 30%), hsl(${(hue(a.title) + 40) % 360} 42% 18%))"><span>${esc(initials(a.title))}</span>${a.image ? `<img loading="lazy" alt="" src="${esc(imgSrc(a.image))}" data-err="remove">` : ''}${coverBadge(coverSvc(a), true)}<span class="tile-play" data-tileplay="${k}" role="button" title="Play">${icon('play')}</span></div><div class="t">${esc(a.title)}</div><div class="a">${esc(a.year || '')}</div>${coverFrom(coverSvc(a))}</button>`).join('')}</div>`;
   const bindItemTiles = (box, tiles, kind) => {
     $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; setView('item', { kind, id: tiles[Number(b.dataset.tile)].id }); });
@@ -5106,7 +5118,7 @@
         case 'home': {
           if (!state.sources) { try { state.sources = await api('GET', '/sources'); } catch { state.sources = []; } }
           const win = state.homeWindow || '7d';
-          const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}">See all</button></div><div class="hbody"><div class="skeleton" style="height:${opts.h || 160}px"></div></div></section>`;
+          const sec = (name, title, opts = {}) => `<section class="section" id="h-${name}"><div class="section-head"><h3>${title}</h3>${opts.windows ? `<span class="chips win">${WINDOWS.map(([w, l]) => `<button class="chip ${w === win ? 'on' : ''}" data-win="${w}">${l}</button>`).join('')}</span>` : ''}<button class="link" data-seeall="${name}" ${homeCount('s:' + name, undefined, 1) ? '' : 'hidden'}>See all</button></div><div class="hbody"><div class="skeleton" style="height:${homeCount('h:' + name, undefined, opts.h || 160)}px"></div></div></section>`;
           await pubkyUser();
           // Rows you can hide and reorder (UX review #10): your own layout (Settings › You › Home), over the node's
           const HOME_ROWS = [['listening', 'Listening now'], ['played', 'Recently played'], ['added', 'Recently added'], ['forgotten', 'Forgotten favourites'], ['lb', 'Recommended for you'], ['trending-songs', 'Trending songs', { windows: true, h: 300 }], ['trending-albums', 'Trending albums', { windows: true }], ['trending-artists', 'Trending artists', { windows: true }], ['following', 'From people you follow', { h: 120 }], ['tags', 'Tags people use for music', { h: 60 }], ['concerts', 'Concerts near you', { h: 80 }], ['podcasts', 'Podcasts'], ['yours', 'Yours on Pubky', { h: 120 }], ['new', 'New on Pubky', { h: 120 }]];
@@ -5120,7 +5132,9 @@
           const ordered = [...(lay.order || []).filter((k) => known.includes(k)), ...known.filter((k) => !(lay.order || []).includes(k))];
           const showRow = (k) => !(lay.hidden || []).includes(k);
           const rowOf = (k) => HOME_ROWS.find(([x]) => x === k);
-          const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody"><div class="skeleton" style="height:150px"></div></div></section>`;
+          // While the library answers, a row shows the tiles it had last time (4 the first time), each
+          // the size of a real tile, so the rows below don't move when the covers come (owner's recording)
+          const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody">${k === 'forgotten' ? rowSkeleton(homeCount(k, undefined, 3)) : tileSkeleton(homeCount(k))}</div></section>`;
           const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (k === 'listening') return '<div id="h-listenwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + '<div id="h-setup"></div>'
@@ -5163,6 +5177,7 @@
             const albumRow = (k, list, emptyText) => {
               const el = $(`#h-${k} .hbody`); if (!el) return;
               const albums = (list || []).filter((a) => a.id != null).slice(0, 12);
+              homeCount(k, albums.length);
               if (!albums.length && state.setupShown) { el.parentElement.remove(); return; }
               el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: a.album_artist || a.year || '' })), 'album') : `<p class="muted small">${emptyText}</p>`;
               el.parentElement.classList.add('fadein');
@@ -5173,6 +5188,7 @@
             const fe = $('#h-forgotten .hbody');
             if (fe) {
               const ts = h.forgotten || [];
+              homeCount('forgotten', ts.length);
               if (!ts.length) { fe.parentElement.remove(); } else {
                 const songs = ts.map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t), image: t.album && t.album.id != null ? `/v1/library/albums/${t.album.id}/cover` : null }));
                 fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
@@ -5196,6 +5212,9 @@
               if (sc.needs === 'contact') { el.parentElement.remove(); return; }
               el.innerHTML = homeBody(sc, name, false); el.parentElement.classList.add('fadein'); bindHome(el, sc);
               const see = $(`#h-${name} [data-seeall]`); if (see) see.hidden = !(sc.items.length > 6 || sc.tags.length > 20);
+              // Its height and its See all for the next visit's placeholder (these rows mix songs,
+              // covers and events; See all can take the header a second line)
+              homeCount('h:' + name, Math.round(el.offsetHeight)); if (see) homeCount('s:' + name, see.hidden ? 0 : 1);
             });
           }
           break;

@@ -394,6 +394,10 @@ html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px; }
 .sk-grid .skeleton { aspect-ratio: 1; }
+/* A tile while it loads: its text lines keep their line height, the bar fills part of the width */
+.sk-text { display: inline-block; width: 70%; color: transparent; }
+.sk-text.short { width: 45%; }
+.sk-tile { cursor: default; }
 
 /* ---- covers & tiles ---- */
 .art { position: relative; width: 100%; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--surface-3); display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.85); font-weight: 700; font-size: 28px; letter-spacing: 0.02em; }
