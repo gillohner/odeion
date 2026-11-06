@@ -6,6 +6,13 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-06
 
+- **The Android app fits the phone** (owner's screen recording: screens panned sideways and cut their left edge, Play to opened beside the page, Home jumped as it loaded, a black window at start).
+  - **Nothing pans sideways:** the top bar was wider than a phone screen when the status chip showed (the search field couldn't shrink), so the whole page was, and the WebView zoomed it out. The bar fits now, and so does every page and panel.
+  - **Panels are bottom sheets on phones:** Play to, the Sound panel, a files job and the volume open from the bottom at the screen's width, with a handle; a swipe down, Back or a tap outside closes them, like the menus.
+  - **The status chip says what is wrong:** "Change the API token" rather than "not answering" when nothing is down; its panel is "External resources".
+  - **Home stays still while it loads:** each row's placeholder is what it had last time (covers as tiles, songs as rows), so the headers don't jump when the music comes.
+  - **Starting the app:** the window has the app's colour from the first frame (no black), the connecting page is centred from the start with a spinner, and after 5 s without an answer it says so and offers Try again; the player bar keeps the zone and song it showed last until the node answers.
+  - **Search in the Android app:** the Search tab no longer focuses the field without a keyboard; a tap on the field opens it.
 - **Back after Play to › Sleep timer stays on the page.** The Sleep timer and "Who sees what you play" menus opened before the Play to menu's own Back step was taken back, so they got none: Back then went back a page in the address while the page stayed. They wait for it now.
 - **Seeking in a TIDAL track no longer ends it** (owner's report: dragging the seek bar on a TIDAL full track showed "decode error … out-of-bounds seek for a non-seekable stream" and the next song started). TIDAL's full tracks (DASH), its official HLS stream and SoundCloud's HLS come in segments, and the decoder could only seek in what it had already read. A seek now opens the stream again at the segment that holds the position and plays from the exact point, forward, back or into the last segment. And if any stream takes a seek and then can't read, the track goes on from where it was and the player says "this stream cannot seek", instead of skipping to the next song.
 
