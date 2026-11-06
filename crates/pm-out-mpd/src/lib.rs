@@ -220,6 +220,11 @@ impl MpdOutput {
 
 #[async_trait]
 impl Output for MpdOutput {
+    /// Levels are set as an amplitude (`volume_path`/`set_volume` map dB with `10^(dB/20)`).
+    fn percent_for_db(&self, db: f32) -> u8 {
+        pm_zones::amplitude_percent(db)
+    }
+
     fn id(&self) -> OutputId {
         OutputId::new("mpd", &self.server.address())
     }
@@ -264,6 +269,27 @@ impl Output for MpdOutput {
             paused: false,
             unconfirmed: false,
         }))
+    }
+
+    /// MPD's `status` says its volume (0–100; -1 when the mixer is off). It has no mute.
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        let server = self.server.clone();
+        tokio::task::spawn_blocking(move || -> Result<Option<pm_model::ZoneVolume>, MpdError> {
+            let mut c = Client::connect(&server)?;
+            let status = c.command("status")?;
+            Ok(status
+                .iter()
+                .find(|(k, _)| k == "volume")
+                .and_then(|(_, v)| v.parse::<i32>().ok())
+                .filter(|v| (0..=100).contains(v))
+                .map(|v| pm_model::ZoneVolume {
+                    level: pm_model::VolumeLevel::Percent(v as u8),
+                    muted: false,
+                }))
+        })
+        .await
+        .map_err(|_| SinkError::Device("MPD volume read panicked".into()))?
+        .map_err(device_err)
     }
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {

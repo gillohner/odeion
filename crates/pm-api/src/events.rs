@@ -62,6 +62,19 @@ struct Inner {
     seq: Mutex<u64>,
     library_rev: AtomicU64,
     boot: String,
+    /// Controllers connected to `/v1/events` right now (the volume poll runs only while one is).
+    watchers: std::sync::atomic::AtomicUsize,
+    /// Woken when the first controller connects, so the volume poll reads at once.
+    first_watcher: tokio::sync::Notify,
+}
+
+/// Counts one connected controller while it lives.
+pub struct Watching(Arc<Inner>);
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        self.0.watchers.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl EventBus {
@@ -73,6 +86,8 @@ impl EventBus {
                 seq: Mutex::new(0),
                 library_rev: AtomicU64::new(0),
                 boot: format!("{:016x}", rand::random::<u64>()),
+                watchers: std::sync::atomic::AtomicUsize::new(0),
+                first_watcher: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -87,6 +102,24 @@ impl EventBus {
         // No receivers is fine: nobody is listening.
         let _ = self.inner.tx.send(Sequenced { seq: *seq, event });
         *seq
+    }
+
+    /// A controller is watching until the returned guard drops.
+    pub fn watch(&self) -> Watching {
+        if self.inner.watchers.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.inner.first_watcher.notify_waiters();
+        }
+        Watching(self.inner.clone())
+    }
+
+    /// Resolves when a controller connects while none was.
+    pub async fn first_watcher(&self) {
+        self.inner.first_watcher.notified().await;
+    }
+
+    /// Whether any controller is connected to `/v1/events`.
+    pub fn watched(&self) -> bool {
+        self.inner.watchers.load(Ordering::Relaxed) > 0
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Sequenced> {
@@ -195,10 +228,13 @@ pub(crate) fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<Api
         ApiEvent::LibraryChanged => Some(ev.clone()),
         // The owner's copies: file names and folders on their machine
         ApiEvent::Jobs { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
+        // Outputs are the owner's, as `GET /v1/outputs` is
+        ApiEvent::OutputsChanged { .. } => (c.role == crate::accounts::Role::Owner).then(|| ev.clone()),
     }
 }
 
 async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Option<String>) {
+    let _watching = s.events.watch();
     let (mut tx, mut rx) = socket.split();
     let (mut events, seq) = s.events.subscribe_at();
     // A listener sees file names, not where the owner keeps files (as in every JSON answer)
@@ -471,6 +507,19 @@ mod tests {
         assert_eq!(
             v["event"],
             serde_json::json!({"type": "error", "message": "boom"})
+        );
+    }
+
+    /// A phone's USB DAC came or went: controllers read `outputs_changed` with the node's id.
+    #[test]
+    fn an_output_device_change_is_an_event() {
+        let ev = ApiEvent::OutputsChanged {
+            output: pm_zones::OutputId("net:192.168.1.20:7790/cpal:Speaker or headphones".into()),
+        };
+        let v = serde_json::to_value(EventMsg { seq: 9, event: &ev }).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"seq": 9, "type": "outputs_changed", "output": "net:192.168.1.20:7790/cpal:Speaker or headphones"})
         );
     }
 }

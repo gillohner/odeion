@@ -108,6 +108,10 @@ pub struct NodeState {
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     /// HEOS players (Denon, Marantz) among the renderers: a zone of them only is a HEOS group.
     pub heos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// Every UPnP renderer by output id: its zone follows the volume by event (upnp_events.rs).
+    pub renderers: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// The renderers' event subscriptions, by callback token.
+    pub gena: crate::upnp_events::Gena,
     /// The snapserver whose groups are zones (`[outputs] snapcast`).
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
@@ -417,6 +421,8 @@ impl NodeState {
             stream_secret,
             sonos: Default::default(),
             heos: Default::default(),
+            renderers: Default::default(),
+            gena: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
             mpd: Default::default(),
@@ -532,6 +538,61 @@ impl NodeState {
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
         let _ = self.events.send(ApiEvent::Zone { state: initial });
+        // The output's level, read back now and every few seconds (a Linn's own remote changes
+        // it; the pages show what the device says), for outputs with a hardware volume. The
+        // task ends with the zone.
+        if zone.output().caps().hw_volume.is_some() {
+            // A UPnP renderer that sends events: followed live; the poll steps aside meanwhile
+            let following = Arc::new(crate::upnp_events::Following::default());
+            let renderer = self
+                .renderers
+                .lock()
+                .expect("renderers lock")
+                .get(&zone.output().id())
+                .cloned();
+            if let Some(out) = renderer {
+                crate::upnp_events::follow(self, &zone, out, following.clone());
+            }
+            let weak = Arc::downgrade(&zone);
+            let node = Arc::downgrade(self);
+            let zid = zone.id().clone();
+            let bus = self.events.clone();
+            tokio::spawn(async move {
+                let every = volume_poll();
+                let mut tick = tokio::time::interval(every);
+                // A slow device doesn't get reads back to back (a set waits on the same lock)
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut first = true;
+                loop {
+                    // A page that connects reads the level at once, not on the next tick
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = bus.first_watcher() => tick.reset(),
+                    }
+                    // Gone from the registry (ungrouped, the device left): the poll ends too
+                    let Some(n) = node.upgrade() else { break };
+                    if n.zones.get(&zid).is_none() {
+                        break;
+                    }
+                    // Read once at the start; after that only while someone is looking and no
+                    // events are coming
+                    if !first
+                        && (!n.events.watched() || following.live.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        continue;
+                    }
+                    first = false;
+                    drop(n);
+                    let Some(z) = weak.upgrade() else { break };
+                    // An unreachable device holds the lock no longer than this
+                    let _ = tokio::time::timeout(
+                        every.min(std::time::Duration::from_secs(4)),
+                        z.refresh_volume(),
+                    )
+                    .await;
+                }
+            });
+        }
         tokio::spawn(async move {
             let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {
@@ -1125,6 +1186,10 @@ impl NodeState {
         }
         self.keep_pull(&name, pull);
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
+        self.renderers
+            .lock()
+            .expect("renderers lock")
+            .insert(id.clone(), out.clone());
         if pm_out_upnp::heos::is_heos(&r) {
             self.heos
                 .lock()
@@ -1227,6 +1292,21 @@ impl NodeState {
         );
     }
 
+    /// A key cell for one endpoint: when one of its outputs reports another device (a phone's
+    /// USB DAC came or went), every owner's controller hears `outputs_changed`. Only for outputs
+    /// the node lists already: a new one is announced once it is registered
+    /// (`add_endpoint_address`), so a controller that fetches the outputs at once finds it.
+    fn endpoint_cell(&self, key: pm_stream::Key) -> pm_out_net::KeyCell {
+        let cell = pm_out_net::KeyCell::new(key);
+        let (events, outputs) = (self.events.clone(), self.outputs.clone());
+        cell.on_device_change(move |id| {
+            if outputs.get(id).is_some() {
+                events.send(ApiEvent::OutputsChanged { output: id.clone() });
+            }
+        });
+        cell
+    }
+
     /// The endpoint keys, loaded on first use; run `f` with them, saving when it says so.
     fn with_endpoint_keys<T>(
         &self,
@@ -1241,7 +1321,7 @@ impl NodeState {
                 .unwrap_or_default();
             stored
                 .into_iter()
-                .filter_map(|(a, k)| Some((a, pm_out_net::KeyCell::new(pm_stream::Key::parse(&k).ok()?))))
+                .filter_map(|(a, k)| Some((a, self.endpoint_cell(pm_stream::Key::parse(&k).ok()?))))
                 .collect()
         });
         let (out, changed) = f(keys);
@@ -1279,7 +1359,7 @@ impl NodeState {
                 (c, Some(old))
             }
             (Some(c), None) => (c, None),
-            (None, Some(k)) => (pm_out_net::KeyCell::new(k.clone()), None),
+            (None, Some(k)) => (self.endpoint_cell(k.clone()), None),
             (None, None) => {
                 return Err("no key stored for it; the app registers it again on its next start".into())
             }
@@ -1315,6 +1395,10 @@ impl NodeState {
                 let name = out.name();
                 self.outputs.register(out.clone());
                 self.create_zone(&name, out.clone());
+                // Its device (a DAC already plugged in) now that GET /v1/outputs lists it
+                if out.device().is_some() {
+                    self.events.send(ApiEvent::OutputsChanged { output: id.clone() });
+                }
             }
             infos.push(out.info());
         }
@@ -1828,6 +1912,22 @@ impl NodeState {
 }
 
 const CONTACT_KEY: &str = "node.contact";
+
+/// A shorter volume poll for tests (ms; 0 = none), set without touching the environment.
+pub static VOLUME_POLL_MS_FOR_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How often a zone reads its output's level back (`PM_VOLUME_POLL_MS`, or the tests' value).
+fn volume_poll() -> std::time::Duration {
+    let t = VOLUME_POLL_MS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+    if t > 0 {
+        return std::time::Duration::from_millis(t);
+    }
+    std::env::var("PM_VOLUME_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10))
+}
 
 /// Where a zone's crossfade length (ms) is kept.
 pub fn crossfade_key(zone: &ZoneId) -> String {

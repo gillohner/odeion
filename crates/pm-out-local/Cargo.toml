@@ -17,9 +17,21 @@ cpal = ["dep:cpal"]
 [dependencies]
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
+pm-usb-audio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 alsa = { version = "0.11", optional = true }
 alsa-sys = { version = "0.4", optional = true }
 cpal = { version = "=0.18.2", optional = true }
+
+[dev-dependencies]
+pm-audio = { workspace = true }
+# The phone's output through its endpoint, as the node reaches it (pm-endpoint without its
+# pm-out-local feature: no cycle)
+pm-endpoint = { workspace = true }
+pm-out-net = { workspace = true }
+pm-stream = { workspace = true }
+tempfile = "3"

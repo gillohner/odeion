@@ -187,6 +187,18 @@ jobs:
           img=$(apt-cache depends linux-image-generic | sed -n 's/^ *Depends: \(linux-image-[0-9].*-generic\)$/\1/p' | head -1)
           kver=${img#linux-image-}
           [ -n "$img" ] || { echo "::error::no kernel behind linux-image-generic"; exit 1; }
+          # The archive can list a new kernel hours before its extra modules (2026-11-06: 6.8.0-149 on
+          # the Azure mirror for three runs): then the newest kernel that has both. (`apt-cache show`
+          # answers 0 for a package only referred to; the candidate tells.)
+          has() { c=$(apt-cache policy "$1" 2>/dev/null | sed -n 's/^ *Candidate: //p'); [ -n "$c" ] && [ "$c" != "(none)" ]; }
+          if ! has "linux-modules-extra-$kver"; then
+            was=$kver
+            kver=$(apt-cache pkgnames linux-modules-extra- | sed -n 's/^linux-modules-extra-\([0-9][0-9.-]*-generic\)$/\1/p' | sort -V \
+              | while read -r v; do if has "linux-image-$v" && has "linux-modules-extra-$v"; then echo "$v"; fi; done | tail -1)
+            [ -n "$kver" ] || { echo "::error::no generic kernel with its extra modules"; exit 1; }
+            img="linux-image-$kver"
+            echo "::warning::linux-modules-extra-$was is not in the archive yet: using $kver"
+          fi
           sudo apt-get install -y --no-install-recommends libasound2-dev alsa-utils qemu-system-x86 busybox-static \
             squeezelite "$img" "linux-modules-extra-$kver"
           sudo chmod a+r "/boot/vmlinuz-$kver"
@@ -424,6 +436,10 @@ jobs:
           node-version: 22
       - name: design lint (classed buttons, no icon glyphs, every class styled)
         run: node tools/design-lint.js
+      - name: palette contrast (WCAG AA on every pair)
+        run: node tools/palette-contrast.js
+      - name: tag colours are pubky.app's (its generateRandomColor, ported)
+        run: node tools/tag-colour-check.js
       - name: installable web app (manifest, real icons, page links, routes, worker promises)
         run: node tools/pwa-check.js
       - run: cargo build -p pm-node
@@ -470,6 +486,16 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-busy.js $GITHUB_WORKSPACE /tmp/pm/busy-shots
           node $GITHUB_WORKSPACE/tools/ui-source-policy.js $GITHUB_WORKSPACE /tmp/pm/source-policy-shots
           node $GITHUB_WORKSPACE/tools/ui-versions.js $GITHUB_WORKSPACE /tmp/pm/versions-shots
+          node $GITHUB_WORKSPACE/tools/ui-similar-tiles.js $GITHUB_WORKSPACE /tmp/pm/similar-shots
+          node $GITHUB_WORKSPACE/tools/ui-connect-ring.js $GITHUB_WORKSPACE /tmp/pm/connect-ring-shots
+          node $GITHUB_WORKSPACE/tools/ui-tap-highlight.js $GITHUB_WORKSPACE /tmp/pm/tap-highlight-shots
+          node $GITHUB_WORKSPACE/tools/ui-here-name.js $GITHUB_WORKSPACE /tmp/pm/here-name-shots
+          node $GITHUB_WORKSPACE/tools/ui-android-first.js $GITHUB_WORKSPACE /tmp/pm/android-first-shots
+          node $GITHUB_WORKSPACE/tools/ui-nowplaying-phone.js $GITHUB_WORKSPACE /tmp/pm/nowplaying-phone-shots
+          node $GITHUB_WORKSPACE/tools/ui-motion.js $GITHUB_WORKSPACE /tmp/pm/motion-shots
+          node $GITHUB_WORKSPACE/tools/ui-redesign.js $GITHUB_WORKSPACE /tmp/pm/redesign-shots
+          node $GITHUB_WORKSPACE/tools/ui-item-about.js $GITHUB_WORKSPACE /tmp/pm/item-about-shots
+          node $GITHUB_WORKSPACE/tools/ui-usb-dac.js $GITHUB_WORKSPACE /tmp/pm/usb-dac-shots
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
           (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \
             nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
@@ -508,6 +534,60 @@ jobs:
         with:
           name: song-versions-shots
           path: /tmp/pm/versions-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: similar-tiles-shots
+          path: /tmp/pm/similar-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: connect-ring-shots
+          path: /tmp/pm/connect-ring-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tap-highlight-shots
+          path: /tmp/pm/tap-highlight-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: here-name-shots
+          path: /tmp/pm/here-name-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-first-shots
+          path: /tmp/pm/android-first-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nowplaying-phone-shots
+          path: /tmp/pm/nowplaying-phone-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: motion-shots
+          path: /tmp/pm/motion-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: redesign-shots
+          path: /tmp/pm/redesign-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: item-about-shots
+          path: /tmp/pm/item-about-shots
           if-no-files-found: ignore
       - if: failure()
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
@@ -642,7 +722,7 @@ jobs:
           cast = false
           slimproto_port = 0
           TOML
-          nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
+          PM_DEV_OUTPUTS=1 nohup ./target/debug/pm-node -c /tmp/pm/node.toml serve > /tmp/pm/node.log 2>&1 &
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
           # The node scans its config folders at start
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
@@ -655,6 +735,12 @@ jobs:
       - name: copy the library to the homeserver (folder tree, totals, the job chip; a 20 000-file library stays quick; desktop and phone)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-copy-library.js ci-token http://127.0.0.1:7788
+      - name: one volume, one source (the bar's slider or the volume popover, never both; every slider reads the zone's level; 1345 to 390 px)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-volume.js ci-token http://127.0.0.1:7788
+      - name: item pages tell switching from leaving (Also on, Open in, the ⋯ menu's Open in…; 375, 820 and 1440 px)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-also-open.js ci-token http://127.0.0.1:7788
       - name: UX sweep follow-ups (a slow TIDAL collection, 40 px touch targets, hero rows, back or trail, tablet Now playing, file names, short notes; 390 to 1180 px)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-sweep-followups.js ci-token http://127.0.0.1:7788
@@ -664,9 +750,15 @@ jobs:
       - name: comments on item pages (post, replies, delete your own; desktop and phone)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-comments.js ci-token http://127.0.0.1:7788
+      - name: artist release sections (Albums, EPs and singles, Other releases; View all paging and Back; loading, error, partial; desktop, tablet and phone)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-release-sections.js ci-token http://127.0.0.1:7788
       - name: People on phones and tablets (invite cards, paste and scan a key, folds, tag chips to touch; 390 and 768)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-people.js ci-token http://127.0.0.1:7788
+      - name: tags in the top card (two scopes, pubky.app chips and taggers, overflow, unmatched; 1280, 820 and 390)
+        timeout-minutes: 8
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-tags-hero.js ci-token http://127.0.0.1:7788
       - name: collections with web links and posts show their cards in order (desktop and phone)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-collection-cards.js ci-token http://127.0.0.1:7788

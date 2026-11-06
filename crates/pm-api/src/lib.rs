@@ -87,10 +87,12 @@ pub mod qobuz;
 pub mod quality;
 pub mod radio;
 pub mod radio_sources;
+pub mod releases;
 pub mod remote;
 pub mod reviews;
 pub mod roon_import;
 pub mod search;
+pub mod segmented;
 pub mod shared;
 pub mod signin;
 pub mod smart;
@@ -110,6 +112,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod upnp_events;
 pub mod usage;
 pub mod vault;
 pub mod vault_cache;
@@ -240,6 +243,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/outputs/endpoints", post(add_endpoint))
         .route("/outputs/endpoints/{address}", delete(remove_endpoint))
         .route("/outputs/pull", post(create_pull))
+        .route("/outputs/{id}/device", axum::routing::put(put_output_device))
         .route("/outputs/pull/{name}/url", get(pull_url))
         .route("/zones", get(zones).post(create_zone))
         .route("/zones/{id}", get(zone).delete(delete_zone))
@@ -815,6 +819,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/song/{id}", get(web_ui))
         .route("/album/{id}", get(web_ui))
         .route("/artist/{id}", get(web_ui))
+        .route("/artist/{id}/releases/{section}", get(web_ui))
         .route("/playlist/{id}", get(web_ui))
         .route("/person/{id}", get(web_ui))
         .route("/smart/{id}", get(web_ui))
@@ -913,6 +918,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
                 // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
                 .route("/v1/outputs/pull/{name}/{file}", get(pull_stream))
+                // A renderer's volume events (GENA NOTIFY), to the token the node handed it; LAN only
+                .route(
+                    "/v1/upnp/events/{token}",
+                    axum::routing::any(upnp_events::notify).layer(middleware::from_fn(peer::lan_only)),
+                )
                 // Album covers for TV screens, with that cover's key.
                 .route("/v1/art/{id}", get(keyed_cover))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
@@ -1290,6 +1300,57 @@ async fn outputs(State(s): State<Arc<NodeState>>) -> Json<Vec<OutputView>> {
             })
             .collect(),
     )
+}
+
+/// `PUT /v1/outputs/{id}/device {mode?, full_level_ok?}`: the listener's choices for the hardware
+/// behind an output (a phone's USB DAC: `auto`, `bit_perfect` or `shared`, and whether the zone's
+/// volume is the DAC's). The output's app keeps them; the answer is the output as listed.
+async fn put_output_device(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<DeviceSettingsPatch>,
+) -> ApiResult<OutputInfo> {
+    let out = s
+        .outputs
+        .get(&OutputId(id.clone()))
+        .ok_or_else(|| ApiError::not_found(format!("no output {id}")))?;
+    let Some(device) = out.device() else {
+        return Err(ApiError::bad_request(format!("{id} has no device to set")));
+    };
+    let mut settings = device.settings.unwrap_or_default();
+    if let Some(m) = body.mode {
+        if m == pm_zones::PreferredMode::Unknown {
+            return Err(ApiError::bad_request(
+                "mode is auto, bit_perfect, exclusive or shared",
+            ));
+        }
+        settings.mode = m;
+    }
+    if let Some(v) = body.dac_volume {
+        settings.dac_volume = v;
+    }
+    // The listener's agreement that Bit-perfect (or Exclusive USB on a DAC without a volume of its
+    // own) plays at full level, asked when they choose it below Android's full volume; it goes
+    // with any other mode
+    settings.full_level_ok = body.full_level_ok.unwrap_or(false)
+        && matches!(
+            settings.mode,
+            pm_zones::PreferredMode::BitPerfect | pm_zones::PreferredMode::Exclusive
+        );
+    out.configure_device(settings)
+        .await
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(Json(out.info()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DeviceSettingsPatch {
+    #[serde(default)]
+    mode: Option<pm_zones::PreferredMode>,
+    #[serde(default)]
+    dac_volume: Option<bool>,
+    #[serde(default)]
+    full_level_ok: Option<bool>,
 }
 
 /// Create a pull output: a zone that plays to it streams WAV at
@@ -1978,15 +2039,20 @@ async fn volume(
     let zone = zone_of(&s, &id)?;
     // A zone's volume limit (DSP settings) caps absolute requests.
     let limit = s.sources.dsp_for(&zone.output().id()).max_volume_db;
-    zone.set_volume(cap_volume(body.volume, limit)).await?;
+    let out = zone.output().clone();
+    zone.set_volume(cap_volume(body.volume, limit, |db| out.percent_for_db(db)))
+        .await?;
     announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Apply a zone's volume limit to an absolute dB request.
-fn cap_volume(v: pm_model::Volume, limit: Option<f32>) -> pm_model::Volume {
+/// Apply a zone's volume limit (dB) to an absolute request: a dB request is capped at it, a
+/// percent request at the level the zone's own output sets for that dB (`percent_for`: linear
+/// on UPnP and Snapcast, an amplitude on BluOS, MPD and Cast).
+fn cap_volume(v: pm_model::Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8) -> pm_model::Volume {
     match (v, limit) {
         (pm_model::Volume::Db(db), Some(max)) if db > max => pm_model::Volume::Db(max),
+        (pm_model::Volume::Percent(p), Some(max)) => pm_model::Volume::Percent(p.min(percent_for(max))),
         (v, _) => v,
     }
 }
@@ -5195,6 +5261,473 @@ mod tests {
             .is_none());
     }
 
+    /// A zone says its output's level (`volume`): null for an output without one, the level
+    /// read back after every change (the dB cap applied), and mute (TASK-volume-one-source).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zones_report_their_volume_and_read_it_back_after_a_change() {
+        use pm_zones::outputs::NullOutput;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let db_out: Arc<dyn pm_zones::Output> = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        // The poll runs fast here (read when a zone's poll starts), and only while a controller
+        // watches: one does for this test
+        crate::state::VOLUME_POLL_MS_FOR_TESTS.store(200, std::sync::atomic::Ordering::Relaxed);
+        let watching = s.events.watch();
+        let pc_out_raw = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let pc_out: Arc<dyn pm_zones::Output> = pc_out_raw.clone();
+        s.outputs.register(db_out.clone());
+        s.outputs.register(pc_out.clone());
+        let db_zone = s.create_zone("Null dB", db_out);
+        let pc_zone = s.create_zone("Null percent", pc_out);
+        let app = router(s.clone());
+        // The poll's first read has happened once the zones settle
+        db_zone.refresh_volume().await;
+        pc_zone.refresh_volume().await;
+        db_zone.wait_acked().await;
+        pc_zone.wait_acked().await;
+        let (st, zones) = call(&app, "GET", "/v1/zones", None).await;
+        assert_eq!(st, StatusCode::OK, "{zones}");
+        let by_out = |id: &str| {
+            zones
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|z| z["output"] == id)
+                .cloned()
+                .unwrap()
+        };
+        assert!(
+            by_out("null")["volume"].is_null(),
+            "no hardware volume: {}",
+            by_out("null")
+        );
+        assert_eq!(
+            by_out("null:db")["volume"],
+            serde_json::json!({"db": 0.0, "muted": false})
+        );
+        assert_eq!(
+            by_out("null:percent")["volume"],
+            serde_json::json!({"percent": 100, "muted": false})
+        );
+        // A change is read back
+        let dz = db_zone.id().0.clone();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{dz}/volume"),
+            Some(serde_json::json!({"volume": {"db": -20.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        db_zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{dz}"), None).await;
+        assert_eq!(
+            z["volume"],
+            serde_json::json!({"db": -20.0, "muted": false}),
+            "{z}"
+        );
+        // The zone's volume limit caps it
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{dz}/dsp"),
+            Some(serde_json::json!({"max_volume_db": -30.0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{dz}/volume"),
+            Some(serde_json::json!({"volume": {"db": -10.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        db_zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{dz}"), None).await;
+        assert_eq!(z["volume"]["db"], -30.0, "capped: {z}");
+        // Asked again, the level stays at the cap: controllers still hear the read-back (a page
+        // showing the -10 it asked for learns the device kept -30)
+        let mut w = db_zone.watch();
+        w.borrow_and_update();
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{dz}/volume"),
+            Some(serde_json::json!({"volume": {"db": -10.0}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        let heard = tokio::time::timeout(std::time::Duration::from_secs(2), w.changed()).await;
+        assert!(
+            matches!(heard, Ok(Ok(()))),
+            "no zone update after an unchanged read-back"
+        );
+        assert_eq!(
+            w.borrow().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Db(-30.0))
+        );
+        // The device's own level changes behind the node's back (its remote): the poll shows it
+        pc_out_raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(33),
+            muted: false,
+        });
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while pc_zone.state().volume.map(|v| v.level) != Some(pm_model::VolumeLevel::Percent(33)) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            seen.is_ok(),
+            "the poll never showed the device's own change: {:?}",
+            pc_zone.state().volume
+        );
+        // Nobody watching: the poll stops reading (the device changes again, unseen)
+        drop(watching);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        pc_out_raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(21),
+            muted: false,
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert_eq!(
+            pc_zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33)),
+            "no controller connected: no reads"
+        );
+        let _watching = s.events.watch();
+        pc_out_raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(33),
+            muted: false,
+        });
+        // Percent and mute, on a percent output
+        let pz = pc_zone.id().0.clone();
+        for (body, want) in [
+            (
+                serde_json::json!({"volume": {"percent": 40}}),
+                serde_json::json!({"percent": 40, "muted": false}),
+            ),
+            (
+                serde_json::json!({"volume": {"mute": true}}),
+                serde_json::json!({"percent": 40, "muted": true}),
+            ),
+            (
+                serde_json::json!({"volume": "up"}),
+                serde_json::json!({"percent": 43, "muted": true}),
+            ),
+        ] {
+            let (st, _) = call(&app, "POST", &format!("/v1/zones/{pz}/volume"), Some(body)).await;
+            assert_eq!(st, StatusCode::NO_CONTENT);
+            pc_zone.wait_acked().await;
+            let (_, z) = call(&app, "GET", &format!("/v1/zones/{pz}"), None).await;
+            assert_eq!(z["volume"], want, "{z}");
+        }
+        // The limit caps a percent request too (-30 dB is 50 % on the outputs' scale)
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/zones/{pz}/dsp"),
+            Some(serde_json::json!({"max_volume_db": -30.0})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{pz}/volume"),
+            Some(serde_json::json!({"volume": {"percent": 100}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        pc_zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{pz}"), None).await;
+        assert_eq!(z["volume"]["percent"], 50, "capped: {z}");
+    }
+
+    /// A UPnP renderer's volume follows its events (TASK-volume-readback): the node subscribes,
+    /// a renew the renderer refuses (412) makes a fresh SUBSCRIBE, a NOTIFY to the callback
+    /// moves the zone's level and mute, and the poll steps aside only once events arrive. Late,
+    /// stale and foreign events are dropped, and a zone made again under the same name doesn't
+    /// get this renderer's level.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renderers_volume_events_move_the_zone() {
+        // The same value the read-back test uses (tests share the process)
+        crate::state::VOLUME_POLL_MS_FOR_TESTS.store(200, std::sync::atomic::Ordering::Relaxed);
+        let log = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let renewals = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let reads = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (l2, r2, rd) = (log.clone(), renewals.clone(), reads.clone());
+        let mock = Router::new()
+            .route(
+                "/rc/event",
+                axum::routing::any(move |method: axum::http::Method, h: axum::http::HeaderMap| {
+                    let (log, renewals) = (l2.clone(), r2.clone());
+                    async move {
+                        let cb = h
+                            .get("CALLBACK")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let sid = h
+                            .get("SID")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        log.lock().unwrap().push((
+                            method.to_string(),
+                            if sid.is_empty() {
+                                cb
+                            } else {
+                                format!("renew {sid}")
+                            },
+                        ));
+                        if !sid.is_empty() {
+                            // The first renewal is refused: the node must subscribe afresh
+                            if renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                                return (
+                                    StatusCode::PRECONDITION_FAILED,
+                                    [("SID", "uuid:gone"), ("TIMEOUT", "Second-1")],
+                                );
+                            }
+                        }
+                        (StatusCode::OK, [("SID", "uuid:sub-1"), ("TIMEOUT", "Second-1")])
+                    }
+                }),
+            )
+            // The poll's GetVolume/GetMute, counted
+            .route(
+                "/rc/control",
+                post(move || {
+                    let rd = rd.clone();
+                    async move {
+                        rd.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let base = format!("http://127.0.0.1:{port}");
+        let r = pm_out_upnp::Renderer {
+            udn: "uuid:fake-linn".into(),
+            friendly_name: "Fake Linn".into(),
+            manufacturer: Some("Linn Products Ltd.".into()),
+            model: Some("Klimax DSM".into()),
+            av_transport: format!("{base}/av/control"),
+            rendering_control: Some(format!("{base}/rc/control")),
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+            events: pm_out_upnp::RendererEvents {
+                rendering_control: Some(format!("{base}/rc/event")),
+                openhome_volume: None,
+            },
+        };
+        let pull = s.pull_output("fake-linn");
+        let out = Arc::new(pm_out_upnp::UpnpOutput::new(r, pull, s.pull_url("fake-linn")));
+        let oid = pm_zones::Output::id(out.as_ref());
+        s.renderers.lock().unwrap().insert(oid.clone(), out.clone());
+        s.outputs.register(out.clone());
+        let zone = s.create_zone("Fake Linn", out);
+        let app = router(s.clone());
+        // It subscribes, with a callback on the node
+        let token = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some((_, cb)) = log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(m, c)| m == "SUBSCRIBE" && c.starts_with('<'))
+                {
+                    return cb
+                        .trim_matches(['<', '>'])
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .to_string();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the node never subscribed");
+        let reads_now = || reads.load(std::sync::atomic::Ordering::SeqCst);
+        let ms = |n| tokio::time::sleep(std::time::Duration::from_millis(n));
+        // A page is open: with no event arrived yet the poll keeps reading, subscription or not
+        let watching = s.events.watch();
+        let before = reads_now();
+        ms(700).await;
+        assert!(reads_now() > before, "no event yet, so the poll reads");
+        // The renewal is refused (412): the node subscribes afresh
+        let again = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let l = log.lock().unwrap().clone();
+                let renewed = l.iter().position(|(_, c)| c.starts_with("renew"));
+                if let Some(i) = renewed {
+                    if l[i + 1..]
+                        .iter()
+                        .any(|(m, c)| m == "SUBSCRIBE" && c.starts_with('<'))
+                    {
+                        return l;
+                    }
+                }
+                drop(l);
+                ms(100).await;
+            }
+        })
+        .await;
+        assert!(
+            again.is_ok(),
+            "no fresh SUBSCRIBE after a refused renewal: {:?}",
+            log.lock().unwrap()
+        );
+        // A NOTIFY from the LAN moves the zone's volume and mute
+        let notify_as = |token: &str, sid: &str, seq: u32, body: &str| {
+            let mut req = Request::builder()
+                .method("NOTIFY")
+                .uri(format!("/v1/upnp/events/{token}"))
+                .header("NT", "upnp:event")
+                .header("SID", sid)
+                .header("SEQ", seq.to_string())
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                "192.168.1.30:49152".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            req
+        };
+        let notify = |token: &str, seq: u32, body: &str| notify_as(token, "uuid:sub-1", seq, body);
+        let event = |inner: &str| {
+            format!(
+                r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;{inner}&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#
+            )
+        };
+        let level = |v: u32| event(&format!(r#"&lt;Volume channel="Master" val="{v}"/&gt;"#));
+        let body =
+            event(r#"&lt;Volume channel="Master" val="37"/&gt;&lt;Mute channel="Master" val="1"/&gt;"#);
+        let resp = app.clone().oneshot(notify(&token, 0, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume,
+            Some(pm_model::ZoneVolume {
+                level: pm_model::VolumeLevel::Percent(37),
+                muted: true
+            })
+        );
+        // Events arrive now: the poll leaves the zone alone (one read may have been under way)
+        ms(300).await;
+        let before = reads_now();
+        ms(800).await;
+        assert_eq!(reads_now(), before, "events work, so the poll doesn't read");
+        // Only the mute changes next: the level stays
+        let body = event(r#"&lt;Mute channel="Master" val="0"/&gt;"#);
+        app.clone().oneshot(notify(&token, 1, &body)).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| (v.level, v.muted)),
+            Some((pm_model::VolumeLevel::Percent(37), false))
+        );
+        // A quick turn whose events arrive out of order: the later one (SEQ) wins
+        app.clone().oneshot(notify(&token, 3, &level(40))).await.unwrap();
+        app.clone().oneshot(notify(&token, 2, &level(30))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // Back and forth at once (40 → 41 → 40): ends at 40, the last word
+        app.clone().oneshot(notify(&token, 4, &level(41))).await.unwrap();
+        app.clone().oneshot(notify(&token, 5, &level(40))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // SEQ 0 is a subscription's first event: the count starts again, the level is taken
+        app.clone().oneshot(notify(&token, 0, &level(33))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33))
+        );
+        // An event with nothing the node reads (left channel only) changes nothing
+        let lf = event(r#"&lt;Volume channel="LF" val="5"/&gt;"#);
+        assert_eq!(
+            app.clone()
+                .oneshot(notify(&token, 1, &lf))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33))
+        );
+        app.clone().oneshot(notify(&token, 2, &level(40))).await.unwrap();
+        zone.wait_acked().await;
+        // An event of a subscription the node gave up: 412, nothing moves
+        let resp = app
+            .clone()
+            .oneshot(notify_as(&token, "uuid:old", 6, &level(12)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        // A token the node doesn't hold: 412, as GENA says; a request from outside the LAN: refused
+        let resp = app.clone().oneshot(notify("nope", 7, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        let mut outside = notify(&token, 7, &body);
+        outside.extensions_mut().insert(axum::extract::ConnectInfo(
+            "8.8.8.8:5000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        assert_eq!(
+            app.clone().oneshot(outside).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // The zone goes and another output gets a zone of the same name: the renderer's events
+        // don't reach it, and the node unsubscribes
+        let zid = zone.id().clone();
+        s.remove_zone(&zid);
+        let other: Arc<dyn pm_zones::Output> =
+            Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        s.outputs.register(other.clone());
+        let twin = s.create_zone("Fake Linn", other);
+        assert_eq!(twin.id(), &zid, "the same name gives the same id");
+        twin.wait_acked().await;
+        let twin_was = twin.state().volume;
+        let resp = app.clone().oneshot(notify(&token, 8, &level(9))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        twin.wait_acked().await;
+        assert_eq!(
+            twin.state().volume,
+            twin_was,
+            "the renderer's level went to another zone"
+        );
+        let gone = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !log.lock().unwrap().iter().any(|(m, _)| m == "UNSUBSCRIBE") {
+                ms(100).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "no UNSUBSCRIBE: {:?}", log.lock().unwrap());
+        drop(watching);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn audiobookshelf_asks_non_admins_for_a_key_and_ends_the_session() {
         let logouts = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -6615,10 +7148,47 @@ mod tests {
         assert_eq!(cfg["max_volume_db"], -20.0);
         // Requests are capped before they reach the output.
         use pm_model::Volume;
-        assert_eq!(cap_volume(Volume::Db(-3.0), Some(-20.0)), Volume::Db(-20.0));
-        assert_eq!(cap_volume(Volume::Db(-30.0), Some(-20.0)), Volume::Db(-30.0));
-        assert_eq!(cap_volume(Volume::Db(-3.0), None), Volume::Db(-3.0));
-        assert_eq!(cap_volume(Volume::Up, Some(-20.0)), Volume::Up);
+        let linear = |db: f32| ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).floor() as u8;
+        assert_eq!(
+            cap_volume(Volume::Db(-3.0), Some(-20.0), linear),
+            Volume::Db(-20.0)
+        );
+        assert_eq!(
+            cap_volume(Volume::Db(-30.0), Some(-20.0), linear),
+            Volume::Db(-30.0)
+        );
+        assert_eq!(cap_volume(Volume::Db(-3.0), None, linear), Volume::Db(-3.0));
+        assert_eq!(cap_volume(Volume::Up, Some(-20.0), linear), Volume::Up);
+        // Percent is capped where the output itself puts the limit: -30 dB is 50 % on a linear
+        // output (UPnP), 3 % on one that sets an amplitude (BluOS, MPD, Cast)
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-30.0), linear),
+            Volume::Percent(50)
+        );
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-30.0), pm_zones::amplitude_percent),
+            Volume::Percent(3)
+        );
+        assert_eq!(
+            cap_volume(Volume::Percent(2), Some(-30.0), pm_zones::amplitude_percent),
+            Volume::Percent(2)
+        );
+        // Rounded down, never past the limit: -46 dB is 0.5 % as an amplitude (1 % would be -40 dB)
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-46.0), pm_zones::amplitude_percent),
+            Volume::Percent(0)
+        );
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-46.0), linear),
+            Volume::Percent(23)
+        );
+        // An output's own mapping: the default (linear) on an output that doesn't override it
+        let plain = pm_zones::outputs::NullOutput::with_volume(pm_model::VolumeKind::Percent);
+        assert_eq!(
+            cap_volume(Volume::Percent(100), Some(-46.0), |db| plain.percent_for_db(db)),
+            Volume::Percent(23),
+            "rounded down (23.3 %)"
+        );
         // The null output has no volume control at all: the request is refused as before.
         let (st, body) = call(
             &app,
@@ -20168,6 +20738,438 @@ exec sleep 300
         assert_eq!(bookmarks::local_ids(&s.library.lock().unwrap()), vec![id]);
     }
 
+    /// Search hits open the unified item page: an Internet Archive item lists its recordings
+    /// (public files only) and plays them, an Audius song's row carries its stream, and an item
+    /// the archive restricts says so (TASK-archive-restricted, revisions 1 and 2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn archive_and_audius_pages_from_search_play_and_a_restricted_item_says_so() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (flac_a, flac_b) = (flac.clone(), flac);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen_q = Arc::new(std::sync::Mutex::new(String::new()));
+        let sq = seen_q.clone();
+        let track = serde_json::json!({"id": "W0NJ0", "title": "Ambient Piano Interlude", "user": {"name": "Techwipe"}, "duration": 5,
+            "permalink": "/techwipe/ambient-piano-interlude-353852", "artwork": {"480x480": "https://img/480"}, "play_count": 3});
+        let (t1, t2) = (track.clone(), track);
+        let mock = Router::new()
+            .route(
+                "/advancedsearch.php",
+                get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let sq = sq.clone();
+                    async move {
+                        *sq.lock().unwrap() = q.get("q").cloned().unwrap_or_default();
+                        Json(serde_json::json!({"response": {"docs": [
+                            {"identifier": "fixture-set", "title": "Fixture Set", "creator": "Tester", "year": "2020", "downloads": 7}
+                        ]}}))
+                    }
+                }),
+            )
+            .route(
+                "/metadata/{id}",
+                get(|axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    Json(if id == "locked-set" {
+                        // A restricted item: the flag, and every audio file private
+                        serde_json::json!({
+                            "metadata": {"title": "Locked Set", "access-restricted-item": "true"},
+                            "files": [{"name": "x.mp3", "format": "VBR MP3", "source": "original", "private": "true"}]
+                        })
+                    } else {
+                        serde_json::json!({
+                            "metadata": {"title": "Fixture Set", "creator": "Tester", "year": "2020"},
+                            "files": [
+                                {"name": "one.flac", "format": "Flac", "source": "original", "title": "One", "track": "1", "length": "5.15"},
+                                {"name": "two.flac", "format": "Flac", "source": "original", "title": "Two", "track": "2", "private": "true"}
+                            ]
+                        })
+                    })
+                }),
+            )
+            .route(
+                "/download/{id}/{file}",
+                get(move || {
+                    let flac = flac_a.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            )
+            .route(
+                "/v1/resolve",
+                get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let t = t1.clone();
+                    async move {
+                        assert_eq!(q.get("url").map(String::as_str), Some("https://audius.co/techwipe/ambient-piano-interlude-353852"));
+                        Json(serde_json::json!({"data": t}))
+                    }
+                }),
+            )
+            .route(
+                "/v1/tracks/{id}",
+                get(move || {
+                    let t = t2.clone();
+                    async move { Json(serde_json::json!({"data": t})) }
+                }),
+            )
+            .route(
+                "/v1/tracks/{id}/stream",
+                get(move || {
+                    let flac = flac_b.clone();
+                    async move { ([(header::CONTENT_TYPE, "audio/flac")], flac) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let base = format!("http://127.0.0.1:{port}");
+        *s.archive_base.write().unwrap() = base.clone();
+        *s.audius_base.write().unwrap() = base.clone();
+        let app = router(s.clone());
+        // The search never asks for restricted items
+        let (st, r) = call(&app, "GET", "/v1/sources/archive/search?q=fixture", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(
+            seen_q
+                .lock()
+                .unwrap()
+                .ends_with("AND mediatype:(audio) AND NOT access-restricted-item:(true)"),
+            "{}",
+            seen_q.lock().unwrap()
+        );
+        // An archive item from a search hit: the page lists its public recordings and plays them
+        let id = crate::discover::page_id("https://archive.org/details/fixture-set");
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert_eq!(pg["title"], "Fixture Set", "{pg}");
+        let songs = pg["songs"].as_array().unwrap();
+        assert_eq!(songs.len(), 1, "the private file is left out: {pg}");
+        let uri = songs[0]["uri"].as_str().unwrap().to_string();
+        assert_eq!(uri, format!("{base}/download/fixture-set/one.flac"));
+        assert_eq!(songs[0]["title"], "One");
+        assert_eq!(
+            (
+                pg["plays_from"]["service"].as_str(),
+                pg["plays_from"]["mode"].as_str()
+            ),
+            (Some("archive"), Some("full")),
+            "{pg}"
+        );
+        assert!(pg["unavailable"].is_null());
+        let (st, plan) = call(
+            &app,
+            "GET",
+            "/v1/discover/play?uri=https%3A%2F%2Farchive.org%2Fdetails%2Ffixture-set",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(plan["items"][0]["uri"], uri, "{plan}");
+        assert_eq!(plan["plays_from"]["service"], "archive");
+        let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
+        let zid = zones[0]["id"].as_str().unwrap().to_string();
+        let (st, q) = call(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(serde_json::json!({"items": [{"uri": uri, "title": "One", "album": "Fixture Set"}], "replace": true, "play": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        let zone = s.zones.get(&ZoneId::new(&zid)).unwrap();
+        assert_eq!(zone.wait_stopped().await.error, None);
+        // The archive switched off on Sources: the page lists nothing and plays from nowhere
+        let off = serde_json::json!({"enabled": false});
+        let (st, _) = call(&app, "PUT", "/v1/sources/archive/enabled", Some(off)).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, dark) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{dark}");
+        assert!(
+            dark["songs"].as_array().unwrap().is_empty() && dark["plays_from"].is_null(),
+            "{dark}"
+        );
+        let on = serde_json::json!({"enabled": true});
+        let (st, _) = call(&app, "PUT", "/v1/sources/archive/enabled", Some(on)).await;
+        assert_eq!(st, StatusCode::OK);
+        // A restricted item: the page says so, with nothing to play and no "plays from"
+        let id = crate::discover::page_id("https://archive.org/details/locked-set");
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/album/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert!(
+            pg["unavailable"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("Restricted on the Internet Archive"),
+            "{pg}"
+        );
+        assert!(
+            pg["songs"].as_array().unwrap().is_empty() && pg["plays_from"].is_null(),
+            "{pg}"
+        );
+        let (st, e) = call(&app, "GET", "/v1/sources/archive/items/locked-set", None).await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{e}");
+        assert!(
+            e["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Restricted on the Internet Archive"),
+            "{e}"
+        );
+        // An Audius song from a search hit: its row carries the stream, and Play queues it
+        let id = crate::discover::page_id("https://audius.co/techwipe/ambient-piano-interlude-353852");
+        let (st, pg) = call(&app, "GET", &format!("/v1/item/song/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert_eq!(pg["title"], "Ambient Piano Interlude", "{pg}");
+        let stream = format!("{base}/v1/tracks/W0NJ0/stream?app_name=pubky-music-node");
+        assert_eq!(pg["songs"][0]["uri"], stream, "{pg}");
+        assert_eq!(pg["plays_from"]["service"], "audius", "{pg}");
+        let (st, plan) = call(
+            &app,
+            "GET",
+            "/v1/discover/play?uri=https%3A%2F%2Faudius.co%2Ftechwipe%2Fambient-piano-interlude-353852",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{plan}");
+        assert_eq!(plan["items"][0]["uri"], stream, "{plan}");
+    }
+
+    /// A library album with no MusicBrainz match keeps its Year in About (the release group's
+    /// "Released" stands in for it only when there is one), and the facts say their kind: the
+    /// year is a fact, a file's format a reference.
+    #[tokio::test]
+    async fn album_without_a_match_keeps_its_year_as_a_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let aid = {
+            let lib = s.library.lock().unwrap();
+            let album = pm_model::Album {
+                id: None,
+                title: "Sounds from the Fourth World".into(),
+                album_artist: Some("Calvin Russell".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: Some(1991),
+                upc: None,
+                total_discs: None,
+            };
+            let mut tr = untagged_track(dir.path().join("music/fw/01.flac"), "Song 1", "Calvin Russell");
+            tr.album = Some(album);
+            tr.track_no = Some(1);
+            let id = lib.upsert_track(&tr).unwrap().0;
+            lib.get_track(pm_model::TrackId(id))
+                .unwrap()
+                .unwrap()
+                .album
+                .unwrap()
+                .id
+                .unwrap()
+        };
+        let (st, al) = call(&app, "GET", &format!("/v1/item/album/lib-{aid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{al}");
+        let about = al["about"].as_array().unwrap();
+        let year = about.iter().find(|f| f["label"] == "Year");
+        assert_eq!(
+            year.map(|f| (f["value"].as_str().unwrap(), f["kind"].as_str().unwrap())),
+            Some(("1991", "fact")),
+            "{al}"
+        );
+        assert!(
+            about.iter().all(|f| f["label"] != "Released"),
+            "no release group, no Released: {al}"
+        );
+        let format = about.iter().find(|f| f["label"] == "Format").unwrap();
+        assert_eq!(format["kind"], "ref", "a file's format is a reference: {al}");
+    }
+
+    /// A phone's USB DAC: the node tells owners (`outputs_changed`) only once the phone's output is
+    /// in the list, so a controller that fetches `GET /v1/outputs` on the event finds it with its
+    /// device; plugging out tells them again; listeners never hear it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_output_device_is_announced_after_its_output_is_listed() {
+        struct Phone {
+            inner: NullOutput,
+            dac: std::sync::Mutex<Option<pm_zones::OutputDevice>>,
+        }
+        #[async_trait::async_trait]
+        impl pm_zones::Output for Phone {
+            fn id(&self) -> OutputId {
+                OutputId::new("cpal", "Speaker or headphones")
+            }
+            fn name(&self) -> String {
+                "Speaker or headphones (Android audio, shared mode)".into()
+            }
+            fn device(&self) -> Option<pm_zones::OutputDevice> {
+                self.dac.lock().unwrap().clone()
+            }
+            async fn configure_device(
+                &self,
+                settings: pm_zones::DeviceSettings,
+            ) -> Result<(), pm_zones::SinkError> {
+                if let Some(d) = self.dac.lock().unwrap().as_mut() {
+                    d.settings = Some(settings);
+                }
+                Ok(())
+            }
+            fn caps(&self) -> &pm_model::OutputCaps {
+                self.inner.caps()
+            }
+            async fn open(
+                &self,
+                fmt: pm_model::AudioFormat,
+            ) -> Result<Box<dyn pm_zones::AudioSink>, pm_zones::SinkError> {
+                self.inner.open(fmt).await
+            }
+        }
+        let ka17 = pm_zones::OutputDevice {
+            name: "FiiO KA17".into(),
+            ..Default::default()
+        };
+        let phone = Arc::new(Phone {
+            inner: NullOutput::new(),
+            dac: std::sync::Mutex::new(Some(ka17)),
+        });
+        let outs = pm_zones::OutputRegistry::new();
+        outs.register(phone.clone());
+        let key = pm_stream::Key::random();
+        let serving = pm_endpoint::Endpoint::new("Pixel 8", outs, key.clone())
+            .spawn(std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+            .unwrap();
+        let address = serving.addr().to_string();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        // What a controller would see when it fetches the outputs the moment the event arrives
+        let mut rx = s.events.subscribe();
+        let s2 = s.clone();
+        // Each observation is also signalled, so the test changes the phone only once the one
+        // before was observed (the observer reads the registry as it is then)
+        let (observed_tx, observed) = std::sync::mpsc::channel::<()>();
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(observed));
+        let wait_observed = || {
+            let o = observed.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    o.lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .expect("an outputs_changed event")
+                })
+                .await
+                .unwrap()
+            }
+        };
+        let seen = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while let Ok(ev) = rx.blocking_recv() {
+                match &ev.event {
+                    ApiEvent::OutputsChanged { output } => {
+                        let listed = s2.outputs.get(output).map(|o| o.device().map(|d| d.name));
+                        seen.push((ev.event.clone(), listed));
+                        let _ = observed_tx.send(());
+                    }
+                    // The test's own end mark
+                    ApiEvent::LibraryChanged => break,
+                    _ => {}
+                }
+            }
+            seen
+        });
+        let register = || {
+            let (app, address, key) = (app.clone(), address.clone(), key.clone());
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/outputs/endpoints",
+                    Some(serde_json::json!({"address": address, "key": key.expose()})),
+                )
+                .await
+            }
+        };
+        let (st, body) = register().await;
+        assert_eq!(st, StatusCode::OK, "{body}");
+        wait_observed().await;
+        // The owner's choices reach the phone, and the answer shows them
+        let id = body[0]["id"].as_str().unwrap().to_string();
+        let enc = id
+            .replace('%', "%25")
+            .replace('/', "%2F")
+            .replace(':', "%3A")
+            .replace(' ', "%20");
+        let (st, out) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "shared", "dac_volume": false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{out}");
+        assert_eq!(
+            out["device"]["settings"],
+            serde_json::json!({"mode": "shared", "dac_volume": false, "full_level_ok": false})
+        );
+        let (st, _) = call(
+            &app,
+            "PUT",
+            &format!("/v1/outputs/{enc}/device"),
+            Some(serde_json::json!({"mode": "loudest"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "a mode this node doesn't know");
+        let (st, _) = call(
+            &app,
+            "PUT",
+            "/v1/outputs/null/device",
+            Some(serde_json::json!({"mode": "shared"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "an output without a device");
+        wait_observed().await;
+        *phone.dac.lock().unwrap() = None;
+        let (st, _) = register().await;
+        assert_eq!(st, StatusCode::OK);
+        s.events.send(ApiEvent::LibraryChanged);
+        let seen = tokio::task::spawn_blocking(move || seen.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.len(),
+            3,
+            "plugged in at the first registration, the settings, then out"
+        );
+        assert_eq!(
+            seen[0].1,
+            Some(Some("FiiO KA17".to_string())),
+            "listed, with its device, when announced"
+        );
+        assert_eq!(
+            seen[1].1,
+            Some(Some("FiiO KA17".to_string())),
+            "its settings changed"
+        );
+        assert_eq!(seen[2].1, Some(None), "listed, without a device, when unplugged");
+        let listener = accounts::Caller {
+            role: accounts::Role::Listener,
+            key: Some("o4dksfbqk85ogzdb5osziw6befigbuxmuxkuxq8434q89uj56uyy".into()),
+        };
+        let owner = accounts::Caller {
+            role: accounts::Role::Owner,
+            key: None,
+        };
+        for (ev, _) in &seen {
+            assert!(
+                events::for_caller(&s, &listener, ev).is_none(),
+                "listeners don't hear it"
+            );
+            assert!(events::for_caller(&s, &owner, ev).is_some(), "owners do");
+        }
+        drop(serving);
+    }
+
     /// A node without a token answers only requests addressed to it by a loopback name from its
     /// own pages, the event stream included. A node with a token answers by any name, behind a
     /// proxy too. No other site frames the pages.
@@ -21759,4 +22761,7 @@ exec sleep 300
             .collect();
         assert_eq!(titles, original);
     }
+
+    /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).
+    mod release_sections;
 }
