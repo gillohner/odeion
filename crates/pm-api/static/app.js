@@ -1212,7 +1212,7 @@
     // Each state in its own words: "not answering" only for one that doesn't answer
     $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? (first.id === 'homeserver' ? `${first.name}: log out and in to approve new folders` : `${first.name}: sign in again`) : first.state === 'change' ? (first.id === 'api-token' ? 'Change the API token' : `${first.name} needs a change`) : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
     el.title = bad.map((p) => `${p.name}: ${p.detail || p.state}`).join('\n') + '\nYour library keeps playing.';
-    el.onclick = () => showMenu(el, [{ title: 'External resources' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in', run: () => { state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
+    el.onclick = () => showMenu(el, [{ title: 'External resources' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in' && p.state !== 'change', run: () => { if (p.state === 'change') { setView('settings', 'about'); return; } state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
   };
   // Clickable rows that are not buttons or links are made reachable for the keyboard, also when
   // they arrive after a page first draws (Home's sections, search results).
@@ -1228,7 +1228,7 @@
   // names who approved when it refuses, so a wrong identity is said plainly.
   const LOGIN_WHY = { ended: 'Your session ended. Log in again.', out: 'You logged out.' };
   // This browser's own state that belongs to the account, not the device (theme and layout stay)
-  const ACCOUNT_KEYS = ['pm.token', 'pm.zone', 'pm.browserQueue', 'pm.browserAt', 'pm.setupHidden'];
+  const ACCOUNT_KEYS = ['pm.token', 'pm.zone', 'pm.browserQueue', 'pm.browserAt', 'pm.setupHidden', 'pm.bar'];
   // The auth middleware's answer to a missing or wrong token (lib.rs `auth`)
   const NODE_REFUSED = 'missing or wrong bearer token';
   const forgetAccount = () => {
@@ -1514,7 +1514,7 @@
   // that swapped to the real one). index.html draws it before this script runs.
   const barKept = () => { try { return JSON.parse(localStorage.getItem('pm.bar') || 'null') || {}; } catch { return {}; } };
   const barKeep = (part) => { const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
-  const renderZoneName = () => { const z = currentZone(); if (z) barKeep({ zone: z.name }); const name = z ? z.name : (!state.zonesSeen && barKept().zone) || 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
+  const renderZoneName = () => { const z = currentZone(); if (z && state.zonesSeen) barKeep({ zone: z.name }); const name = (!state.zonesSeen && barKept().zone) || (z ? z.name : 'Zone'); $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
@@ -2914,13 +2914,13 @@
     const se = !st && state.startError && state.startError.zone === state.zone && Date.now() - state.startError.at < 10000 ? state.startError : null;
     const waitHtml = st ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title np-wait" role="status"><span class="spin"></span> ${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
     const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert">${esc(se.msg)}</span></div></div>` : '';
-    if (!np && !z && !state.zonesSeen && barKept().title && !waitHtml && !errHtml) {
+    if (!np && !state.zonesSeen && barKept().title && !waitHtml && !errHtml) {
       // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
       const k = barKept();
       $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`;
       return;
     }
-    if (z) barKeep(np ? { title: np.item.title || '', sub: np.item.artist || '' } : { title: '', sub: '' });
+    if (z && state.zonesSeen) barKeep(np ? { title: np.item.title || '', sub: np.item.artist || '' } : { title: '', sub: '' });
     if (!np) {
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
@@ -4186,8 +4186,10 @@
         if (dy < 0 || Math.abs(dx) > Math.abs(dy) || el.scrollTop > 0) { t = null; return; }
         t.on = true; el.classList.add('sheet-drag');
       }
+      // The pull is the sheet's from its first move: the browser doesn't also pan (it would cancel the touch)
+      if (e.cancelable) e.preventDefault();
       t.dy = Math.max(0, dy); el.style.transform = `translateY(${t.dy}px)`;
-    }, { passive: true });
+    }, { passive: false });
     el.addEventListener('touchend', () => end(false), { passive: true });
     el.addEventListener('touchcancel', () => end(true), { passive: true });
   };
@@ -5192,7 +5194,7 @@
           const rowOf = (k) => HOME_ROWS.find(([x]) => x === k);
           // While the library answers, a row shows the tiles it had last time (4 the first time), each
           // the size of a real tile, so the rows below don't move when the covers come (owner's recording)
-          const localSec = (k, title) => `<section class="section" id="h-${k}"><div class="section-head"><h3>${title}</h3></div><div class="hbody">${k === 'forgotten' ? rowSkeleton(homeCount(k, undefined, 3)) : tileSkeleton(homeCount(k))}</div></section>`;
+          const localSec = (k, title) => `<section class="section" id="h-${k}" ${homeCount(k, undefined, k === 'forgotten' ? 3 : 4) === 0 && (k === 'forgotten' || state.setupShown) ? 'hidden' : ''}><div class="section-head"><h3>${title}</h3></div><div class="hbody">${k === 'forgotten' ? rowSkeleton(homeCount(k, undefined, 3)) : tileSkeleton(homeCount(k))}</div></section>`;
           const rowHtml = (k) => { const [, title, opts] = rowOf(k); if (k === 'lb') return '<div id="h-lbwrap"></div>'; if (k === 'listening') return '<div id="h-listenwrap"></div>'; if (['played', 'added', 'forgotten'].includes(k)) return localSec(k, title); return sec(k, title, opts || {}); };
           const editPanel = state.homeEdit ? `<section class="section homeedit" id="h-edit"><div class="section-head"><h3>Rows on Home</h3><button class="btn sm primary" id="hdone">Done</button></div><div class="list compact">${ordered.map((k, i) => `<div class="list-row"><label class="grow"><input type="checkbox" data-hshow="${k}" ${showRow(k) ? 'checked' : ''}> ${esc(rowOf(k)[1])}</label><button class="icon-btn" data-hup="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} up">${icon('chevron', 'ic up')}</button><button class="icon-btn" data-hdown="${i}" ${i === ordered.length - 1 ? 'disabled' : ''} aria-label="Move ${esc(rowOf(k)[1])} down">${icon('chevron')}</button></div>`).join('')}</div></section>` : '';
           main.innerHTML = pageHead('Home', null, `<button class="btn ghost sm" id="hedit" aria-pressed="${!!state.homeEdit}">${icon('settings')} Edit Home</button>`) + editPanel + '<div id="h-setup"></div>'
@@ -5238,7 +5240,7 @@
               homeCount(k, albums.length);
               if (!albums.length && state.setupShown) { el.parentElement.remove(); return; }
               el.innerHTML = albums.length ? itemTileGrid(albums.map((a) => ({ id: 'lib-' + a.id, title: a.title, image: `/v1/library/albums/${a.id}/cover`, year: a.album_artist || a.year || '' })), 'album') : `<p class="muted small">${emptyText}</p>`;
-              el.parentElement.classList.add('fadein');
+              el.parentElement.hidden = false; el.parentElement.classList.add('fadein');
               if (albums.length) bindItemTiles(el, albums.map((a) => ({ id: 'lib-' + a.id, title: a.title })), 'album');
             };
             albumRow('played', h.recently_played, 'Albums you play show up here.');
@@ -5249,10 +5251,10 @@
               homeCount('forgotten', ts.length);
               if (!ts.length) { fe.parentElement.remove(); } else {
                 const songs = ts.map((t, k) => ({ no: k + 1, title: t.title, artist: artists(t), album: t.album && t.album.title, album_id: t.album && t.album.id != null ? 'lib-' + t.album.id : null, duration_ms: t.duration_ms, track_id: t.id, id: trackPageId(t), image: t.album && t.album.id != null ? `/v1/library/albums/${t.album.id}/cover` : null }));
-                fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
+                fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.hidden = false; fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
               }
             }
-          }).catch(() => { for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el) el.innerHTML = '<p class="muted small">The library did not answer.</p>'; } });
+          }).catch(() => { for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el) { el.innerHTML = '<p class="muted small">The library did not answer.</p>'; el.parentElement.hidden = false; } } });
           // ListenBrainz's picks for the user, when connected (Settings › ListenBrainz).
           api('GET', '/listenbrainz').then(async (lb) => {
             if (!lb.connected || state.view !== 'home') return;
