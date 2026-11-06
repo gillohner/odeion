@@ -3184,7 +3184,8 @@
   let npObs = null; // the one screen's observers (sticky chips, the part in view, Sources when near)
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
-    const oneScroll = overlay.scrollTop; const prevUri = overlay.dataset.npuri || ''; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
+    const oneScroll = overlay.scrollTop; const prevUri = overlay.dataset.npuri || ''; const prevTransport = overlay.dataset.transport || '';
+    const prevImg = $('#nowplaying .np-big img'); const prevSrc = prevImg && prevImg.complete && prevImg.naturalWidth ? (prevImg.currentSrc || prevImg.src) : null; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
       setTimeout(setArtTint, 0); // no cover: no tint
@@ -3246,6 +3247,31 @@
         </div>
       </div>`;
     const sk = $('#npseek'); setFill(sk);
+    // A track change: the last cover fades out over the new one, the title slides in; a sheet change
+    // fades its panel in; the cover's rest state follows the transport
+    // (each marker is kept in state for its animation's length: a second redraw can follow at once,
+    // from the queue's refresh, and must not wipe it)
+    const now = Date.now();
+    if (prevUri && prevUri !== (it.uri || '')) state.npSwap = { at: now, src: prevSrc };
+    const swap = state.npSwap && now - state.npSwap.at < 400;
+    overlay.classList.toggle('np-swap', !!swap);
+    overlay.classList.toggle('np-sheet-swap', !one && (sheet || '') !== (keep.sheet || ''));
+    if (swap && state.npSwap.src) { const big = $('.np-big', overlay); if (big) { const old = new Image(); old.className = 'np-prev'; old.src = state.npSwap.src; old.style.animationDelay = `-${now - state.npSwap.at}ms`; old.onanimationend = () => old.remove(); big.appendChild(old); setTimeout(() => old.remove(), 1200); } }
+    overlay.dataset.transport = z.transport || '';
+    // A transport change that came with this redraw pops the play icon as the tick would
+    if (prevTransport && prevTransport !== (z.transport || '')) state.npPop = now;
+    if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => ic.classList.add('swap'));
+    // (the tick doesn't redraw again for this item)
+    renderNowPlaying.lastItem = it; renderNowPlaying.lastTitle = np.stream_title;
+    if (!one) {
+      const tabs = $('.np-sheet-tabs', overlay); const on = tabs && $('.chip.on', tabs);
+      if (tabs && on) {
+        // (from where the last render's mark was, so it slides)
+        const was = state.npTabMark; if (was) { tabs.style.setProperty('--tab-x', was.x); tabs.style.setProperty('--tab-w', was.w); }
+        const next = { x: `${on.offsetLeft}px`, w: String(on.offsetWidth / 100) }; state.npTabMark = next;
+        requestAnimationFrame(() => { tabs.style.setProperty('--tab-x', next.x); tabs.style.setProperty('--tab-w', next.w); });
+      }
+    }
     // Now playing's own transport (phones: the mini player hides behind it)
     // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
@@ -3497,6 +3523,11 @@
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
     if (!np || !s || s.dataset.dragging) return;
     if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
+    if ((z.transport || '') !== (overlay.dataset.transport || '')) {
+      overlay.dataset.transport = z.transport || '';
+      const playing = z.transport === 'playing';
+      $$('[data-npt="toggle"]', overlay).forEach((b) => { b.innerHTML = icon(playing ? 'pause' : 'play'); b.setAttribute('aria-label', playing ? 'Pause' : 'Play'); const ic = $('.ic', b); if (ic) ic.classList.add('swap'); });
+    }
     s.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(s);
     const p = $('#nppos'); if (p) p.textContent = fmt(np.position_ms);
     followLyrics(np.position_ms);

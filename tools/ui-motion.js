@@ -7,6 +7,8 @@
 //   * synced lyrics: the current line is larger and fuller than the others, its neighbours step
 //     down, and the panel keeps the current line about a third of the way down;
 //   * a tap on a line seeks there; a scroll by hand holds the following off for a few seconds;
+//   * Now playing: a pause settles the cover back and pops the play icon; a track change cross-fades
+//     the cover (the last one fades out over the new) and slides the title in;
 //   * under reduced motion every transition and animation is off (the motion scale is 0);
 //   * every transition and animation in app.css takes a duration from the scale (design-lint);
 //   * no horizontal overflow on any main page.
@@ -26,12 +28,20 @@ const np = { item: { id: 1, uri: 'track:1', title: 'Come On', artist: 'Dr. Peaco
 const zone = { id: 'linn', name: 'Linn Klimax DS3', output: 'upnp:linn', transport: 'playing', queue, queue_index: 0, queue_version: 1, repeat: 'off', radio: false, error: null, acked: 1, sync: 'single', crossfade_ms: 0, volume: { percent: 20, muted: false }, now_playing: np };
 // 40 lines, 2 s apart; one of them long enough to wrap on a phone
 const lyrics = { synced: true, source: 'file', lines: Array.from({ length: 40 }, (_, i) => ({ ms: i * 2000, text: i === 33 ? 'A line long enough that it has to wrap on a phone screen, and on a tablet it very nearly does as well' : `Line ${i + 1} of the song` })) };
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { body: [zone] }, '/outputs': { body: [{ id: 'upnp:linn', name: 'Linn', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/zones/linn/queue': { body: queue } };
 
 const openNp = async (browser, w, h, opts = {}) => {
   const { page, context, state } = await fx.create(browser, w, { mobile: w < 600, fixtures, ...opts });
   await page.setViewportSize({ width: w, height: h });
-  await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+  // The fixture's context asks for reduced motion (its suites measure end states); the motion is the
+  // point here. A 1×1 cover, so the cross-fade has an image to fade
+  await page.emulateMedia({ reducedMotion: opts.reduced ? 'reduce' : 'no-preference' });
+  await page.route(/\/cover(\?|$)/, (r) => r.fulfill({ contentType: 'image/png', body: PNG }));
+  let seq = 0;
+  await context.routeWebSocket(/\/v1\/events/, (ws) => { state.ws = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: seq++, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+  // Another state of the zone, as the node would send it
+  state.send = (z) => state.ws.send(JSON.stringify({ type: 'snapshot', seq: seq++, boot: 'fixture-boot', library_rev: 0, zones: [z] }));
   await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
   await fx.go(page, '/albums'); await page.waitForSelector('#np'); await sleep(500);
   await page.click(w < 600 ? '#np' : '#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-player'); await sleep(300);
@@ -58,6 +68,7 @@ const lyricBox = (page) => page.evaluate(() => {
     check(a.synced && a.on && a.prev && a.on.scale > 1.1 && a.prev.scale <= 1.01 && a.on.op === 1 && a.prev.op < 1 && a.prev2.op < a.prev.op && a.far.op < a.prev2.op, `${at}: the current line is larger (×${a.on && a.on.scale.toFixed(2)}) and fuller (${a.on && a.on.op}) than its neighbours (${a.prev && a.prev.op}, ${a.prev2 && a.prev2.op}, far ${a.far && a.far.op})`);
     check(a.on && a.on.top > a.boxH * 0.15 && a.on.top < a.boxH * 0.55, `${at}: the current line sits about a third of the way down the panel (${a.on && Math.round(a.on.top)} of ${a.boxH})`);
     check(a.role === 'button', `${at}: a synced line is a button (tap to play from there)`);
+    await page.$eval('#nplyrics', (el) => el.scrollIntoView({ block: 'start' })); await sleep(300);
     await page.screenshot({ path: path.join(SHOTS, `lyrics-${w}.png`) });
     // A tap on a line seeks there (the node is asked for position = the line's time)
     const hits0 = state.hits.length;
@@ -69,13 +80,24 @@ const lyricBox = (page) => page.evaluate(() => {
     await sleep(1600);
     const held = await page.$eval('#nplyrics .lyric-lines', (box) => box.scrollTop);
     check(held === 0, `${at}: after a scroll by hand the panel stays put for a while (at ${held})`);
+    // A pause: the cover settles back and the play icon pops
+    state.send({ ...zone, transport: 'paused' }); await sleep(900);
+    const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label'), swapped: !!b.querySelector('.ic.swap') }; });
+    check(paused.t === 'paused' && paused.scale < 0.99 && paused.label === 'Play' && paused.swapped, `${at}: a pause settles the cover back (×${paused.scale.toFixed(2)}) and swaps the icon to Play with a pop`);
+    // A track change: the last cover fades out over the new one, the title slides in
+    const next = { ...zone, transport: 'playing', queue_index: 1, now_playing: { ...np, item: { ...np.item, id: 2, uri: 'track:2', title: 'Flowing River' }, position_ms: 1000 } };
+    state.send(next); await sleep(150);
+    const swap = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const prev = ov.querySelector('.np-big .np-prev'); return { cls: ov.classList.contains('np-swap'), prev: !!prev, fading: !!prev && getComputedStyle(prev).animationName === 'fadeout', title: ov.querySelector('.np-titles h1').textContent.trim(), anim: getComputedStyle(ov.querySelector('.np-titles')).animationName }; });
+    await sleep(900);
+    const after = await page.evaluate(() => ({ prev: !!document.querySelector('#nowplaying .np-big .np-prev'), scale: new DOMMatrix(getComputedStyle(document.querySelector('#nowplaying .np-big')).transform).a }));
+    check(swap.cls && swap.title === 'Flowing River' && swap.anim === 'npslide' && swap.fading && !after.prev && after.scale > 0.99, `${at}: a track change slides the title in (${swap.anim}), fades the last cover out over the new (${swap.fading}) and the cover is back at rest (×${after.scale.toFixed(2)}; old cover gone ${!after.prev})`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
     await context.close();
   }
   // Reduced motion: the scale is 0, and no element has a running transition or animation
   {
-    const { page, context } = await openNp(browser, 390, 844, {});
-    await page.emulateMedia({ reducedMotion: 'reduce' }); await sleep(300);
+    const { page, context } = await openNp(browser, 390, 844, { reduced: true });
+    await sleep(300);
     const r = await page.evaluate(() => {
       const cs = getComputedStyle(document.documentElement);
       const durs = ['--dur-fast', '--dur-base', '--dur-slow'].map((k) => cs.getPropertyValue(k).trim());
