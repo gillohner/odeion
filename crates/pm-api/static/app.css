@@ -317,6 +317,7 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 /* (inherited: the track pseudo-element reads it from its input) */
 @property --fill { syntax: '<percentage>'; inherits: true; initial-value: 0%; }
 #npseek { transition: --fill var(--dur-slow) linear; }
+#npseek[data-dragging] { transition: none; } /* (under the finger the fill is where the finger is) */
 #npseek::-webkit-slider-thumb { transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
 #npseek:hover::-webkit-slider-thumb, #npseek:active::-webkit-slider-thumb, #npseek[data-dragging]::-webkit-slider-thumb { opacity: 1; transform: scale(1.5); }
 #npseek:hover::-moz-range-thumb, #npseek:active::-moz-range-thumb, #npseek[data-dragging]::-moz-range-thumb { opacity: 1; transform: scale(1.5); }

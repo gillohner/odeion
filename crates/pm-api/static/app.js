@@ -3484,9 +3484,12 @@
       lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); e.stopPropagation(); seekTo(ln); } });
       // A scroll counts as the listener's only right after their touch, wheel or key: the page's own
       // scrolls (the follower, a redraw putting the place back) don't hold the following off
-      const mine = () => { state.lyricsUser = Date.now(); };
+      // (the listener's own input holds at once, and a scroll right after it holds again)
+      const mine = () => { state.lyricsUser = Date.now(); state.lyricsHold = Date.now() + 4000; };
       lines.addEventListener('touchstart', mine, { passive: true });
+      lines.addEventListener('touchmove', mine, { passive: true });
       lines.addEventListener('wheel', mine, { passive: true });
+      lines.addEventListener('focusin', mine);
       lines.addEventListener('keydown', (e) => { if (/^(Arrow|Page|Home|End)/.test(e.key)) mine(); });
       lines.addEventListener('scroll', () => { if (lines.dataset.auto) return; if (state.lyricsUser && Date.now() - state.lyricsUser < 1500) state.lyricsHold = Date.now() + 4000; }, { passive: true });
     }

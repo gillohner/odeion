@@ -76,10 +76,11 @@ for (const [c, at] of [...used.entries()].sort()) {
   const LOOP = /\b(spin|shimmer|conn-pulse|navprog|nudge)\b|\binfinite\b|(?<![-\w])width\b/;
   for (const f of cssFiles) {
     const src = fs.readFileSync(path.join(DIR, f), 'utf8');
-    const re = /(transition|animation|transition-duration|animation-duration|animation-delay):([^;{}]*)/g; let m;
+    const re = /(transition|animation|transition-duration|animation-duration|transition-delay|animation-delay):([^;{}]*)/g; let m;
     while ((m = re.exec(src))) {
       // (each comma-separated part on its own: one on the scale doesn't excuse another)
-      for (const part of m[2].split(',')) {
+      // (commas inside cubic-bezier() or steps() don't split)
+      for (const part of m[2].split(/,(?![^(]*\))/)) {
         const decl = part.trim();
         if (!decl || LOOP.test(decl) || /^none\b/.test(decl)) continue;
         const first = decl.match(/(^|[^\w.-])(\d*\.?\d+m?s)\b/); // the duration is the first time; a delay after a scale duration is fine
