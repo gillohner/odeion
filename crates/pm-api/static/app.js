@@ -2165,10 +2165,12 @@
     if (!f) return { bp: false, d, why: '' };
     const same = !!(d.format && d.format.rate_hz === f.rate_hz && d.format.bits === f.bits && d.format.channels === f.channels);
     const clean = !!(np.signal_path && headline(np.signal_path) === 'bit_perfect');
-    if (dacMode(d) === 'bit_perfect' && same && clean) return { bp: true, d, f };
-    const why = !same ? '' : dacMode(d) === 'bit_perfect' ? 'the node changes the samples (volume, DSP or a conversion)'
+    // Exclusive USB: the app's own driver, confirmed when the DAC's clock read back this rate
+    const ex = d.mode === 'exclusive';
+    if (dacMode(d) !== 'shared' && same && clean) return { bp: true, ex, d, f };
+    const why = !same ? '' : dacMode(d) !== 'shared' ? 'the node changes the samples (volume, DSP or a conversion)'
       : (dacUnconfirmed(d) || d.note || '').replace(/\.$/, '');
-    return { bp: false, d, f, why };
+    return { bp: false, ex, d, f, why };
   };
   // The path as the listener hears it: the node's stages, then what the phone does with its DAC.
   // Bit-perfect only as dacNow says (confirmed for this format, nothing changed on the way);
@@ -2186,23 +2188,31 @@
     }
     const of = np.output_format;
     const stage = n.bp
-      ? { name: 'DAC', in_format: of, out_format: of, quality: 'bit_perfect', note: `Android confirmed bit-perfect to ${n.d.name}` }
+      ? { name: 'DAC', in_format: of, out_format: of, quality: 'bit_perfect', note: n.ex ? dacExLine(n) : `Android confirmed bit-perfect to ${n.d.name}` }
+      // The app's own driver, not (yet) confirmed for this format: never said bit-perfect
+      : n.ex ? { name: 'USB driver', in_format: of, out_format: of, quality: 'lossless', note: `Exclusive USB · ${n.d.name}: not confirmed for this format${n.why && !/not confirmed/.test(n.why) ? `; ${n.why}` : ''}` }
       : { name: 'Android mixer', in_format: of, out_format: of, quality: 'lossless', note: `shared: Android may convert it and mixes in other sounds${n.why ? `; ${n.why}` : ''}` };
     return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, stage] } };
   };
-  // Bit-perfect at full level below Android's full volume (the listener agreed): said wherever it
-  // plays, for as long as it applies
+  // "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit"
+  const dacExLine = (n) => `Exclusive USB · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
+  // Bit-perfect (or Exclusive USB on a DAC without a volume of its own) at full level below
+  // Android's full volume (the listener agreed): said wherever it plays, for as long as it applies
+  const fullLevelText = (d, ex) => (ex
+    ? `Exclusive USB plays at full level: this DAC has no volume of its own, and Android’s volume (${d.media_volume}%) does not apply. Set the level on the amplifier.`
+    : `Bit-perfect plays at full level: Android’s volume (${d.media_volume}%) does not apply. Set the level on the DAC or amplifier.`);
   const fullLevelNote = (z) => {
     const n = deviceOf(z) && dacNow(z); const d = n && n.d;
-    return n && n.bp && d.settings && d.settings.full_level_ok && d.media_volume != null && d.media_volume < 100
-      ? `Bit-perfect plays at full level: Android’s volume (${d.media_volume}%) does not apply. Set the level on the DAC or amplifier.` : '';
+    return n && n.bp && d.settings && d.settings.full_level_ok && d.media_volume != null && d.media_volume < 100 && !(n.ex && d.hardware_volume)
+      ? fullLevelText(d, n.ex) : '';
   };
   // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
-  const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? 'bit-perfect' : 'shared'}` : ''; };
+  const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? (n.ex ? 'exclusive USB' : 'bit-perfect') : 'shared'}` : ''; };
   // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"
   const dacLine = (z) => {
     const n = dacNow(z); if (!n) return '';
-    if (n.bp) return `Bit-perfect · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
+    if (n.bp) return n.ex ? dacExLine(n) : `Bit-perfect · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
+    if (n.ex && n.d.format) return `Exclusive USB · ${n.d.name} · not confirmed${n.why && !/not confirmed/.test(n.why) ? ` · ${n.why}` : ''}`;
     return `Shared · ${n.d.name}${n.why ? ` · ${n.why}` : ''}`;
   };
   const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? ({ native: 'DSD (native)', dop: 'DSD (DoP)' })[d.dsd] || 'DSD' : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
@@ -6549,9 +6559,11 @@
             + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
             + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : '')
-            + (dv.settings && dv.settings.mode === 'bit_perfect' && dv.settings.full_level_ok && dv.media_volume != null && dv.media_volume < 100 ? `<div class="notice warn" role="status">Bit-perfect plays at full level: Android’s volume (${esc(String(dv.media_volume))}%) does not apply. Set the level on the DAC or amplifier.</div>` : ''))
+            + (dv.settings && (dv.settings.mode === 'bit_perfect' || (dv.settings.mode === 'exclusive' && !dv.hardware_volume)) && dv.settings.full_level_ok && dv.media_volume != null && dv.media_volume < 100 ? `<div class="notice warn" role="status">${esc(fullLevelText(dv, dv.settings.mode === 'exclusive'))}</div>` : ''))
             // The choices, from apps that take them (they report `settings`)
-            + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${v === 'bit_perfect' && !(dv.modes || []).includes('bit_perfect') ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)) : '');
+            + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Exclusive USB: this app drives the DAC itself with its own USB driver, on any Android; Android asks you once to allow it, and other apps’ sounds go to the phone’s speaker meanwhile. It starts the DAC’s own volume no louder than Android played. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['exclusive', 'Exclusive USB'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${(v === 'bit_perfect' || v === 'exclusive') && !(dv.modes || []).includes(v) ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)
+              // Exclusive USB on a DAC with its own volume: the zone's volume moves it
+              + (dv.settings.mode === 'exclusive' && dv.hardware_volume ? row('Use the DAC’s volume', 'The zone’s volume sets the DAC’s own volume; the music stays untouched. Off: the DAC stays where it started, and the zone’s volume changes the samples.', `<input type="checkbox" id="dvvol" aria-label="Use the DAC’s volume" ${dv.settings.dac_volume !== false ? 'checked' : ''}>`) : '')) : '');
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           // This phone: the choices go to the node, which passes them to the app's player
@@ -6565,8 +6577,15 @@
               if (!confirm(`Bit-perfect plays at full level; Android’s volume${at} no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?`)) { dvm.value = was; return; }
               return putDev({ mode: 'bit_perfect', full_level_ok: true }, 'Mode saved');
             }
-            return putDev({ mode: dvm.value }, 'Mode saved');
+            // Exclusive USB on a DAC without a volume of its own plays at full level too
+            if (dvm.value === 'exclusive' && !dv.hardware_volume && mv !== 100) {
+              const at = mv != null ? ` (${mv}%)` : '';
+              if (!confirm(`Exclusive USB plays at full level on this DAC (it has no volume of its own); Android’s volume${at} no longer applies. Set the level on the amplifier first.\n\nUse Exclusive USB?`)) { dvm.value = was; return; }
+              return putDev({ mode: 'exclusive', full_level_ok: true }, 'Mode saved (allow the DAC when Android asks)');
+            }
+            return putDev({ mode: dvm.value }, dvm.value === 'exclusive' ? 'Mode saved (allow the DAC when Android asks)' : 'Mode saved');
           }; }
+          const dvv = $('#dvvol', main); if (dvv) dvv.onchange = () => putDev({ dac_volume: dvv.checked }, dvv.checked ? 'The zone’s volume sets the DAC' : 'The DAC’s volume stays put');
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
