@@ -16,7 +16,10 @@
 //   * a playlist's Play on the zone turns shuffle off before it plays;
 //   * the zone's loads and toggles go one after another, in the order asked: a toggle after a queued
 //     Shuffle turns it off, a queued load takes the repeat set meanwhile, and a press shows at once;
-//   * a page with no songs of its own (found elsewhere) loads what is found with the mode asked for;
+//   * a page with no songs of its own (found elsewhere) loads what is found with the mode asked for, and
+//     keeps its turn among the zone's changes while it is found; an add to the queue waits for a load
+//     asked before it; a playlist's Play counts as asking shuffle off; a toggle the node refuses
+//     shows the mode as it is;
 //   * Shuffle starts on a random song (on the zone and here: not always the first, over three);
 //   * This browser: Play loads in order with shuffle off; shuffle on keeps the current song and draws
 //     the rest, and Now playing's Up next shows the new order; off puts the queue back in its order
@@ -83,7 +86,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         // A page with no songs of its own: discovery finds three library songs for it
         fixtures['/discover/play'] = { body: { plays_from: { service: 'library', label: 'Your library' }, track_ids: [1, 2, 3] } };
         fixtures['/item/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'] = { body: { kind: 'album', id: 'mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e', title: 'Found elsewhere', section: 'albums', source: 'musicbrainz', target: { uri: 'https://musicbrainz.org/release-group/1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e' }, uri: 'https://example.com/album', open_on: [{ url: 'https://example.com/album' }], songs: [], releases: [], links: [], also_on: [], tags: [] } };
-        let slowLoad = 0;
+        let slowLoad = 0; let refuseShuffle = false;
         const { page, context, state } = await fx.create(browser, w, { mobile: w < 600, fixtures });
         await page.setViewportSize({ width: w, height: w < 600 ? 800 : 900 });
         await page.emulateMedia({ colorScheme: scheme });
@@ -93,14 +96,17 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await page.route(/\/v1\/playlists\/c1\/play$/, (r) => { sent.push({ m: r.request().method(), v: '/playlists/c1/play', body: null }); return json(r, { queued: 1, missing: [] }); });
         await page.route(/\/v1\/zones\/z1\/(shuffle|repeat|load|transport|queue)(\?|$)/, async (r) => {
           const req = r.request(); const v = new URL(req.url()).pathname.slice(3); let body = null; try { body = JSON.parse(req.postData() || 'null'); } catch { /* none */ }
-          sent.push({ m: req.method(), v, body });
+          const entry = { m: req.method(), v, body, at: Date.now() }; sent.push(entry);
           // (a real node's zone event comes before its answer: the answer is then dropped as not newer)
           const event = () => sock && sock.send(JSON.stringify({ type: 'zone', seq: seq++, state: Z }));
+          if (/\/queue$/.test(v) && req.method() === 'POST') { return json(r, { ids: [] }); }
+          if (/\/shuffle$/.test(v) && req.method() === 'PUT' && refuseShuffle) { refuseShuffle = false; return json(r, { error: 'refused for the test' }, 500); }
           if (/\/shuffle$/.test(v) && req.method() === 'PUT') { Z.shuffle = !!body.shuffle; Z.queue_version++; event(); await sleep(50); return json(r, Z); }
           if (/\/shuffle$/.test(v)) { Z.shuffle = true; return r.fulfill({ status: 204, body: '' }); }
           if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; return r.fulfill({ status: 204, body: '' }); }
           if (/\/queue$/.test(v)) { if (req.method() === 'DELETE') { Z.queue = []; Z.now_playing = null; Z.transport = 'stopped'; return r.fulfill({ status: 204, body: '' }); } return json(r, Z.queue); }
-          if (/\/load$/.test(v)) { if (slowLoad) { const d = slowLoad; slowLoad = 0; await sleep(d); } Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; event(); await sleep(50); return json(r, Z); }
+          // (a slow one delays only its answer and event; after a reload they'd be another page's)
+          if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; const asked = sock; if (slowLoad) { const d = slowLoad; slowLoad = 0; await sleep(d); } if (sock === asked) event(); await sleep(50); entry.done = Date.now(); return json(r, Z); }
           return json(r, Z);
         });
         await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.fulfill({ status: 200, contentType: 'audio/wav', body: WAV }));
@@ -206,6 +212,50 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await until(async () => asked('POST', /\/zones\/z1\/load$/).length === n2 + 1, 6000), `${T} Shuffle on a page found elsewhere loads what discovery found`);
         const found = asked('POST', /\/zones\/z1\/load$/)[n2];
         check(!!found && found.body.shuffle === true && found.body.items.length === 3, `${T} …with shuffle on, the three songs found (${found && JSON.stringify({ shuffle: found.body.shuffle, n: found.body.items.length })})`);
+
+        // A refused toggle shows the mode as it is again
+        await fx.go(page, '/smart/s1'); await page.waitForSelector('#smplay'); await sleep(200);
+        Z.shuffle = false; snapshot(); await sleep(150);
+        refuseShuffle = true;
+        if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        await pressMode(page, 'shuffle');
+        check(await until(async () => /refused for the test/.test(await toasted())), `${T} a toggle the node refuses says so`);
+        check(await until(async () => allAre((await modes(page)).shuffle, false, 'Shuffle: off')), `${T} …and every copy shows the mode as it is: ${say((await modes(page)).shuffle)}`);
+        await closeNp(page);
+        // An add to the queue waits for the load asked before it
+        const n3 = sent.length; slowLoad = 700;
+        await page.click('#smplay'); await sleep(50);
+        await rowMenu(page, 'Song 4', 'Add to queue');
+        check(await until(async () => sent.slice(n3).filter((x) => x.m === 'POST' && /\/(load|queue)$/.test(x.v)).length === 2, 8000), `${T} the load and the add go out`);
+        const [ld3, add3] = sent.slice(n3).filter((x) => x.m === 'POST' && /\/(load|queue)$/.test(x.v));
+        check(!!ld3 && !!add3 && /load$/.test(ld3.v) && /queue$/.test(add3.v) && ld3.done && add3.at >= ld3.done, `${T} …the add goes only once the load it was asked after is answered (add at +${add3 && ld3 ? add3.at - ld3.at : '?'} ms, the load answered at +${ld3 && ld3.done ? ld3.done - ld3.at : '?'})`);
+        // A playlist's Play asks shuffle off: a toggle after it, queued behind a slow Shuffle, turns it on
+        slowLoad = 900; const n4 = sent.length;
+        await page.click('#smshuffle'); await sleep(50);
+        // (to the playlist within the app: a reload would start the zone's chain afresh)
+        await page.evaluate(() => { history.pushState(null, '', '/playlist/c1'); window.dispatchEvent(new PopStateEvent('popstate', { state: null })); });
+        await page.waitForSelector('#plplay');
+        await page.click('#plplay'); await sleep(50);
+        if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        await pressMode(page, 'shuffle');
+        check(await until(async () => sent.slice(n4).some((x) => x.v === '/playlists/c1/play') && sent.slice(n4).filter((x) => /\/shuffle$/.test(x.v) && x.m === 'PUT').length === 2, 10000), `${T} the Shuffle, the playlist's Play and the toggle go out`);
+        const plOrder = sent.slice(n4).filter((x) => /\/(load|shuffle|play)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}${x.body && 'shuffle' in x.body ? ':' + x.body.shuffle : ''}`);
+        check(plOrder.join() === 'load:true,shuffle:false,play,shuffle:true', `${T} …in order, the toggle turning shuffle on after the Play turned it off (${plOrder.join(', ')})`);
+        await closeNp(page);
+        // Discovery keeps its turn: a toggle pressed while a page is still being found goes after its load
+        await fx.go(page, '/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'); await page.waitForSelector('#ishuffle'); await sleep(200);
+        Z.shuffle = false; snapshot();
+        check(await until(async () => allAre((await modes(page)).shuffle, false, 'Shuffle: off')), `${T} (the page shows shuffle off before: ${say((await modes(page)).shuffle)})`);
+        state.delay = (v) => (v === '/discover/play' ? 800 : 0);
+        const n5 = sent.length;
+        await page.click('#ishuffle'); await sleep(100);
+        if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        await pressMode(page, 'shuffle');
+        check(await until(async () => sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').length === 2, 8000), `${T} the found page's load and the toggle go out`);
+        const dOrder = sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}:${x.body.shuffle}`);
+        check(dOrder.join() === 'load:true,shuffle:true', `${T} …the load first, as asked (${dOrder.join(', ')})`);
+        state.delay = 0;
+        await closeNp(page);
 
         // ---- This browser
         await page.evaluate(() => { sessionStorage.setItem('pm.test.zone', 'browser'); localStorage.removeItem('pm.repeat'); });
