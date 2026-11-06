@@ -1509,7 +1509,12 @@
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
-  const renderZoneName = () => { const z = currentZone(); const name = z ? z.name : 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
+  // What the bar showed last (zone, song, artist), kept in this browser: until the node answers,
+  // the bar shows it rather than "Zone" and "Nothing playing" (owner's recording: a second shell
+  // that swapped to the real one). index.html draws it before this script runs.
+  const barKept = () => { try { return JSON.parse(localStorage.getItem('pm.bar') || 'null') || {}; } catch { return {}; } };
+  const barKeep = (part) => { const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
+  const renderZoneName = () => { const z = currentZone(); if (z) barKeep({ zone: z.name }); const name = z ? z.name : (!state.zonesSeen && barKept().zone) || 'Zone'; $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
@@ -2581,9 +2586,11 @@
     // The devices' models: the owner's output list, fetched once
     if (isOwner() && !state.outputs) loadOutputs().then(() => { if (!zonePop.hidden) renderZonePop(); renderBar(); }).catch(() => {});
   };
-  // The tabs' Library: the library page last open
+  // The tabs' Library: the library page last open. The tabs' Search focuses the field, except in
+  // the Android app: its WebView doesn't open the keyboard for a focus set by script, so the field
+  // showed focused with no keyboard (owner's recording); there a tap on the field opens it.
   const libHome = () => state.lastLib || 'library';
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); if (appPlatform() !== 'android') search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
   $('#me').onclick = async () => {
@@ -2907,6 +2914,13 @@
     const se = !st && state.startError && state.startError.zone === state.zone && Date.now() - state.startError.at < 10000 ? state.startError : null;
     const waitHtml = st ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title np-wait" role="status"><span class="spin"></span> ${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
     const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert">${esc(se.msg)}</span></div></div>` : '';
+    if (!np && !z && !state.zonesSeen && barKept().title && !waitHtml && !errHtml) {
+      // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
+      const k = barKept();
+      $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`;
+      return;
+    }
+    if (z) barKeep(np ? { title: np.item.title || '', sub: np.item.artist || '' } : { title: '', sub: '' });
     if (!np) {
       // A zone that stopped on an error says so here, until the next track starts (the node clears it)
       const err = z && z.transport === 'stopped' && z.error;
@@ -7325,7 +7339,7 @@
     const libChanged = !first && (restarted || (ev.library_rev != null && ev.library_rev !== link.libRev));
     const downFor = link.downSince ? Date.now() - link.downSince : 0;
     link.seq = ev.seq ?? null; link.boot = ev.boot ?? null; link.libRev = ev.library_rev ?? null;
-    state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ensureZone(); renderZoneName();
+    state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); state.zonesSeen = true; ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
     setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
@@ -7427,7 +7441,7 @@
         // The app's local server: no zones, no events; the app switches back when the node is reachable
         setConn(true, `Offline · ${countOf(state.info.library.tracks, 'songs')} on this device`);
         try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
-        state.sources = []; state.zones = {}; state.zone = BROWSER;
+        state.sources = []; state.zones = {}; state.zonesSeen = true; state.zone = BROWSER;
         loadFavourites().catch(() => { state.favUris = new Set(); });
         renderZoneName(); renderBar();
         link.loaded = true;
@@ -7446,7 +7460,7 @@
         refreshOutputs();
       } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
-      state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
+      state.zones = Object.fromEntries(zones.map((z) => [z.id, z])); state.zonesSeen = true;
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
       { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
       link.loaded = true;

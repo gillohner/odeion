@@ -101,6 +101,7 @@
       <button class="zone-btn" id="zonebtn"><svg class="ic"><use href="#i-zone"/></svg><span id="zonename">Zone</span><svg class="ic chev"><use href="#i-chevron"/></svg></button>
     </div>
   </footer>
+  <script>try { var k = JSON.parse(localStorage.getItem('pm.bar') || 'null'); if (k) { if (k.zone) document.getElementById('zonename').textContent = k.zone; if (k.title) { var t = document.querySelector('#np .np-title'); t.textContent = k.title; t.classList.remove('muted'); document.querySelector('#np .np-sub').textContent = k.sub || ''; } } } catch (e) { /* nothing kept */ }</script>
   <nav class="bottomnav" id="bottomnav" aria-label="Main">
     <button class="bnav" data-bnav="home"><svg class="ic"><use href="#i-home"/></svg><span>Home</span></button>
     <button class="bnav" data-bnav="search"><svg class="ic"><use href="#i-search"/></svg><span>Search</span></button>
