@@ -1455,3 +1455,92 @@ async fn a_settings_change_skips_the_crossfade_and_reopens() {
     assert_eq!(*r.rec.opens.lock().unwrap(), 2, "b on a fresh sink");
     drop(drain_events(&mut r.events));
 }
+
+/// A renderer whose set can be held open, and whose read after it fails: the shape of a device
+/// event arriving while a set waits on the device (#265 with #256's one volume).
+struct HeldSet {
+    inner: NullOutput,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    reads_fail: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Output for HeldSet {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        if self.reads_fail.load(Ordering::SeqCst) {
+            return Err(SinkError::Device("no answer".into()));
+        }
+        self.inner.volume().await
+    }
+}
+
+fn pct(p: u8) -> pm_model::ZoneVolume {
+    pm_model::ZoneVolume {
+        level: pm_model::VolumeLevel::Percent(p),
+        muted: false,
+    }
+}
+
+#[tokio::test]
+async fn a_level_the_device_announces_during_a_set_stands() {
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+    }));
+    let out = Arc::new(HeldSet {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Percent),
+        entered: Default::default(),
+        release: Default::default(),
+        reads_fail: Default::default(),
+    });
+    let zone = zones.create("Linn", out.clone());
+    zone.announce_volume(pct(10));
+    wait_for(|| zone.state().volume == Some(pct(10))).await;
+    // A set waits on the device; meanwhile the device announces the level it took, and the
+    // read after the set fails: the announced level stays, not the one before it
+    out.reads_fail.store(true, Ordering::SeqCst);
+    let z = zone.clone();
+    let set = tokio::spawn(async move { z.set_volume(Volume::Percent(20)).await });
+    out.entered.notified().await;
+    zone.announce_volume(pct(20));
+    out.release.notify_one();
+    set.await.expect("the set ran").expect("the set worked");
+    zone.wait_acked().await;
+    assert_eq!(
+        zone.state().volume,
+        Some(pct(20)),
+        "the device's own announcement stands"
+    );
+    // A poll that reads the announced level sends nothing new; one that reads another sends it
+    out.reads_fail.store(false, Ordering::SeqCst);
+    out.inner.pretend_level(pct(20));
+    assert_eq!(zone.refresh_volume().await, Some(pct(20)));
+    zone.wait_acked().await;
+    assert_eq!(zone.state().volume, Some(pct(20)));
+    out.inner.pretend_level(pct(35));
+    assert_eq!(zone.refresh_volume().await, Some(pct(35)));
+    zone.wait_acked().await;
+    assert_eq!(
+        zone.state().volume,
+        Some(pct(35)),
+        "a change read after the announcement shows"
+    );
+}
