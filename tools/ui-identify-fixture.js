@@ -313,7 +313,10 @@ const server = http.createServer(async (req, res) => {
       check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} a toast says 6 songs were left as they are, with Undo`);
       check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
       check(/^Undo \(brings back all 11 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim()), `${W} …and the Undo says it brings back the earlier skips too, from the node's count (11, not the page's 3 + 6)`);
-      await page.locator('#toast .toast-act').click();
+      // (the toast waits while its Undo has the focus: past its 8 s, the Undo and the focus are still there)
+      await sleep(9000);
+      check(await page.evaluate(() => document.querySelector('#toast').classList.contains('show') && !!document.activeElement && document.activeElement.matches('#toast .toast-act')), `${W} …and the toast waits while its Undo has the focus (still there after 9 s)`);
+      if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
       check(await until(async () => /11 songs back for review/.test(await page.locator('#toast').textContent())), `${W} …and the toast says how many came back`);
       check(await until(async () => await page.evaluate(() => document.activeElement && ['idskipall', 'idrun'].includes(document.activeElement.id))), `${W} the focus is back on the card after Undo`);
@@ -369,6 +372,15 @@ const server = http.createServer(async (req, res) => {
         if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
         check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and its Undo brings the songs back`);
       }
+      // A toast whose Undo had the focus goes 4 s after the focus left (not at its 8 s)
+      fx = base({ routes: skipRoutes() });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      await page.locator('#idskipall').click();
+      await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act')));
+      await page.evaluate(() => document.activeElement.blur());
+      const left = Date.now();
+      check(await until(async () => !(await page.evaluate(() => document.querySelector('#toast').classList.contains('show'))), 7000) && Date.now() - left > 3500 && Date.now() - left < 6000, `${W} …it goes about 4 s after the focus left its Undo (${Date.now() - left} ms)`);
       // One change at a time per album: while Leave as is (or Confirm) is on its way, the album's other
       // changes and Skip all wait, so the songs come off the count once and a later toast can't replace
       // the Undo. (The presses are a script's clicks: a disabled button takes none.)

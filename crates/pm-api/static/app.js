@@ -170,7 +170,8 @@
     t.textContent = msg;
     let b = null;
     const hide = () => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); };
-    const unhook = () => { t.onmouseenter = t.onfocusin = t.onmouseleave = t.onfocusout = null; };
+    // (listeners, not on… properties: focusin and focusout have none; the next toast drops them)
+    const unhook = () => { if (toast.ac) toast.ac.abort(); toast.ac = null; };
     if (action) { b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); unhook(); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
     t.className = `toast show ${kind}`;
     clearTimeout(toast.h);
@@ -179,7 +180,12 @@
     const arm = (ms) => { clearTimeout(toast.h); toast.h = setTimeout(hide, ms); };
     arm(stay);
     unhook();
-    if (action) { let over = false; let focused = false; const settle = () => { if (!over && !focused) arm(4000); }; t.onmouseenter = () => { over = true; clearTimeout(toast.h); }; t.onfocusin = () => { focused = true; clearTimeout(toast.h); }; t.onmouseleave = () => { over = false; settle(); }; t.onfocusout = () => { focused = false; settle(); }; }
+    if (action) {
+      const ac = new AbortController(); toast.ac = ac; const on = (type, fn) => t.addEventListener(type, fn, { signal: ac.signal });
+      let over = false; let focused = false; const settle = () => { if (!over && !focused) arm(4000); };
+      on('mouseenter', () => { over = true; clearTimeout(toast.h); }); on('focusin', () => { focused = true; clearTimeout(toast.h); });
+      on('mouseleave', () => { over = false; settle(); }); on('focusout', () => { focused = false; settle(); });
+    }
     return b;
   };
   // A press whose button a redraw removed leaves the focus on the page: it goes to the toast's Undo
