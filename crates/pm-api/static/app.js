@@ -1514,7 +1514,7 @@
   // that swapped to the real one). index.html draws it before this script runs.
   const barKept = () => { try { return JSON.parse(localStorage.getItem('pm.bar') || 'null') || {}; } catch { return {}; } };
   const barKeep = (part) => { const was = barKept(); const next = { ...was, ...part }; if (JSON.stringify(next) !== JSON.stringify(was)) { try { localStorage.setItem('pm.bar', JSON.stringify(next)); } catch { /* private window */ } } };
-  const renderZoneName = () => { const z = currentZone(); if (z && state.zonesSeen) barKeep({ zone: z.name }); const name = (!state.zonesSeen && barKept().zone) || (z ? z.name : 'Zone'); $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
+  const renderZoneName = () => { const z = currentZone(); if (z && state.zonesSeen) barKeep({ zone: z.name }); const name = (!state.zonesSeen && !state.zonePicked && barKept().zone) || (z ? z.name : 'Zone'); $('#zonename').textContent = name; $('#zonebtn').setAttribute('aria-label', `Playing on ${name}: choose where to play`); $('#zonebtn').title = `Playing on ${name}`; syncVolumeSliders(z); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); };
   // ---- One volume, one source (TASK-volume-one-source) ----
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
@@ -2574,7 +2574,7 @@
     const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { closePop(); menuAfterPop($('#zonebtn'), [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
     $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
-      state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone);
+      state.zone = b.dataset.zone; localStorage.setItem('pm.zone', state.zone); state.zonePicked = true;
       closePop(); renderZoneName(); renderBar(); refreshQueue();
     });
   };
@@ -2914,7 +2914,7 @@
     const se = !st && state.startError && state.startError.zone === state.zone && Date.now() - state.startError.at < 10000 ? state.startError : null;
     const waitHtml = st ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title np-wait" role="status"><span class="spin"></span> ${st.what === 'move' ? 'Moving to' : 'Starting on'} ${esc(z ? z.name : 'the zone')}…</div><div class="np-sub">${esc(st.title || '')}</div></div>` : '';
     const errHtml = se ? `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">Couldn’t start</div><div class="np-sub"><span class="warn-text" role="alert">${esc(se.msg)}</span></div></div>` : '';
-    if (!np && !state.zonesSeen && barKept().title && !waitHtml && !errHtml) {
+    if (!np && !state.zonesSeen && !state.zonePicked && barKept().title && !waitHtml && !errHtml) {
       // The node hasn't said yet: the song the bar showed last stays (index.html drew it)
       const k = barKept();
       $('#np').innerHTML = `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title">${esc(k.title)}</div><div class="np-sub">${esc(k.sub || '')}</div></div>`;
@@ -4132,7 +4132,9 @@
       if (!cancel && was.on && was.dy > Math.min(120, el.offsetHeight / 3)) close();
     };
     el.addEventListener('touchstart', (e) => {
-      t = shellMode() === 'phone' && e.touches.length === 1 && el.scrollTop <= 0 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, dy: 0, on: false } : null;
+      // (only with the sheet and every list in it between the finger and the sheet at their top)
+      let inner = false; for (let a = e.target; a && a !== el; a = a.parentElement) if (a.scrollTop > 0) inner = true;
+      t = shellMode() === 'phone' && e.touches.length === 1 && el.scrollTop <= 0 && !inner ? { x: e.touches[0].clientX, y: e.touches[0].clientY, dy: 0, on: false } : null;
     }, { passive: true });
     el.addEventListener('touchmove', (e) => {
       if (!t) return;
@@ -5210,7 +5212,7 @@
                 fe.innerHTML = songRows(songs, { numbers: 'index' }); fe.parentElement.hidden = false; fe.parentElement.classList.add('fadein'); bindSongRows(fe, songs, {});
               }
             }
-          }).catch(() => { for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el) { el.innerHTML = '<p class="muted small">The library did not answer.</p>'; el.parentElement.hidden = false; } } });
+          }).catch(() => { for (const k of ['played', 'added', 'forgotten']) { const el = $(`#h-${k} .hbody`); if (el && el.querySelector('[aria-hidden="true"], .skeleton')) { el.innerHTML = '<p class="muted small">The library did not answer.</p>'; el.parentElement.hidden = false; } } });
           // ListenBrainz's picks for the user, when connected (Settings › ListenBrainz).
           api('GET', '/listenbrainz').then(async (lb) => {
             if (!lb.connected || state.view !== 'home') return;
