@@ -12,6 +12,8 @@
 //     closes the top one and the page stays; a swipe down closes Play to, a short pull doesn't;
 //   * the chip says what is wrong ("Change the API token") and its panel is "External resources";
 //   * the last zone card scrolls fully above the mini player.
+//   * the app's connecting page (crates/pm-desktop/ui) is centred from its first frame, shows that
+//     it is working, and after 5 s without an answer says so and offers Try again and another node;
 //   * Home doesn't move while it loads: opened again, each row's placeholder is the size it had
 //     (covers as tiles, songs as rows, Pubky rows their height), so every header stays within 4 px.
 //   node tools/ui-android-first.js [repo] [shots]
@@ -117,6 +119,27 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
     const z = await page.evaluate(() => { const cards = [...document.querySelectorAll('.zone-card')]; const last = cards[cards.length - 1].getBoundingClientRect(); const bar = document.querySelector('.player').getBoundingClientRect(); return { last: Math.round(last.bottom), bar: Math.round(bar.top), n: cards.length }; });
     check(z.last <= z.bar, `${w}: the last of ${z.n} zone cards ends above the mini player (${z.last} <= ${z.bar})`);
     check(!state.errors.length, `${w}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
+    await context.close();
+  }
+  // The app's connecting page with a node that never answers (a stand-in for the app's commands)
+  for (const [w, h] of [[360, 800], [412, 915]]) {
+    const context = await browser.newContext({ viewport: { width: w, height: h }, isMobile: true, hasTouch: true, deviceScaleFactor: 2.625, reducedMotion: 'reduce' });
+    await context.addInitScript(() => {
+      const never = new Promise(() => {});
+      const answers = { crash_report: null, saved: { node_url: 'http://192.168.1.124:7788' }, has_downloads: false };
+      window.__TAURI__ = { core: { invoke: (cmd) => (cmd === 'open_saved' ? never : Promise.resolve(answers[cmd] ?? null)) }, event: { listen: () => Promise.resolve(() => {}) } };
+    });
+    const page = await context.newPage(); const errs = []; page.on('pageerror', (e) => errs.push(e.message));
+    await page.goto('file://' + path.join(path.resolve(process.argv[2] || path.join(__dirname, '..')), 'crates/pm-desktop/ui/index.html'));
+    await page.waitForSelector('#saved:not([hidden])'); await sleep(300);
+    const at = async () => page.evaluate(() => { const m = document.querySelector('main').getBoundingClientRect(); const vis = getComputedStyle(document.querySelector('main')).visibility; const q = (id) => !document.getElementById(id).hidden; return { mid: Math.round(m.top + m.height / 2), vh: innerHeight, vis, spin: q('saved-spin'), retry: q('retry'), other: q('other'), msg: document.getElementById('saved-msg').textContent }; });
+    const a = await at();
+    check(a.vis === 'visible' && Math.abs(a.mid - a.vh / 2) <= 24 && a.spin && !a.retry, `${w}: the connecting page is centred and working (${a.mid} of ${a.vh}, "${a.msg}")`);
+    await sleep(5200);
+    const b = await at();
+    check(b.retry && b.other && /hasn’t answered yet/.test(b.msg) && b.spin, `${w}: after 5 s it says the node hasn't answered and offers Try again and another node ("${b.msg}")`);
+    await page.screenshot({ path: path.join(SHOTS, `connecting-${w}.png`) });
+    check(!errs.length, `${w}: the connecting page has no errors${errs.length ? ': ' + errs.join('; ') : ''}`);
     await context.close();
   }
   // Home, slow to answer: the headers while it loads vs once it has

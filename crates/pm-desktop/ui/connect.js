@@ -1,3 +1,7 @@
+// Drawn once the window has its size: a first frame laid out before it put the page at the top,
+// then it jumped to the middle (owner's recording, 2026-11-06). The window's colour shows meanwhile.
+// First in the file, so nothing below can keep the page hidden.
+(function ready(n) { if (innerHeight > 200 || n > 30) document.body.classList.add('ready'); else requestAnimationFrame(() => ready(n + 1)); })(0);
 // The connect page: reconnect to the remembered node, or connect with
 // Pubky Ring or by address. Commands live in src/lib.rs.
 (() => {
@@ -105,6 +109,7 @@
     attempt++;
     show('connect', false);
     show('saved');
+    show('saved-spin', false);
     clearErr();
     $('saved-msg').textContent = (oldUrl ? 'Your node didn’t answer at ' + oldUrl + ', and a' : 'A')
       + ' node with its id answers at ' + url + '. If you moved the node or its address changed, use the new address. '
@@ -123,6 +128,9 @@
     return true;
   }
 
+  // A node that hasn't answered after this long: the page says so and offers the ways on, while
+  // it keeps trying (owner's recording: ~6 s of "Connecting…" with nothing else)
+  const SLOW_MS = 5000;
   async function reconnect(nodeUrl) {
     const mine = ++attempt;
     show('connect', false);
@@ -130,13 +138,22 @@
     show('moved-yes', false);
     show('retry', false);
     show('other', false);
+    show('saved-spin');
     clearErr();
     $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
+    const slow = setTimeout(() => {
+      if (mine !== attempt) return;
+      $('saved-msg').textContent = 'Your node at ' + nodeUrl + ' hasn’t answered yet. Still trying…';
+      show('retry');
+      show('other');
+    }, SLOW_MS);
     for (let i = 0; ; i++) {
       try {
         await invoke('open_saved');
+        clearTimeout(slow);
         return;
       } catch (e) {
+        clearTimeout(slow);
         if (mine !== attempt) return;
         if (askMoved(e, nodeUrl)) return;
         // Away from the node with music on this device: play it now; the app comes back to the
@@ -150,6 +167,7 @@
         // Only an unreachable node is worth waiting for; a refused token is not
         if (i >= RETRIES.length || !String(e).startsWith("Can't reach")) {
           $('saved-msg').textContent = String(e) + '.';
+          show('saved-spin', false);
           return;
         }
         for (let left = RETRIES[i]; left > 0; left--) {
