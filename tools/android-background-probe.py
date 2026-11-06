@@ -411,8 +411,22 @@ def part_d():
     # service coming back and carrying playback from here, so play again first if it isn't playing
     # On API 37 it can also show Pause with its time standing still (Android silenced it while the
     # service was gone; a known issue, see the PR): then Pause and Play, as a listener would
-    a = secs(mini_time()); time.sleep(3); b = secs(mini_time())
-    if a is None or b is None or b <= a:
+    # (two readings 3 s apart; a reading can be missing for a moment while the page redraws, so a
+    # missing one is read again rather than taken for a stopped player)
+    a = b = None
+    for _ in range(4):
+        a = secs(mini_time())
+        if a is not None:
+            break
+        time.sleep(1)
+    time.sleep(3)
+    for _ in range(4):
+        b = secs(mini_time())
+        if b is not None:
+            break
+        time.sleep(1)
+    log(f"D: the player's time {a} -> {b} s after C")
+    if a is not None and b is not None and b <= a:
         try:
             tap_text(['~(?:text|content-desc)="Pause"'], "Pause (the player stands still after C)", timeout=6)
             time.sleep(2)
@@ -479,7 +493,12 @@ def part_e():
     except RuntimeError:
         pass
     time.sleep(2)
-    tap_text(["Pause"], "Pause", timeout=20)
+    # (a player that already stands paused, or frozen after E1 on API 37, shows no Pause: fine, E2
+    # wants it not playing)
+    try:
+        tap_text(['~(?:text|content-desc)="Pause"'], "Pause", timeout=12)
+    except RuntimeError:
+        log("E2: no Pause showing (the player isn't playing): going on")
     time.sleep(3)
     if not app_mode():
         raise RuntimeError("E2: app mode did not start")
@@ -499,8 +518,10 @@ def part_e():
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(4)
     back = service_foreground()
-    # The watch ticks every 60 s and stops at 5 min idle: about 5 min after HOME (polled every 30 s)
-    ok2 = ended is not None and 4.5 * 60 <= ended <= 7 * 60 and not lock2 and back
+    # The watch ticks every 60 s and stops at 5 min idle: about 5 min after HOME (polled every 30 s).
+    # Android can count the paused player's sound as active for a couple of minutes more (API 30:
+    # its OpenSL track stayed "started" ~2 min after Pause), so up to 8 min is still the rule at work
+    ok2 = ended is not None and 4.5 * 60 <= ended <= 8 * 60 and not lock2 and back
     log(f"E2 verdict: ended when idle {ended is not None} ({ended if ended is None else round(ended)} s), lock released {not lock2}, back on resume {back}")
     results["E2 app mode: ends when idle out of sight, back on resume"] = ok2
     return ok1 and ok2
