@@ -1999,12 +1999,20 @@
   // gone, as the background probe's part C does on API 37): the element still says it plays, but
   // its time stands still and nothing sounds. A pause and play starts it again; a stream that is
   // only buffering (no data yet) is left to arrive.
+  // (the in-app player's own element, whichever zone the page shows; cancelled if the app goes
+  // out of sight again, or the listener seeks or pauses meanwhile)
+  let stallCheck = null;
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible' || !isBrowser() || state.ytOn || audioEl.paused || audioEl.ended) return;
+    clearTimeout(stallCheck); stallCheck = null;
+    if (document.visibilityState !== 'visible' || !audioEl.getAttribute('src') || state.ytOn || audioEl.paused || audioEl.ended) return;
     const t0 = audioEl.currentTime;
-    setTimeout(() => {
-      if (isBrowser() && !state.ytOn && !audioEl.paused && !audioEl.ended && audioEl.currentTime === t0 && audioEl.readyState >= 2) {
-        audioEl.pause(); audioEl.play().catch(() => {});
+    stallCheck = setTimeout(() => {
+      stallCheck = null;
+      // (one line in the Android log, where the background probe reads it)
+      console.info(`in-app player back on screen: time ${t0.toFixed(1)} -> ${audioEl.currentTime.toFixed(1)} s, paused ${audioEl.paused}, ready ${audioEl.readyState}, seeking ${audioEl.seeking}`);
+      if (document.visibilityState === 'visible' && audioEl.getAttribute('src') && !state.ytOn && !audioEl.paused && !audioEl.ended && !audioEl.seeking && audioEl.currentTime === t0 && audioEl.readyState >= 2) {
+        console.info('in-app player stood still: playing it again');
+        audioEl.pause(); audioEl.play().catch((e) => console.info(`in-app player: play again failed: ${e && e.message}`));
       }
     }, 2000);
   });
