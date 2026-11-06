@@ -17,7 +17,7 @@
 //   * the zone's loads and toggles go one after another, in the order asked: a toggle after a queued
 //     Shuffle turns it off, a queued load takes the repeat set meanwhile, and a press shows at once;
 //   * a page with no songs of its own (found elsewhere) loads what is found with the mode asked for, and
-//     keeps its turn among the zone's changes while it is found; an add to the queue waits for a load
+//     keeps its turn among the zone's changes while it is found (its mode pending meanwhile); an add to the queue waits for a load
 //     asked before it; a playlist's Play counts as asking shuffle off; a toggle the node refuses
 //     shows the mode as it is;
 //   * Shuffle starts on a random song (on the zone and here: not always the first, over three);
@@ -250,10 +250,11 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         const n5 = sent.length;
         await page.click('#ishuffle'); await sleep(100);
         if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} the page's Shuffle is the pending mode while its songs are found: ${say((await modes(page)).shuffle)}`);
         await pressMode(page, 'shuffle');
         check(await until(async () => sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').length === 2, 8000), `${T} the found page's load and the toggle go out`);
         const dOrder = sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}:${x.body.shuffle}`);
-        check(dOrder.join() === 'load:true,shuffle:true', `${T} …the load first, as asked (${dOrder.join(', ')})`);
+        check(dOrder.join() === 'load:true,shuffle:false', `${T} …the load first, then the toggle turning the page's shuffle off (${dOrder.join(', ')})`);
         state.delay = 0;
         await closeNp(page);
 
