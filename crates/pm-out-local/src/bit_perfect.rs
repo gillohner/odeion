@@ -40,6 +40,12 @@ pub trait TrackBackend: Send + Sync {
     fn open(&self, dac_id: i32, entry: &MixerEntry) -> Result<(Box<dyn Track>, OpenReport), OpenError>;
     /// Android's media volume, 0 to 100 (`None`: it could not be read).
     fn media_volume(&self) -> Option<u8>;
+    /// Android's own attenuation of media (dB) for the USB DAC it plays to now
+    /// (`getStreamVolumeDb`, Android 9+); `None` when it can't say, or media doesn't go to a USB
+    /// DAC now (the reading would be another device's).
+    fn media_db_on_dac(&self) -> Option<f32> {
+        None
+    }
 }
 
 /// One `AudioTrack`.
@@ -421,7 +427,9 @@ pub fn view_extras(
     reported: Option<u8>,
 ) -> (Vec<pm_zones::DeviceFormat>, Option<u8>) {
     let media = lower(reported, backend().and_then(|b| b.media_volume()));
-    let f = if plays_bit_perfect(dac, settings, full_level_ok, media) {
+    let f = if crate::exclusive::plays_exclusive(dac, settings, full_level_ok, media) {
+        crate::exclusive::formats(dac)
+    } else if plays_bit_perfect(dac, settings, full_level_ok, media) {
         formats(dac)
     } else {
         Vec::new()
@@ -429,30 +437,39 @@ pub fn view_extras(
     (f, media)
 }
 
-/// [`live_caps`] for the phone's output now.
-pub fn phone_caps(shared: &OutputCaps) -> OutputCaps {
+/// [`live_caps`] for the phone's output now (or Exclusive USB's, when it plays that way), with
+/// the formats the DAC then takes unchanged.
+fn phone_caps_and_formats(shared: &OutputCaps) -> (OutputCaps, Vec<pm_zones::DeviceFormat>) {
     let dac = usb_dac::current_dac();
     let media = dac.as_ref().and_then(|_| media_now());
-    live_caps(
-        dac.as_ref(),
-        usb_dac::settings(),
-        usb_dac::full_level_consent(),
-        media,
-        shared,
-    )
+    let settings = usb_dac::settings();
+    let consent = usb_dac::full_level_consent();
+    if let Some(d) = dac.as_ref() {
+        if let Some(c) = crate::exclusive::live_caps(d, settings, consent, media, shared) {
+            return (c, crate::exclusive::formats(d));
+        }
+    }
+    let caps = live_caps(dac.as_ref(), settings, consent, media, shared);
+    let f = match dac.as_ref() {
+        Some(d) if caps.quality_ceiling == QualityCeiling::BitPerfect => formats(d),
+        _ => Vec::new(),
+    };
+    (caps, f)
+}
+
+/// [`live_caps`] for the phone's output now.
+pub fn phone_caps(shared: &OutputCaps) -> OutputCaps {
+    phone_caps_and_formats(shared).0
 }
 
 /// [`phone_caps`] for one source: its own format when the DAC lists it (unchanged), else the
 /// closest listed one.
 pub fn phone_caps_for(shared: &OutputCaps, src: AudioFormat) -> OutputCaps {
-    let caps = phone_caps(shared);
-    if caps.quality_ceiling != QualityCeiling::BitPerfect {
+    let (caps, f) = phone_caps_and_formats(shared);
+    if caps.quality_ceiling != QualityCeiling::BitPerfect || f.is_empty() {
         return caps;
     }
-    match usb_dac::current_dac() {
-        Some(d) => pm_zones::caps_for_source(&formats(&d), src, &caps),
-        None => caps,
-    }
+    pm_zones::caps_for_source(&f, src, &caps)
 }
 
 /// Confirmed only when Android read the bit-perfect mixer back with exactly the format asked for
@@ -538,6 +555,12 @@ impl OpenError {
 pub enum PhoneOpen {
     /// The bit-perfect player.
     BitPerfect(TrackSink),
+    /// The app's own USB driver (Exclusive USB).
+    Exclusive(Box<crate::exclusive::ExclusiveSink>),
+    /// The DAC can't take this format unchanged in Exclusive USB: the zone plans another.
+    Unsupported(String),
+    /// Exclusive USB holds the DAC but would not start: nothing plays (never another device).
+    Failed(String),
     /// Android's shared path; `any_rate`: at the format's own rate even if the shared caps don't
     /// list it (Android converts), because it was planned for the DAC; `opened_for`: the DAC it
     /// is for (the sink stops, never plays elsewhere, once that DAC isn't Android's route).
@@ -549,26 +572,103 @@ pub enum PhoneOpen {
     Gone(String),
 }
 
+/// The exclusive driver's open, as the phone's output opens it; `Err`: Android plays it (why).
+fn open_exclusive(
+    id: OutputId,
+    dac: &Dac,
+    fmt: AudioFormat,
+    warning: Option<String>,
+    media: Option<u8>,
+    media_db: Option<f32>,
+) -> Result<PhoneOpen, String> {
+    use crate::exclusive::ExclusiveError as E;
+    match crate::exclusive::open(id, dac, fmt, warning, media, media_db) {
+        Ok(s) => Ok(PhoneOpen::Exclusive(Box::new(s))),
+        Err(E::Gone(why)) => {
+            usb_dac::gone_seen();
+            Ok(PhoneOpen::Gone(why))
+        }
+        Err(E::Unsupported(why)) => Ok(PhoneOpen::Unsupported(why)),
+        Err(E::Failed(why)) => {
+            tracing::warn!(format = %fmt, "Exclusive USB: {why}");
+            usb_dac::record_open(LastOpen {
+                dac_id: dac.id,
+                format: fmt,
+                mode: DeviceMode::Exclusive,
+                confirmed: false,
+                note: Some(why.clone()),
+            });
+            Ok(PhoneOpen::Failed(why))
+        }
+        Err(E::Refused(why)) => Err(why),
+    }
+}
+
 /// How the phone's output opens `fmt` now: the whole decision, apart from cpal. The DAC it is
 /// for is fixed first: nothing opened for it may reach another device (rule (b), [`usb_dac::may_reach`]).
 pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
-    let at_open = usb_dac::opened_for_now();
+    let mut at_open = usb_dac::opened_for_now();
     // An unplug no sink reported yet (between one song's sink and the next): pause, once
     if at_open.is_none() {
         if let Some(why) = usb_dac::take_gone_unseen() {
             return PhoneOpen::Gone(why);
         }
     }
-    let shared = |any_rate| PhoneOpen::Shared {
-        any_rate,
-        opened_for: at_open.clone(),
-    };
     let gone = |why: String| {
         usb_dac::gone_seen();
         PhoneOpen::Gone(why)
     };
+    let mut why_not = None;
+    if let Some(dac) = usb_dac::current_dac() {
+        let media = media_now();
+        // Android's attenuation for the DAC, before anything touches it (the hand-over's)
+        let media_db = crate::exclusive::handover_reading();
+        // Exclusive USB when chosen; when chosen but not possible, why (Android plays it)
+        why_not =
+            match crate::exclusive::decide(&dac, usb_dac::settings(), usb_dac::full_level_consent(), media) {
+                Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning, media, media_db) {
+                    Ok(o) => return o,
+                    Err(why) => {
+                        tracing::warn!(format = %fmt, "no Exclusive USB: {why}");
+                        Some((dac.clone(), why))
+                    }
+                },
+                Some(Err(why)) => Some((dac.clone(), why)),
+                None => None,
+            };
+        // Android's paths only once Android has the DAC back: never while the app holds it, and
+        // after the app gave it back (or touched it in a failed attempt) only once Android lists
+        // it again, under a new id: the DAC this open is for is fixed again then
+        crate::exclusive::release();
+        if crate::exclusive::holding() {
+            return gone(format!(
+                "{} is going back to Android: press Play again in a moment",
+                dac.device.name
+            ));
+        }
+        // Waited for a give-back: the DAC this open is for is the one Android lists now (a new
+        // id); none listed: Gone. Not waited: the DAC fixed at the start stays (it went meanwhile:
+        // the gate says so, never the default route)
+        match crate::exclusive::wait_android_back() {
+            Err(why) => return gone(why),
+            Ok(true) => match usb_dac::opened_for_now() {
+                Some(f) => at_open = Some(f),
+                None => return gone(format!("{} went while going back to Android", dac.device.name)),
+            },
+            Ok(false) => {}
+        }
+    }
+    let shared = |any_rate| PhoneOpen::Shared {
+        any_rate,
+        opened_for: at_open.clone(),
+    };
+    if let Some((before, why)) = why_not {
+        let dac = usb_dac::current_dac().unwrap_or(before);
+        record_shared(&dac, fmt, why);
+        return shared(true);
+    }
     match plan(fmt) {
-        Plan::BitPerfect(dac, choice, warning) => match open(id, &dac, choice, warning, fmt) {
+        Plan::BitPerfect(dac, choice, warning) => match open(id.clone(), &dac, choice, warning, fmt) {
             Ok(s) => PhoneOpen::BitPerfect(s),
             Err(OpenError::RouteLost(why)) => {
                 tracing::warn!(format = %fmt, "the DAC is not where Android plays: {why}");
@@ -584,6 +684,36 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                     return gone(lost);
                 }
                 tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
+                // Auto: Exclusive USB instead, where permission was given before (never asks)
+                if usb_dac::settings().mode == PreferredMode::Auto {
+                    let media = media_now();
+                    if let Some(warning) = crate::exclusive::auto_fallback(&dac, media) {
+                        let media_db = crate::exclusive::handover_reading();
+                        if let Ok(o) = open_exclusive(id, &dac, fmt, warning, media, media_db) {
+                            return o;
+                        }
+                        // The attempt may have taken the DAC from Android: shared only once
+                        // Android lists it again, for the DAC as Android lists it then
+                        let opened_for = match crate::exclusive::wait_android_back() {
+                            Err(why) => return gone(why),
+                            Ok(true) => match usb_dac::opened_for_now() {
+                                Some(f) => Some(f),
+                                None => {
+                                    return gone(format!(
+                                        "{} went while going back to Android",
+                                        dac.device.name
+                                    ))
+                                }
+                            },
+                            Ok(false) => at_open.clone(),
+                        };
+                        record_shared(&dac, fmt, why);
+                        return PhoneOpen::Shared {
+                            any_rate: true,
+                            opened_for,
+                        };
+                    }
+                }
                 record_shared(&dac, fmt, why);
                 shared(true)
             }
@@ -933,6 +1063,8 @@ mod tests {
             id: 41,
             mixer,
             sdk,
+            descriptors: None,
+            held: false,
         }
     }
 
@@ -2104,6 +2236,9 @@ mod tests {
         async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
             match open_phone(self.id(), fmt) {
                 PhoneOpen::BitPerfect(s) => Ok(Box::new(s)),
+                PhoneOpen::Exclusive(s) => Ok(s),
+                PhoneOpen::Unsupported(_) => Err(SinkError::UnsupportedFormat(self.id(), fmt)),
+                PhoneOpen::Failed(why) => Err(SinkError::Unavailable(self.id(), why)),
                 PhoneOpen::Gone(why) => Err(SinkError::Gone(self.id(), why)),
                 PhoneOpen::Shared { opened_for, .. } => {
                     self.shared_opens
@@ -2405,6 +2540,53 @@ mod tests {
         assert_eq!(out.device().and_then(|d| d.media_volume), Some(100));
         // Unchanged: no change
         assert!(!usb_dac::apply_report(&at(100)));
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+    }
+
+    /// Claude L1 (300g): while a bit-perfect sink plays (not paused), the per-block check reads
+    /// Android live at most 100 ms late: a stale 100 % report doesn't keep it at full level.
+    #[test]
+    fn while_it_plays_a_stale_report_is_read_past_within_100_ms() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        let report = ka17_report_with(&ka17_mixer()).replace(r#""sdk":34"#, r#""sdk":34,"media_volume":100"#);
+        usb_dac::apply_report(&report);
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        *player.volume.lock().unwrap() = Some(100);
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        let PhoneOpen::BitPerfect(mut sink) = open_phone(OutputId::new("cpal", "phone"), fmt) else {
+            panic!("bit-perfect at 100 %")
+        };
+        sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 960])).unwrap();
+        assert!(!sink.reopen_now(), "100 %: plays on");
+        // Turned down: Android says so at once, the report (100 %) not yet
+        *player.volume.lock().unwrap() = Some(40);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 960])).unwrap();
+        assert!(sink.reopen_now(), "playing, live 40 %: reopened");
+        drop(sink);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+    }
+
+    /// Claude L2 (300g): without a DAC, a volume step is no change (the app doesn't register
+    /// again at every step); with one it is.
+    #[test]
+    fn a_volume_step_without_a_dac_is_no_change() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        let none = |v: u8| format!(r#"{{"v":1,"sdk":34,"devices":[],"media_volume":{v}}}"#);
+        usb_dac::apply_report(&none(50));
+        assert!(!usb_dac::apply_report(&none(40)), "no DAC: no change");
+        assert!(!usb_dac::apply_report(&none(100)));
+        let at = |v: u8| {
+            ka17_report_with(&ka17_mixer()).replace(r#""sdk":34"#, &format!(r#""sdk":34,"media_volume":{v}"#))
+        };
+        assert!(usb_dac::apply_report(&at(100)), "the DAC arrives");
+        assert!(usb_dac::apply_report(&at(40)), "with a DAC: a change");
         usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
     }
 }

@@ -243,6 +243,67 @@ What it does:
    saw and what Android answered.
 ```
 
+### Exclusive USB (the app's own USB driver)
+
+Checked without the DAC: the playback setting for each format, the clock and volume requests (the
+bytes on the wire), the packet sizes at 44.1/48/96/192 kHz on full and high speed, the DAC's feedback
+and the packet sizes it gives, the volume hand-over (never louder) and the give-back, the quirks
+table, and the driver's steps (open, play, rate change, unplug) against a fake DAC
+(crates/pm-usb-audio, crates/pm-out-local/src/exclusive.rs); the page's words (tools/ui-usb-dac.js).
+Not checked: anything on a real phone. The usbfs calls follow Linux's headers and libusb's Android
+backend, but only this pass shows whether Android lets the app take the DAC, whether the KA17 takes
+the packets, and whether Android gets the DAC back afterwards. Device-unverified until then.
+
+What it does: on any Android (also below 14), the app takes the DAC from Android's driver, sets its
+clock to the song's rate, reads the rate back, and sends the samples itself. The app says "Exclusive
+USB · FiiO KA17 · 96 kHz / 24 bit" only when the DAC read back exactly that rate and the stream runs.
+The KA17's own volume becomes the zone's volume (Use the DAC's volume), and starts no louder than
+Android played it. Meanwhile other apps' sounds go to the phone's speaker.
+
+```
+1. Same phone and files as above. Settings › This phone › Preferred mode: Exclusive USB. Android asks
+   whether Odeion may access the FiiO KA17: allow it. Report whether the dialog appeared, and its
+   words. (Auto never asks; with Auto, Exclusive USB is used only below Android 14, and only once
+   access was allowed here.)
+2. Note Android's media volume, then play the 44.1/16, 96/24 and 192/24 files in turn. For each,
+   report:
+   - the KA17's display (expected: 44.1, 96, 192 on any Android version);
+   - the Sound panel's "Playing on" line (expected: "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit",
+     and so on) and the signal path (no resample stage);
+   - whether the first second was louder than Android played before (it must not be);
+   - any clicks, dropouts or a pitch that drifts over a few minutes (the DAC's feedback paces it).
+   If the panel says "not confirmed", or the zone stops with a reason, report the exact words.
+3. Volume: move the zone's volume in the app. The KA17's volume (its display) must follow, and the
+   signal path must not show a volume stage. Report the steps you saw on the display.
+4. Unplug the KA17 mid-song: the zone pauses ("FiiO KA17 was unplugged: paused"), nothing from the
+   speaker. Plug it in again and press Play.
+5. Back to Auto (Android 14+) or Shared: from the next song Android plays the DAC again. Report
+   whether it plays (from the DAC, not the speaker), whether the KA17's volume is where it was before
+   step 1 or lower (never higher), and whether a notification sound plays from the DAC again.
+6. Exclusive USB again, then close the app (swipe it away) while paused: within a few seconds
+   Android plays notification sounds from the DAC again. Report if it needs a replug.
+   Then force-stop the app while it plays (Settings › Apps › Odeion › Force stop): Android has no
+   sound from the DAC until the app starts again (it gives the DAC back at its next start) or the
+   DAC is replugged. Report which of the two brought it back.
+   Also: with Android's volume at its lowest step, choose Exclusive USB and play: the DAC starts
+   muted and the panel says so; raise the zone's volume to hear it.
+   The starting level is Android's own level for the DAC (Android 9 and later): note Android's
+   volume, choose Exclusive USB, and report whether the first second sounds the same as before
+   (never louder). On Android 8, or within a few seconds of switching away from Exclusive USB and
+   back, the DAC starts muted instead; on Android 9 to 12 too, where the phone doesn't tell whether
+   media plays to the DAC (report which happened). With the DAC plugged in but media on Bluetooth
+   or the speaker, choosing Exclusive USB starts it muted. Switching away again, the DAC's own
+   volume (its display) is back where it was before Exclusive USB, or lower if you turned it down.
+   Mute the zone during a 96/24 song, let a 44.1/16 song follow: it stays muted; unmute, and the
+   next 96/24 song plays at your level again; choose Shared
+   while muted: the DAC goes back muted. Turn the zone down during a 96/24 song: the next 44.1/16
+   song is no louder. With media on Bluetooth at 100% and the DAC plugged in, Auto never plays a
+   DAC without a volume of its own at full level (report the panel's reason).
+7. If an Android 13 (or older) phone is at hand: steps 1 to 5 there. Auto plays Exclusive USB on
+   it once access was allowed.
+8. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB".
+```
+
 ## Squeezebox players and squeezelite (Slimproto)
 
 Checked here with real squeezelite 2.0 in CI (ci.yml, `slimproto`):
