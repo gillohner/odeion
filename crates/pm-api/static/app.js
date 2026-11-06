@@ -33,7 +33,7 @@
     sleepAt: {},
     browserSleepTimer: null,
     pubkyUser: undefined,
-    view: 'home',
+    view: 'home', tab: 'home',
     viewArg: null,
     albums: null,
     artists: null,
@@ -2647,7 +2647,8 @@
   // opened on its own (a link, a reload without the entry) is marked as before: Library's pages are Library's
   const DETAIL_VIEWS = new Set(['item', 'album', 'artist', 'releases', 'person', 'playlist', 'genre', 'tag', 'source-item', 'source-artist', 'shared', 'home-section', 'smart', 'smart-edit', 'lossless', 'lossy', 'dsd']);
   const TAB_ROOTS = { home: 'home', search: 'search', zones: 'zones' };
-  const tabFor = (v, from) => TAB_ROOTS[v] || (DETAIL_VIEWS.has(v) && from ? from : LIB_VIEWS.includes(v) ? 'library' : null);
+  // (Identify for some songs, opened from their album's tags, is a page of that album's tab)
+  const tabFor = (v, from, arg) => TAB_ROOTS[v] || ((DETAIL_VIEWS.has(v) || (v === 'identify' && arg)) && from ? from : LIB_VIEWS.includes(v) ? 'library' : null);
   const markTabs = () => {
     // Sources is a Library section on phones
     $$('.bnav').forEach((b) => { const on = b.dataset.bnav === state.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
@@ -3650,6 +3651,7 @@
   // History stores only what restores a view (search keeps its query, not its results).
   const histArg = (v, arg) => (v === 'search' ? (arg && arg.q ? (arg.in && arg.in !== 'everywhere' ? { q: arg.q, in: arg.in } : { q: arg.q }) : null) : (arg && typeof arg === 'object' && !Array.isArray(arg) ? JSON.parse(JSON.stringify(arg)) : arg ?? null));
   let navDepth = 0;
+  let tabsBooted = false; // the first page (a reload keeps its history entry): its tab comes from the entry
   // For tests (tools/ui-item-pages.js): every view with a path round-trips through routeFromPath.
   window.pmRoutes = {
     check: () => {
@@ -3679,8 +3681,9 @@
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
-    // (on Back or Forward, history.state is already the entry being shown)
-    const tab = tabFor(v, how === 'pop' ? history.state && history.state.tab : state.tab);
+    // (on Back or Forward, history.state is already the entry being shown; on a reload it is the page's own)
+    const fromEntry = how === 'pop' || !tabsBooted; tabsBooted = true;
+    const tab = tabFor(v, fromEntry ? history.state && history.state.tab : state.tab, arg);
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
       const cur = history.state || {};
