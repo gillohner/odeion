@@ -3330,3 +3330,121 @@ async fn songs_can_be_left_as_they_are_and_brought_back() {
     }
     assert_eq!(s.library.lock().unwrap().identity_counts().unwrap().skipped, 1);
 }
+
+/// "Which song is this?" on a song waiting for review adds what it finds to the song's options:
+/// the options a run found stay, and the song still counts as checked by older rules.
+#[tokio::test]
+async fn which_song_is_this_keeps_a_waiting_songs_options() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, true).await;
+    let id = pending_song(&s, dir.path(), 'C', 5);
+    left_by_older_rules(&s, id, &[91, 92]);
+    let (st, b) = call(
+        &router(s.clone()),
+        "GET",
+        &format!("/v1/library/tracks/{id}/candidates"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let options: Vec<String> = s
+        .library
+        .lock()
+        .unwrap()
+        .suggestions_for(id)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.recording_mbid)
+        .collect();
+    assert!(options.len() > 2, "something found and added: {options:?}");
+    assert!(
+        options.contains(&rec(91)) && options.contains(&rec(92)),
+        "{options:?}"
+    );
+    assert_eq!(s.library.lock().unwrap().identity_counts().unwrap().outdated, 1);
+}
+
+/// The start's automatic run checks only the songs older rules left waiting: a song never checked
+/// stays unchecked (nothing new is fingerprinted, no IDs written for it).
+#[tokio::test]
+async fn the_automatic_run_checks_only_songs_older_rules_left() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, true).await;
+    let old = pending_song(&s, dir.path(), 'C', 5);
+    left_by_older_rules(&s, old, &[91]);
+    let fresh = pending_song(&s, dir.path(), 'C', 7);
+    assert!(identify::recheck_when_idle(&s, std::time::Duration::from_millis(10)).await);
+    for _ in 0..1000 {
+        if !s.identify.lock().unwrap().running {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let p = s.identify.lock().unwrap().clone();
+    assert!(!p.running);
+    assert_eq!(p.total, 1, "{p:?}");
+    let lib = s.library.lock().unwrap();
+    let canonical = |id| lib.get_track(pm_model::TrackId(id)).unwrap().unwrap().canonical;
+    assert!(canonical(old).is_some());
+    assert!(canonical(fresh).is_none());
+    let c = lib.identity_counts().unwrap();
+    assert_eq!((c.unchecked, c.outdated), (1, 0));
+}
+
+/// A hidden song waiting for review never enters a run, so it doesn't count as one to check
+/// again (or every start would launch a run for it).
+#[tokio::test]
+async fn hidden_songs_dont_start_the_automatic_run() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, true).await;
+    let id = pending_song(&s, dir.path(), 'C', 5);
+    left_by_older_rules(&s, id, &[91]);
+    assert_eq!(s.library.lock().unwrap().identity_counts().unwrap().outdated, 1);
+    assert!(s
+        .library
+        .lock()
+        .unwrap()
+        .hide_track(pm_model::TrackId(id))
+        .unwrap());
+    {
+        let lib = s.library.lock().unwrap();
+        assert_eq!(lib.identity_counts().unwrap().outdated, 0);
+        assert!(!lib.has_outdated_suggestions().unwrap());
+    }
+    assert!(!identify::recheck_when_idle(&s, std::time::Duration::from_millis(10)).await);
+}
+
+/// MusicBrainz failing while a waiting song is checked again: the run counts an error, and the
+/// song keeps its options and stays one to check again.
+#[tokio::test]
+async fn a_failed_check_again_counts_as_an_error() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, true).await;
+    let id = pending_song(&s, dir.path(), 'C', 5);
+    left_by_older_rules(&s, id, &[91]);
+    // Nothing listens there
+    let dead = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{dead}/ws/2");
+    identify::run_with(&s, identify::RunOptions::quick(true))
+        .await
+        .unwrap();
+    let p = s.identify.lock().unwrap().clone();
+    assert_eq!(p.errors, 1, "{p:?}");
+    assert!(p.last_error.is_some(), "{p:?}");
+    let lib = s.library.lock().unwrap();
+    let options: Vec<String> = lib
+        .suggestions_for(id)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.recording_mbid)
+        .collect();
+    assert_eq!(options, vec![rec(91)]);
+    assert_eq!(lib.identity_counts().unwrap().outdated, 1);
+}

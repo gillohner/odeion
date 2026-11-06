@@ -116,6 +116,9 @@ pub struct RunOptions {
     /// The most MusicBrainz answers kept (default [`Library::IDENTIFY_MB_MAX`]); held when
     /// the run ends, not only when the next one starts.
     pub mb_cache_max: Option<i64>,
+    /// Only songs waiting for review that older rules checked (the start's automatic run): no
+    /// new song is fingerprinted, and IDs are written only for these.
+    pub outdated_only: bool,
 }
 
 impl RunOptions {
@@ -125,6 +128,15 @@ impl RunOptions {
             mb_interval: std::time::Duration::from_millis(1000),
             acoustid_interval: std::time::Duration::from_millis(340),
             mb_cache_max: None,
+            outdated_only: false,
+        }
+    }
+
+    /// The start's automatic run: [`Self::outdated_only`].
+    pub fn recheck() -> Self {
+        Self {
+            outdated_only: true,
+            ..Self::new(false)
         }
     }
 
@@ -135,6 +147,7 @@ impl RunOptions {
             mb_interval: std::time::Duration::ZERO,
             acoustid_interval: std::time::Duration::ZERO,
             mb_cache_max: None,
+            outdated_only: false,
         }
     }
 }
@@ -498,12 +511,12 @@ pub(crate) async fn start(
     State(s): State<Arc<NodeState>>,
     body: Option<Json<IdentifyStart>>,
 ) -> ApiResult<IdentifyStatus> {
-    launch(&s, body.map(|b| b.retry).unwrap_or(false));
+    launch(&s, RunOptions::new(body.map(|b| b.retry).unwrap_or(false)));
     Ok(Json(status(&s)?))
 }
 
 /// Start a run in the background; false (and nothing started) while one is going.
-fn launch(s: &Arc<NodeState>, retry: bool) -> bool {
+fn launch(s: &Arc<NodeState>, opts: RunOptions) -> bool {
     {
         let mut p = s.identify.lock().expect("identify lock");
         if p.running {
@@ -519,7 +532,7 @@ fn launch(s: &Arc<NodeState>, retry: bool) -> bool {
     remember_run(s, &started);
     let st = s.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(&st, retry).await {
+        if let Err(e) = run_with(&st, opts).await {
             tracing::warn!("identify: {}", e.message);
             st.identify.lock().expect("identify lock").stopped = Some(e.message);
         }
@@ -541,8 +554,9 @@ const RECHECK_AFTER_START: std::time::Duration = std::time::Duration::from_secs(
 /// At start: when songs wait for review that older rules checked, check them again once under
 /// the current rules (owner, 2026-11-06: most of them are the same song on several editions, which
 /// the current rules settle). After the start's library scan, only when MusicBrainz can be asked
-/// and no run is going. Songs the run settles are marked checked by these rules, so the next start
-/// finds nothing to do; with "Write IDs" on, the IDs found are written as after any run.
+/// and no run is going. The run checks only those songs (nothing new is fingerprinted); songs it
+/// settles are marked checked by these rules, so the next start finds nothing to do; with "Write
+/// IDs" on, the IDs found for them are written as after any run.
 pub fn spawn_recheck(s: &Arc<NodeState>) {
     let s = s.clone();
     tokio::spawn(async move {
@@ -566,7 +580,7 @@ pub(crate) async fn recheck_when_idle(s: &Arc<NodeState>, poll: std::time::Durat
     if !outdated || s.contact().trim().is_empty() {
         return false;
     }
-    let started = launch(s, false);
+    let started = launch(s, RunOptions::recheck());
     if started {
         tracing::info!("identify: checking songs that wait for review again under the current rules");
     }
@@ -674,7 +688,11 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             }
         }
         (
-            lib.tracks_to_identify(retry)?,
+            if opts.outdated_only {
+                Vec::new()
+            } else {
+                lib.tracks_to_identify(retry)?
+            },
             lib.all_tracks()?,
             lib.identify_inputs()?,
             // What each song is (file and tags), in the same read as the songs themselves: a
@@ -694,9 +712,21 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             Some((id, pm_library::identify::input_key(t, &services)))
         })
         .collect();
-    // Songs waiting for review are among them (older rules left them, or they changed): a retry
-    // ("Identify again") checks them too, not only a plain run
-    {
+    if opts.outdated_only {
+        // The start's automatic run: the songs older rules left waiting, nothing else
+        let outdated = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .outdated_suggestion_ids()?;
+        todo = all
+            .iter()
+            .filter(|t| t.id.is_some_and(|id| outdated.contains(&id.0)))
+            .cloned()
+            .collect();
+    } else {
+        // Songs waiting for review are among them (older rules left them, or they changed): a
+        // retry ("Identify again") checks them too, not only a plain run
         let have: std::collections::HashSet<i64> = todo.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
         let changed: Vec<Track> = all
             .iter()
@@ -1273,6 +1303,7 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
         Outcome::Suggest(c) => SettleAnswer::Suggest {
             candidates: c.clone(),
             input_key,
+            replace: true,
         },
         Outcome::Unknown => SettleAnswer::State {
             state: "unknown".into(),
@@ -1300,6 +1331,13 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
     match (settled, outcome) {
         // Kept: the owner's or another identity; Changed: checked again by the next run
         (Settled::Kept | Settled::Changed, _) => {}
+        // Checking a waiting song again failed: it keeps its options for the next run
+        (Settled::Failed, o) => {
+            p.errors += 1;
+            if let Outcome::Error(e) = o {
+                p.last_error = Some(e);
+            }
+        }
         (Settled::Rejected | Settled::Empty, _) => p.unknown += 1,
         (Settled::Stored, Outcome::Identified { confidence, .. }) => {
             p.identified += 1;
@@ -1870,6 +1908,7 @@ pub(crate) async fn track_candidates(
                 &pm_library::db::SettleAnswer::Suggest {
                     candidates: found,
                     input_key: None,
+                    replace: false,
                 },
             )?;
         }

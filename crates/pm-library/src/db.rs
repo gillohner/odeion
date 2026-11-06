@@ -139,6 +139,9 @@ pub enum SettleAnswer {
     Suggest {
         candidates: Vec<crate::identify::Candidate>,
         input_key: Option<String>,
+        /// A run's check: the song's open options become exactly these. Otherwise ("Which song
+        /// is this?") they are added to what is open, and the song's rules version stays.
+        replace: bool,
     },
     /// `unknown` or `error`.
     State {
@@ -163,6 +166,9 @@ pub enum Settled {
     /// The song changed since the run read it (a rescan replaced its file or changed its tags):
     /// the answer is for what it was, so nothing is stored; the next run checks it again.
     Changed,
+    /// Checking a waiting song again failed: nothing is written, it keeps its options and the
+    /// next run tries again.
+    Failed,
 }
 
 /// Whether a suggestion still is what the caller saw.
@@ -2891,11 +2897,27 @@ impl Library {
     /// Whether songs wait for review that older rules checked (the node checks them again once).
     pub fn has_outdated_suggestions(&self) -> Result<bool> {
         Ok(self.lock().query_row(
-            "SELECT EXISTS (SELECT 1 FROM tracks t JOIN identify_state s ON s.track_id = t.id
-               WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1)",
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM tracks t JOIN identify_state s ON s.track_id = t.id
+                   WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1 AND {TRACK_PRESENT})"
+            ),
             params![crate::identify::RULES_VERSION],
             |r| r.get(0),
         )?)
+    }
+
+    /// The songs [`Self::has_outdated_suggestions`] finds: waiting for review, checked by older
+    /// rules, with a file present. The start's automatic run checks only these.
+    pub fn outdated_suggestion_ids(&self) -> Result<std::collections::HashSet<i64>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(&format!(
+            "SELECT t.id FROM tracks t JOIN identify_state s ON s.track_id = t.id
+             WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1 AND {TRACK_PRESENT}"
+        ))?;
+        let ids = st
+            .query_map(params![crate::identify::RULES_VERSION], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(ids)
     }
 
     /// One suggestion by id, whatever its song's state.
@@ -3058,18 +3080,24 @@ impl Library {
                 return Ok(Settled::Kept);
             }
             let rules = crate::identify::RULES_VERSION;
-            let put_state = |state: &str,
-                             detail: Option<&str>,
-                             release: Option<String>,
-                             input: Option<&str>| {
+            // `rules` None: the song's rules version stays (options added, not checked again)
+            let put_state_as = |state: &str,
+                                detail: Option<&str>,
+                                release: Option<String>,
+                                input: Option<&str>,
+                                rules: Option<u32>| {
                 tx.execute(
                 "INSERT INTO identify_state(track_id, state, detail, checked_at, release_mbid, input_key, rules) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(track_id) DO UPDATE SET state = excluded.state, detail = excluded.detail, checked_at = excluded.checked_at,
                    release_mbid = excluded.release_mbid, input_key = COALESCE(excluded.input_key, identify_state.input_key),
-                   rules = excluded.rules",
+                   rules = COALESCE(excluded.rules, identify_state.rules)",
                 params![track, state, detail, now_unix(), release, input, rules],
             )
             };
+            let put_state =
+                |state: &str, detail: Option<&str>, release: Option<String>, input: Option<&str>| {
+                    put_state_as(state, detail, release, input, Some(rules))
+                };
             let done = match answer {
                 SettleAnswer::Identified {
                     recording,
@@ -3119,8 +3147,10 @@ impl Library {
                 SettleAnswer::Suggest {
                     candidates,
                     input_key,
+                    replace,
                 } => {
-                    if open_before > 0 {
+                    let recheck = *replace && open_before > 0;
+                    if recheck {
                         // Checked again: options older rules offered and these don't go; one that
                         // stays keeps its id, so a review page showing it still acts on it
                         let keep: Vec<String> = candidates.iter().map(|c| c.recording.to_string()).collect();
@@ -3138,8 +3168,11 @@ impl Library {
                         params![track],
                         |r| r.get(0),
                     )?;
+                    // Options added to open ones ("Which song is this?") aren't a check under
+                    // these rules: the song keeps its version, so a run still checks it again
+                    let stamp = (*replace || open_before == 0).then_some(rules);
                     if open > 0 {
-                        put_state("suggested", None, None, input_key.as_deref())?;
+                        put_state_as("suggested", None, None, input_key.as_deref(), stamp)?;
                         Settled::Stored
                     } else {
                         let why = (!candidates.is_empty()).then_some("suggestions rejected");
@@ -3155,10 +3188,11 @@ impl Library {
                     // Checked again and nothing new: an error leaves it to a later run (nothing
                     // is written); "nothing found" keeps the options older rules offered, for the
                     // owner, and marks it checked by these rules
-                    if state != "error" {
-                        put_state("suggested", None, None, input_key.as_deref())?;
-                        tx.commit()?;
+                    if state == "error" {
+                        return Ok(Settled::Failed);
                     }
+                    put_state("suggested", None, None, input_key.as_deref())?;
+                    tx.commit()?;
                     return Ok(Settled::Kept);
                 }
                 SettleAnswer::State {
@@ -3286,8 +3320,10 @@ impl Library {
                 "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id WHERE t.canonical_uri IS NULL AND s.state = 'skipped'",
             )?,
             outdated: conn.query_row(
-                "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id
-                 WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1",
+                &format!(
+                    "SELECT COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id
+                     WHERE t.canonical_uri IS NULL AND s.state = 'suggested' AND COALESCE(s.rules, 0) < ?1 AND {TRACK_PRESENT}"
+                ),
                 params![crate::identify::RULES_VERSION],
                 |r| r.get::<_, i64>(0),
             )? as u64,
@@ -5868,6 +5904,7 @@ mod identify_tests {
         let suggest = SettleAnswer::Suggest {
             candidates: vec![cand(R[2], "x", 0.9, "fingerprint")],
             input_key: None,
+            replace: true,
         };
         assert_eq!(lib.settle(t[1], &suggest).unwrap(), Settled::Kept);
         assert!(lib.suggestions_for(t[1]).unwrap().is_empty());
@@ -5905,6 +5942,7 @@ mod identify_tests {
                 cand(R[2], "S4b", 0.9, "fingerprint"),
             ],
             input_key: Some("k4".into()),
+            replace: true,
         };
         assert_eq!(lib.settle(t[3], &both).unwrap(), Settled::Stored);
         assert_eq!(lib.suggestions_for(t[3]).unwrap().len(), 1);
@@ -5926,6 +5964,7 @@ mod identify_tests {
         let rejected_only = SettleAnswer::Suggest {
             candidates: vec![cand(R[3], "S5", 0.9, "search")],
             input_key: None,
+            replace: true,
         };
         assert_eq!(lib.settle(t[4], &rejected_only).unwrap(), Settled::Empty);
         assert_eq!(state_of(&lib, t[4]).unwrap().0, "unknown");
@@ -6565,6 +6604,7 @@ mod identify_tests {
         let now = SettleAnswer::Suggest {
             candidates: vec![cand(R[1], "X", 0.75, "search"), cand(R[2], "X", 0.7, "search")],
             input_key: Some("k".into()),
+            replace: true,
         };
         assert_eq!(lib.settle(a, &now).unwrap(), Settled::Stored);
         let after = ids(&lib, a);
@@ -6587,10 +6627,20 @@ mod identify_tests {
             detail: Some("MusicBrainz answered 503".into()),
             input_key: Some("k".into()),
         };
-        assert_eq!(lib.settle(b, &err).unwrap(), Settled::Kept);
+        assert_eq!(lib.settle(b, &err).unwrap(), Settled::Failed);
         assert_eq!(state_of(&lib, b).unwrap().0, "suggested");
         assert_eq!(rules_of(&lib, b), None);
         assert_eq!(ids(&lib, b).len(), 1);
+        // Options added ("Which song is this?"): the open ones stay, the song stays outdated
+        let added = SettleAnswer::Suggest {
+            candidates: vec![cand(R[4], "X", 0.6, "search")],
+            input_key: None,
+            replace: false,
+        };
+        assert_eq!(lib.settle(b, &added).unwrap(), Settled::Stored);
+        assert_eq!(ids(&lib, b).len(), 2, "added to the open option");
+        assert_eq!(rules_of(&lib, b), None);
+        assert_eq!(lib.identity_counts().unwrap().outdated, 1);
         // Nothing found: the options stay for the owner, the song is marked checked
         let nothing = SettleAnswer::State {
             state: "unknown".into(),
@@ -6600,7 +6650,7 @@ mod identify_tests {
         assert_eq!(lib.settle(b, &nothing).unwrap(), Settled::Kept);
         assert_eq!(state_of(&lib, b).unwrap().0, "suggested");
         assert_eq!(rules_of(&lib, b), Some(crate::identify::RULES_VERSION as i64));
-        assert_eq!(ids(&lib, b).len(), 1);
+        assert_eq!(ids(&lib, b).len(), 2);
 
         // The rules pick a recording the owner rejected for it: it keeps waiting with what's open
         let c = left_by_older_rules(
