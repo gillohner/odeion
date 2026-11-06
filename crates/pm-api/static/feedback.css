@@ -1,0 +1,27 @@
+/* Help and problem reports (feedback.js). Uses the app's tokens and its .dialog, .btn, .field. */
+.fb-anchor { position: relative; display: inline-flex; }
+.fb-help { min-width: 36px; min-height: 36px; padding: 0 10px; border-radius: 999px; font-weight: 700; }
+.fb-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 50; display: flex; flex-direction: column; gap: 4px; min-width: 200px; padding: 6px; background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); box-shadow: var(--shadow); }
+.fb-item { justify-content: flex-start; width: 100%; text-align: left; border-color: transparent; }
+.fb-dialog { width: min(92vw, 520px); max-height: min(90vh, 760px); overflow: auto; }
+.fb-kinds { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; }
+.fb-kind, .fb-tick { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; cursor: pointer; }
+.fb-text { min-height: 120px; resize: vertical; line-height: 1.4; }
+.fb-count { display: block; text-align: right; font-size: 12px; margin-top: 4px; }
+.fb-tick { margin-top: 8px; }
+.fb-preview { margin: 8px 0 0; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.fb-status:empty, .fb-error:empty { display: none; }
+.fb-status { margin: 8px 0 0; color: var(--muted); }
+.fb-done { margin-bottom: 0; }
+.fb-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.fb-row { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.fb-row-head { min-width: 0; }
+.fb-preview-line { color: var(--fg-2); overflow-wrap: anywhere; white-space: pre-wrap; }
+.fb-state { font-size: 12px; font-weight: 600; color: var(--muted); }
+.fb-received { color: var(--info); }
+.fb-reviewed { color: var(--ok); }
+.fb-saved { color: var(--muted); }
+@media (max-width: 600px) {
+  .fb-dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; border-radius: 0; padding: 16px; }
+  .fb-menu { right: -8px; }
+}

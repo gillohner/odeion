@@ -709,6 +709,8 @@ const LISTENER_READS: &[&str] = &[
 /// acts on the caller's own account, reads included; the apps and clients behind them stay the
 /// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
 const LISTENER_OWN: &[&str] = &[
+    // Their own problem reports (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights: their own choice, aliases and events (usage.rs checks the person itself)
     "/usage",
     "/play-order",
@@ -733,6 +735,9 @@ const LISTENER_OWN: &[&str] = &[
 
 /// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
 const LISTENER_OWN_ALWAYS: &[&str] = &[
+    // Problem reports aren't a sign-in either: a listener reports and sees their own whatever
+    // plays through whose sign-ins (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
     // whatever plays through whose sign-ins (usage.rs checks the person)
     "/usage",
@@ -990,12 +995,18 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
-/// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
+/// devices, their problem reports, and what was fetched with their sign-ins (TIDAL tracks, search
+/// answers, item pages).
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let signed_out = sign_out_everywhere(s, key);
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
+    // Their problem reports too (feedback.rs); if the inbox can't be written now, they still go
+    // within a year
+    if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), key) {
+        tracing::warn!("feedback: a removed listener's reports not removed: {e}");
+    }
     signed_out?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());

@@ -13,7 +13,7 @@
 'use strict';
 const CACHE = 'odeion-shell';
 // The page's files. The page itself (/) is the same for every path the app shows.
-const FILES = ['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'];
+const FILES = ['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feedback.js', '/feedback.css', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'];
 // The app's own pages, exactly the node's page routes (lib.rs `web` router and WEB_VIEWS; checked
 // by tools/pwa-check.js); a party link, a sign-in return or anything else is left to the network.
 const PAGES = /^\/(?:|app\/?|now-playing|discover(?:\/.+)?|search|library|add-music|downloads|favourites|albums|artists|genres|tracks|playlists|radio|sources|queue|zones|settings|identify|(?:settings|library|sources|home)\/[^/]+|(?:song|album|artist|playlist|person|smart|genre|source|tag)\/[^/]+|shared\/[^/]+(?:\/[^/]+)?)$/;
