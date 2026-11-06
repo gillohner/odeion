@@ -1317,9 +1317,12 @@ html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-te
 html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
 html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
-html[data-shell="phone"] .search { flex: 1 1 auto; }
+/* Nothing in the top bar may be wider than the screen: a too-wide bar made the whole page wider,
+   and the WebView then panned it sideways (owner's recording, 2026-11-06). The search field and the
+   status chip shrink; the buttons keep their size. */
+html[data-shell="phone"] .search { flex: 1 1 auto; min-width: 0; }
 html[data-shell="phone"] .topbar-right:empty { display: none; }
-html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none; max-width: 40%; }
+html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: 0 1 auto; min-width: 0; max-width: 40%; }
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
 /* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
 html[data-shell="phone"] .player { grid-template-columns: minmax(150px, 1fr) fit-content(48%) auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
@@ -1440,6 +1443,22 @@ html[data-shell] .topbar { height: calc(var(--topbar) + env(safe-area-inset-top,
 }
 /* Menus as a bottom sheet on phones; the playlist picker */
 .popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
+/* Phones: every panel is a bottom sheet the width of the screen, like the menus (owner's recording,
+   2026-11-06: Play to opened as a narrow panel beside the page and ran off the bottom). A handle on
+   top, its own scroll, the gesture bar's inset below; the scrim, Back and a swipe down close it. */
+html[data-shell="phone"] .popover:not(.menu) {
+  left: 0; right: 0; top: auto; bottom: 0; width: auto; max-width: none; max-height: 85vh; max-height: 85dvh;
+  border-width: 1px 0 0; border-radius: 16px 16px 0 0; padding: 0 8px calc(10px + env(safe-area-inset-bottom));
+  z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); overscroll-behavior: contain;
+}
+html[data-shell="phone"] .popover:not(.menu)::before, .popover.menu.sheet::before {
+  content: ""; display: block; position: sticky; top: 0; width: 36px; height: 4px; margin: 0 auto 6px;
+  border-top: 8px solid var(--surface-2); border-bottom: 6px solid var(--surface-2); box-sizing: content-box;
+  background: var(--line-strong); background-clip: content-box; border-radius: 2px; z-index: 1;
+}
+.popover.menu.sheet { padding-top: 0; }
+html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto; }
+.popover.sheet-drag { transition: none !important; }
 .picker { max-height: 50vh; overflow: auto; margin: 10px 0; }
 .picker .list-row { width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: var(--fg); cursor: pointer; }
 .picker .list-row:first-child { border-top: 0; }

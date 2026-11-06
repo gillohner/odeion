@@ -1198,7 +1198,8 @@
   const watchJob = (id) => { if (id) jobs.watch = id; refreshJobs(); };
   // A job already running (another tab started it, or the node carried on after a restart)
   const findJob = refreshJobs;
-  // Outside parts that do not answer (Pinakes, the homeserver, a service): one quiet line under
+  // External resources that do not answer (Pinakes, the homeserver, a service), or that need a
+  // change (the API token): one quiet line under
   // the node status, only when something is wrong; the library keeps playing without them.
   let healthTimer = null;
   const checkHealth = async () => {
@@ -1208,9 +1209,10 @@
     const bad = parts.filter((p) => p.state !== 'ok');
     el.hidden = !bad.length; if (!bad.length) return;
     const first = bad[0];
-    $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? (first.id === 'homeserver' ? `${first.name}: log out and in to approve new folders` : `${first.name}: sign in again`) : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
+    // Each state in its own words: "not answering" only for one that doesn't answer
+    $('.up-text', el).textContent = (first.state === 'needs_sign_in' ? (first.id === 'homeserver' ? `${first.name}: log out and in to approve new folders` : `${first.name}: sign in again`) : first.state === 'change' ? (first.id === 'api-token' ? 'Change the API token' : `${first.name} needs a change`) : `${first.name} not answering`) + (bad.length > 1 ? ` · ${bad.length - 1} more` : '');
     el.title = bad.map((p) => `${p.name}: ${p.detail || p.state}`).join('\n') + '\nYour library keeps playing.';
-    el.onclick = () => showMenu(el, [{ title: 'Outside parts' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in', run: () => { state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
+    el.onclick = () => showMenu(el, [{ title: 'External resources' }, ...parts.map((p) => ({ label: p.name, note: p.state === 'ok' ? `answering${p.ms != null ? ` · ${p.ms} ms` : ''}` : p.detail || p.state, icon: p.state === 'ok' ? 'check' : 'close', disabled: p.state !== 'needs_sign_in', run: () => { state.autoResign = true; setView('settings', 'accounts'); } })), { label: 'Check again', icon: 'shuffle', run: () => checkHealth() }]);
   };
   // Clickable rows that are not buttons or links are made reachable for the keyboard, also when
   // they arrive after a page first draws (Home's sections, search results).
@@ -4106,6 +4108,32 @@
   }
   const closeMenu = (fromBack) => { if (menuEl.hidden) return; menuEl.hidden = true; if (fromBack !== true) popTransient(); };
   transients.push({ open: () => !menuEl.hidden, close: closeMenu }, { open: () => !zonePop.hidden, close: closePop }, { open: () => !qPanel.hidden, close: closeQPanel }, { open: () => !jobPop().hidden, close: closeJobPop });
+  // Phones: a sheet closes with a swipe down while its list is at the top (it follows the finger;
+  // a short pull springs back). A swipe that starts sideways or scrolls the list is left alone.
+  const sheetSwipe = (el, close) => {
+    let t = null;
+    const end = (cancel) => {
+      if (!t) return; const was = t; t = null;
+      el.classList.remove('sheet-drag'); el.style.transform = '';
+      if (!cancel && was.on && was.dy > Math.min(120, el.offsetHeight / 3)) close();
+    };
+    el.addEventListener('touchstart', (e) => {
+      t = shellMode() === 'phone' && e.touches.length === 1 && el.scrollTop <= 0 ? { x: e.touches[0].clientX, y: e.touches[0].clientY, dy: 0, on: false } : null;
+    }, { passive: true });
+    el.addEventListener('touchmove', (e) => {
+      if (!t) return;
+      const dy = e.touches[0].clientY - t.y; const dx = e.touches[0].clientX - t.x;
+      if (!t.on) {
+        if (Math.abs(dy) < 10 && Math.abs(dx) < 10) return;
+        if (dy < 0 || Math.abs(dx) > Math.abs(dy) || el.scrollTop > 0) { t = null; return; }
+        t.on = true; el.classList.add('sheet-drag');
+      }
+      t.dy = Math.max(0, dy); el.style.transform = `translateY(${t.dy}px)`;
+    }, { passive: true });
+    el.addEventListener('touchend', () => end(false), { passive: true });
+    el.addEventListener('touchcancel', () => end(true), { passive: true });
+  };
+  [[menuEl, closeMenu], [zonePop, closePop], [qPanel, closeQPanel], [jobPop(), closeJobPop], [volPop(), closeVolPop]].forEach(([el, close]) => { if (el) sheetSwipe(el, close); });
   const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   // `opts.all`: every item stays for a listener too (the items are names, not owner actions)
