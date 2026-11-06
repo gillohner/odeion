@@ -52,6 +52,13 @@ pub struct Report {
     /// being unplugged), sent before the device's removal: the DAC counts as gone at once.
     #[serde(default)]
     pub noisy: bool,
+    /// The USB DAC the app holds for Exclusive USB (it took it from Android's driver, so Android
+    /// lists no audio device for it): still attached, still the phone's DAC.
+    #[serde(default)]
+    pub held: Option<ReportUsb>,
+    /// The app closes: give the DAC back to Android once nothing plays on it.
+    #[serde(default)]
+    pub release_exclusive: bool,
     /// Android's media volume, 0 to 100 (-1: unknown); the app reports again at every change.
     #[serde(default)]
     pub media_volume: Option<i32>,
@@ -198,7 +205,7 @@ pub fn display_name(d: &ReportDevice) -> String {
     name.chars().take(MAX_NAME).collect()
 }
 
-fn unhex(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
     let s = s.trim();
     if !s.len().is_multiple_of(2) || s.len() / 2 > MAX_DESCRIPTORS {
         return None;
@@ -209,16 +216,21 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The descriptors' summary, when they are there, parse as an audio device, and are the same
-/// USB device (vendor and product id).
-fn descriptors_summary(d: &ReportDevice, name: &str) -> Option<pm_usb_audio::Summary> {
+/// The raw descriptors, when they are there, parse as an audio device, and are the same USB
+/// device (vendor and product id).
+fn descriptors(d: &ReportDevice) -> Option<Vec<u8>> {
     let usb = d.usb.as_ref()?;
     let raw = unhex(usb.descriptors.as_deref()?)?;
     let parsed = pm_usb_audio::parse(&raw);
     if parsed.uac.is_none() || (parsed.vendor_id, parsed.product_id) != (usb.vendor_id, usb.product_id) {
         return None;
     }
-    Some(parsed.summary(name, &[]))
+    Some(raw)
+}
+
+/// The descriptors' summary (see [`descriptors`]).
+fn descriptors_summary(d: &ReportDevice, name: &str) -> Option<pm_usb_audio::Summary> {
+    Some(pm_usb_audio::parse(&descriptors(d)?).summary(name, &[]))
 }
 
 /// The Android major version for an SDK level, for words people know ("Android 13").
@@ -265,6 +277,10 @@ pub struct Dac {
     pub id: i32,
     pub mixer: Vec<MixerEntry>,
     pub sdk: u32,
+    /// Its raw USB descriptors, when the app had permission (Exclusive USB reads its formats).
+    pub descriptors: Option<Vec<u8>>,
+    /// The app holds it for Exclusive USB (Android lists no audio device for it meanwhile).
+    pub held: bool,
 }
 
 /// The [`Dac`] of a report, when there is one.
@@ -275,6 +291,8 @@ pub fn dac(report: &Report) -> Option<Dac> {
         id: d.id,
         mixer: d.mixer.clone(),
         sdk: report.sdk,
+        descriptors: descriptors(d),
+        held: false,
     })
 }
 
@@ -436,6 +454,31 @@ pub fn gone_reason() -> String {
             p.gone_why.clone()
         }
     })
+}
+
+/// Reports in which Android listed a USB DAC (an audio device): Exclusive USB waits for the next
+/// one after it gave a DAC back.
+static LISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many reports so far listed a DAC Android plays.
+pub fn listed_seq() -> u64 {
+    LISTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The exclusive open on `dac_id` in `format` is no longer confirmed (its packets stopped
+/// arriving): still Exclusive USB, not confirmed, with why; the node learns it.
+pub fn unconfirm_exclusive(dac_id: i32, format: pm_model::AudioFormat, why: String) {
+    let changed = with_phone(|p| match p.last.as_mut() {
+        Some(l) if l.dac_id == dac_id && l.format == format && l.confirmed => {
+            l.confirmed = false;
+            l.note = Some(why);
+            true
+        }
+        _ => false,
+    });
+    if changed {
+        notify_change();
+    }
 }
 
 /// An unplug this soon after the last sink for the DAC closed counts as one the zone hasn't seen
@@ -613,11 +656,13 @@ fn view(p: &Phone) -> Option<OutputDevice> {
     let d = p.dac.as_ref()?;
     let mut dev = d.device.clone();
     let offer = crate::bit_perfect::offer(d);
-    dev.modes = if offer.is_ok() {
-        vec![DeviceMode::Shared, DeviceMode::BitPerfect]
-    } else {
-        vec![DeviceMode::Shared]
-    };
+    dev.modes = vec![DeviceMode::Shared];
+    if offer.is_ok() {
+        dev.modes.push(DeviceMode::BitPerfect);
+    }
+    if crate::exclusive::offer(d).is_ok() {
+        dev.modes.push(DeviceMode::Exclusive);
+    }
     dev.settings = Some(p.settings);
     // What bit-perfect would play now, and Android's volume (it plays at full level)
     let (formats, media) = crate::bit_perfect::view_extras(d, p.settings, consent(p), p.media);
@@ -630,10 +675,13 @@ fn view(p: &Phone) -> Option<OutputDevice> {
             dev.note = l.note.clone();
             dev.format = Some(l.format);
         }
-        // Nothing played on it yet: why it can't be bit-perfect, when it can't
+        // Nothing played on it yet: why it can't be bit-perfect, when it can't (and Exclusive
+        // USB isn't there instead)
         None => {
             if let Err(why) = offer {
-                dev.note = dev.note.or(Some(why));
+                if !dev.modes.contains(&DeviceMode::Exclusive) {
+                    dev.note = dev.note.or(Some(why));
+                }
             }
         }
     }
@@ -664,8 +712,8 @@ pub fn settings() -> DeviceSettings {
 /// changed.
 pub fn set_settings(s: DeviceSettings) -> bool {
     let mut s = s;
-    // The agreement to full level goes with Bit-perfect, for the DAC attached now
-    if s.mode != pm_zones::PreferredMode::BitPerfect {
+    // The agreement to full level goes with Bit-perfect or Exclusive USB, for the DAC attached now
+    if !full_level_mode(s.mode) {
         s.full_level_ok = false;
     }
     let (changed, file) = with_phone(|p| {
@@ -684,12 +732,25 @@ pub fn set_settings(s: DeviceSettings) -> bool {
     if changed {
         GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+    // Exclusive USB chosen (again: Android's permission is asked again when it isn't given);
+    // another mode gives the DAC back
+    if changed || s.mode == pm_zones::PreferredMode::Exclusive {
+        crate::exclusive::settings_changed(s.mode);
+    }
     if let (true, Some(f)) = (changed, file) {
         if let Err(e) = std::fs::write(&f, serde_json::to_vec(&s).expect("serializes")) {
             tracing::warn!(path = %f.display(), "cannot save the DAC settings: {e}");
         }
     }
     changed
+}
+
+/// The modes that may play at full level, with the listener's agreement.
+pub fn full_level_mode(m: pm_zones::PreferredMode) -> bool {
+    matches!(
+        m,
+        pm_zones::PreferredMode::BitPerfect | pm_zones::PreferredMode::Exclusive
+    )
 }
 
 /// Where the settings are kept: read them from there now, save them there from now on.
@@ -720,6 +781,26 @@ pub fn record_open(last: LastOpen) {
         let changed = was.is_some_and(|w| w != (last.mode, last.confirmed));
         p.last = Some(last);
         changed
+    });
+    if changed {
+        notify_change();
+    }
+}
+
+/// The exclusive open on `dac_id` in `format` is confirmed (the clock read back its rate and the
+/// stream runs): the node learns it.
+pub fn confirm_open(dac_id: i32, format: pm_model::AudioFormat) {
+    let changed = with_phone(|p| match p.last.as_mut() {
+        Some(l)
+            if l.dac_id == dac_id
+                && l.format == format
+                && l.mode == DeviceMode::Exclusive
+                && !l.confirmed =>
+        {
+            l.confirmed = true;
+            true
+        }
+        _ => false,
     });
     if changed {
         notify_change();
@@ -774,6 +855,8 @@ fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
             }
         }
         if other {
+            // A DAC the app held for Exclusive USB goes with it
+            crate::exclusive::dac_changed(dac.as_ref().map(|d| d.id));
             GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             p.last = None;
             // The next DAC's reason, when it goes, is its own; an earlier unplug is moot now
@@ -785,6 +868,19 @@ fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
         p.dac = dac;
         view(p) != before
     })
+}
+
+/// The phone's DAC while the app holds it (or gives it back), as long as the same USB device is
+/// still attached: Android lists no audio device for it meanwhile.
+fn kept_while_held(r: &Report) -> Option<Dac> {
+    let held = r.held.as_ref()?;
+    let mut d = current_dac()?;
+    let ids = d.device.usb?;
+    if (ids.vendor_id, ids.product_id) != (held.vendor_id, held.product_id) {
+        return None;
+    }
+    d.held = true;
+    Some(d)
 }
 
 /// A report from the app, kept as the phone's DAC: a report that can't be read (too large,
@@ -802,10 +898,18 @@ pub fn apply_report(json: &str) -> bool {
         media_changed = with_phone(|p| std::mem::replace(&mut p.media, v) != v);
     }
     let (dac, why) = match parsed {
-        // Android is about to move audio off the DAC: gone now, before its removal arrives
-        Ok(r) if r.noisy => (None, None),
+        // Android is about to move audio off the DAC: gone now, before its removal arrives (not
+        // while the app holds it: taking it from Android's driver warns the same way)
+        Ok(r) if r.noisy && r.held.is_none() => (None, None),
         Ok(r) => {
-            let dac = dac(&r);
+            if r.release_exclusive {
+                crate::exclusive::release();
+            }
+            let listed = dac(&r);
+            if listed.is_some() {
+                LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let dac = listed.or_else(|| kept_while_held(&r));
             // The DAC still attached, but media goes elsewhere (Bluetooth, the speaker)
             let old = current_dac();
             let why = old
@@ -819,7 +923,10 @@ pub fn apply_report(json: &str) -> bool {
         }
     };
     tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
-    set_dac_because(dac, why) || media_changed
+    // Android's volume decides only a DAC's mode: without one, a volume step is no change (the
+    // app doesn't register again at every step of the slider)
+    let volume_counts = media_changed && dac.is_some();
+    set_dac_because(dac, why) || volume_counts
 }
 
 #[cfg(test)]
@@ -1077,6 +1184,8 @@ mod tests {
             "channels",
             "behavior",
             "noisy",
+            "held",
+            "release_exclusive",
             "media_volume",
         ];
         assert_eq!(

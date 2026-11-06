@@ -4251,6 +4251,7 @@ dependencies = [
 name = "pm-usb-audio"
 version = "0.2.2"
 dependencies = [
+ "libc",
  "serde",
 ]
 

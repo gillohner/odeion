@@ -1311,17 +1311,23 @@ async fn put_output_device(
     let mut settings = device.settings.unwrap_or_default();
     if let Some(m) = body.mode {
         if m == pm_zones::PreferredMode::Unknown {
-            return Err(ApiError::bad_request("mode is auto, bit_perfect or shared"));
+            return Err(ApiError::bad_request(
+                "mode is auto, bit_perfect, exclusive or shared",
+            ));
         }
         settings.mode = m;
     }
     if let Some(v) = body.dac_volume {
         settings.dac_volume = v;
     }
-    // The listener's agreement that Bit-perfect plays at full level (asked when they choose it
-    // below Android's full volume); it goes with any other mode
-    settings.full_level_ok =
-        body.full_level_ok.unwrap_or(false) && settings.mode == pm_zones::PreferredMode::BitPerfect;
+    // The listener's agreement that Bit-perfect (or Exclusive USB on a DAC without a volume of its
+    // own) plays at full level, asked when they choose it below Android's full volume; it goes
+    // with any other mode
+    settings.full_level_ok = body.full_level_ok.unwrap_or(false)
+        && matches!(
+            settings.mode,
+            pm_zones::PreferredMode::BitPerfect | pm_zones::PreferredMode::Exclusive
+        );
     out.configure_device(settings)
         .await
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
