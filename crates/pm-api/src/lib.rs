@@ -22814,6 +22814,44 @@ exec sleep 300
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
     }
 
+    /// [`fake_renderer_at`], answering after `delay_ms`.
+    async fn fake_renderer_slow(
+        listener: tokio::net::TcpListener,
+        udn: &'static str,
+        name: &'static str,
+        delay_ms: Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        let desc = format!(
+            r#"<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+    <friendlyName>{name}</friendlyName>
+    <UDN>{udn}</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+        <controlURL>/AVTransport/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>"#
+        );
+        let mock = Router::new().route(
+            "/desc.xml",
+            get(move || {
+                let desc = desc.clone();
+                let ms = delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    ([(header::CONTENT_TYPE, "text/xml")], desc)
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    }
+
     /// The node's own zones, offered as UPnP renderers, are never taken as outputs: not by their
     /// UDN, not by their description's address (loopback or a LAN address of this host), and not
     /// when typed as an address. A rescan once made `<zone>-2` zones playing into the node itself.
@@ -22893,7 +22931,7 @@ exec sleep 300
     /// its own zone and the old one is forgotten.
     #[tokio::test]
     async fn a_known_renderer_missed_by_the_search_gets_its_zone() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
         let linn = "uuid:4c494e4e-0026-0f21-cc3f-0123456789ab";
         let named = |s: &Arc<NodeState>, n: &str| s.zones.list().iter().filter(|z| z.name == n).count();
         let restore = |s: &Arc<NodeState>| {
@@ -22996,6 +23034,55 @@ exec sleep 300
             s.upnp_known().get(tv).map(|k| k.location.clone()),
             Some(url.clone())
         );
+        // A restore still describing a renderer at its old address while another pass registers it
+        // at its new one: the old address isn't written back over the new
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let slow = Arc::new(AtomicU64::new(600));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let old_url = format!(
+            "http://127.0.0.1:{}/desc.xml",
+            listener.local_addr().unwrap().port()
+        );
+        fake_renderer_slow(listener, linn, "Klimax UPnP AV", slow.clone()).await;
+        s.remember_upnp(linn, &old_url);
+        let restoring = restore(&s);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let new_url = format!(
+            "http://127.0.0.1:{}/desc.xml",
+            listener.local_addr().unwrap().port()
+        );
+        fake_renderer_at(
+            listener,
+            linn,
+            "Klimax UPnP AV",
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await;
+        // (blocking HTTP, off the runtime's threads)
+        let registered = tokio::task::spawn_blocking({
+            let s = s.clone();
+            let url = new_url.clone();
+            move || {
+                let found = pm_out_upnp::describe(&url).unwrap().unwrap();
+                s.register_renderer(found).is_some()
+            }
+        })
+        .await
+        .unwrap();
+        assert!(registered, "registered at its new address meanwhile");
+        assert!(
+            restoring.await.unwrap().is_empty(),
+            "the late answer registers nothing"
+        );
+        assert_eq!(
+            s.upnp_known().get(linn).map(|k| k.location.clone()),
+            Some(new_url),
+            "the new address stands"
+        );
+        assert_eq!(named(&s, "Klimax UPnP AV"), 1);
         // Forgetting is for the address it was at: one found elsewhere meanwhile stays
         s.remember_upnp(linn, "http://192.0.2.7/desc.xml");
         s.forget_upnp_at(linn, &url);

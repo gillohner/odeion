@@ -1389,6 +1389,15 @@ impl NodeState {
             }
             match pm_out_upnp::describe_within(&k.location, std::time::Duration::from_secs(2)) {
                 Ok(Some(r)) => {
+                    // (registered meanwhile by another pass, at the address it answered there: this
+                    // answer, from an address that may be stale, says nothing newer)
+                    if self
+                        .outputs
+                        .get(&OutputId::new("upnp", r.udn.trim_start_matches("uuid:")))
+                        .is_some()
+                    {
+                        continue;
+                    }
                     if !r
                         .udn
                         .trim_start_matches("uuid:")
