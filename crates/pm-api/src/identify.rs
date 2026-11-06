@@ -116,6 +116,9 @@ pub struct RunOptions {
     /// The most MusicBrainz answers kept (default [`Library::IDENTIFY_MB_MAX`]); held when
     /// the run ends, not only when the next one starts.
     pub mb_cache_max: Option<i64>,
+    /// Only songs waiting for review that older rules checked (the start's automatic run): no
+    /// new song is fingerprinted, and IDs are written only for these.
+    pub outdated_only: bool,
 }
 
 impl RunOptions {
@@ -125,6 +128,15 @@ impl RunOptions {
             mb_interval: std::time::Duration::from_millis(1000),
             acoustid_interval: std::time::Duration::from_millis(340),
             mb_cache_max: None,
+            outdated_only: false,
+        }
+    }
+
+    /// The start's automatic run: [`Self::outdated_only`].
+    pub fn recheck() -> Self {
+        Self {
+            outdated_only: true,
+            ..Self::new(false)
         }
     }
 
@@ -135,6 +147,7 @@ impl RunOptions {
             mb_interval: std::time::Duration::ZERO,
             acoustid_interval: std::time::Duration::ZERO,
             mb_cache_max: None,
+            outdated_only: false,
         }
     }
 }
@@ -498,12 +511,16 @@ pub(crate) async fn start(
     State(s): State<Arc<NodeState>>,
     body: Option<Json<IdentifyStart>>,
 ) -> ApiResult<IdentifyStatus> {
-    let retry = body.map(|b| b.retry).unwrap_or(false);
+    launch(&s, RunOptions::new(body.map(|b| b.retry).unwrap_or(false)));
+    Ok(Json(status(&s)?))
+}
+
+/// Start a run in the background; false (and nothing started) while one is going.
+fn launch(s: &Arc<NodeState>, opts: RunOptions) -> bool {
     {
         let mut p = s.identify.lock().expect("identify lock");
         if p.running {
-            drop(p);
-            return Ok(Json(status(&s)?));
+            return false;
         }
         *p = IdentifyProgress {
             running: true,
@@ -512,10 +529,10 @@ pub(crate) async fn start(
         };
     }
     let started = s.identify.lock().expect("identify lock").clone();
-    remember_run(&s, &started);
+    remember_run(s, &started);
     let st = s.clone();
     tokio::spawn(async move {
-        if let Err(e) = run(&st, retry).await {
+        if let Err(e) = run_with(&st, opts).await {
             tracing::warn!("identify: {}", e.message);
             st.identify.lock().expect("identify lock").stopped = Some(e.message);
         }
@@ -528,7 +545,46 @@ pub(crate) async fn start(
         remember_run(&st, &ended);
         let _ = st.events.send(crate::types::ApiEvent::LibraryChanged);
     });
-    Ok(Json(status(&s)?))
+    true
+}
+
+/// How long the node lets its start settle before it checks old suggestions again.
+const RECHECK_AFTER_START: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// At start: when songs wait for review that older rules checked, check them again once under
+/// the current rules (owner, 2026-11-06: most of them are the same song on several editions, which
+/// the current rules settle). After the start's library scan, only when MusicBrainz can be asked
+/// and no run is going. The run checks only those songs (nothing new is fingerprinted); songs it
+/// settles are marked checked by these rules, so the next start finds nothing to do; with "Write
+/// IDs" on, the IDs found for them are written as after any run.
+pub fn spawn_recheck(s: &Arc<NodeState>) {
+    let s = s.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(RECHECK_AFTER_START).await;
+        recheck_when_idle(&s, std::time::Duration::from_secs(5)).await;
+    });
+}
+
+/// [`spawn_recheck`] without the wait at start: once no scan runs, start the run if there is
+/// something to check again. Whether it started one.
+pub(crate) async fn recheck_when_idle(s: &Arc<NodeState>, poll: std::time::Duration) -> bool {
+    while s.is_scanning() {
+        tokio::time::sleep(poll).await;
+    }
+    let outdated = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .has_outdated_suggestions()
+        .unwrap_or(false);
+    if !outdated || s.contact().trim().is_empty() {
+        return false;
+    }
+    let started = launch(s, RunOptions::recheck());
+    if started {
+        tracing::info!("identify: checking songs that wait for review again under the current rules");
+    }
+    started
 }
 
 /// Fingerprints decoded at once: the machine's cores, at most 8 (each decodes up to two minutes
@@ -632,7 +688,11 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             }
         }
         (
-            lib.tracks_to_identify(retry)?,
+            if opts.outdated_only {
+                Vec::new()
+            } else {
+                lib.tracks_to_identify(retry)?
+            },
             lib.all_tracks()?,
             lib.identify_inputs()?,
             // What each song is (file and tags), in the same read as the songs themselves: a
@@ -652,13 +712,30 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             Some((id, pm_library::identify::input_key(t, &services)))
         })
         .collect();
-    if !retry {
+    if opts.outdated_only {
+        // The start's automatic run: the songs older rules left waiting, nothing else
+        let outdated = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .outdated_suggestion_ids()?;
+        todo = all
+            .iter()
+            .filter(|t| t.id.is_some_and(|id| outdated.contains(&id.0)))
+            .cloned()
+            .collect();
+    } else {
+        // Songs waiting for review are among them (older rules left them, or they changed): a
+        // retry ("Identify again") checks them too, not only a plain run
+        let have: std::collections::HashSet<i64> = todo.iter().filter_map(|t| t.id.map(|i| i.0)).collect();
         let changed: Vec<Track> = all
             .iter()
             .filter(|t| {
                 t.id.is_some_and(|id| {
-                    kept.get(&id.0)
-                        .is_some_and(|k| k.as_deref() != inputs.get(&id.0).map(String::as_str))
+                    !have.contains(&id.0)
+                        && kept
+                            .get(&id.0)
+                            .is_some_and(|k| k.as_deref() != inputs.get(&id.0).map(String::as_str))
                 })
             })
             .cloned()
@@ -1186,13 +1263,23 @@ async fn search_lane(
                         let c = rank_track_hits(&m.track, hits);
                         if c.is_empty() {
                             m.outcome
+                        } else if matches!(m.outcome, Outcome::Error(_)) {
+                            // The fingerprint failed: the search's options are added to what the
+                            // song has, and it isn't marked checked (its fingerprint options stay,
+                            // and a later run asks the fingerprint again)
+                            settle_with(s, &m.track, Outcome::Suggest(c), found, false).await?;
+                            continue;
                         } else {
                             Outcome::Suggest(c)
                         }
                     }
                 }
             }
-            Err(_) => m.outcome,
+            // MusicBrainz failed: an error (a later run asks again), unless the fingerprint said more
+            Err(e) => match m.outcome {
+                Outcome::Unknown => Outcome::Error(e),
+                o => o,
+            },
         };
         settle(s, &m.track, outcome, found).await?;
     }
@@ -1201,6 +1288,18 @@ async fn search_lane(
 
 /// Store what a song's ladder found and count it.
 async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> Result<(), ApiError> {
+    settle_with(s, t, outcome, found, true).await
+}
+
+/// [`settle`]; `replace` false: options found are added to the song's open ones and the song
+/// isn't marked checked (part of its check failed).
+async fn settle_with(
+    s: &NodeState,
+    t: &Track,
+    outcome: Outcome,
+    found: &RunCtx,
+    replace: bool,
+) -> Result<(), ApiError> {
     use pm_library::db::{SettleAnswer, Settled};
     let id = t.id.map(|i| i.0).unwrap_or_default();
     let input_key = found.inputs.get(&id).cloned();
@@ -1222,6 +1321,7 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
         Outcome::Suggest(c) => SettleAnswer::Suggest {
             candidates: c.clone(),
             input_key,
+            replace,
         },
         Outcome::Unknown => SettleAnswer::State {
             state: "unknown".into(),
@@ -1249,6 +1349,13 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
     match (settled, outcome) {
         // Kept: the owner's or another identity; Changed: checked again by the next run
         (Settled::Kept | Settled::Changed, _) => {}
+        // Checking a waiting song again failed: it keeps its options for the next run
+        (Settled::Failed, o) => {
+            p.errors += 1;
+            if let Outcome::Error(e) = o {
+                p.last_error = Some(e);
+            }
+        }
         (Settled::Rejected | Settled::Empty, _) => p.unknown += 1,
         (Settled::Stored, Outcome::Identified { confidence, .. }) => {
             p.identified += 1;
@@ -1819,6 +1926,7 @@ pub(crate) async fn track_candidates(
                 &pm_library::db::SettleAnswer::Suggest {
                     candidates: found,
                     input_key: None,
+                    replace: false,
                 },
             )?;
         }
@@ -2162,6 +2270,99 @@ pub(crate) async fn review_albums(
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfirmBody {
     pub choices: Vec<pm_library::ConfirmChoice>,
+}
+
+/// Most albums one "Leave as is" names.
+const MAX_SKIP_ALBUMS: usize = 500;
+/// Most songs one "Leave as is" names by id.
+const MAX_SKIP_TRACKS: usize = 5_000;
+
+/// `POST /v1/library/suggestions/skip` and `…/unskip`: which songs, exactly one of: albums of the
+/// review page (their `key`), song ids, or every one.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SkipBody {
+    #[serde(default)]
+    pub albums: Vec<String>,
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// The songs a [`SkipBody`] names among `paths` (songs and their file's path).
+fn skip_targets(body: &SkipBody, paths: Vec<(i64, String)>) -> Result<Vec<i64>, ApiError> {
+    let given = [!body.albums.is_empty(), !body.track_ids.is_empty(), body.all];
+    if given.iter().filter(|g| **g).count() != 1 {
+        return Err(ApiError::bad_request(
+            "Name the songs one way: albums, track_ids or all",
+        ));
+    }
+    if body.albums.len() > MAX_SKIP_ALBUMS || body.track_ids.len() > MAX_SKIP_TRACKS {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_SKIP_ALBUMS} albums or {MAX_SKIP_TRACKS} songs at once"
+        )));
+    }
+    if !body.track_ids.is_empty() {
+        return Ok(body.track_ids.clone());
+    }
+    let albums: std::collections::HashSet<&str> = body.albums.iter().map(String::as_str).collect();
+    Ok(paths
+        .into_iter()
+        .filter(|(_, path)| {
+            body.all
+                || albums.contains(
+                    std::path::Path::new(path)
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                        .as_str(),
+                )
+        })
+        .map(|(id, _)| id)
+        .collect())
+}
+
+/// `POST /v1/library/suggestions/skip {albums | track_ids | all}`: "Leave as is" / "Skip all
+/// unsure". The songs stay without an identity, out of review and of later runs; they play and
+/// show as before, and nothing is written into files. Undone by `…/unskip`.
+pub(crate) async fn skip(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<SkipBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let paths = if body.track_ids.is_empty() {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .suggested_track_paths()?
+    } else {
+        Vec::new()
+    };
+    let ids = skip_targets(&body, paths)?;
+    let n = write_waiting(&s, |lib| lib.skip_review(&ids)).await?;
+    let counts = s.library.lock().expect("library poisoned").identity_counts()?;
+    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    Ok(Json(serde_json::json!({"skipped": n, "counts": counts})))
+}
+
+/// `POST /v1/library/suggestions/unskip {albums | track_ids | all}`: the songs left as they are
+/// wait for review again, with their options.
+pub(crate) async fn unskip(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<SkipBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let paths = if body.track_ids.is_empty() {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .skipped_track_paths()?
+    } else {
+        Vec::new()
+    };
+    let ids = skip_targets(&body, paths)?;
+    let n = write_waiting(&s, |lib| lib.unskip_review(&ids)).await?;
+    let counts = s.library.lock().expect("library poisoned").identity_counts()?;
+    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    Ok(Json(serde_json::json!({"restored": n, "counts": counts})))
 }
 
 /// `POST /v1/library/suggestions/confirm`: the owner confirms the songs they chose, at most
