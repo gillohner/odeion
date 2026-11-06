@@ -113,7 +113,8 @@ def system_kills():
     return KILLED.findall(logcat())
 
 
-PROMPT = re.compile(r'text="(Don.t allow|Deny)"')
+# (any case: the API 37 image says "DON’T ALLOW")
+PROMPT = re.compile(r'text="(Don.t allow|Deny)"', re.I)
 
 
 def ui_nodes():

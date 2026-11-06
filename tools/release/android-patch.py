@@ -117,7 +117,7 @@ rule = "-keep, includedescriptorclasses class org.rustls.platformverifier.** { *
 existing = proguard.read_text() if proguard.exists() else ""
 if rule not in existing:
     existing = existing.rstrip("\n") + "\n\n# rustls-platform-verifier (called over JNI)\n" + rule + "\n"
-player = "-keep class **.PlayerService { public static void start(...); public static void stop(...); }"
+player = "-keep class **.PlayerService { public static *; }"
 crash = "-keep class **.CrashReport { public static *; }\n-keep class **.PubkyMusicApp { *; }"
 updater = "-keep class **.AppUpdate { public static *; }"
 usb_audio = "-keep class **.UsbAudio { public static *; }"
