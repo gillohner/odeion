@@ -9,7 +9,8 @@
 //     every copy on (.on, the dot under the icon, aria-pressed, "Shuffle: on") and no toast; the
 //     node's next state turning it off (another app) turns every copy off;
 //   * repeat cycles off → all → one (its icon) → off, every copy following;
-//   * the Queue page's Shuffle is the same toggle, with its state;
+//   * the Queue page's Shuffle is the same toggle, with its state, keeping the focus;
+//   * the node's own zone event comes before each answer, as on a real node;
 //   * a smart playlist's Play and Shuffle load the zone's queue in its order with shuffle off / on
 //     (one POST load; Shuffle starts on a random song; repeat stays);
 //   * a playlist's Play on the zone turns shuffle off before it plays;
@@ -86,16 +87,20 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await page.route(/\/v1\/zones\/z1\/(shuffle|repeat|load|transport|queue)(\?|$)/, async (r) => {
           const req = r.request(); const v = new URL(req.url()).pathname.slice(3); let body = null; try { body = JSON.parse(req.postData() || 'null'); } catch { /* none */ }
           sent.push({ m: req.method(), v, body });
-          if (/\/shuffle$/.test(v) && req.method() === 'PUT') { Z.shuffle = !!body.shuffle; Z.queue_version++; return json(r, Z); }
+          // (a real node's zone event comes before its answer: the answer is then dropped as not newer)
+          const event = () => sock && sock.send(JSON.stringify({ type: 'zone', seq: seq++, state: Z }));
+          if (/\/shuffle$/.test(v) && req.method() === 'PUT') { Z.shuffle = !!body.shuffle; Z.queue_version++; event(); await sleep(50); return json(r, Z); }
           if (/\/shuffle$/.test(v)) { Z.shuffle = true; return r.fulfill({ status: 204, body: '' }); }
           if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; return r.fulfill({ status: 204, body: '' }); }
           if (/\/queue$/.test(v)) { if (req.method() === 'DELETE') { Z.queue = []; Z.now_playing = null; Z.transport = 'stopped'; return r.fulfill({ status: 204, body: '' }); } return json(r, Z.queue); }
-          if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; return json(r, Z); }
+          if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; event(); await sleep(50); return json(r, Z); }
           return json(r, Z);
         });
         await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.fulfill({ status: 200, contentType: 'audio/wav', body: WAV }));
         // (the fixture sets This browser on every load: the zone this suite is on, kept per tab)
         await context.addInitScript(() => { if (!sessionStorage.getItem('pm.test.zone')) { localStorage.removeItem('pm.shuffle'); localStorage.removeItem('pm.repeat'); localStorage.removeItem('pm.browserQueue'); sessionStorage.setItem('pm.test.zone', 'z1'); } localStorage.setItem('pm.zone', sessionStorage.getItem('pm.test.zone')); });
+        // A seeded Math.random (the same draws on every run: the random-start checks can't fail by chance)
+        await context.addInitScript(() => { let a = 0x2545f491; Math.random = () => { a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; });
         const toasted = () => page.evaluate(() => { const t = document.querySelector('#toast'); return t.classList.contains('show') ? t.textContent : ''; });
         const asked = (m, re) => sent.filter((x) => x.m === m && re.test(x.v));
 
@@ -143,6 +148,8 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await page.click('#qshuffle');
         check(await until(async () => asked('PUT', /\/zones\/z1\/shuffle$/).length === puts0 + 1 && (await qs()).pressed === 'true'), `${T} …pressed, it turns shuffle on (PUT) and says so (${JSON.stringify(await qs())})`);
         check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} …and the bar's copy follows: ${say((await modes(page)).shuffle)}`);
+        await sleep(300);
+        check(await page.evaluate(() => !!document.activeElement && document.activeElement.id === 'qshuffle'), `${T} …and keeps the focus across the page's redraw (${await page.evaluate(() => (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || '')})`);
         await page.click('#qshuffle');
         check(await until(async () => (await qs()).pressed === 'false' && asked('PUT', /\/zones\/z1\/shuffle$/).pop().body.shuffle === false), `${T} …pressed again, off (${JSON.stringify(await qs())})`);
 
