@@ -1995,6 +1995,19 @@
   audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
   audio.addEventListener('play', () => renderBar());
   audio.addEventListener('pause', () => renderBar());
+  // Back on screen after Android stopped the app's audio in the background (its player service
+  // gone, as the background probe's part C does on API 37): the element still says it plays, but
+  // its time stands still and nothing sounds. A pause and play starts it again; a stream that is
+  // only buffering (no data yet) is left to arrive.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !isBrowser() || state.ytOn || audioEl.paused || audioEl.ended) return;
+    const t0 = audioEl.currentTime;
+    setTimeout(() => {
+      if (isBrowser() && !state.ytOn && !audioEl.paused && !audioEl.ended && audioEl.currentTime === t0 && audioEl.readyState >= 2) {
+        audioEl.pause(); audioEl.play().catch(() => {});
+      }
+    }, 2000);
+  });
 
   const rememberTracks = (tracks) => { for (const t of tracks || []) if (t && t.id != null) state.trackCache.set('track:' + t.id, t); };
   const playTracks = async (tracks, replace = true, at = 'end') => {
