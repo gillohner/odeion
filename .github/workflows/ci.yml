@@ -188,11 +188,13 @@ jobs:
           kver=${img#linux-image-}
           [ -n "$img" ] || { echo "::error::no kernel behind linux-image-generic"; exit 1; }
           # The archive can list a new kernel hours before its extra modules (2026-11-06: 6.8.0-149 on
-          # the Azure mirror for three runs): then the newest kernel that has both
-          if ! apt-cache show "linux-modules-extra-$kver" >/dev/null 2>&1; then
+          # the Azure mirror for three runs): then the newest kernel that has both. (`apt-cache show`
+          # answers 0 for a package only referred to; the candidate tells.)
+          has() { c=$(apt-cache policy "$1" 2>/dev/null | sed -n 's/^ *Candidate: //p'); [ -n "$c" ] && [ "$c" != "(none)" ]; }
+          if ! has "linux-modules-extra-$kver"; then
             was=$kver
             kver=$(apt-cache pkgnames linux-modules-extra- | sed -n 's/^linux-modules-extra-\([0-9][0-9.-]*-generic\)$/\1/p' | sort -V \
-              | while read -r v; do if apt-cache show "linux-image-$v" >/dev/null 2>&1; then echo "$v"; fi; done | tail -1)
+              | while read -r v; do if has "linux-image-$v" && has "linux-modules-extra-$v"; then echo "$v"; fi; done | tail -1)
             [ -n "$kver" ] || { echo "::error::no generic kernel with its extra modules"; exit 1; }
             img="linux-image-$kver"
             echo "::warning::linux-modules-extra-$was is not in the archive yet: using $kver"
