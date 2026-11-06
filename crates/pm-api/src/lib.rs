@@ -87,6 +87,7 @@ pub mod qobuz;
 pub mod quality;
 pub mod radio;
 pub mod radio_sources;
+pub mod releases;
 pub mod remote;
 pub mod reviews;
 pub mod roon_import;
@@ -818,6 +819,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/song/{id}", get(web_ui))
         .route("/album/{id}", get(web_ui))
         .route("/artist/{id}", get(web_ui))
+        .route("/artist/{id}/releases/{section}", get(web_ui))
         .route("/playlist/{id}", get(web_ui))
         .route("/person/{id}", get(web_ui))
         .route("/smart/{id}", get(web_ui))
@@ -22405,4 +22407,7 @@ exec sleep 300
         assert!(!body.contains(accounts::NODE_SOURCES_ONLY), "{st} {body}");
         assert_ne!(st, StatusCode::FORBIDDEN, "{body}");
     }
+
+    /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).
+    mod release_sections;
 }

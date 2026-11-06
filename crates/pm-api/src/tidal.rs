@@ -534,7 +534,9 @@ async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(1 + attempt);
+                .unwrap_or(1 + attempt)
+                // Never a long wait inside a request (an artist's catalogue makes dozens of calls)
+                .min(5);
             tracing::info!(%url, wait, "TIDAL rate limit: waiting before the retry");
             tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
             continue;
@@ -897,15 +899,7 @@ impl StreamingService for Tidal {
         let Some(h) = head.into_iter().next() else {
             return Err(ApiError::not_found(format!("no TIDAL artist {aid}")));
         };
-        let album_ids = relationship_ids(
-            s,
-            &format!("/artists/{aid}/relationships/albums"),
-            &[("countryCode", country(s))],
-            60,
-        )
-        .await?;
-        let mut albums = album_hits(s, &album_ids.into_iter().take(60).collect::<Vec<_>>()).await?;
-        albums.sort_by_key(|a| std::cmp::Reverse(a.year));
+        let (albums, catalogue) = artist_catalogue(s, aid).await;
         Ok(SourceArtist {
             source: SOURCE_ID.into(),
             id: format!("artist:{aid}"),
@@ -913,6 +907,7 @@ impl StreamingService for Tidal {
             image: h.image,
             url: tidal_url("artist", aid),
             albums,
+            catalogue: Some(catalogue),
             library_artist_id: None,
         })
     }
@@ -1907,7 +1902,119 @@ async fn track_hits(s: &NodeState, ids: &[String]) -> Result<(Vec<SourceHit>, Ve
     Ok((hits, docs))
 }
 
+/// An artist's whole catalogue (up to [`crate::releases::MAX_RELEASES`]): every page of the
+/// album relationship (TIDAL has no type filter and no page size there), then the albums
+/// themselves, 20 per call, each with TIDAL's `albumType`. Complete only when the last page was
+/// reached and every listed album's details came back. A page that fails, a page with nothing new
+/// that still says there is more, or a `next` link off the artist's own list ends the fetch with
+/// what arrived and says why; past the page or release bound it says TIDAL lists more.
+async fn artist_catalogue(s: &NodeState, aid: &str) -> (Vec<ArtistRelease>, Catalogue) {
+    let max = crate::releases::MAX_RELEASES;
+    let mut cat = Catalogue {
+        source: SOURCE_ID.into(),
+        ..Default::default()
+    };
+    let list = format!("/artists/{aid}/relationships/albums");
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut next: Option<String> = None;
+    let mut reached_end = false;
+    for page_no in 0..crate::releases::max_pages(crate::releases::TIDAL_PAGE_FLOOR) {
+        let page = if page_no == 0 {
+            get_json(s, &list, &[("countryCode", country(s))]).await
+        } else {
+            // Checked before any token goes with it
+            match crate::releases::checked_next(&api_base(s), &next.take().unwrap_or_default(), &list) {
+                Ok(u) => get_json(s, &u, &[]).await,
+                Err(e) => {
+                    cat.error = Some(format!("TIDAL: {e}"));
+                    break;
+                }
+            }
+        };
+        let page = match page {
+            Ok(p) => p,
+            Err(e) => {
+                cat.error = Some(e.message);
+                break;
+            }
+        };
+        let before = ids.len();
+        for id in page["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|d| d["id"].as_str())
+        {
+            if !seen.insert(id.to_string()) {
+                continue;
+            }
+            if ids.len() == max {
+                cat.truncated = true;
+                break;
+            }
+            ids.push(id.to_string());
+        }
+        next = page["links"]["next"].as_str().map(str::to_string);
+        if cat.truncated {
+            break;
+        }
+        if next.is_none() {
+            reached_end = true;
+            break;
+        }
+        if ids.len() == before {
+            cat.error = Some(format!(
+                "TIDAL's page {} brought nothing new but said there was more",
+                page_no + 1
+            ));
+            break;
+        }
+        if ids.len() == max {
+            cat.truncated = true;
+            break;
+        }
+    }
+    // Out of pages with more to come: TIDAL lists more than the bound fetches
+    if !reached_end && cat.error.is_none() {
+        cat.truncated = true;
+    }
+    let mut releases = Vec::new();
+    for chunk in ids.chunks(20) {
+        match album_releases(s, chunk).await {
+            Ok(r) => releases.extend(r),
+            Err(e) => {
+                cat.error.get_or_insert(e.message);
+                break;
+            }
+        }
+    }
+    crate::releases::dedupe(&mut releases);
+    // Listed but not described (not in this country, withdrawn): said, never dropped quietly
+    if cat.error.is_none() {
+        let got: std::collections::HashSet<&str> = releases
+            .iter()
+            .map(|r| r.hit.id.trim_start_matches("album:"))
+            .collect();
+        let missing = ids.iter().filter(|i| !got.contains(i.as_str())).count();
+        if missing > 0 {
+            cat.error = Some(format!(
+                "TIDAL listed {} without their details",
+                crate::plural(missing as u64, "release")
+            ));
+        }
+    }
+    crate::releases::sort_releases(&mut releases);
+    cat.complete = cat.error.is_none() && !cat.truncated && reached_end;
+    (releases, cat)
+}
+
 async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, ApiError> {
+    Ok(album_releases(s, ids).await?.into_iter().map(|r| r.hit).collect())
+}
+
+/// Albums by id (20 per call, TIDAL's `filter[id]` limit), with what TIDAL says each one is.
+async fn album_releases(s: &NodeState, ids: &[String]) -> Result<Vec<ArtistRelease>, ApiError> {
     let mut hits = Vec::new();
     for chunk in ids.chunks(20) {
         let mut q: Vec<(&str, String)> = vec![
@@ -1923,22 +2030,25 @@ async fn album_hits(s: &NodeState, ids: &[String]) -> Result<Vec<SourceHit>, Api
         for a in detail["data"].as_array().cloned().unwrap_or_default() {
             let id = a["id"].as_str().unwrap_or("").to_string();
             let artists = names(&dinc, &a, "artists", "artists");
-            hits.push(SourceHit {
-                id: format!("album:{id}"),
-                title: a["attributes"]["title"].as_str().unwrap_or("").to_string(),
-                creator: (!artists.is_empty()).then(|| artists.join(", ")),
-                year: year_of(a["attributes"]["releaseDate"].as_str()),
-                downloads: None,
-                image: artwork_url(&dinc, &a),
-                kind: "album".into(),
-                duration_ms: None,
-                library_artist_id: None,
-                isrc: None,
-                upc: a["attributes"]["barcodeId"].as_str().map(str::to_string),
-                library_track_id: None,
-                library_album_id: None,
-                uri: None,
-                url: tidal_url("album", &id),
+            hits.push(ArtistRelease {
+                release: crate::releases::tidal(&a["attributes"]),
+                hit: SourceHit {
+                    id: format!("album:{id}"),
+                    title: a["attributes"]["title"].as_str().unwrap_or("").to_string(),
+                    creator: (!artists.is_empty()).then(|| artists.join(", ")),
+                    year: year_of(a["attributes"]["releaseDate"].as_str()),
+                    downloads: None,
+                    image: artwork_url(&dinc, &a),
+                    kind: "album".into(),
+                    duration_ms: None,
+                    library_artist_id: None,
+                    isrc: None,
+                    upc: a["attributes"]["barcodeId"].as_str().map(str::to_string),
+                    library_track_id: None,
+                    library_album_id: None,
+                    uri: None,
+                    url: tidal_url("album", &id),
+                },
             });
         }
     }
