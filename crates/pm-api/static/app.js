@@ -2131,6 +2131,28 @@
   audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
   audio.addEventListener('play', () => renderBar());
   audio.addEventListener('pause', () => renderBar());
+  // Back on screen after Android stopped the app's audio in the background (its player service
+  // gone, as the background probe's part C does on API 37): the element still says it plays, but
+  // its time stands still and nothing sounds. A pause and play starts it again; a stream that is
+  // only buffering (no data yet) is left to arrive.
+  // (the in-app player's own element, whichever zone the page shows; cancelled if the app goes
+  // out of sight again, or the listener seeks or pauses meanwhile)
+  let stallCheck = null;
+  const checkStall = () => {
+    clearTimeout(stallCheck); stallCheck = null;
+    if (document.visibilityState !== 'visible' || !audioEl.getAttribute('src') || state.ytOn || audioEl.paused || audioEl.ended) return;
+    const t0 = audioEl.currentTime;
+    stallCheck = setTimeout(() => {
+      stallCheck = null;
+      if (document.visibilityState === 'visible' && audioEl.getAttribute('src') && !state.ytOn && !audioEl.paused && !audioEl.ended && !audioEl.seeking && audioEl.currentTime === t0 && audioEl.readyState >= 2) {
+        audioEl.pause(); audioEl.play().catch(() => {});
+      }
+    }, 2000);
+  };
+  // Back on screen: the page's own signal, and the app's (its WebView doesn't always say)
+  document.addEventListener('visibilitychange', () => (document.visibilityState === 'visible' ? checkStall() : (clearTimeout(stallCheck), stallCheck = null)));
+  window.addEventListener('pmdesktop:resumed', checkStall);
+  window.addEventListener('pmdesktop:suspended', () => { clearTimeout(stallCheck); stallCheck = null; });
 
   const rememberTracks = (tracks) => { for (const t of tracks || []) if (t && t.id != null) state.trackCache.set('track:' + t.id, t); };
   const playTracks = async (tracks, replace = true, at = 'end') => {
