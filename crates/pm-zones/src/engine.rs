@@ -1248,13 +1248,14 @@ impl Engine {
     fn publish(&mut self) {
         self.last_position_publish = Instant::now();
         self.dirty = false;
-        let (queue, queue_index, queue_version, repeat, radio) = {
+        let (queue, queue_index, queue_version, repeat, shuffle, radio) = {
             let q = self.queue.lock().expect("queue poisoned");
             (
                 q.items().to_vec(),
                 q.current_index(),
                 q.version(),
                 q.repeat(),
+                q.shuffle(),
                 q.radio(),
             )
         };
@@ -1290,6 +1291,7 @@ impl Engine {
             s.queue_index = queue_index;
             s.queue_version = queue_version;
             s.repeat = repeat;
+            s.shuffle = shuffle;
             s.radio = radio;
             s.error = self.error.clone();
             s.acked = self.acked;

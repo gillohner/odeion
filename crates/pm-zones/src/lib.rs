@@ -24,7 +24,7 @@ pub mod sink;
 pub mod source;
 pub mod zone;
 
-pub use queue::{FetchLimit, Insert, Queue, QueueItem, Repeat};
+pub use queue::{FetchLimit, Insert, Queue, QueueItem, QueueSnapshot, Repeat};
 pub use registry::OutputRegistry;
 pub use sink::{
     amplitude_percent, AudioSink, BufferLevel, ClockSource, Describe, DeviceKind, DeviceMode, DeviceSettings,

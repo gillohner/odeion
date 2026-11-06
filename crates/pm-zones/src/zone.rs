@@ -16,7 +16,7 @@
 //! resuming seeks the source there. Nothing is resampled or faded.
 
 use crate::engine::{self, Command};
-use crate::queue::{Insert, Queue, QueueItem, Repeat};
+use crate::queue::{Insert, Queue, QueueItem, QueueSnapshot, Repeat};
 use crate::sink::{Output, OutputId, SinkError};
 use crate::source::SourceFactory;
 use pm_model::{AudioFormat, SignalPath, Volume};
@@ -84,6 +84,9 @@ pub struct ZoneState {
     pub queue_index: Option<usize>,
     pub queue_version: u64,
     pub repeat: Repeat,
+    /// Shuffle mode: the upcoming items are shuffled; off puts them back in their order.
+    #[serde(default)]
+    pub shuffle: bool,
     /// Keep playing similar music after the last item (implemented by the node).
     #[serde(default)]
     pub radio: bool,
@@ -187,6 +190,7 @@ impl Zone {
             queue_index: None,
             queue_version: 0,
             repeat: Repeat::Off,
+            shuffle: false,
             radio: false,
             error: None,
             acked: 0,
@@ -289,13 +293,58 @@ impl Zone {
         self.with_queue(|q| q.clear())
     }
 
-    /// Shuffle the upcoming items; the current one keeps playing.
+    /// Shuffle the upcoming items, the current one keeps playing: shuffle mode goes on, or when
+    /// it is on, the upcoming items are shuffled again (`POST …/shuffle`, Subsonic's `shuffle`).
     pub fn shuffle_upcoming(&self) -> bool {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0x5eed);
-        self.with_queue(|q| q.shuffle_upcoming(seed))
+        let seed = seed();
+        self.with_queue(|q| {
+            if q.shuffle() {
+                q.shuffle_upcoming(seed)
+            } else {
+                q.set_shuffle(true, seed)
+            }
+        })
+    }
+
+    /// Shuffle mode on or off ([`Queue::set_shuffle`]); whether it changed.
+    pub fn set_shuffle(&self, on: bool) -> bool {
+        let seed = seed();
+        self.with_queue(|q| q.set_shuffle(on, seed))
+    }
+
+    /// The current item first, every other item shuffled after it ([`Queue::reshuffle`]).
+    pub fn reshuffle(&self) {
+        let seed = seed();
+        self.with_queue(|q| q.reshuffle(seed))
+    }
+
+    pub fn shuffle(&self) -> bool {
+        self.queue.lock().expect("queue poisoned").shuffle()
+    }
+
+    /// Shuffle mode on for a queue just loaded: `index`'s item becomes the first and every other
+    /// item is shuffled after it; with no index everything is shuffled and nothing is current.
+    pub fn shuffle_from(&self, index: Option<usize>) {
+        let seed = seed();
+        self.with_queue(|q| {
+            q.set_current(index);
+            q.reshuffle(seed);
+        })
+    }
+
+    /// The original order while shuffled, for saving ([`Queue::shuffle_order`]).
+    pub fn shuffle_order(&self) -> Option<Vec<usize>> {
+        self.queue.lock().expect("queue poisoned").shuffle_order()
+    }
+
+    /// What is saved per zone, from one look at the queue ([`Queue::snapshot`]).
+    pub fn queue_snapshot(&self) -> QueueSnapshot {
+        self.queue.lock().expect("queue poisoned").snapshot()
+    }
+
+    /// Shuffle on again from a saved queue ([`Queue::restore_shuffle`]).
+    pub fn restore_shuffle(&self, order: &[usize]) {
+        self.with_queue(|q| q.restore_shuffle(order))
     }
 
     pub fn set_repeat(&self, r: Repeat) {
@@ -555,6 +604,14 @@ fn slug(name: &str) -> String {
     } else {
         s
     }
+}
+
+/// A seed for a shuffle: the clock, never the same twice in a row.
+fn seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x5eed)
 }
 
 #[cfg(test)]
