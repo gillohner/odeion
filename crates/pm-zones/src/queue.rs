@@ -97,6 +97,19 @@ pub enum Repeat {
     One,
 }
 
+/// One consistent look at what a queue keeps across a restart ([`Queue::snapshot`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueSnapshot {
+    /// The play order.
+    pub items: Vec<QueueItem>,
+    pub repeat: Repeat,
+    pub radio: bool,
+    pub shuffle: bool,
+    /// With shuffle on: the original order as indexes into `items` ([`Queue::shuffle_order`]).
+    pub order: Vec<usize>,
+    pub version: u64,
+}
+
 /// Where [`Queue::add`] puts new items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Insert {
@@ -114,6 +127,10 @@ pub struct Queue {
     /// "Radio": whoever owns the zone keeps it playing with similar music
     /// after the last item (the engine only carries the flag).
     radio: bool,
+    /// Shuffle mode. `items` is always the play order; while shuffle is on, `order` keeps the ids
+    /// in their original order, so turning it off puts every item back.
+    shuffle: bool,
+    order: Vec<u64>,
     version: u64,
 }
 
@@ -136,6 +153,10 @@ impl Queue {
 
     pub fn repeat(&self) -> Repeat {
         self.repeat
+    }
+
+    pub fn shuffle(&self) -> bool {
+        self.shuffle
     }
 
     pub fn radio(&self) -> bool {
@@ -201,11 +222,25 @@ impl Queue {
                 it
             })
             .collect();
-        let at = match at {
+        let pos = match at {
             Insert::End => self.items.len(),
             Insert::Next => self.current.map(|c| c + 1).unwrap_or(0),
         };
-        self.items.splice(at..at, items);
+        self.items.splice(pos..pos, items);
+        if self.shuffle {
+            // The same place in the original order: "Play next" is next there too; "Add to
+            // queue" goes to its end
+            let opos = match at {
+                Insert::End => self.order.len(),
+                Insert::Next => self
+                    .current
+                    .and_then(|c| self.items.get(c))
+                    .and_then(|cur| self.order.iter().position(|id| *id == cur.id))
+                    .map(|p| p + 1)
+                    .unwrap_or(0),
+            };
+            self.order.splice(opos..opos, ids.iter().copied());
+        }
         self.version += 1;
         ids
     }
@@ -218,6 +253,7 @@ impl Queue {
             return false;
         };
         self.items.remove(i);
+        self.order.retain(|x| *x != id);
         self.current = match self.current {
             Some(c) if c > i => Some(c - 1),
             Some(c) if c == i && i >= self.items.len() => None,
@@ -249,26 +285,125 @@ impl Queue {
     /// and everything already played stay where they are. Returns whether
     /// the order could change at all (at least two upcoming items).
     pub fn shuffle_upcoming(&mut self, seed: u64) -> bool {
-        let start = self.current.map(|c| c + 1).unwrap_or(0).min(self.items.len());
-        let upcoming = &mut self.items[start..];
-        if upcoming.len() < 2 {
+        let start = self.current.map(|c| c + 1).unwrap_or(0);
+        if !self.fisher_yates(start, seed) {
             return false;
-        }
-        let mut x = seed | 1;
-        for i in (1..upcoming.len()).rev() {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            let j = (x % (i as u64 + 1)) as usize;
-            upcoming.swap(i, j);
         }
         self.version += 1;
         true
     }
 
+    /// A Fisher–Yates pass over `items[start..]`, driven by `seed`; whether the order could
+    /// change at all (at least two items there). The version is the caller's to bump.
+    fn fisher_yates(&mut self, start: usize, seed: u64) -> bool {
+        let start = start.min(self.items.len());
+        let part = &mut self.items[start..];
+        if part.len() < 2 {
+            return false;
+        }
+        let mut x = seed | 1;
+        for i in (1..part.len()).rev() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let j = (x % (i as u64 + 1)) as usize;
+            part.swap(i, j);
+        }
+        true
+    }
+
+    /// Shuffle mode on or off; whether it changed. On: the original order is kept and the
+    /// upcoming items are shuffled (the current item and everything played stay). Off: every
+    /// item goes back to its original order, the current item following its id.
+    pub fn set_shuffle(&mut self, on: bool, seed: u64) -> bool {
+        if self.shuffle == on {
+            return false;
+        }
+        if on {
+            self.order = self.items.iter().map(|i| i.id).collect();
+            self.shuffle = true;
+            let start = self.current.map(|c| c + 1).unwrap_or(0);
+            self.fisher_yates(start, seed);
+        } else {
+            let current_id = self.current().map(|c| c.id);
+            let mut rest = std::mem::take(&mut self.items);
+            let mut back = Vec::with_capacity(rest.len());
+            for id in self.order.drain(..) {
+                if let Some(i) = rest.iter().position(|it| it.id == id) {
+                    back.push(rest.remove(i));
+                }
+            }
+            // Anything the original order doesn't name (it can't happen; kept all the same)
+            back.append(&mut rest);
+            self.items = back;
+            self.current = current_id.and_then(|cid| self.position_of(cid));
+            self.shuffle = false;
+        }
+        self.version += 1;
+        true
+    }
+
+    /// Shuffle again with the current item first and every other item shuffled after it:
+    /// a queue loaded with shuffle on (the chosen item stays first), or "shuffle" pressed while
+    /// on. Turns shuffle on when it was off.
+    pub fn reshuffle(&mut self, seed: u64) {
+        if !self.shuffle {
+            self.order = self.items.iter().map(|i| i.id).collect();
+            self.shuffle = true;
+        }
+        if let Some(c) = self.current.filter(|c| *c < self.items.len()) {
+            let it = self.items.remove(c);
+            self.items.insert(0, it);
+            self.current = Some(0);
+        }
+        let start = self.current.map(|_| 1).unwrap_or(0);
+        self.fisher_yates(start, seed);
+        self.version += 1;
+    }
+
+    /// With shuffle on: the original order, as indexes into the play order (for saving; ids
+    /// change when a saved queue is loaded again). `None` while shuffle is off.
+    pub fn shuffle_order(&self) -> Option<Vec<usize>> {
+        if !self.shuffle {
+            return None;
+        }
+        Some(self.order.iter().filter_map(|id| self.position_of(*id)).collect())
+    }
+
+    /// Shuffle on again from a saved queue, with [`Self::shuffle_order`]'s indexes as the
+    /// original order. Anything that isn't a permutation of the items makes the play order the
+    /// original one. The play order stays as it is.
+    pub fn restore_shuffle(&mut self, order: &[usize]) {
+        let mut seen = order.to_vec();
+        seen.sort_unstable();
+        let valid = seen.len() == self.items.len() && seen.iter().enumerate().all(|(i, p)| *p == i);
+        self.order = if valid {
+            order.iter().map(|i| self.items[*i].id).collect()
+        } else {
+            self.items.iter().map(|i| i.id).collect()
+        };
+        self.shuffle = true;
+        self.version += 1;
+    }
+
+    /// Everything that is saved per zone, from one look at the queue (the items in play order,
+    /// the modes, and the original order as indexes while shuffled), with its version.
+    pub fn snapshot(&self) -> QueueSnapshot {
+        QueueSnapshot {
+            items: self.items.clone(),
+            repeat: self.repeat,
+            radio: self.radio,
+            shuffle: self.shuffle,
+            order: self.shuffle_order().unwrap_or_default(),
+            version: self.version,
+        }
+    }
+
+    /// Empties the queue; the shuffle and repeat modes stay.
     pub fn clear(&mut self) {
         if !self.items.is_empty() || self.current.is_some() {
             self.items.clear();
+            self.order.clear();
             self.current = None;
             self.version += 1;
         }
@@ -424,5 +559,137 @@ mod tests {
         assert_eq!(q.before(), Some(1));
         q.set_repeat(Repeat::Off);
         assert_eq!(q.before(), None);
+    }
+
+    fn ids(q: &Queue) -> Vec<u64> {
+        q.items().iter().map(|i| i.id).collect()
+    }
+
+    /// Shuffle on keeps the current item and shuffles what comes after; off puts every item
+    /// back in its original order, the current item following its id.
+    #[test]
+    fn shuffle_off_restores_the_order_around_the_current_item() {
+        let mut q8 = q(8);
+        q8.set_current(Some(2));
+        let original = ids(&q8);
+        let v = q8.version();
+        assert!(q8.set_shuffle(true, 0x9e37_79b9));
+        assert!(q8.shuffle());
+        assert!(q8.version() > v);
+        let on = ids(&q8);
+        assert_eq!(&on[..3], &original[..3], "played and current stay");
+        assert_ne!(&on[3..], &original[3..]);
+        assert!(!q8.set_shuffle(true, 1), "already on: nothing changes");
+        // Play on: the current item moves along the play order
+        q8.set_current(Some(5));
+        let now = q8.current().unwrap().id;
+        assert!(q8.set_shuffle(false, 0));
+        assert!(!q8.shuffle());
+        assert_eq!(ids(&q8), original, "the exact original order");
+        assert_eq!(
+            q8.current().unwrap().id,
+            now,
+            "the current item is still the current one"
+        );
+        assert_eq!(
+            q8.current_index(),
+            Some(original.iter().position(|i| *i == now).unwrap())
+        );
+        assert!(!q8.set_shuffle(false, 0));
+    }
+
+    /// Items added, removed and moved while shuffled: "Play next" is next in both orders, "Add to
+    /// queue" ends both; a removal leaves both; a move changes the play order only.
+    #[test]
+    fn changes_while_shuffled_keep_both_orders() {
+        let mut q5 = q(5);
+        q5.set_current(Some(1));
+        let original = ids(&q5);
+        q5.set_shuffle(true, 42);
+        let next = q5.add(vec![QueueItem::new("next")], Insert::Next)[0];
+        let end = q5.add(vec![QueueItem::new("end")], Insert::End)[0];
+        assert_eq!(q5.items()[2].id, next, "right after the current item");
+        assert_eq!(q5.items().last().unwrap().id, end);
+        let gone = original[4];
+        assert!(q5.remove(gone));
+        let last_play = ids(&q5)[q5.len() - 1];
+        assert!(q5.move_item(last_play, 2));
+        assert!(q5.shuffle(), "a move keeps the mode");
+        q5.set_shuffle(false, 0);
+        let mut want: Vec<u64> = original.clone();
+        want.insert(2, next);
+        want.push(end);
+        want.retain(|i| *i != gone);
+        assert_eq!(ids(&q5), want);
+        assert_eq!(q5.current().unwrap().id, original[1]);
+    }
+
+    /// A reshuffle puts the current item first and shuffles every other item after it (a queue
+    /// loaded with shuffle on); from off it turns shuffle on.
+    #[test]
+    fn reshuffle_keeps_the_current_item_first() {
+        let mut q6 = q(6);
+        q6.set_current(Some(3));
+        let original = ids(&q6);
+        q6.reshuffle(7);
+        assert!(q6.shuffle());
+        assert_eq!(q6.current_index(), Some(0));
+        assert_eq!(q6.current().unwrap().id, original[3]);
+        let mut rest = ids(&q6)[1..].to_vec();
+        rest.sort_unstable();
+        let mut others: Vec<u64> = original.iter().copied().filter(|i| *i != original[3]).collect();
+        others.sort_unstable();
+        assert_eq!(rest, others, "every other item is there, after it");
+        q6.set_shuffle(false, 0);
+        assert_eq!(ids(&q6), original);
+        assert_eq!(q6.current_index(), Some(3));
+        // Nothing current: everything shuffles, nothing is current after
+        let mut all = q(4);
+        all.reshuffle(9);
+        assert_eq!(all.current_index(), None);
+        assert_eq!(all.len(), 4);
+    }
+
+    /// The original order survives a save (as indexes) and a load with new ids; a bad saved
+    /// order makes the play order the original one.
+    #[test]
+    fn the_original_order_is_saved_as_indexes_and_restored() {
+        let mut q5 = q(5);
+        q5.set_current(Some(0));
+        let original = ids(&q5);
+        q5.set_shuffle(true, 3);
+        let play: Vec<String> = q5.items().iter().map(|i| i.uri.clone()).collect();
+        let order = q5.shuffle_order().unwrap();
+        assert_eq!(order.len(), 5);
+        // A new queue with the same play order (new ids), as a restart loads it
+        let mut again = Queue::default();
+        again.add(
+            play.iter().map(|u| QueueItem::new(u.clone())).collect(),
+            Insert::End,
+        );
+        again.set_current(Some(0));
+        again.restore_shuffle(&order);
+        assert!(again.shuffle());
+        again.set_shuffle(false, 0);
+        let uris: Vec<String> = again.items().iter().map(|i| i.uri.clone()).collect();
+        assert_eq!(original.len(), 5);
+        let want: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
+        assert_eq!(uris, want, "the original order, by content");
+        assert_eq!(q(3).shuffle_order(), None);
+        // A snapshot holds the items and the order from the same look
+        let snap = q5.snapshot();
+        assert_eq!((snap.shuffle, snap.version), (true, q5.version()));
+        assert_eq!(snap.order, q5.shuffle_order().unwrap());
+        assert_eq!(snap.items, q5.items());
+        let mut bad = q(3);
+        bad.restore_shuffle(&[0, 0, 1]);
+        assert!(bad.shuffle());
+        let before = ids(&bad);
+        bad.set_shuffle(false, 0);
+        assert_eq!(
+            ids(&bad),
+            before,
+            "a bad saved order: the play order is the original"
+        );
     }
 }

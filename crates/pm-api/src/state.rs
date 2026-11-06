@@ -533,6 +533,7 @@ impl NodeState {
         let events = self.events.clone();
         let library = self.library.clone();
         let key = queue_key(zone.id());
+        let shuffled = zone.clone();
         let mut state_rx = zone.watch();
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
@@ -597,11 +598,16 @@ impl NodeState {
             while state_rx.changed().await.is_ok() {
                 let state = state_rx.borrow_and_update().clone();
                 if state.queue_version != saved_version {
-                    saved_version = state.queue_version;
+                    // One look at the queue: the items and, while shuffled, their original
+                    // order belong together (a change between two reads would save a wrong one)
+                    let snap = shuffled.queue_snapshot();
+                    saved_version = snap.version;
                     let saved = SavedQueue {
-                        items: state.queue.clone(),
-                        repeat: state.repeat,
-                        radio: state.radio,
+                        items: snap.items,
+                        repeat: snap.repeat,
+                        radio: snap.radio,
+                        shuffle: snap.shuffle,
+                        order: snap.order,
                     };
                     if let Ok(json) = serde_json::to_string(&saved) {
                         let lib = library.lock().expect("library poisoned");
@@ -689,7 +695,10 @@ impl NodeState {
         zone.enqueue(saved.items, pm_zones::Insert::End);
         zone.set_repeat(saved.repeat);
         zone.set_radio(saved.radio);
-        tracing::info!(zone = %zone.id(), items = n, "queue restored");
+        if saved.shuffle {
+            zone.restore_shuffle(&saved.order);
+        }
+        tracing::info!(zone = %zone.id(), items = n, shuffle = saved.shuffle, "queue restored");
     }
 
     pub fn remove_zone(&self, id: &ZoneId) -> Option<Arc<Zone>> {
@@ -1929,13 +1938,18 @@ fn queue_key(id: &ZoneId) -> String {
     format!("queue.{}", id.0)
 }
 
-/// What survives a restart per zone: the items and the repeat mode.
+/// What survives a restart per zone: the items (in play order), the repeat and shuffle modes,
+/// and with shuffle on the original order as indexes into the items.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedQueue {
     items: Vec<pm_zones::QueueItem>,
     repeat: pm_zones::Repeat,
     #[serde(default)]
     radio: bool,
+    #[serde(default)]
+    shuffle: bool,
+    #[serde(default)]
+    order: Vec<usize>,
 }
 
 /// Library radio: when a zone with `radio` on runs out of queue, add tracks
