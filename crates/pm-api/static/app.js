@@ -2247,6 +2247,8 @@
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
   seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); });
+  // (a drag let go on its start value sends no change: the bar's seek let go too)
+  for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) seek.addEventListener(ev, () => { setTimeout(() => { delete seek.dataset.dragging; }, 0); }, { passive: true });
   seek.addEventListener('change', () => {
     delete seek.dataset.dragging;
     const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0;
@@ -3481,7 +3483,9 @@
     const lines = $('.lyric-lines', box);
     if (l.synced && lines) {
       // (a line the listener chose is followed at once: the hold their tap set is over)
-      const seekTo = (ln) => { state.lyricsHold = 0; state.lyricsUser = 0; return transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) }); };
+      // (the hold their tap set is over once the seek has landed: not before, or the panel would
+      // first go back to the old line)
+      const seekTo = (ln) => Promise.resolve(transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) })).finally(() => { state.lyricsHold = 0; state.lyricsUser = 0; });
       lines.addEventListener('click', (e) => { const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) seekTo(ln); });
       // (Space and Enter on a line are the line's: the page's Space is play/pause)
       lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); e.stopPropagation(); seekTo(ln); } });

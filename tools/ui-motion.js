@@ -78,6 +78,11 @@ const lyricBox = (page) => page.evaluate(() => {
     await page.click('#nplyrics .lyric-line[data-ms="20000"]'); await sleep(400);
     const seek = state.hits.slice(hits0).find((x) => /\/zones\/linn\/transport|\/zones\/linn\/seek/.test(x.v) && x.body && /20000/.test(x.body));
     check(!!seek, `${at}: a tap on a line asks the node to play from its time (${seek ? seek.v : 'no seek sent'})`);
+    // …and once the node is there, the panel follows that line at once (the tap's own hold is over)
+    state.send({ ...zone, now_playing: { ...np, position_ms: 20500 } }); await sleep(1000);
+    const followed = await page.evaluate(() => { const box = document.querySelector('#nplyrics .lyric-lines'); const on = box.querySelector('.lyric-line.on'); const b = box.getBoundingClientRect(); const o = on && on.getBoundingClientRect(); return { ms: on && on.dataset.ms, frac: on ? (o.top - b.top + o.height / 2) / b.height : null }; });
+    check(followed.ms === '20000' && followed.frac != null && followed.frac > 0.15 && followed.frac < 0.55, `${at}: the tapped line is followed at once (${followed.ms}, ${followed.frac != null ? Math.round(followed.frac * 100) : '?'}% down the panel)`);
+    state.send({ ...zone, now_playing: { ...np, position_ms: 61000 } }); await sleep(900);
     // A scroll by hand holds the following off: the box stays where the finger left it
     // (the song moves on to line 51 meanwhile: the panel must not follow it during the hold, and
     // must follow the next line once the hold is over)
@@ -95,6 +100,16 @@ const lyricBox = (page) => page.evaluate(() => {
     // Under the finger the fill is where the finger is (no glide), and letting go without a change lets go of the drag
     const drag = await page.evaluate(() => { const sk = document.querySelector('#npseek'); sk.dataset.dragging = '1'; const t = getComputedStyle(sk).transitionProperty; sk.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return new Promise((r) => setTimeout(() => r({ t, cleared: !sk.dataset.dragging }), 20)); });
     check(drag.t === 'none' && drag.cleared, `${at}: the seek fill doesn't glide under a drag (${drag.t}) and a drag let go without a change is over (${drag.cleared})`);
+    // A real drag on the seek bar still sends the seek (with a mouse: a phone's touch emulation gives a
+    // range input no change from a synthetic mouse drag)
+    if (w >= 600) {
+    const sb = await page.$eval('#npseek', (el) => { const r = el.getBoundingClientRect(); return { x: r.left, y: r.top + r.height / 2, w: r.width }; });
+    const h0 = state.hits.length;
+    await page.mouse.move(sb.x + sb.w * 0.3, sb.y); await page.mouse.down(); await page.mouse.move(sb.x + sb.w * 0.6, sb.y, { steps: 5 }); await page.mouse.up(); await sleep(400);
+    const dragged = state.hits.slice(h0).find((x) => /transport|seek/.test(x.v) && x.body && /seek/.test(x.body));
+    const after2 = await page.$eval('#npseek', (el) => !el.dataset.dragging);
+    check(!!dragged && after2, `${at}: a real drag on the seek bar sends the seek (${dragged ? dragged.v : 'none'}) and lets go (${after2})`);
+    }
     // A track change: the last cover fades out over the new one, the title slides in
     const next = { ...zone, transport: 'playing', queue_index: 1, now_playing: { ...np, item: { ...np.item, id: 2, uri: 'track:2', title: 'Flowing River' }, position_ms: 1000 } };
     state.send(next); await sleep(150);
