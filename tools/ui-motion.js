@@ -81,7 +81,10 @@ const lyricBox = (page) => page.evaluate(() => {
     await sleep(120);
     const placed = await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const b = ln.closest('.lyric-lines').getBoundingClientRect(); const o = ln.getBoundingClientRect(); return (o.top - b.top + o.height / 2) / b.height; });
     check(placed > 0.7, `${at}: the line to tap sits low in the box before the tap (${Math.round(placed * 100)}%)`);
-    await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => ln.click()); await sleep(400);
+    // (a real tap where the line is: its touch sets the hold the seek must end)
+    const lr = await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const r = ln.getBoundingClientRect(); return { x: r.left + Math.min(40, r.width / 2), y: r.top + r.height / 2 }; });
+    if (w < 600) await page.touchscreen.tap(lr.x, lr.y); else await page.mouse.click(lr.x, lr.y);
+    await sleep(400);
     const seek = state.hits.slice(hits0).find((x) => /\/zones\/linn\/transport|\/zones\/linn\/seek/.test(x.v) && x.body && /20000/.test(x.body));
     check(!!seek, `${at}: a tap on a line asks the node to play from its time (${seek ? seek.v : 'no seek sent'})`);
     // …and once the node is there, the panel follows that line at once (the tap's own hold is over)
