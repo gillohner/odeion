@@ -13,7 +13,7 @@
 //! starts the fetch and says `about_pending`, and the web page asks again a few seconds later.
 
 use crate::state::NodeState;
-use crate::types::{AboutText, Fact, ImageCredit, Version};
+use crate::types::{AboutText, Fact, FactKind, ImageCredit, Version};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -401,12 +401,8 @@ pub(crate) async fn artist_facts(s: &NodeState, ent: &Value, lang: &str) -> Vec<
     if let Some(o) = named(&origin) {
         facts.push(fact("Origin", o));
     }
-    let start = year(ent, "P2031").or_else(|| (!person).then(|| year(ent, "P571")).flatten());
-    let end = year(ent, "P2032").or_else(|| (!person).then(|| year(ent, "P576")).flatten());
-    match (start, end) {
-        (Some(a), Some(b)) => facts.push(fact("Active", format!("{a}–{b}"))),
-        (Some(a), None) => facts.push(fact("Active", format!("since {a}"))),
-        _ => {}
+    if let Some(a) = active_years(ent, person) {
+        facts.push(fact("Active", a));
     }
     if let Some(g) = named(&genres) {
         facts.push(fact("Genres", g));
@@ -417,10 +413,27 @@ pub(crate) async fn artist_facts(s: &NodeState, ent: &Value, lang: &str) -> Vec<
     facts
 }
 
+/// The years an artist was active, from Wikidata: P2031–P2032 (a band: P571–P576 too). A person
+/// who died (P570) ended then when P2032 is missing. Nothing without a start, and nothing when the
+/// start isn't before the end: Calvin Russell's item has P2031 = 2011, the year he died, and
+/// "since 2011" would be wrong.
+fn active_years(ent: &Value, person: bool) -> Option<String> {
+    let start = year(ent, "P2031").or_else(|| (!person).then(|| year(ent, "P571")).flatten())?;
+    let end = year(ent, "P2032")
+        .or_else(|| (!person).then(|| year(ent, "P576")).flatten())
+        .or_else(|| person.then(|| year(ent, "P570")).flatten());
+    match end {
+        Some(b) if start < b => Some(format!("{start}–{b}")),
+        Some(_) => None,
+        None => Some(format!("since {start}")),
+    }
+}
+
 fn fact(label: &str, value: String) -> Fact {
     Fact {
         label: label.into(),
         value,
+        kind: FactKind::Fact,
         href: None,
     }
 }
@@ -697,6 +710,7 @@ pub(crate) fn song(s: &std::sync::Arc<NodeState>, recording: pm_model::Mbid, lan
                 about.facts.push(Fact {
                     label: "Work".into(),
                     value: title.to_string(),
+                    kind: FactKind::Ref,
                     href: Some(format!("https://musicbrainz.org/work/{id}")),
                 });
                 if let Some(wv) = get_json(s, &format!("{mb}/ws/2/work/{id}?inc=url-rels&fmt=json")).await {
@@ -843,5 +857,27 @@ mod tests {
             strip_html("<a href=\"//commons.wikimedia.org/wiki/User:X\">Jane &amp; John</a>\n Doe"),
             "Jane & John Doe"
         );
+    }
+
+    #[test]
+    fn active_years_use_the_death_year_and_never_run_backwards() {
+        let t = |y: &str| serde_json::json!({"mainsnak": {"datavalue": {"value": {"time": format!("+{y}-00-00T00:00:00Z")}}}});
+        // Calvin Russell (Q490290): P2031 2011, P569 1948, P570 2011 (died in April 2011; played
+        // from the 1970s): no "Active" at all rather than "since 2011"
+        let calvin =
+            serde_json::json!({"claims": {"P2031": [t("2011")], "P569": [t("1948")], "P570": [t("2011")]}});
+        assert_eq!(active_years(&calvin, true), None);
+        // A person with a start and a death year, no end: the death year ends it
+        let died = serde_json::json!({"claims": {"P2031": [t("1962")], "P570": [t("2016")]}});
+        assert_eq!(active_years(&died, true).as_deref(), Some("1962–2016"));
+        // A living person: since
+        let alive = serde_json::json!({"claims": {"P2031": [t("1998")]}});
+        assert_eq!(active_years(&alive, true).as_deref(), Some("since 1998"));
+        // No start: nothing, even with a death year
+        let no_start = serde_json::json!({"claims": {"P570": [t("2016")]}});
+        assert_eq!(active_years(&no_start, true), None);
+        // A band: inception and dissolution
+        let band = serde_json::json!({"claims": {"P571": [t("1985")], "P576": [t("1996")]}});
+        assert_eq!(active_years(&band, false).as_deref(), Some("1985–1996"));
     }
 }

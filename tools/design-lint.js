@@ -2,7 +2,12 @@
 //   1. every <button> has a class from the component set;
 //   2. no emoji or dingbats as icons (icons come from icon()); a line may opt out with
 //      `lint-allow-glyph` when the glyph is a component's own styled text (the rating stars);
-//   3. every class the UI uses has a rule in app.css.
+//   3. every class the UI uses has a rule in app.css;
+//   4. every transition and animation takes its duration from the motion scale (--dur-fast/base/slow),
+//      except a looping indicator (spin, shimmer, pulse, progress bars) and a bar's width; the
+//      long-hand duration and delay properties too;
+//   5. every font-size and border-radius takes a step of the type or radius scale (--fs-*, --r-*);
+//      a radius of 3 px or less (bars, marks), 50%, relative units and a fluid clamp() are fine.
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
@@ -13,7 +18,7 @@ const problems = [];
 const where = (file, src, idx) => `${file}:${src.slice(0, idx).split('\n').length}`;
 
 // The component set a button may belong to.
-const BUTTON_CLASSES = ['btn', 'set-tab', 'np-artbtn', 'chip', 'icon-btn', 'chiplink', 'chipx', 'half', 'back', 'tile', 'link', 'nav-item', 'pop-item', 'tab', 'seg', 'row-btn', 'list-row', 'toast-x', 'close', 'crumb', 'zone-btn', 'out-btn', 'play-btn', 'sbtn', 'mini', 'qbtn', 'rowplay', 'idmark', 'card', 'quality', 'connbar-retry', 'lnk', 'upstreams', 'jobchip', 'faces', 'bnav', 'az'];
+const BUTTON_CLASSES = ['btn', 'set-tab', 'np-artbtn', 'chip', 'icon-btn', 'chiplink', 'chipx', 'half', 'back', 'tile', 'link', 'nav-item', 'pop-item', 'tab', 'seg', 'row-btn', 'list-row', 'toast-x', 'close', 'crumb', 'zone-btn', 'out-btn', 'play-btn', 'sbtn', 'mini', 'qbtn', 'rowplay', 'idmark', 'card', 'quality', 'connbar-retry', 'lnk', 'upstreams', 'jobchip', 'faces', 'bnav', 'az', 'ptag'];
 // Classes set only by the browser or third parties, never styled by us.
 const IGNORE_CLASSES = new Set(['ic']);
 
@@ -67,9 +72,48 @@ for (const [c, at] of [...used.entries()].sort()) {
   problems.push(`${at}  class "${c}" has no rule in app.css`);
 }
 
+// 5. type and radius on their scales
+{
+  const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
+  for (const f of cssFiles) {
+    const src = fs.readFileSync(path.join(DIR, f), 'utf8');
+    const re = /(font-size|border(?:-[a-z]+)*-radius|font):([^;{}]*)/g; let m;
+    while ((m = re.exec(src))) {
+      const decl = m[2]; const at = `${f}:${src.slice(0, m.index).split('\n').length}`;
+      if (/clamp\(|\d(vw|vh|vmin)\b/.test(decl)) continue; // a fluid display size (the dashboard) scales with the screen
+      if (/radius$/.test(m[1])) {
+        const raw = decl.match(/(\d*\.?\d+)px/g) || [];
+        if (raw.some((v) => parseFloat(v) > 3)) problems.push(`${at}  border-radius off the scale: use var(--r-sm|md|lg|pill): ${decl.trim()}`);
+      } else if (/(^|[^\w.-])\d*\.?\d+px\b/.test(decl.replace(/\/[\d.]+/, ''))) {
+        problems.push(`${at}  ${m[1]} off the type scale: use var(--fs-2xs|xs|sm|md|lg|xl|2xl|3xl|display|art): ${decl.trim().slice(0, 50)}`);
+      }
+    }
+  }
+}
+
+// 4. durations on the motion scale
+{
+  const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
+  const LOOP = /\b(spin|shimmer|conn-pulse|navprog|nudge)\b|\binfinite\b|(?<![-\w])width\b/;
+  for (const f of cssFiles) {
+    const src = fs.readFileSync(path.join(DIR, f), 'utf8');
+    const re = /(transition|animation|transition-duration|animation-duration|transition-delay|animation-delay):([^;{}]*)/g; let m;
+    while ((m = re.exec(src))) {
+      // (each comma-separated part on its own: one on the scale doesn't excuse another)
+      // (commas inside cubic-bezier() or steps() don't split)
+      for (const part of m[2].split(/,(?![^(]*\))/)) {
+        const decl = part.trim();
+        if (!decl || LOOP.test(decl) || /^none\b/.test(decl)) continue;
+        const first = decl.match(/(^|[^\w.])(-?\d*\.?\d+m?s)\b/); // the duration is the first time (a negative one too); a delay after a scale duration is fine
+        if (first && !/var\(--dur-/.test(decl.slice(0, first.index + 1))) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.slice(0, 60)}`);
+      }
+    }
+  }
+}
+
 if (problems.length) {
   for (const p of problems) console.log(p);
-  console.log(`\n${problems.length} design problem${problems.length === 1 ? '' : 's'}`);
+console.log(`\n${problems.length} design problem${problems.length === 1 ? '' : 's'}`);
   process.exit(1);
 }
 console.log(`design lint: ok (${used.size} classes, every button classed, no icon glyphs)`);

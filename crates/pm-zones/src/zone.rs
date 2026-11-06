@@ -97,6 +97,10 @@ pub struct ZoneState {
     /// Crossfade between tracks in ms; 0 = off.
     #[serde(default)]
     pub crossfade_ms: u64,
+    /// The output's level as last read back (after a change, and on the zone's poll); `None`
+    /// until a read succeeds, or when the output can't say.
+    #[serde(default)]
+    pub volume: Option<pm_model::ZoneVolume>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,6 +156,19 @@ pub struct Zone {
     state: watch::Receiver<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
     crossfade: Arc<AtomicU64>,
+    /// A set and its read-back, or a poll's read, one at a time (the device's I/O): a poll that
+    /// started before a set can't publish after it.
+    volume_io: Arc<tokio::sync::Mutex<()>>,
+    /// The level last published, changed only together with the command that publishes it (the
+    /// engine's state can lag the commands still queued). Never held across an await.
+    volume_published: Arc<std::sync::Mutex<Published>>,
+}
+
+/// What a zone last said its level was, and how many levels the device announced itself.
+#[derive(Default)]
+struct Published {
+    level: Option<pm_model::ZoneVolume>,
+    announced: u64,
 }
 
 impl Zone {
@@ -175,6 +192,7 @@ impl Zone {
             acked: 0,
             sync: output.sync(),
             crossfade_ms: 0,
+            volume: None,
         };
         let (state_tx, state) = watch::channel(initial);
         let crossfade = Arc::new(AtomicU64::new(0));
@@ -198,6 +216,8 @@ impl Zone {
             state,
             events,
             crossfade,
+            volume_io: Default::default(),
+            volume_published: Default::default(),
         }
     }
 
@@ -331,9 +351,81 @@ impl Zone {
         self.send(Command::Seek(ms));
     }
 
-    /// Hardware volume on the output; the audio path is untouched.
+    fn published(&self) -> std::sync::MutexGuard<'_, Published> {
+        self.volume_published.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Hardware volume on the output; the audio path is untouched. The level is read back into
+    /// the state afterwards, so every controller shows what the device took. An output that
+    /// can't read its level keeps the last absolute level set (and the mute), so a change still
+    /// shows; up and down leave it as it was. A read that fails keeps the last level published
+    /// (the poll catches up). Controllers always hear the result, also when it equals what they
+    /// had: one that showed the level it asked for learns that the device kept another. A level
+    /// the device announced while this ran is newer than this read-back: it stays.
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        self.output.set_volume(v).await
+        let _io = self.volume_io.lock().await;
+        let seen = self.published().announced;
+        self.output.set_volume(v).await?;
+        let read = self.output.volume().await;
+        let mut p = self.published();
+        if p.announced != seen {
+            return Ok(());
+        }
+        let next = match read {
+            Ok(Some(read)) => Some(read),
+            Err(_) => None,
+            Ok(None) => {
+                let was = p.level;
+                let level = match v {
+                    Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
+                    Volume::Percent(p) => Some(pm_model::VolumeLevel::Percent(p.min(100))),
+                    _ => was.map(|w| w.level),
+                };
+                let muted = match v {
+                    Volume::Mute(m) => m,
+                    _ => was.is_some_and(|w| w.muted),
+                };
+                level.map(|level| pm_model::ZoneVolume { level, muted })
+            }
+        };
+        if next.is_some() {
+            p.level = next;
+        }
+        self.send(Command::Volume(p.level));
+        Ok(())
+    }
+
+    /// Read the output's level and publish it in the state (the poll). A read that fails, or an
+    /// output that can't say, leaves the last value; so does a level the device announced while
+    /// the read ran (it is newer).
+    pub async fn refresh_volume(&self) -> Option<pm_model::ZoneVolume> {
+        let _io = self.volume_io.lock().await;
+        let seen = self.published().announced;
+        let read = self.output.volume().await;
+        let mut p = self.published();
+        match read {
+            Ok(Some(v)) if p.announced == seen => {
+                // Nothing is sent when it is the level last published
+                if p.level != Some(v) {
+                    p.level = Some(v);
+                    self.send(Command::Volume(Some(v)));
+                }
+                Some(v)
+            }
+            Ok(_) => p.level,
+            Err(_) => None,
+        }
+    }
+
+    /// A level the device announced itself (UPnP events), through the engine. Always sent: the
+    /// state may not show a level announced just before yet, and events must land in order. It
+    /// becomes the level last published, so a poll that reads it again sends nothing and one
+    /// that reads another level later sends that; a set or a poll in flight leaves it standing.
+    pub fn announce_volume(&self, v: pm_model::ZoneVolume) {
+        let mut p = self.published();
+        p.level = Some(v);
+        p.announced += 1;
+        self.send(Command::Volume(Some(v)));
     }
 
     /// Wait until every command sent so far was handled, whatever the

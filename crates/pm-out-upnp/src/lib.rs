@@ -10,6 +10,7 @@
 //! thread, and the few control calls per track do not justify a runtime.
 
 pub mod dlna;
+pub mod gena;
 pub mod heos;
 pub mod output;
 pub mod soap;
@@ -53,6 +54,16 @@ pub struct Renderer {
     /// Sonos: where the group topology is read (`sonos::groups`).
     pub zone_group_topology: Option<String>,
     pub location: String,
+    /// Where the renderer's volume changes are sent (GENA), when it says: the OpenHome `Volume`
+    /// service (a Linn's; what Roon follows) and RenderingControl's `LastChange`.
+    pub events: RendererEvents,
+}
+
+/// The event subscription URLs ([`gena`]) a renderer's description names, absolute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RendererEvents {
+    pub rendering_control: Option<String>,
+    pub openhome_volume: Option<String>,
 }
 
 /// SSDP M-SEARCH for media renderers; collects unique LOCATIONs within
@@ -522,11 +533,13 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
     let mut manufacturer = None;
     let mut model = None;
     let mut device_type = None;
-    let mut in_service: Option<(Option<String>, Option<String>)> = None; // (serviceType, controlURL)
+    let mut in_service: Option<(Option<String>, Option<String>, Option<String>)> = None; // (serviceType, controlURL, eventSubURL)
     let mut av = None;
     let mut rc = None;
     let mut cm = None;
     let mut zgt = None;
+    let mut rc_event: Option<String> = None;
+    let mut oh_volume_event: Option<String> = None;
     let mut url_base: Option<String> = None;
     let mut text_target: Option<String> = None;
     loop {
@@ -535,7 +548,7 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
                 let name = e.local_name().as_ref().to_string();
                 path.push(name.clone());
                 if name == "service" {
-                    in_service = Some((None, None));
+                    in_service = Some((None, None, None));
                 }
                 text_target = Some(name);
             }
@@ -567,13 +580,26 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
                             s.1 = Some(v);
                         }
                     }
+                    "eventSubURL" => {
+                        if let Some(s) = in_service.as_mut() {
+                            s.2 = Some(v);
+                        }
+                    }
                     _ => {}
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.local_name().as_ref().to_string();
                 if name == "service" {
-                    if let Some((Some(t), Some(c))) = in_service.take() {
+                    if let Some((Some(t), Some(c), ev)) = in_service.take() {
+                        if t.starts_with("urn:schemas-upnp-org:service:RenderingControl:")
+                            && rc_event.is_none()
+                        {
+                            rc_event = ev.clone();
+                        }
+                        if t.starts_with("urn:av-openhome-org:service:Volume:") && oh_volume_event.is_none() {
+                            oh_volume_event = ev.clone();
+                        }
                         if t.starts_with("urn:schemas-upnp-org:service:AVTransport:") && av.is_none() {
                             av = Some(c);
                         } else if t.starts_with("urn:schemas-upnp-org:service:RenderingControl:")
@@ -626,6 +652,10 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
         connection_manager: cm.map(|c| abs(&c)),
         zone_group_topology: zgt.map(|c| abs(&c)),
         location: location.to_string(),
+        events: RendererEvents {
+            rendering_control: rc_event.map(|c| abs(&c)),
+            openhome_volume: oh_volume_event.map(|c| abs(&c)),
+        },
     }))
 }
 
@@ -647,6 +677,13 @@ mod tests {
         <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
         <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
         <controlURL>/RenderingControl/control</controlURL>
+        <eventSubURL>/RenderingControl/event</eventSubURL>
+      </service>
+      <service>
+        <serviceType>urn:av-openhome-org:service:Volume:1</serviceType>
+        <serviceId>urn:av-openhome-org:serviceId:Volume</serviceId>
+        <controlURL>/Volume/control</controlURL>
+        <eventSubURL>/Volume/event</eventSubURL>
       </service>
       <service>
         <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
@@ -676,6 +713,14 @@ mod tests {
         assert_eq!(
             r.rendering_control.as_deref(),
             Some("http://192.168.1.20:55178/RenderingControl/control")
+        );
+        // Where its volume changes are sent: OpenHome Volume and RenderingControl, absolute
+        assert_eq!(
+            r.events,
+            RendererEvents {
+                rendering_control: Some("http://192.168.1.20:55178/RenderingControl/event".into()),
+                openhome_volume: Some("http://192.168.1.20:55178/Volume/event".into()),
+            }
         );
     }
 

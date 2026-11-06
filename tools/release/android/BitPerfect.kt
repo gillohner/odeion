@@ -377,7 +377,11 @@ class BitPerfect private constructor() {
             val am = audio() ?: return -1
             val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             if (max <= 0) return -1
-            return (am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 + max / 2) / max
+            val v = am.getStreamVolume(AudioManager.STREAM_MUSIC)
+            // 100 only at the top step: on a phone with 200 or more steps, the one below full
+            // would otherwise round up to 100 (full level without the agreement)
+            if (v >= max) return 100
+            return minOf(99, (v * 100 + max / 2) / max)
         }
 
         /// Android's own attenuation of media, in dB, for the USB DAC it plays to now

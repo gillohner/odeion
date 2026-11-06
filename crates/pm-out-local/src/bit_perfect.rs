@@ -2542,4 +2542,51 @@ mod tests {
         assert!(!usb_dac::apply_report(&at(100)));
         usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
     }
+
+    /// Claude L1 (300g): while a bit-perfect sink plays (not paused), the per-block check reads
+    /// Android live at most 100 ms late: a stale 100 % report doesn't keep it at full level.
+    #[test]
+    fn while_it_plays_a_stale_report_is_read_past_within_100_ms() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        let report = ka17_report_with(&ka17_mixer()).replace(r#""sdk":34"#, r#""sdk":34,"media_volume":100"#);
+        usb_dac::apply_report(&report);
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        *player.volume.lock().unwrap() = Some(100);
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        let PhoneOpen::BitPerfect(mut sink) = open_phone(OutputId::new("cpal", "phone"), fmt) else {
+            panic!("bit-perfect at 100 %")
+        };
+        sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 960])).unwrap();
+        assert!(!sink.reopen_now(), "100 %: plays on");
+        // Turned down: Android says so at once, the report (100 %) not yet
+        *player.volume.lock().unwrap() = Some(40);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 960])).unwrap();
+        assert!(sink.reopen_now(), "playing, live 40 %: reopened");
+        drop(sink);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+    }
+
+    /// Claude L2 (300g): without a DAC, a volume step is no change (the app doesn't register
+    /// again at every step); with one it is.
+    #[test]
+    fn a_volume_step_without_a_dac_is_no_change() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _player = with_player();
+        usb_dac::set_settings(DeviceSettings::default());
+        usb_dac::set_dac(None);
+        let none = |v: u8| format!(r#"{{"v":1,"sdk":34,"devices":[],"media_volume":{v}}}"#);
+        usb_dac::apply_report(&none(50));
+        assert!(!usb_dac::apply_report(&none(40)), "no DAC: no change");
+        assert!(!usb_dac::apply_report(&none(100)));
+        let at = |v: u8| {
+            ka17_report_with(&ka17_mixer()).replace(r#""sdk":34"#, &format!(r#""sdk":34,"media_volume":{v}"#))
+        };
+        assert!(usb_dac::apply_report(&at(100)), "the DAC arrives");
+        assert!(usb_dac::apply_report(&at(40)), "with a DAC: a change");
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+    }
 }

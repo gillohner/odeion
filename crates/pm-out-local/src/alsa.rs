@@ -191,14 +191,22 @@ fn volume_selem(mixer: &Mixer) -> Option<Selem<'_>> {
 /// `step` assumes the control's dB scale is linear in raw steps, which holds for UAC2
 /// feature units (the KA17: 0..127 = -127..0 dB). HDA codecs with non-linear TLV tables
 /// would need the per-step table; until then `step` is only an average for them.
+///
+/// A control whose lowest step is mute reports that step as about -99999 dB: its range starts at
+/// the first audible step instead (the pages' slider and a volume limit's percent cap need the
+/// real range).
 fn volume_kind(s: &Selem) -> VolumeKind {
     let (lo, hi) = s.get_playback_db_range();
     let (vmin, vmax) = s.get_playback_volume_range();
-    if hi.0 > lo.0 && vmax > vmin {
+    let (min, steps) = match s.ask_playback_vol_db(vmin + 1) {
+        Ok(first) if lo.to_db() <= -200.0 && vmax > vmin + 1 => (first.to_db(), vmax - vmin - 1),
+        _ => (lo.to_db(), vmax - vmin),
+    };
+    if hi.to_db() > min && steps > 0 {
         VolumeKind::Db {
-            min: lo.to_db(),
+            min,
             max: hi.to_db(),
-            step: (hi.to_db() - lo.to_db()) / (vmax - vmin) as f32,
+            step: (hi.to_db() - min) / steps as f32,
         }
     } else {
         VolumeKind::Percent

@@ -128,17 +128,20 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       assert.match(await vis.textContent(), /Who sees what you play\s*Only you/);
       await page.keyboard.press('Escape');
 
-      // S4 and S5: the song page's tag chips are 40 px to touch, and its Tags say they are public
+      // S4 and S5: the song page's tag chips are 40 px to touch, and adding one says it is public
       await page.route(/\/v1\/tags(\?.*)?$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { tags: [{ label: 'chill' }] } }) : r.fallback()));
       await page.goto(`${BASE}/song/lib-1`);
-      await page.locator('#itags .chip.tag').first().waitFor();
-      const h = (await page.locator('#itags .chip.tag').first().boundingBox()).height;
+      await page.locator('#htags .ptag.own').first().waitFor();
+      // Once Pubky's answer is in (no placeholders) nothing redraws the chips under the measurement
+      for (let i = 0; i < 100 && await page.locator('#htags .tag-skel').count(); i++) await page.waitForTimeout(100);
+      const h = await page.locator('#htags .ptag.own').first().evaluate((e) => e.getBoundingClientRect().height);
       assert.ok(h >= 40, `a tag chip is 40 px to touch at ${width} (${h})`);
       for (const part of ['.chiplink', '.chipx']) {
-        const ph = (await page.locator(`#itags .chip.tag ${part}`).first().boundingBox()).height;
+        const ph = await page.locator(`#htags .ptag.own ${part}`).first().evaluate((e) => e.getBoundingClientRect().height);
         assert.ok(ph >= 36, `a tag chip's ${part} fills it at ${width} (${ph})`);
       }
-      assert.match(await page.locator('#itags .tag-hint').textContent(), /Public on your homeserver/);
+      await page.locator('#htags [data-htag-plus]').first().click();
+      assert.match(await page.locator('#htags .tag-hint').textContent(), /Public on your homeserver/);
       await page.goto(`${BASE}/genres`);
       await page.locator('[data-mytag]').first().waitFor();
       const g = (await page.locator('[data-mytag]').first().boundingBox()).height;

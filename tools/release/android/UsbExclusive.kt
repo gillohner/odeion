@@ -45,6 +45,9 @@ class UsbExclusive private constructor() {
         private var returningUntil = 0L
         /// The app is closing: the Rust side gives the DAC back once nothing plays on it.
         @Volatile private var closing = false
+        /// USB devices Android detached, not yet taken by the Rust side (takeDetached): it forgets
+        /// what the listener chose for exactly those devices.
+        private val detachedLog = mutableListOf<JSONObject>()
 
         fun init(c: Context) {
             if (context != null) return
@@ -59,6 +62,13 @@ class UsbExclusive private constructor() {
                         UsbManager.ACTION_USB_DEVICE_DETACHED -> {
                             val gone = deviceOf(intent)
                             synchronized(lock) {
+                                if (gone != null) {
+                                    detachedLog.add(
+                                        JSONObject().put("vendor_id", gone.vendorId).put("product_id", gone.productId)
+                                            .put("device_name", gone.deviceName)
+                                    )
+                                    while (detachedLog.size > 64) detachedLog.removeAt(0)
+                                }
                                 if (gone != null && device?.deviceName == gone.deviceName) {
                                     runCatching { conn?.close() }
                                     conn = null
@@ -270,6 +280,46 @@ class UsbExclusive private constructor() {
         @JvmStatic
         fun forgetClaim() {
             forget()
+        }
+
+        /// One attached device as the Rust side tells DACs apart (pm-out-local's DacIdentity): its
+        /// ids, its serial number when it has one (readable with the permission Exclusive USB has)
+        /// and its device name (this attachment: a replug or another device is another path).
+        private fun identity(d: UsbDevice): String {
+            val o = JSONObject().put("vendor_id", d.vendorId).put("product_id", d.productId)
+                .put("device_name", d.deviceName)
+            val serial = runCatching { d.serialNumber }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+            if (serial != null) o.put("serial", serial)
+            return o.toString()
+        }
+
+        /// The DAC the app holds now (identity()); empty when none is held.
+        @JvmStatic
+        fun heldIdentity(): String {
+            val d = synchronized(lock) { device } ?: return ""
+            return identity(d)
+        }
+
+        /// The one attached audio device with these ids (identity()); empty when there is none, or
+        /// more than one (they can't be told apart without the app holding one).
+        @JvmStatic
+        fun identityOf(vendor: Int, product: Int): String {
+            val all = runCatching {
+                usb()?.deviceList?.values?.filter { it.vendorId == vendor && it.productId == product && isAudio(it) }
+            }.getOrNull() ?: return ""
+            return all.singleOrNull()?.let { identity(it) } ?: ""
+        }
+
+        /// The devices Android detached since the last call, JSON [{vendor_id, product_id,
+        /// device_name}], each once.
+        @JvmStatic
+        fun takeDetached(): String {
+            val out = JSONArray()
+            synchronized(lock) {
+                detachedLog.forEach { out.put(it) }
+                detachedLog.clear()
+            }
+            return out.toString()
         }
 
         /// The app holds a DAC now.

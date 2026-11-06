@@ -1,8 +1,8 @@
 use crate::sink::{check_block, AudioSink, BufferLevel, Output, OutputId, SinkError};
 use async_trait::async_trait;
-use pm_model::{AudioBlock, AudioFormat, OutputCaps};
+use pm_model::{AudioBlock, AudioFormat, OutputCaps, Volume, VolumeKind, VolumeLevel, ZoneVolume};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How far a real-time null sink may run ahead of the wall clock.
@@ -17,6 +17,9 @@ pub struct NullOutput {
     frames: Arc<AtomicU64>,
     opens: AtomicU64,
     realtime: bool,
+    /// A pretend hardware volume (the `with_volume` fixtures): the level set last, read back
+    /// like a device's.
+    level: Option<Mutex<ZoneVolume>>,
 }
 
 impl Default for NullOutput {
@@ -32,6 +35,24 @@ impl NullOutput {
             frames: Arc::new(AtomicU64::new(0)),
             opens: AtomicU64::new(0),
             realtime: false,
+            level: None,
+        }
+    }
+
+    /// A null output with a hardware volume of `kind` (dB or percent), for the pages' and the
+    /// API's volume checks: `null:db` and `null:percent`, next to the plain one with none. The
+    /// level starts at the top of the scale and keeps what it is set to, mute included.
+    pub fn with_volume(kind: VolumeKind) -> Self {
+        let mut caps = OutputCaps::unlimited();
+        let level = match kind {
+            VolumeKind::Db { max, .. } => VolumeLevel::Db(max),
+            _ => VolumeLevel::Percent(100),
+        };
+        caps.hw_volume = Some(kind);
+        Self {
+            caps,
+            level: Some(Mutex::new(ZoneVolume { level, muted: false })),
+            ..Self::new()
         }
     }
 
@@ -57,6 +78,14 @@ impl NullOutput {
         Self { caps, ..Self::new() }
     }
 
+    /// The device's own level changed behind the node's back (its remote): what the next read
+    /// sees. Only an output made with [`NullOutput::with_volume`] has one.
+    pub fn pretend_level(&self, v: ZoneVolume) {
+        if let Some(l) = &self.level {
+            *l.lock().expect("null volume") = v;
+        }
+    }
+
     /// How many sinks were opened on this output (gapless = one per format run).
     pub fn opens_total(&self) -> u64 {
         self.opens.load(Ordering::Relaxed)
@@ -71,11 +100,56 @@ impl NullOutput {
 #[async_trait]
 impl Output for NullOutput {
     fn id(&self) -> OutputId {
-        OutputId::new("null", "")
+        match self.caps.hw_volume {
+            Some(VolumeKind::Db { .. }) => OutputId::new("null", "db"),
+            Some(_) => OutputId::new("null", "percent"),
+            None => OutputId::new("null", ""),
+        }
     }
 
     fn name(&self) -> String {
-        "Null output".into()
+        match self.caps.hw_volume {
+            Some(VolumeKind::Db { .. }) => "Null output (dB volume)".into(),
+            Some(_) => "Null output (% volume)".into(),
+            None => "Null output".into(),
+        }
+    }
+
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        let Some(level) = &self.level else {
+            return Err(SinkError::NoVolume(self.id()));
+        };
+        let mut l = level.lock().expect("null volume");
+        let (min, max, step) = match self.caps.hw_volume {
+            Some(VolumeKind::Db { min, max, step }) => (min, max, step.max(0.5)),
+            _ => (0.0, 100.0, 3.0),
+        };
+        let cur = match l.level {
+            VolumeLevel::Db(d) => d,
+            VolumeLevel::Percent(p) => f32::from(p),
+        };
+        let next = match v {
+            Volume::Db(d) => d.clamp(min, max),
+            Volume::Percent(p) => match l.level {
+                VolumeLevel::Db(_) => min + (max - min) * f32::from(p.min(100)) / 100.0,
+                VolumeLevel::Percent(_) => f32::from(p.min(100)),
+            },
+            Volume::Up => (cur + step).min(max),
+            Volume::Down => (cur - step).max(min),
+            Volume::Mute(m) => {
+                l.muted = m;
+                return Ok(());
+            }
+        };
+        l.level = match l.level {
+            VolumeLevel::Db(_) => VolumeLevel::Db(next),
+            VolumeLevel::Percent(_) => VolumeLevel::Percent(next.round() as u8),
+        };
+        Ok(())
+    }
+
+    async fn volume(&self) -> Result<Option<ZoneVolume>, SinkError> {
+        Ok(self.level.as_ref().map(|l| *l.lock().expect("null volume")))
     }
 
     fn caps(&self) -> &OutputCaps {
