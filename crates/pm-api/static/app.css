@@ -1166,9 +1166,10 @@ a.btn { text-decoration: none; }
   html[data-shell="phone"] .player .player-right { gap: 4px; }
   /* (the quality pill keeps its badge whole; the zone button, which can cut its words, gives way) */
   html[data-shell="phone"] .player .player-right .quality { flex: 0 0 auto; }
-  /* (and up to 400 px the pill is its icon: the zone's name is what the bar must say; the format
-     is in Now playing's quality line) */
+  /* (and up to 420 px the pill is its icon: the zone's name is what the bar must say; the format
+     is in Now playing's quality line. With nothing left to show, the pill goes: no empty pill) */
   html[data-shell="phone"] .player .player-right .quality .qshort .qbadge { display: none; }
+  html[data-shell="phone"] .player .player-right .quality:not(:has(.qsrc svg)), html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) .quality { display: none; }
   html[data-shell="phone"] .player .player-right .zone-btn { gap: 4px; padding: 6px 8px; }
   /* (as many of its words as the screen allows: ~86 px at 360, ~99 at 412; it was 64) */
   html[data-shell="phone"] .player .player-right .zone-btn span { max-width: min(120px, 24vw); }
@@ -1969,8 +1970,9 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
   .icon-btn, .chip, .btn.sm, .bnav, .pop-item { position: relative; isolation: isolate; }
   .icon-btn::before, .chip::before, .btn.sm::before { content: ''; position: absolute; inset: -6px; z-index: -1; }
   .chip::before, .btn.sm::before { inset: -8px -4px; }
-  /* A row of chips that scrolls sideways keeps no vertical scroll from the reach */
-  :is(.libnav, .np-sheet-tabs, .np-jump-chips, .scopechips, .azbar, .chips.win) { overflow-y: hidden; }
+  /* A row of chips that scrolls sideways keeps the reach inside its box (no vertical scroll, no clip):
+     the room above and below is padding, taken back by margin */
+  html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs), .np-jump-chips { padding-top: 8px; padding-bottom: 8px; margin-top: -8px; margin-bottom: -8px; }
 }
 /* A button that is its icon on a phone (its label says what it does elsewhere) */
 html[data-shell="phone"] .btn.iconic .btn-label { display: none; }

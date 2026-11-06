@@ -6830,7 +6830,7 @@
           const WAY_WORDS = /\b(airplay|upnp(?:[ -]?av)?|dlna|chromecast|cast|sonos|bluos|heos|snapcast|squeezelite|squeezebox|slimproto)\b/gi;
           // (the name without its way words, in any script; a name that is only a way word, or one
           // word of three letters or fewer, is too little to go on)
-          const familyOf = (z) => { if (z.id === BROWSER || String(z.id).startsWith('group:')) return ''; const f = String(z.name || '').replace(WAY_WORDS, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); return f.length >= 4 ? f : ''; };
+          const familyOf = (z) => { if (z.id === BROWSER || String(z.id).startsWith('group:')) return ''; const f = String(z.name || '').replace(WAY_WORDS, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); return f.length >= 4 || /[^\x00-\x7f]/.test(f) ? f : ''; };
           const familyName = (z) => String(z.name || '').replace(WAY_WORDS, '').replace(/[\s:·(),-]+$/g, '').replace(/^[\s:·(),-]+/g, '').replace(/\(\s*\)/g, '').replace(/\s{2,}/g, ' ').trim() || z.name;
           const families = new Map();
           for (const z of zs) { const f = familyOf(z); if (f) families.set(f, [...(families.get(f) || []), z]); }

@@ -24,7 +24,11 @@ const sysIdx = css.indexOf('@media (prefers-color-scheme: light)');
 let drift = 0;
 if (sysIdx >= 0) {
   const body = css.slice(sysIdx, css.indexOf('}', css.indexOf('{', css.indexOf('{', sysIdx) + 1)) + 1);
-  for (const m of body.matchAll(/--([\w-]+)\s*:\s*([^;]+);/g)) if (lightPicked[m[1]] != null && lightPicked[m[1]] !== m[2].trim()) { drift++; console.log(`FAIL light: --${m[1]} differs between the picked theme (${lightPicked[m[1]]}) and the system one (${m[2].trim()})`); }
+  const sys = {}; for (const m of body.matchAll(/--([\w-]+)\s*:\s*([^;]+);/g)) sys[m[1]] = m[2].trim();
+  for (const k of new Set([...Object.keys(sys), ...Object.keys(lightPicked)])) {
+    if (sys[k] == null || lightPicked[k] == null) { drift++; console.log(`FAIL light: --${k} is in ${sys[k] == null ? 'the picked theme only' : 'the system theme only'}`); }
+    else if (sys[k] !== lightPicked[k]) { drift++; console.log(`FAIL light: --${k} differs between the picked theme (${lightPicked[k]}) and the system one (${sys[k]})`); }
+  }
 }
 
 // sRGB from #rgb, #rrggbb, rgb()/rgba(), hsl() (what the palette uses)

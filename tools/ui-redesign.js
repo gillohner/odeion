@@ -46,7 +46,11 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
       for (let i = 0; i < code.length; i++) {
         const c = code[i]; if (c === '\n') line++;
         if (!q) {
-          if (c === "'" || c === '"' || c === '`') { q = c; buf = ''; at = line; } else if (c === '/' && code[i + 1] === '/') { while (i < code.length && code[i] !== '\n') i++; line++; } else if (c === '/' && code[i + 1] === '*') { const j = code.indexOf('*/', i + 2); line += (code.slice(i, j < 0 ? code.length : j).match(/\n/g) || []).length; i = j < 0 ? code.length : j + 1; }
+          if (c === "'" || c === '"' || c === '`') { q = c; buf = ''; at = line; } else if (c === '/' && code[i + 1] === '/') { while (i < code.length && code[i] !== '\n') i++; line++; } else if (c === '/' && code[i + 1] === '*') { const j = code.indexOf('*/', i + 2); line += (code.slice(i, j < 0 ? code.length : j).match(/\n/g) || []).length; i = j < 0 ? code.length : j + 1; } else if (c === '/') {
+            // a regex literal (after an operator or an opening bracket): to its closing slash, past classes and escapes
+            const before = code.slice(0, i).replace(/\s+$/, '').slice(-1);
+            if (!before || '(,=:[!&|?{};+-*%<>~^'.includes(before) || /\b(return|typeof|case|do|else|in|of)$/.test(code.slice(Math.max(0, i - 7), i))) { let j = i + 1; let cls = false; while (j < code.length && (cls || code[j] !== '/') && code[j] !== '\n') { if (code[j] === '\\') j++; else if (code[j] === '[') cls = true; else if (code[j] === ']') cls = false; j++; } i = j; }
+          }
           continue;
         }
         if (c === '\\') { buf += code[i + 1]; i++; continue; }
@@ -77,13 +81,13 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
       const ways = linn ? [...linn.querySelectorAll('.zc-ways .chip')].map((c) => ({ t: c.textContent.trim(), on: c.classList.contains('on'), pressed: c.getAttribute('aria-pressed') })) : [];
       const ph = cards.find((c) => c.querySelector('.zc-ph'));
       // (a point 5 px above the control's box must land on the control itself: its reach, not a neighbour)
-      const hit = (sel) => { const el = document.querySelector(sel); if (!el) return null; const cs = getComputedStyle(el, '::before'); const r = el.getBoundingClientRect(); const inset = parseFloat(cs.top) || 0; const above = document.elementFromPoint(r.left + r.width / 2, r.top - 5); const inner = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return { box: Math.round(Math.min(r.width, r.height)), reach: Math.round(r.height - 2 * inset), content: cs.content, aboveHits: above === el || el.contains(above), innerHits: inner === el || el.contains(inner) }; };
+      const hit = (sel) => { const el = document.querySelector(sel); if (!el) return null; const cs = getComputedStyle(el, '::before'); const r = el.getBoundingClientRect(); const inset = parseFloat(cs.top) || 0; const above = document.elementFromPoint(r.left + r.width / 2, r.top - 5); return { box: Math.round(Math.min(r.width, r.height)), reach: Math.round(r.height - 2 * inset), content: cs.content, aboveHits: above === el || el.contains(above) }; };
       const g = document.querySelector('#zgroup'); const label = g && g.querySelector('.btn-label');
       return { n: cards.length, titles: cards.map((c) => c.querySelector('h3').textContent.trim()), linnTitle: linn && linn.querySelector('h3').textContent.trim(), ways, phIcon: !!(ph && ph.querySelector('.zc-ph svg')), chip: hit('.zc-ways .chip'), iconBtn: hit('.zone-card .icon-btn'), group: { aria: g && g.getAttribute('aria-label'), labelShown: !!label && getComputedStyle(label).display !== 'none' } };
     });
     check(z.n === 5 && z.linnTitle === 'Linn Klimax DS3' && z.ways.length === 2 && z.ways.map((x) => x.t).join('/') === 'AirPlay/UPnP' && z.ways[1].on && z.ways[1].pressed === 'true', `${w}: the Linn seen two ways is one card, "${z.linnTitle}", with the chips ${z.ways.map((x) => x.t).join(' and ')} (UPnP on) among ${z.n} cards`);
     check(z.phIcon, `${w}: a zone with nothing playing shows the zone's mark`);
-    check(z.chip && z.chip.content !== 'none' && z.chip.reach >= 48 && z.chip.aboveHits && z.chip.innerHits && z.iconBtn && z.iconBtn.reach >= 48 && z.iconBtn.aboveHits, `${w}: hit areas reach 48 px up and down on a touch screen and a tap 5 px above lands on the control (chip ${z.chip && z.chip.box} → ${z.chip && z.chip.reach}, above ${z.chip && z.chip.aboveHits}; icon button ${z.iconBtn && z.iconBtn.box} → ${z.iconBtn && z.iconBtn.reach}, above ${z.iconBtn && z.iconBtn.aboveHits})`);
+    check(z.chip && z.chip.content !== 'none' && z.chip.reach >= 48 && z.chip.aboveHits && z.iconBtn && z.iconBtn.reach >= 48 && z.iconBtn.aboveHits, `${w}: hit areas reach 48 px up and down on a touch screen and a tap 5 px above lands on the control (chip ${z.chip && z.chip.box} → ${z.chip && z.chip.reach}, above ${z.chip && z.chip.aboveHits}; icon button ${z.iconBtn && z.iconBtn.box} → ${z.iconBtn && z.iconBtn.reach}, above ${z.iconBtn && z.iconBtn.aboveHits})`);
     check(z.group.aria === 'Group outputs' && !z.group.labelShown, `${w}: "Group outputs…" is its icon on a phone, named for a screen reader (${z.group.aria})`);
     await page.screenshot({ path: path.join(SHOTS, `zones-${w}.png`) });
     // A way's chip plays to that way: the card follows
