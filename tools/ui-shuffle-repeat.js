@@ -12,11 +12,15 @@
 //   * the Queue page's Shuffle is the same toggle, with its state;
 //   * a smart playlist's Play and Shuffle load the zone's queue in its order with shuffle off / on
 //     (one POST load; Shuffle starts on a random song; repeat stays);
+//   * a playlist's Play on the zone turns shuffle off before it plays;
+//   * Shuffle starts on a random song (on the zone and here: not always the first, over three);
 //   * This browser: Play loads in order with shuffle off; shuffle on keeps the current song and draws
-//     the rest; off puts the queue back in its order with the current song in its place; Shuffle
-//     loads with shuffle on; a move to the zone carries shuffle and repeat, the items in their
-//     original order and the current song's place in it.
-//   node tools/ui-shuffle-repeat.js [repo] [shots]
+//     the rest, and Now playing's Up next shows the new order; off puts the queue back in its order
+//     with the current song in its place; "Add to queue" while on ends the original order and "Play
+//     next" is next in both; Shuffle loads with shuffle on; a move to the zone carries shuffle and
+//     repeat, the items in their original order and the current song's place in it; a move back
+//     carries shuffle on.
+//   node tools/ui-shuffle-repeat.js [repo] [shots]   (UI_WIDTHS=390 for one width)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
 const fx = require('./ui-fixture');
@@ -56,28 +60,36 @@ const pressMode = async (page, which) => {
 const openNp = async (page, w) => { if (await page.locator('#nowplaying:not([hidden])').count()) return; await page.click(w >= 600 && await page.locator('#npart').isVisible() ? '#npart' : '#np'); await page.waitForSelector('#nowplaying:not([hidden])'); await sleep(250); };
 const closeNp = async (page) => { if (!(await page.locator('#nowplaying:not([hidden])').count())) return; await page.keyboard.press('Escape'); await until(async () => !(await page.locator('#nowplaying:not([hidden])').count()), 2000); };
 const saved = (page) => page.evaluate(() => { try { return { q: JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').map((it) => it.uri), at: JSON.parse(localStorage.getItem('pm.browserAt') || 'null'), shuffle: localStorage.getItem('pm.shuffle'), repeat: localStorage.getItem('pm.repeat') }; } catch { return null; } });
+const title = (uri) => `Song ${uri.split(':')[1]}`;
+const upNext = (page) => page.evaluate(() => [...document.querySelectorAll('#nowplaying:not([hidden]) [data-npqi] .name')].map((e) => e.textContent.trim()));
+// A song row's ⋯ menu, then one of its entries
+const rowMenu = async (page, song, entry) => { const row = page.locator('.srow', { hasText: song }).first(); await row.locator('[data-smore]').click(); await page.locator('.popover .pop-item', { hasText: entry }).first().click(); await sleep(300); };
 const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOrder].sort().join();
 
 (async () => {
   const browser = await chromium.launch();
   try {
-    for (const w of [360, 390, 412, 768, 1024, 1440]) {
+    // (UI_WIDTHS=390,1440 runs only those)
+    for (const w of (process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number) : [360, 390, 412, 768, 1024, 1440])) {
       for (const scheme of ['dark', 'light']) {
         const T = `${w} ${scheme}:`;
         const Z = zoneOf(); const sent = [];
         const fixtures = { '/zones': { body: [Z] }, '/zones/z1': { get body() { return Z; } }, '/zones/z1/queue': { get body() { return Z.queue; } }, '/outputs': { body: [{ id: 'upnp:sp', name: 'Speaker', kind: 'upnp', caps: { hw_volume: 'percent' } }] }, '/smart/s1/tracks': { body: { playlist: { id: 's1', name: 'Mix', rules: [], matches: 'all' }, tracks, matched: N } } };
+        for (const t of tracks) fixtures[`/library/tracks/${t.id}`] = { body: t };
         const { page, context, state } = await fx.create(browser, w, { mobile: w < 600, fixtures });
         await page.setViewportSize({ width: w, height: w < 600 ? 800 : 900 });
         await page.emulateMedia({ colorScheme: scheme });
         let seq = 0; let sock = null;
         const snapshot = () => sock && sock.send(JSON.stringify({ type: 'snapshot', seq: seq++, boot: 'fixture-boot', library_rev: 0, zones: [Z] }));
         await context.routeWebSocket(/\/v1\/events/, (ws) => { sock = ws; ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); snapshot(); });
-        await page.route(/\/v1\/zones\/z1\/(shuffle|repeat|load|transport)(\?|$)/, async (r) => {
+        await page.route(/\/v1\/playlists\/c1\/play$/, (r) => { sent.push({ m: r.request().method(), v: '/playlists/c1/play', body: null }); return json(r, { queued: 1, missing: [] }); });
+        await page.route(/\/v1\/zones\/z1\/(shuffle|repeat|load|transport|queue)(\?|$)/, async (r) => {
           const req = r.request(); const v = new URL(req.url()).pathname.slice(3); let body = null; try { body = JSON.parse(req.postData() || 'null'); } catch { /* none */ }
           sent.push({ m: req.method(), v, body });
           if (/\/shuffle$/.test(v) && req.method() === 'PUT') { Z.shuffle = !!body.shuffle; Z.queue_version++; return json(r, Z); }
           if (/\/shuffle$/.test(v)) { Z.shuffle = true; return r.fulfill({ status: 204, body: '' }); }
           if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; return r.fulfill({ status: 204, body: '' }); }
+          if (/\/queue$/.test(v)) { if (req.method() === 'DELETE') { Z.queue = []; Z.now_playing = null; Z.transport = 'stopped'; return r.fulfill({ status: 204, body: '' }); } return json(r, Z.queue); }
           if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; return json(r, Z); }
           return json(r, Z);
         });
@@ -146,6 +158,16 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         ld = asked('POST', /\/zones\/z1\/load$/)[1];
         check(!!ld && ld.body.shuffle === true && ld.body.items.map((x) => x.uri).join() === inOrder.join() && ld.body.index >= 0 && ld.body.index < N, `${T} …in its order with shuffle on, from a song of it (${ld && JSON.stringify({ shuffle: ld.body.shuffle, index: ld.body.index })}); the node keeps the order for shuffle off`);
         check(await until(async () => allAre((await modes(page)).shuffle, true, 'Shuffle: on')), `${T} …and the bar says shuffle on: ${say((await modes(page)).shuffle)}`);
+        for (const k of [3, 4]) { await sleep(200); await page.click('#smshuffle'); await until(async () => asked('POST', /\/zones\/z1\/load$/).length === k); }
+        const starts = asked('POST', /\/zones\/z1\/load$/).slice(1).map((x) => x.body.index);
+        check(starts.length === 3 && starts.some((i) => i !== 0), `${T} …from a random song, not always the first (indexes ${starts.join(', ')})`);
+        // A playlist's Play on the zone: shuffle off first, then the list plays in its order
+        await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plplay'); await sleep(200);
+        const n0 = sent.length;
+        await page.click('#plplay');
+        check(await until(async () => sent.slice(n0).some((x) => x.v === '/playlists/c1/play')), `${T} a playlist's Play plays it on the zone`);
+        const pl = sent.slice(n0).map((x) => `${x.m} ${x.v}${x.body && 'shuffle' in x.body ? ` ${x.body.shuffle}` : ''}`);
+        check(pl.indexOf('PUT /zones/z1/shuffle false') >= 0 && pl.indexOf('PUT /zones/z1/shuffle false') < pl.indexOf('POST /playlists/c1/play'), `${T} …after turning shuffle off (${pl.join(', ')})`);
 
         // ---- This browser
         await page.evaluate(() => { sessionStorage.setItem('pm.test.zone', 'browser'); localStorage.removeItem('pm.repeat'); });
@@ -153,9 +175,10 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await page.click('#smplay');
         check(await until(async () => { const s = await saved(page); return s.q.join() === inOrder.join() && !s.shuffle; }, 6000), `${T} here, Play queues the songs in order with shuffle off (${JSON.stringify(await saved(page))})`);
         check(allAre((await modes(page)).shuffle, false, 'Shuffle: off'), `${T} …and the buttons say off: ${say((await modes(page)).shuffle)}`);
-        if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        await openNp(page, w);
         await pressMode(page, 'shuffle');
         check(await until(async () => { const s = await saved(page); return s.shuffle === 'on' && s.q[0] === inOrder[0] && isPermutation(s.q) && s.q.join() !== inOrder.join(); }, 6000), `${T} shuffle on here: the current song stays first, the rest is drawn (${(await saved(page)).q.join(' ')})`);
+        check(await until(async () => { const s = await saved(page); const rows = await upNext(page); return rows.length > 0 && rows.join() === s.q.slice(s.at.index + 1, s.at.index + 1 + rows.length).map(title).join(); }), `${T} …and Now playing's Up next shows the drawn order (${(await upNext(page)).slice(0, 4).join(', ')})`);
         check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} …every copy on: ${say((await modes(page)).shuffle)}`);
         // Next, then off: back in order with the current song in its place
         const drawn = (await saved(page)).q; const now = drawn[1];
@@ -167,9 +190,25 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await until(async () => { const s = await saved(page); return !s.shuffle && s.q.join() === inOrder.join() && s.at && s.q[s.at.index] === now; }, 6000), `${T} shuffle off: the queue is in its order again, ${now} playing in its place (${JSON.stringify(await saved(page))})`);
         await pressMode(page, 'repeat');
         check(await until(async () => (await saved(page)).repeat === 'all' && allAre((await modes(page)).repeat, true, 'Repeat: the whole queue')), `${T} repeat here cycles to all, every copy following: ${say((await modes(page)).repeat)}`);
+        // While shuffled: "Add to queue" ends the original order, "Play next" is next in both
+        const curNow = (await saved(page)).q[(await saved(page)).at.index];
+        await pressMode(page, 'shuffle'); await until(async () => (await saved(page)).shuffle === 'on');
         await closeNp(page);
-        await page.click('#smshuffle');
-        check(await until(async () => { const s = await saved(page); return s.shuffle === 'on' && isPermutation(s.q) && s.q.join() !== inOrder.join(); }, 6000), `${T} Shuffle here loads with shuffle on, from a random song (${(await saved(page)).q.join(' ')})`);
+        await rowMenu(page, 'Song 5', 'Add to queue'); await rowMenu(page, 'Song 7', 'Play next');
+        check(await until(async () => { const s = await saved(page); return s.q.length === N + 2 && s.q[s.q.length - 1] === 'track:5' && s.q[s.at.index + 1] === 'track:7'; }, 6000), `${T} while shuffled, Add to queue goes last and Play next right after the current song (${(await saved(page)).q.join(' ')})`);
+        if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
+        await pressMode(page, 'shuffle');
+        const wantOrder = [...inOrder]; wantOrder.splice(inOrder.indexOf(curNow) + 1, 0, 'track:7'); wantOrder.push('track:5');
+        check(await until(async () => { const s = await saved(page); return !s.shuffle && s.q.join() === wantOrder.join() && s.q[s.at.index] === curNow; }, 6000), `${T} …then shuffle off: in order, the next song after ${curNow}, the added one last (${(await saved(page)).q.join(' ')})`);
+        await closeNp(page);
+        const firsts = [];
+        for (let k = 0; k < 3; k++) {
+          const before = (await saved(page)).q.join();
+          await page.click('#smshuffle');
+          check(await until(async () => { const s = await saved(page); return s.shuffle === 'on' && isPermutation(s.q) && s.q.join() !== inOrder.join() && s.q.join() !== before; }, 6000), `${T} Shuffle here loads with shuffle on (${(await saved(page)).q.join(' ')})`);
+          firsts.push((await saved(page)).q[0]);
+        }
+        check(firsts.some((f) => f !== inOrder[0]), `${T} …from a random song, not always the first (${firsts.join(', ')})`);
         // Move to the zone: shuffle and repeat go along, the items in their original order
         const cur = await until(async () => { const s = await saved(page); return s.at && s.at.index === 0; }, 4000) ? (await saved(page)).q[0] : null;
         const loads = asked('POST', /\/zones\/z1\/load$/).length;
@@ -178,6 +217,13 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         const mv = asked('POST', /\/zones\/z1\/load$/)[loads];
         check(!!mv && mv.body.shuffle === true && mv.body.repeat === 'all' && mv.body.items.map((x) => x.uri).join() === inOrder.join() && cur != null && mv.body.items[mv.body.index] && mv.body.items[mv.body.index].uri === cur, `${T} …with shuffle on and repeat all, the items in their original order and the current song's place in it (${mv && JSON.stringify({ shuffle: mv.body.shuffle, repeat: mv.body.repeat, index: mv.body.index, cur })})`);
         await page.screenshot({ path: `${SHOTS}/${w}-${scheme}-moved.png` });
+        // …and back: the zone's shuffle comes along (its play order stands for the original order)
+        await until(async () => (await page.evaluate(() => localStorage.getItem('pm.zone'))) === 'z1', 4000);
+        const zq = Z.queue.map((x) => x.uri);
+        const back = page.locator('[data-move="browser"]');
+        if (!(await back.isVisible())) { await page.keyboard.press('Escape'); await sleep(300); await page.click('#zonebtn'); }
+        await back.click();
+        check(await until(async () => { const s = await saved(page); return s.shuffle === 'on' && s.q.join() === zq.join(); }, 8000), `${T} a move back here keeps shuffle on (${JSON.stringify((await saved(page)).shuffle)})`);
 
         check(!state.errors.length, `${T} no page errors ${state.errors.slice(0, 3).join(' | ')}`);
         await context.close();
