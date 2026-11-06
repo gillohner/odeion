@@ -763,6 +763,25 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(errs.length === 0, `${w}: Identify: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
       await cc.close();
     }
+    // Play to › Sleep timer (and Who sees what you play): the menu has its own Back step, so Back
+    // closes it and the page stays where it was
+    {
+      const cc = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      await pp.goto(BASE + '/albums'); await pp.waitForSelector('#zonebtn'); await pp.goto(BASE + '/tracks'); await pp.waitForSelector('.track', { timeout: 20000 });
+      for (const [btn, title] of [['#zpsleep', 'Sleep timer'], ['#zpvisible', 'Who sees what you play']]) {
+        if (!(await pp.$('#zonepop[hidden]'))) await pp.keyboard.press('Escape');
+        await pp.click('#zonebtn'); await pp.waitForSelector(`#zonepop:not([hidden]) ${btn}`, { timeout: 5000 }).catch(() => {});
+        if (!(await pp.$(btn))) continue;
+        await pp.click(btn); await pp.waitForSelector('.popover.menu:not([hidden]) .pop-title', { timeout: 5000 });
+        const t = (await pp.textContent('.popover.menu:not([hidden]) .pop-title')).trim();
+        await pp.goBack(); await pp.waitForTimeout(500);
+        check(t === title && await pp.$eval('.popover.menu', (m) => m.hidden) && new URL(pp.url()).pathname === '/tracks', `Play to › ${title}: Back closes the menu and the page stays (${new URL(pp.url()).pathname})`);
+      }
+      check(errs.length === 0, `Play to menus: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
     // The kiosk dashboard fills the screen without a scroll; a playlist whose sources can't be
     // found says so, with Try again, and drops "Still finding…"
     {

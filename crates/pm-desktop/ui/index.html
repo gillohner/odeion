@@ -25,6 +25,7 @@
 
     <section id="saved" hidden>
       <p id="saved-msg">Connecting…</p>
+      <div id="saved-spin" class="spin" aria-hidden="true" hidden></div>
       <div class="row">
         <button id="moved-yes" class="primary" hidden>Use the new address</button>
         <button id="retry" class="primary" hidden>Try again</button>
@@ -61,6 +62,8 @@
     </section>
 
     <p id="err" class="err" role="alert" hidden></p>
+    <!-- The saved node's changes of state, said to a screen reader (connect.js); outside the sections, so it is live from the start -->
+    <p id="saved-live" class="sr-only" role="status"></p>
   </main>
   <script src="connect.js"></script>
 </body>

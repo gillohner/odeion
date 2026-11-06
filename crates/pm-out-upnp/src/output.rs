@@ -891,6 +891,7 @@ mod tests {
             rendering_control: Some(format!("{base}/rc")),
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("fake"));
@@ -957,6 +958,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let linn = UpnpOutput::new(
@@ -993,6 +995,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::controlled("pause"));
@@ -1054,6 +1057,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::controlled("refuse"));
@@ -1139,6 +1143,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::controlled("linnish"));
@@ -1217,6 +1222,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let out = UpnpOutput::new(
@@ -1288,6 +1294,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("linn-play"));
@@ -1416,6 +1423,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let out = UpnpOutput::new(
@@ -1530,6 +1538,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("tv-refuses"));
@@ -1577,6 +1586,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let out = UpnpOutput::new(
@@ -1611,6 +1621,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         }
     }

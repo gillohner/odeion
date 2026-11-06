@@ -488,6 +488,8 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-connect-ring.js $GITHUB_WORKSPACE /tmp/pm/connect-ring-shots
           node $GITHUB_WORKSPACE/tools/ui-tap-highlight.js $GITHUB_WORKSPACE /tmp/pm/tap-highlight-shots
           node $GITHUB_WORKSPACE/tools/ui-here-name.js $GITHUB_WORKSPACE /tmp/pm/here-name-shots
+          node $GITHUB_WORKSPACE/tools/ui-android-first.js $GITHUB_WORKSPACE /tmp/pm/android-first-shots
+          node $GITHUB_WORKSPACE/tools/ui-nowplaying-phone.js $GITHUB_WORKSPACE /tmp/pm/nowplaying-phone-shots
           node $GITHUB_WORKSPACE/tools/ui-item-about.js $GITHUB_WORKSPACE /tmp/pm/item-about-shots
           node $GITHUB_WORKSPACE/tools/ui-usb-dac.js $GITHUB_WORKSPACE /tmp/pm/usb-dac-shots
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
@@ -552,6 +554,18 @@ jobs:
         with:
           name: here-name-shots
           path: /tmp/pm/here-name-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-first-shots
+          path: /tmp/pm/android-first-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nowplaying-phone-shots
+          path: /tmp/pm/nowplaying-phone-shots
           if-no-files-found: ignore
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -91,6 +91,7 @@ pub mod remote;
 pub mod reviews;
 pub mod roon_import;
 pub mod search;
+pub mod segmented;
 pub mod shared;
 pub mod signin;
 pub mod smart;
@@ -110,6 +111,7 @@ pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
 pub mod types;
+pub mod upnp_events;
 pub mod usage;
 pub mod vault;
 pub mod vault_cache;
@@ -914,6 +916,11 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route(pm_discovery::DESCRIPTION_PATH, get(upnp_description))
                 // Renderers fetch pull streams with the stream's own key (`?k=`), or the token.
                 .route("/v1/outputs/pull/{name}/{file}", get(pull_stream))
+                // A renderer's volume events (GENA NOTIFY), to the token the node handed it; LAN only
+                .route(
+                    "/v1/upnp/events/{token}",
+                    axum::routing::any(upnp_events::notify).layer(middleware::from_fn(peer::lan_only)),
+                )
                 // Album covers for TV screens, with that cover's key.
                 .route("/v1/art/{id}", get(keyed_cover))
                 // MusicBrainz caching proxy for Pinakes and the owner's tools.
@@ -5210,8 +5217,10 @@ mod tests {
             max: 0.0,
             step: 1.0,
         }));
-        // The poll runs fast here (read when a zone's poll starts)
+        // The poll runs fast here (read when a zone's poll starts), and only while a controller
+        // watches: one does for this test
         crate::state::VOLUME_POLL_MS_FOR_TESTS.store(200, std::sync::atomic::Ordering::Relaxed);
+        let watching = s.events.watch();
         let pc_out_raw = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
         let pc_out: Arc<dyn pm_zones::Output> = pc_out_raw.clone();
         s.outputs.register(db_out.clone());
@@ -5322,6 +5331,24 @@ mod tests {
             "the poll never showed the device's own change: {:?}",
             pc_zone.state().volume
         );
+        // Nobody watching: the poll stops reading (the device changes again, unseen)
+        drop(watching);
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        pc_out_raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(21),
+            muted: false,
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        assert_eq!(
+            pc_zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33)),
+            "no controller connected: no reads"
+        );
+        let _watching = s.events.watch();
+        pc_out_raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(33),
+            muted: false,
+        });
         // Percent and mute, on a percent output
         let pz = pc_zone.id().0.clone();
         for (body, want) in [
@@ -5364,6 +5391,285 @@ mod tests {
         pc_zone.wait_acked().await;
         let (_, z) = call(&app, "GET", &format!("/v1/zones/{pz}"), None).await;
         assert_eq!(z["volume"]["percent"], 50, "capped: {z}");
+    }
+
+    /// A UPnP renderer's volume follows its events (TASK-volume-readback): the node subscribes,
+    /// a renew the renderer refuses (412) makes a fresh SUBSCRIBE, a NOTIFY to the callback
+    /// moves the zone's level and mute, and the poll steps aside only once events arrive. Late,
+    /// stale and foreign events are dropped, and a zone made again under the same name doesn't
+    /// get this renderer's level.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renderers_volume_events_move_the_zone() {
+        // The same value the read-back test uses (tests share the process)
+        crate::state::VOLUME_POLL_MS_FOR_TESTS.store(200, std::sync::atomic::Ordering::Relaxed);
+        let log = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let renewals = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let reads = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (l2, r2, rd) = (log.clone(), renewals.clone(), reads.clone());
+        let mock = Router::new()
+            .route(
+                "/rc/event",
+                axum::routing::any(move |method: axum::http::Method, h: axum::http::HeaderMap| {
+                    let (log, renewals) = (l2.clone(), r2.clone());
+                    async move {
+                        let cb = h
+                            .get("CALLBACK")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        let sid = h
+                            .get("SID")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        log.lock().unwrap().push((
+                            method.to_string(),
+                            if sid.is_empty() {
+                                cb
+                            } else {
+                                format!("renew {sid}")
+                            },
+                        ));
+                        if !sid.is_empty() {
+                            // The first renewal is refused: the node must subscribe afresh
+                            if renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                                return (
+                                    StatusCode::PRECONDITION_FAILED,
+                                    [("SID", "uuid:gone"), ("TIMEOUT", "Second-1")],
+                                );
+                            }
+                        }
+                        (StatusCode::OK, [("SID", "uuid:sub-1"), ("TIMEOUT", "Second-1")])
+                    }
+                }),
+            )
+            // The poll's GetVolume/GetMute, counted
+            .route(
+                "/rc/control",
+                post(move || {
+                    let rd = rd.clone();
+                    async move {
+                        rd.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let base = format!("http://127.0.0.1:{port}");
+        let r = pm_out_upnp::Renderer {
+            udn: "uuid:fake-linn".into(),
+            friendly_name: "Fake Linn".into(),
+            manufacturer: Some("Linn Products Ltd.".into()),
+            model: Some("Klimax DSM".into()),
+            av_transport: format!("{base}/av/control"),
+            rendering_control: Some(format!("{base}/rc/control")),
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+            events: pm_out_upnp::RendererEvents {
+                rendering_control: Some(format!("{base}/rc/event")),
+                openhome_volume: None,
+            },
+        };
+        let pull = s.pull_output("fake-linn");
+        let out = Arc::new(pm_out_upnp::UpnpOutput::new(r, pull, s.pull_url("fake-linn")));
+        let oid = pm_zones::Output::id(out.as_ref());
+        s.renderers.lock().unwrap().insert(oid.clone(), out.clone());
+        s.outputs.register(out.clone());
+        let zone = s.create_zone("Fake Linn", out);
+        let app = router(s.clone());
+        // It subscribes, with a callback on the node
+        let token = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some((_, cb)) = log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|(m, c)| m == "SUBSCRIBE" && c.starts_with('<'))
+                {
+                    return cb
+                        .trim_matches(['<', '>'])
+                        .rsplit('/')
+                        .next()
+                        .unwrap()
+                        .to_string();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the node never subscribed");
+        let reads_now = || reads.load(std::sync::atomic::Ordering::SeqCst);
+        let ms = |n| tokio::time::sleep(std::time::Duration::from_millis(n));
+        // A page is open: with no event arrived yet the poll keeps reading, subscription or not
+        let watching = s.events.watch();
+        let before = reads_now();
+        ms(700).await;
+        assert!(reads_now() > before, "no event yet, so the poll reads");
+        // The renewal is refused (412): the node subscribes afresh
+        let again = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let l = log.lock().unwrap().clone();
+                let renewed = l.iter().position(|(_, c)| c.starts_with("renew"));
+                if let Some(i) = renewed {
+                    if l[i + 1..]
+                        .iter()
+                        .any(|(m, c)| m == "SUBSCRIBE" && c.starts_with('<'))
+                    {
+                        return l;
+                    }
+                }
+                drop(l);
+                ms(100).await;
+            }
+        })
+        .await;
+        assert!(
+            again.is_ok(),
+            "no fresh SUBSCRIBE after a refused renewal: {:?}",
+            log.lock().unwrap()
+        );
+        // A NOTIFY from the LAN moves the zone's volume and mute
+        let notify_as = |token: &str, sid: &str, seq: u32, body: &str| {
+            let mut req = Request::builder()
+                .method("NOTIFY")
+                .uri(format!("/v1/upnp/events/{token}"))
+                .header("NT", "upnp:event")
+                .header("SID", sid)
+                .header("SEQ", seq.to_string())
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            req.extensions_mut().insert(axum::extract::ConnectInfo(
+                "192.168.1.30:49152".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            req
+        };
+        let notify = |token: &str, seq: u32, body: &str| notify_as(token, "uuid:sub-1", seq, body);
+        let event = |inner: &str| {
+            format!(
+                r#"<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0"><e:property><LastChange>&lt;Event&gt;&lt;InstanceID val="0"&gt;{inner}&lt;/InstanceID&gt;&lt;/Event&gt;</LastChange></e:property></e:propertyset>"#
+            )
+        };
+        let level = |v: u32| event(&format!(r#"&lt;Volume channel="Master" val="{v}"/&gt;"#));
+        let body =
+            event(r#"&lt;Volume channel="Master" val="37"/&gt;&lt;Mute channel="Master" val="1"/&gt;"#);
+        let resp = app.clone().oneshot(notify(&token, 0, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume,
+            Some(pm_model::ZoneVolume {
+                level: pm_model::VolumeLevel::Percent(37),
+                muted: true
+            })
+        );
+        // Events arrive now: the poll leaves the zone alone (one read may have been under way)
+        ms(300).await;
+        let before = reads_now();
+        ms(800).await;
+        assert_eq!(reads_now(), before, "events work, so the poll doesn't read");
+        // Only the mute changes next: the level stays
+        let body = event(r#"&lt;Mute channel="Master" val="0"/&gt;"#);
+        app.clone().oneshot(notify(&token, 1, &body)).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| (v.level, v.muted)),
+            Some((pm_model::VolumeLevel::Percent(37), false))
+        );
+        // A quick turn whose events arrive out of order: the later one (SEQ) wins
+        app.clone().oneshot(notify(&token, 3, &level(40))).await.unwrap();
+        app.clone().oneshot(notify(&token, 2, &level(30))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // Back and forth at once (40 → 41 → 40): ends at 40, the last word
+        app.clone().oneshot(notify(&token, 4, &level(41))).await.unwrap();
+        app.clone().oneshot(notify(&token, 5, &level(40))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // SEQ 0 is a subscription's first event: the count starts again, the level is taken
+        app.clone().oneshot(notify(&token, 0, &level(33))).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33))
+        );
+        // An event with nothing the node reads (left channel only) changes nothing
+        let lf = event(r#"&lt;Volume channel="LF" val="5"/&gt;"#);
+        assert_eq!(
+            app.clone()
+                .oneshot(notify(&token, 1, &lf))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        zone.wait_acked().await;
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(33))
+        );
+        app.clone().oneshot(notify(&token, 2, &level(40))).await.unwrap();
+        zone.wait_acked().await;
+        // An event of a subscription the node gave up: 412, nothing moves
+        let resp = app
+            .clone()
+            .oneshot(notify_as(&token, "uuid:old", 6, &level(12)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        // A token the node doesn't hold: 412, as GENA says; a request from outside the LAN: refused
+        let resp = app.clone().oneshot(notify("nope", 7, &body)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        let mut outside = notify(&token, 7, &body);
+        outside.extensions_mut().insert(axum::extract::ConnectInfo(
+            "8.8.8.8:5000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        assert_eq!(
+            app.clone().oneshot(outside).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            zone.state().volume.map(|v| v.level),
+            Some(pm_model::VolumeLevel::Percent(40))
+        );
+        // The zone goes and another output gets a zone of the same name: the renderer's events
+        // don't reach it, and the node unsubscribes
+        let zid = zone.id().clone();
+        s.remove_zone(&zid);
+        let other: Arc<dyn pm_zones::Output> =
+            Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        s.outputs.register(other.clone());
+        let twin = s.create_zone("Fake Linn", other);
+        assert_eq!(twin.id(), &zid, "the same name gives the same id");
+        twin.wait_acked().await;
+        let twin_was = twin.state().volume;
+        let resp = app.clone().oneshot(notify(&token, 8, &level(9))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        twin.wait_acked().await;
+        assert_eq!(
+            twin.state().volume,
+            twin_was,
+            "the renderer's level went to another zone"
+        );
+        let gone = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !log.lock().unwrap().iter().any(|(m, _)| m == "UNSUBSCRIBE") {
+                ms(100).await;
+            }
+        })
+        .await;
+        assert!(gone.is_ok(), "no UNSUBSCRIBE: {:?}", log.lock().unwrap());
+        drop(watching);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

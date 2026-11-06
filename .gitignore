@@ -8,5 +8,5 @@
 .DS_Store
 /.cargo-armv7
 
-# Python bytecode (tools/*.py import each other)
+# Python bytecode (py_compile, imports of tools/*.py)
 __pycache__/

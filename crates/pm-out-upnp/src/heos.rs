@@ -396,6 +396,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/upnp/desc.xml"),
         }
     }

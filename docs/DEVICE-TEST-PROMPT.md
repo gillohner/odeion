@@ -163,6 +163,32 @@ nearly every phone. In a group it is "loosely synced": Android adds latency the 
    and Android version.
 ```
 
+## The Android app's screens (the owner's recording, 2026-11-06)
+
+Checked here with a phone's viewport rules in Chromium (tools/ui-android-first.js at 360, 390 and
+412 px, the app's bridge, six zones and the API token warning): every page and panel is the screen's
+width; Play to, Sleep timer and the status panel are bottom sheets; Home keeps its headers in place
+while it loads; the connecting page is centred and offers Try again after 5 s. Not checked without
+the phone: the WebView itself, the keyboard, the first frames of a cold start.
+
+```
+1. Install the edge APK. Cold start (swipe the app away first): no black window; the app's colour,
+   then the connecting page in the middle (not at the top first), then the app. Turn the node off
+   once: after about 5 s the page says it hasn't answered and offers Try again.
+2. With the status chip showing (the API token warning), swipe sideways on Home, Search, Zones,
+   Settings, Now playing and its panels: nothing moves sideways and no left edge is cut off
+   ("earch music", "ome On" before). Pinch: the page doesn't zoom out.
+3. Tap the zone button: Play to is a sheet from the bottom, the full width, with a handle. Swipe it
+   down: it closes. Open it again, tap Sleep timer: a sheet; Back closes it and the page stays.
+4. Tap the chip: it says "Change the API token" (not "not answering"); its sheet is "External
+   resources".
+5. Open Home twice: the second time the covers fill grey squares of the same size and the headers
+   don't jump down.
+6. Tap Search in the bottom bar, then the field: the keyboard opens, and the field and first
+   results stay above it.
+7. Report the phone's model and Android version, and a screen recording of 1 to 6.
+```
+
 ## USB DAC (FiiO KA17) on Android
 
 Checked without the DAC:

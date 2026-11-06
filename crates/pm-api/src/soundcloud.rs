@@ -1162,10 +1162,10 @@ pub(crate) fn open_track_blocking(
         Kind::Progressive => crate::sources::open_http_stream(&url)
             .map_err(|_| fail("the SoundCloud stream did not open".into())),
         Kind::HlsMp3 | Kind::HlsAac => {
-            let reader = crate::hls::HlsReader::open(crate::sources::http_client(), &url)
+            let segs = crate::hls::open_segments(crate::sources::http_client(), &url)
                 .map_err(|e| fail(format!("SoundCloud HLS: {e}")))?;
             let ext = if p.kind == Kind::HlsMp3 { "mp3" } else { "m4a" };
-            crate::sources::frame_source_from_reader(Box::new(reader), Some(ext), &track_uri(id))
+            crate::sources::frame_source_from_segments(segs, Some(ext), &track_uri(id))
         }
     }
 }
