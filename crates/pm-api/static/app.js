@@ -6480,7 +6480,8 @@
           // About and the portrait in place (the page stays put: scroll, focus, a half-typed tag).
           // When it brings other sources ("Also on"), the page is drawn once more at the end.
           else if (pg.about_pending) {
-            const here = () => state.view === 'item' && state.viewArg.id === id;
+            // The newest render only: Retry and the pending redraws draw this page again meanwhile
+            const here = () => live();
             const poll = (tries) => setTimeout(async () => {
               if (!here()) return;
               let np; try { np = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); } catch { return; }
