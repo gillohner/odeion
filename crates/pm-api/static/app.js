@@ -3284,6 +3284,8 @@
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
+    // (a drag that ends without a change, or is cancelled, lets go too)
+    for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) sk.addEventListener(ev, () => { setTimeout(() => { delete sk.dataset.dragging; }, 0); }, { passive: true });
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npzone').onclick = () => $('#zonebtn').click();
     // On a phone's one screen a part is scrolled to, not opened
@@ -3478,7 +3480,8 @@
     // Synced: a tap on a line plays from it; a scroll by hand pauses the following for a few seconds
     const lines = $('.lyric-lines', box);
     if (l.synced && lines) {
-      const seekTo = (ln) => transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) });
+      // (a line the listener chose is followed at once: the hold their tap set is over)
+      const seekTo = (ln) => { state.lyricsHold = 0; state.lyricsUser = 0; return transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) }); };
       lines.addEventListener('click', (e) => { const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) seekTo(ln); });
       // (Space and Enter on a line are the line's: the page's Space is play/pause)
       lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); e.stopPropagation(); seekTo(ln); } });

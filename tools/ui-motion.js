@@ -92,6 +92,9 @@ const lyricBox = (page) => page.evaluate(() => {
     state.send({ ...zone, transport: 'paused' }); await sleep(900);
     const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label'), swapped: !!b.querySelector('.ic.swap') }; });
     check(paused.t === 'paused' && paused.scale < 0.99 && paused.label === 'Play' && paused.swapped, `${at}: a pause settles the cover back (×${paused.scale.toFixed(2)}) and swaps the icon to Play with a pop`);
+    // Under the finger the fill is where the finger is (no glide), and letting go without a change lets go of the drag
+    const drag = await page.evaluate(() => { const sk = document.querySelector('#npseek'); sk.dataset.dragging = '1'; const t = getComputedStyle(sk).transitionProperty; sk.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return new Promise((r) => setTimeout(() => r({ t, cleared: !sk.dataset.dragging }), 20)); });
+    check(drag.t === 'none' && drag.cleared, `${at}: the seek fill doesn't glide under a drag (${drag.t}) and a drag let go without a change is over (${drag.cleared})`);
     // A track change: the last cover fades out over the new one, the title slides in
     const next = { ...zone, transport: 'playing', queue_index: 1, now_playing: { ...np, item: { ...np.item, id: 2, uri: 'track:2', title: 'Flowing River' }, position_ms: 1000 } };
     state.send(next); await sleep(150);

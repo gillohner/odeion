@@ -83,7 +83,7 @@ for (const [c, at] of [...used.entries()].sort()) {
       for (const part of m[2].split(/,(?![^(]*\))/)) {
         const decl = part.trim();
         if (!decl || LOOP.test(decl) || /^none\b/.test(decl)) continue;
-        const first = decl.match(/(^|[^\w.-])(\d*\.?\d+m?s)\b/); // the duration is the first time; a delay after a scale duration is fine
+        const first = decl.match(/(^|[^\w.])(-?\d*\.?\d+m?s)\b/); // the duration is the first time (a negative one too); a delay after a scale duration is fine
         if (first && !/var\(--dur-/.test(decl.slice(0, first.index + 1))) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.slice(0, 60)}`);
       }
     }
