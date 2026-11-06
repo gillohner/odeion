@@ -409,13 +409,21 @@ def part_d():
     log(f"D: back on screen after C: service foreground {fg}")
     # Where C's stopped service let the player stop (API 37), it stays paused: D is about the
     # service coming back and carrying playback from here, so play again first if it isn't playing
+    # On API 37 it can also show Pause with its time standing still (Android silenced it while the
+    # service was gone; a known issue, see the PR): then Pause and Play, as a listener would
     a = secs(mini_time()); time.sleep(3); b = secs(mini_time())
     if a is None or b is None or b <= a:
+        try:
+            tap_text(['~(?:text|content-desc)="Pause"'], "Pause (the player stands still after C)", timeout=6)
+            time.sleep(2)
+        except RuntimeError:
+            log("D: no Pause showing")
         try:
             tap_text(['~(?:text|content-desc)="Play"'], "Play (C left the player paused)", timeout=10)
             time.sleep(3)
         except RuntimeError:
             log("D: no Play to tap")
+        results_info["D: the player stood still after C and was played again by hand"] = True
     moved, wall = away(60)
     ok = fg and moved is not None and moved >= wall - 8
     log(f"D verdict: service back {fg}; kept playing {moved} of {wall:.0f} s")
