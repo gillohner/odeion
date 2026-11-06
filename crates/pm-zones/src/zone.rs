@@ -392,6 +392,18 @@ impl Zone {
         }
     }
 
+    /// A level the device announced itself (UPnP events), through the engine. Always sent: the
+    /// state may not show a level announced just before yet, and events must land in order.
+    /// It is also the level last published, so a later poll that reads it again sends nothing,
+    /// and one that reads another level sends that. While a set or a poll holds the lock, that
+    /// one publishes its own read-back after this.
+    pub fn announce_volume(&self, v: pm_model::ZoneVolume) {
+        if let Ok(mut last) = self.volume_lock.try_lock() {
+            *last = Some(v);
+        }
+        self.send(Command::Volume(Some(v)));
+    }
+
     /// Wait until every command sent so far was handled, whatever the
     /// transport ended up as; returns the state published after that.
     pub async fn wait_acked(&self) -> ZoneState {
