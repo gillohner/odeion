@@ -164,13 +164,14 @@
     if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
     return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls, svc, quiet);
   };
-  // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then
+  // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then. Returns that button
   const toast = (msg, kind = '', action = null) => {
     const t = $('#toast');
     t.textContent = msg;
+    let b = null;
     const hide = () => { t.classList.remove('show'); toast.h = setTimeout(() => { t.textContent = ''; }, 400); };
     const unhook = () => { t.onmouseenter = t.onfocusin = t.onmouseleave = t.onfocusout = null; };
-    if (action) { const b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); unhook(); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
+    if (action) { b = document.createElement('button'); b.className = 'btn sm toast-act'; b.textContent = action.label; b.onclick = () => { clearTimeout(toast.h); unhook(); b.remove(); hide(); Promise.resolve(action.run()).catch((e) => toast(e.message, 'error')); }; t.appendChild(b); }
     t.className = `toast show ${kind}`;
     clearTimeout(toast.h);
     // (a toast with an action waits while the pointer or the focus is on it: it goes 4 s after both left)
@@ -179,7 +180,11 @@
     arm(stay);
     unhook();
     if (action) { let over = false; let focused = false; const settle = () => { if (!over && !focused) arm(4000); }; t.onmouseenter = () => { over = true; clearTimeout(toast.h); }; t.onfocusin = () => { focused = true; clearTimeout(toast.h); }; t.onmouseleave = () => { over = false; settle(); }; t.onfocusout = () => { focused = false; settle(); }; }
+    return b;
   };
+  // A press whose button a redraw removed leaves the focus on the page: it goes to the toast's Undo
+  // (keyboard and screen-reader users reach it there; the toast waits while it has the focus)
+  const focusUndo = (b) => { const a = document.activeElement; if (b && b.isConnected && (!a || a === document.body)) b.focus(); };
   // A node without a route answers 404, or 405 when the path matches another method's route
   const noRoute = (e) => (e && (e.status === 404 || e.status === 405) ? new Error('This node doesn’t offer that yet: update it first') : e);
   // The Undo of a skip says how many songs came back (the node's unskip can bring back earlier skips too)
@@ -5615,7 +5620,7 @@
           const draw = () => {
             main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `<p class="muted small idintro" style="margin-top:-6px">Each folder as an album, every song with what MusicBrainz knows about it. Ticked songs are only proposed: nothing is stored until you press Confirm. A confirmed match becomes the song's identity. ${esc(files)}</p>${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
-            const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } if (!live()) return; listGen++; toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; draw(); }, ev);
+            const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); if (!live()) return; listGen++; albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; draw(); focusUndo(ub); }, ev);
             // (a "Show more" answer that comes after Skip all is for a list that is gone)
             const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; const gen = listGen; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live() || gen !== listGen) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live() || gen !== listGen) return; toast(e.message, 'error'); more.disabled = false; } };
           };
@@ -5636,11 +5641,12 @@
             const skipBtn = $('[data-skip]', sec); if (skipBtn) skipBtn.onclick = (ev) => busy(skipBtn, async () => {
               const ai = Number(sec.dataset.album); const a = albums[ai]; const key = a.key; const nSongs = a.songs.length;
               let r; try { r = await api('POST', '/library/suggestions/skip', { albums: [key] }); } catch (e) { throw noRoute(e); }
+              // (the toast and its Undo come even when the page was left meanwhile: the songs are skipped)
+              const ub = toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: undoSkip({ albums: [key] }) });
               if (!live()) return;
-              toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: undoSkip({ albums: [key] }) });
               a.songs.forEach((g) => choices.delete(g.track.id)); a.songs = []; a.ready = 0; a.conflicts = 0;
               page.songs = Math.max(0, page.songs - nSongs);
-              redraw(ai);
+              redraw(ai); focusUndo(ub);
             }, ev);
             // More than one batch takes: the first ones are confirmed (all of them or none), the rest stay
             const label = () => { const n = chosen(sec).length; btn.textContent = !n ? 'Nothing chosen' : n > MAX_CONFIRM ? `Confirm the first ${MAX_CONFIRM} of ${n}` : `Confirm ${countOf(n, 'songs')}`; btn.disabled = !n; };
@@ -7750,7 +7756,7 @@
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
     // (the Undo button goes with the click: the focus comes back to the card)
-    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); return; } await renderIdentify(); const f = $('#idskipall') || $('#idrun'); if (f) f.focus(); } }); renderIdentify(); }, ev);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); return; } await renderIdentify(); const f = $('#idskipall') || $('#idrun'); if (f) f.focus(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
     const us = $('#idunskip'); if (us) us.onclick = (ev) => busy(us, async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); }, ev);
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed

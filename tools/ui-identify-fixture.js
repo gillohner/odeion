@@ -10,7 +10,9 @@
 //     files the IDs couldn't be written to are said;
 //   - more than 500 chosen songs: the first 500 confirmed, the rest stay;
 //   - "Not this" and "Which song is this?" send the song and recording they show;
-//   - review is optional: the card's wording, Skip all unsure with Undo, Leave as is per album.
+//   - review is optional: the card's wording, Skip all unsure with Undo, Leave as is per album; the
+//     focus goes to the Undo when the pressed button is gone; an answer after the page was left still
+//     shows the toast and its Undo.
 // Any request outside the loopback server fails the run.
 //   node tools/ui-identify-fixture.js [static dir] [screenshot dir]
 const http = require('http');
@@ -309,6 +311,7 @@ const server = http.createServer(async (req, res) => {
       const skipBody = asked('POST', '/library/suggestions/skip')[0].body;
       check(skipBody && skipBody.all === true && Object.keys(skipBody).length === 1, `${W} …with exactly {all: true} (${JSON.stringify(skipBody)})`);
       check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} a toast says 6 songs were left as they are, with Undo`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
       check(/^Undo \(brings back all 11 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim()), `${W} …and the Undo says it brings back the earlier skips too, from the node's count (11, not the page's 3 + 6)`);
       await page.locator('#toast .toast-act').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
@@ -328,6 +331,7 @@ const server = http.createServer(async (req, res) => {
       await page.locator('#idskipall').click();
       check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && /^Undo \(brings back all 11 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim())), `${W} on the review page Skip all says what its Undo brings back (from the node's count)`);
       check(await until(async () => /Nothing to confirm/.test(await page.locator('#main').textContent())), `${W} …and the page empties`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
       await page.locator('#toast .toast-act').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && (await page.locator('section.idalbum').count()) === 2), `${W} Undo brings the albums back on the page`);
       fx = base({ routes: skipRoutes() });
@@ -342,9 +346,29 @@ const server = http.createServer(async (req, res) => {
       check(await until(async () => (await page.locator('section.idalbum').count()) === 1), `${W} the album leaves the page`);
       check(asked('GET', '/library/suggestions/albums').length === loads0, `${W} the page isn't loaded again after Leave as is`);
       check(await until(async () => /4 songs left as they are/.test(await page.locator('#toast').textContent())), `${W} the toast says 4 songs were left as they are`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
       await page.locator('#toast .toast-act').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && JSON.stringify(asked('POST', '/library/suggestions/unskip')[0].body) === JSON.stringify({ albums: ['/music/Band/Album'] })), `${W} Undo asks the node to bring that album back`);
       check(await until(async () => asked('GET', '/library/suggestions/albums').length > loads0 && (await page.locator('section.idalbum').count()) === 2), `${W} …and the page is loaded again with it`);
+      // A skip answered after the page was left (Back, from the card) still says so with its Undo: the
+      // songs are skipped all the same. It doesn't take the focus on the other page
+      for (const which of ['Leave as is', 'Skip all unsure']) {
+        const late = skipRoutes(); const skip = late['POST /library/suggestions/skip'];
+        late['POST /library/suggestions/skip'] = async (u, b) => [...(await skip(u, b)).slice(0, 2), 1500];
+        fx = base({ routes: late });
+        await page.goto(`${BASE}/library/node`);
+        await until(async () => (await page.locator('#idbox [data-view="identify"]').count()) > 0);
+        await page.locator('#idbox [data-view="identify"]').first().click();
+        await until(async () => (await page.locator('section.idalbum').count()) === 2);
+        await (which === 'Skip all unsure' ? page.locator('#idskipall') : section(0).locator('[data-skip]')).click();
+        await until(async () => asked('POST', '/library/suggestions/skip').length === 1);
+        await page.evaluate(() => history.back());
+        check(await until(async () => (await page.locator('#idbox').count()) === 1 && (await page.locator('section.idalbum').count()) === 0) && !/left as they are/.test(await page.locator('#toast').textContent()), `${W} ${which}: the page is left before the node answers`);
+        check(await until(async () => /left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} …the answer still shows its toast, with Undo`);
+        check(await page.evaluate(() => !document.activeElement || !document.activeElement.matches('#toast .toast-act')), `${W} …without taking the focus`);
+        if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
+        check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and its Undo brings the songs back`);
+      }
 
       check(!errors.length, `${W} no page errors ${errors.slice(0, 3).join(' | ')}`);
       check(!outside.length, `${W} nothing asked outside the loopback server ${outside.slice(0, 3).join(' ')}`);
