@@ -2619,7 +2619,7 @@
   const shell = $('.shell');
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
   // The phone's tabs mark the current place; again when the shell changes
-  const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
+  const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'releases', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
   const markTabs = (v = state.view) => {
     // Sources is a Library section on phones
     $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
@@ -3610,6 +3610,7 @@
   const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } const yv = /^youtube-([A-Za-z0-9_-]{11})$/.exec(id); if (yv) return `https://www.youtube.com/watch?v=${yv[1]}`; const sm = /^(tidal|deezer|spotify)-([A-Za-z0-9]+)$/.exec(id); if (sm) return `${SVC_BASES[sm[1]]}/${seg === 'artist' ? 'artist' : seg === 'album' ? 'album' : 'track'}/${sm[2]}`; return null; };
   const pathFor = (v, arg) => {
     if (v === 'item' && arg && arg.kind && arg.id) return `/${arg.kind}/${arg.id}`;
+    if (v === 'releases' && arg && arg.id && arg.section) return `/artist/${arg.id}/releases/${arg.section}${arg.page > 1 ? `?page=${arg.page}` : ''}`;
     if (v === 'library' && (arg === 'node' || arg === 'import')) return `/library/${arg}`;
     if (v === 'home-section' && arg && arg.section) return `/home/${arg.section}${arg.window && arg.window !== '7d' ? `?window=${arg.window}` : ''}`;
     if (v === 'tag' && arg) return `/tag/${String(arg).split(',').map(encodeURIComponent).join(',')}`;
@@ -3640,7 +3641,9 @@
     if (p === '/library/import' || p === '/settings/import') return { v: 'library', arg: 'import' };
     const st = p.match(/^\/settings\/([a-z]+)$/);
     if (st && SETTINGS_TABS.some(([k]) => k === st[1])) return { v: 'settings', arg: st[1] };
-    let m = p.match(/^\/(song|album|artist)\/([^/]+)$/);
+    let m = p.match(/^\/artist\/([^/]+)\/releases\/(albums|eps-singles|other)$/);
+    if (m && (m[1].startsWith('lib-') || uriOf('artist', m[1]))) { const pg = Number(new URLSearchParams(location.search).get('page')) || 1; return { v: 'releases', arg: pg > 1 ? { id: m[1], section: m[2], page: pg } : { id: m[1], section: m[2] } }; }
+    m = p.match(/^\/(song|album|artist)\/([^/]+)$/);
     if (m && (m[2].startsWith('lib-') || uriOf(m[1], m[2]))) return { v: 'item', arg: { kind: m[1], id: m[2] } };
     m = p.match(/^\/home\/([a-z-]+)$/);
     if (m) { const w = new URLSearchParams(location.search).get('window'); return { v: 'home-section', arg: w ? { section: m[1], window: w } : { section: m[1] } }; }
@@ -3673,7 +3676,7 @@
     return null;
   };
   // What the back arrow says on the next page.
-  const hereLabel = () => state.view === 'item' ? (state.itemTitle || 'Back') : state.view === 'tag' ? `#${String(state.viewArg).split(',').join(' #')}` : state.view === 'home-section' ? (HOME_TITLES[state.viewArg && state.viewArg.section] || 'Home') : state.view === 'playlist' || state.view === 'shared' ? (state.itemTitle || 'Playlist') : state.view === 'search' ? `Results for “${(state.viewArg && state.viewArg.q) || ''}”` : (VIEW_LABELS[state.view] || 'Back');
+  const hereLabel = () => state.view === 'item' ? (state.itemTitle || 'Back') : state.view === 'releases' ? (state.relTitle || 'Back') : state.view === 'tag' ? `#${String(state.viewArg).split(',').join(' #')}` : state.view === 'home-section' ? (HOME_TITLES[state.viewArg && state.viewArg.section] || 'Home') : state.view === 'playlist' || state.view === 'shared' ? (state.itemTitle || 'Playlist') : state.view === 'search' ? `Results for “${(state.viewArg && state.viewArg.q) || ''}”` : (VIEW_LABELS[state.view] || 'Back');
   // History stores only what restores a view (search keeps its query, not its results).
   const histArg = (v, arg) => (v === 'search' ? (arg && arg.q ? (arg.in && arg.in !== 'everywhere' ? { q: arg.q, in: arg.in } : { q: arg.q }) : null) : (arg && typeof arg === 'object' && !Array.isArray(arg) ? JSON.parse(JSON.stringify(arg)) : arg ?? null));
   let navDepth = 0;
@@ -3683,6 +3686,7 @@
       const cases = [['home'], ['albums'], ['artists'], ['tracks'], ['playlists'], ['queue'], ['zones'], ['settings'], ['favourites'], ['genres'], ['radio'], ['identify'],
         ['item', { kind: 'song', id: 'lib-3' }], ['item', { kind: 'album', id: 'lib-1' }], ['item', { kind: 'artist', id: 'mb-0383dadf-2a4e-4d10-a46a-e9e041da8eb3' }],
         ['item', { kind: 'album', id: idOf('https://tidal.com/album/199574241') }], ['item', { kind: 'song', id: 'isrc-GBUM71029604' }],
+        ['releases', { id: 'tidal-4805908', section: 'albums' }], ['releases', { id: 'lib-3', section: 'eps-singles', page: 2 }], ['releases', { id: 'mb-0383dadf-2a4e-4d10-a46a-e9e041da8eb3', section: 'other' }],
         ['home-section', { section: 'trending-songs' }], ['home-section', { section: 'trending-albums', window: '30d' }], ['tag', 'hip-hop,german'],
         ['playlist', 'abc123'], ['shared', { user: 'zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o' }], ['shared', { user: 'zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o', id: '0035WKVKQDHSM' }], ['genre', 4], ['sources', { source: 'tidal' }], ['search', { q: 'queen' }], ['search', { q: 'queen', in: 'tidal' }]];
       const saved = location.pathname + location.search;
@@ -3722,7 +3726,7 @@
     state.view = v; state.viewArg = arg;
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs(v);
-    $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
     main.scrollTop = 0;
@@ -4752,6 +4756,45 @@
   const bindItemTiles = (box, tiles, kind) => {
     $$('[data-tile]', box).forEach((b) => b.onclick = (e) => { if (e.target.closest('[data-tileplay]')) return; setView('item', { kind, id: tiles[Number(b.dataset.tile)].id }); });
     $$('[data-tileplay]', box).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { const pg = await api('GET', `/item/${kind}/${tiles[Number(b.dataset.tileplay)].id}`); playSongs(pg.songs, 0, 'replace', pg.plays_from, b, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } });
+  };
+
+  // An artist's releases (owner's report on /artist/tidal-4805908: one "Albums" grid of every
+  // single and remix): Albums, then EPs & singles, then Other releases, by the type the service
+  // gives each release (the node's `release_type`; never guessed from a title or a track count).
+  // A compilation, or a release the service doesn't type, is Other. Each section is newest first
+  // (the node's order), shows its first 12 and has View all: a paged grid with its own path.
+  const REL_SECTIONS = [['albums', 'Albums', 'albums'], ['eps', 'EPs & singles', 'eps-singles'], ['other', 'Other releases', 'other']];
+  const REL_PREVIEW = 12; const REL_PAGE = 48;
+  const relKey = (a) => (a.compilation || !a.release_type ? 'other' : a.release_type === 'album' ? 'albums' : a.release_type === 'ep' || a.release_type === 'single' ? 'eps' : 'other');
+  const relGroups = (albums) => { const g = { albums: [], eps: [], other: [] }; for (const a of albums || []) g[relKey(a)].push(a); return g; };
+  // With nothing typed (a library artist: files carry no release type) the one section is "Releases"
+  const relTitle = (key, g) => (key === 'other' && !g.albums.length && !g.eps.length ? 'Releases' : (REL_SECTIONS.find(([k]) => k === key) || [, 'Releases'])[1]);
+  // A tile says what the service says besides its section: EP or Single, Compilation, and MusicBrainz's other secondary types (Live, Remix…)
+  const relTile = (a, key) => ({ ...a, year: [a.year, a.compilation ? 'Compilation' : key === 'eps' ? (a.release_type === 'ep' ? 'EP' : 'Single') : '', ...(a.secondary_types || []).filter((t) => t !== 'Compilation')].filter(Boolean).join(' · ') });
+  // A list that isn't the whole catalogue (a page failed, or the fetch stopped at its bound) counts "at least"
+  const relCount = (n, cat) => `${n}${cat && cat.complete === false && n ? '+' : ''}`;
+  const relSvc = (pg) => { const id = (pg.catalogue && pg.catalogue.source) || (pg.plays_from && pg.plays_from.service) || ''; return SERVICE_NAMES[id] || (id === 'musicbrainz' ? 'MusicBrainz' : id) || 'the service'; };
+  // What the list is, said plainly: still coming, failed, partial, cut at the bound; else nothing
+  const relStatus = (pg, stuck) => {
+    const cat = pg.catalogue; const n = (pg.albums || []).length; const svc = esc(relSvc(pg));
+    const retry = '<button class="btn sm" id="irelretry">Retry</button>';
+    if (pg.pending && !n) return stuck ? `<p class="muted small relnote" id="irelstatus" role="status">${svc} is still listing this artist’s releases. ${retry}</p>` : `<p class="muted small relnote" id="irelstatus" role="status"><span class="spin"></span> Getting the releases from ${svc}…</p>`;
+    if (!cat) return '';
+    if (cat.error && !n) return `<div class="notice relnote" id="irelstatus" role="alert">${svc} didn’t list the releases: ${esc(cat.error)} ${retry}</div>`;
+    if (cat.error) return `<p class="muted small relnote" id="irelstatus" role="status">Only ${n} releases arrived: ${svc} stopped answering (${esc(cat.error)}). ${retry}</p>`;
+    if (cat.truncated) return `<p class="muted small relnote" id="irelstatus">${svc} lists more than ${n} releases for this artist; these are the first ${n} it lists, newest first.</p>`;
+    if (cat.complete === false) return `<p class="muted small relnote" id="irelstatus">${svc} didn’t say whether this is the whole list: it may not be every release.</p>`;
+    return '';
+  };
+  const relSections = (pg) => {
+    const g = relGroups(pg.albums);
+    return REL_SECTIONS.filter(([k]) => g[k].length).map(([k, , slug]) => `<section class="section relsec" data-rel="${k}" aria-labelledby="irel-${k}"><div class="section-head"><div class="relhead"><h3 id="irel-${k}">${esc(relTitle(k, g))}</h3><span class="muted small relcount">${relCount(g[k].length, pg.catalogue)}</span></div>${g[k].length > REL_PREVIEW ? `<button class="link relall" data-relall="${k}" data-slug="${slug}" aria-label="View all ${esc(relTitle(k, g))}">View all</button>` : ''}</div>${itemTileGrid(g[k].slice(0, REL_PREVIEW).map((a) => relTile(a, k)), 'album')}</section>`).join('');
+  };
+  const relSkeleton = () => `<div class="grid">${Array.from({ length: 6 }, () => '<div class="tile"><div class="art skeleton"></div><div class="skeleton relskel"></div></div>').join('')}</div>`;
+  const bindRelSections = (box, pg, id) => {
+    const g = relGroups(pg.albums);
+    for (const [k] of REL_SECTIONS) { const sec = $(`[data-rel="${k}"]`, box); if (sec) bindItemTiles(sec, g[k].slice(0, REL_PREVIEW), 'album'); }
+    $$('[data-relall]', box).forEach((b) => b.onclick = () => setView('releases', { id, section: b.dataset.slug }));
   };
 
   const SOURCE_RANK = ['library', 'tidal', 'deezer', 'spotify', 'archive', 'audius', 'pubky'];
@@ -6338,14 +6381,55 @@
           $$('[data-st-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/radio/stations/${encodeURIComponent(b.dataset.stDel)}`); render(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
-        case 'item': {
-          await pubkyUser();
-          const { kind, id } = state.viewArg;
+        case 'releases': {
+          // View all of one release section: 48 a page, newest first; paging replaces the history
+          // entry, so Back goes straight to the artist (one press, whatever page)
+          const gen = state.pageGen = (state.pageGen || 0) + 1;
+          const { id, section } = state.viewArg;
+          const live = () => gen === state.pageGen && state.view === 'releases' && state.viewArg.id === id && state.viewArg.section === section;
+          const key = (REL_SECTIONS.find(([, , slug]) => slug === section) || [])[0] || 'other';
+          const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
+          // The next page's Back label, even when this one fails to load
+          state.relTitle = (REL_SECTIONS.find(([k]) => k === key) || [, 'Releases'])[1];
           loading();
           let pg;
-          try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}`), loadSvcRank()]); }
-          catch (e) { main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
-          if (state.view !== 'item' || state.viewArg.id !== id) return;
+          try { pg = await api('GET', `/item/artist/${encodeURIComponent(id)}${refresh}`); }
+          catch (e) { if (!live()) return; main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, 'Artist')}</div><div class="notice">${esc(e.message)} <button class="btn sm" id="irelretry">Retry</button></div>`; $('[data-back]', main).onclick = () => goBack(`item:artist:${id}`); $('#irelretry', main).onclick = () => { state.viewArg.refresh = 1; render(); }; break; }
+          if (!live()) return;
+          pg.albums = pg.albums || [];
+          const g = relGroups(pg.albums); const list = g[key];
+          const name = pg.title || 'Artist'; const title = relTitle(key, g);
+          state.relTitle = title; state.itemSection = 'artists';
+          const pages = Math.max(1, Math.ceil(list.length / REL_PAGE));
+          const page = Math.min(Math.max(1, Math.floor(Number(state.viewArg.page) || 1)), pages);
+          const shown = list.slice((page - 1) * REL_PAGE, page * REL_PAGE);
+          const stuck = (state.viewArg.tries || 0) >= 12;
+          main.innerHTML = `<div class="pagebar">${backBtn(`item:artist:${id}`, name)}</div>`
+            + `<div class="page-head"><div><div class="eyebrow">${esc(name)}</div><h1>${esc(title)}</h1></div></div>`
+            + `<div id="ialbums" class="relsecs">${relStatus(pg, stuck)}`
+            + (shown.length ? itemTileGrid(shown.map((a) => relTile(a, key)), 'album') : pg.pending ? relSkeleton() : pg.catalogue && pg.catalogue.error ? '' : '<p class="muted small relempty">No releases here.</p>')
+            + `</div>${list.length ? `<nav class="pager" aria-label="Pages of ${esc(title)}"><button class="btn sm" data-relpage="prev" ${page <= 1 ? 'disabled' : ''}>${icon('back')} Previous</button><span class="pageinfo muted small" aria-live="polite">Page ${page} of ${pages} · ${relCount(list.length, pg.catalogue)} releases</span><button class="btn sm" data-relpage="next" ${page >= pages ? 'disabled' : ''}>Next</button></nav>` : ''}`;
+          $('[data-back]', main).onclick = () => goBack(`item:artist:${id}`);
+          bindItemTiles($('#ialbums', main), shown, 'album');
+          $$('[data-relpage]', main).forEach((b) => b.onclick = () => setView('releases', { id, section, page: page + (b.dataset.relpage === 'next' ? 1 : -1) }, 'replace'));
+          { const rr = $('#irelretry', main); if (rr) rr.onclick = () => { state.viewArg.tries = 0; state.viewArg.refresh = 1; render(); }; }
+          if (pg.pending && !stuck) { const tries = (state.viewArg.tries || 0) + 1; setTimeout(() => { if (!live()) return; state.viewArg.tries = tries; render(); }, 3000); }
+          break;
+        }
+        case 'item': {
+          // This render's generation: an answer (or failure) from an older render, or from a page
+          // left meanwhile, is dropped (the same page opened again is a newer render)
+          const gen = state.pageGen = (state.pageGen || 0) + 1;
+          await pubkyUser();
+          const { kind, id } = state.viewArg;
+          const live = () => gen === state.pageGen && state.view === 'item' && state.viewArg.id === id;
+          // Retry asks the node to fetch the service's lists again, once
+          const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
+          loading();
+          let pg;
+          try { [pg] = await Promise.all([api('GET', `/item/${kind}/${encodeURIComponent(id)}${refresh}`), loadSvcRank()]); }
+          catch (e) { if (!live()) return; main.innerHTML = backBtn(kind === 'artist' ? 'artists' : 'albums', kind === 'artist' ? 'Artists' : 'Albums') + `<div class="notice">${esc(e.message)}</div>`; break; }
+          if (!live()) return;
           // The node leaves empty lists out of its answer.
           for (const k of ['songs', 'albums', 'versions', 'also_on', 'about', 'open_on', 'connect']) pg[k] = pg[k] || [];
 
@@ -6370,7 +6454,7 @@
             ownTags(songRef), ownTags(linkRef),
             isListener() ? Promise.resolve(undefined) : api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
-          if (state.view !== 'item' || state.viewArg.id !== id) return;
+          if (!live()) return;
           // The hero's tag groups. Public tags and people come from Pubky for each group's own URI: for a
           // library item the one the node keeps its tags on (GET /tags says; a listener's page asks
           // Pubky), never the page's guess. The page's on_pubky stands in only when it is that URI.
@@ -6482,7 +6566,10 @@
               </div></div>`
             + (aboutTop ? aboutTopHtml(pg) : '')
             + (kind === 'song' ? '' : `<section class="section" id="isongs"><div class="section-head"><h3>${songsTitle}</h3><span class="muted small">${esc(songsInfo)}</span></div>${songs.length ? songRows(songs, { showAlbum: kind !== 'album', covers: kind !== 'album', ...(kind === 'artist' ? { numbers: 'index' } : {}) }) : pg.unavailable ? empty(`${esc(pg.unavailable)}${pg.link ? ` <a href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener">Open on ${esc(pg.source)}</a>` : ''}`) : empty(pg.connect.length ? `Not on your services · <a data-view="sources">Connect ${esc(pg.connect.map((c) => SERVICE_NAMES[c] || c).join(' or '))}</a>` : 'No connected service lists songs for this yet.')}</section>`)
-            + (kind === 'artist' || (kind === 'song' && pg.albums.length) ? `<section class="section" id="ialbums"><div class="section-head"><h3>${kind === 'song' ? 'On the album' : 'Albums'}</h3><span class="muted small">${pg.albums.length || ''}</span></div>${pg.albums.length ? itemTileGrid(pg.albums, 'album') : empty(kind === 'song' ? 'The album is not known for this link yet.' : 'No albums found on your services yet.')}</section>` : '')
+            + (kind === 'song' && pg.albums.length ? `<section class="section" id="ialbums"><div class="section-head"><h3>On the album</h3><span class="muted small">${pg.albums.length}</span></div>${itemTileGrid(pg.albums, 'album')}</section>` : '')
+            // An artist's releases: Albums, EPs & singles, Other releases (each with View all), or
+            // what the list is when it isn't there: loading, an error with Retry, nothing found
+            + (kind === 'artist' ? `<div id="ialbums" class="relsecs">${relStatus(pg, (state.viewArg.tries || 0) >= 12)}${pg.albums.length ? relSections(pg) : pg.pending ? `<section class="section"><div class="section-head"><h3>Releases</h3></div>${relSkeleton()}</section>` : pg.catalogue && pg.catalogue.error ? '' : `<section class="section"><div class="section-head"><h3>Releases</h3></div><p class="muted small relempty">No releases found on your services yet.</p></section>`}</div>` : '')
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
@@ -6508,10 +6595,11 @@
             if (bk && bk.textContent.trim() === String(pg.title || '').trim()) bk.lastChild.textContent = ' Back'; }
           const ig = $('#iglobal'); if (ig) ig.onclick = () => setView('item', { kind, id: idOf(pg.song_uri) });
           if ($('#isongs')) { bindSongRows($('#isongs'), songs, { plays_from: pf, fallback }); enableSelect($('#isongs'), songs, { plays_from: pf, fallback }); }
-          if (pg.albums.length) bindItemTiles($('#ialbums'), pg.albums, 'album');
+          if (kind === 'artist') { bindRelSections($('#ialbums'), pg, id); const rr = $('#irelretry', main); if (rr) rr.onclick = () => { state.viewArg.tries = 0; state.viewArg.refresh = 1; render(); }; }
+          else if (pg.albums.length) bindItemTiles($('#ialbums'), pg.albums, 'album');
           // Related items and concerts come after the page (each outside call has a time budget)
           api('GET', `/item/${kind}/${encodeURIComponent(id)}/extras`).then((ex) => {
-            if (state.view !== 'item' || state.viewArg.id !== id) return;
+            if (!live()) return;
             pg.related = ex.related || []; pg.concerts = ex.concerts || [];
             // Similar (TASK-pinakes-social-ux A3): the library's own first (shared genres, then the
             // same artist; playable), Last.fm's similar artists on an artist page, then what people
@@ -6595,12 +6683,13 @@
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
           // Not while someone types a comment: the render would take the box away under them
-          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
+          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (!live()) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.reading ? 4000 : 3000); }
           // About from open sources comes in the background: ask for the page again and redraw only
           // About and the portrait in place (the page stays put: scroll, focus, a half-typed tag).
           // When it brings other sources ("Also on"), the page is drawn once more at the end.
           else if (pg.about_pending) {
-            const here = () => state.view === 'item' && state.viewArg.id === id;
+            // The newest render only: Retry and the pending redraws draw this page again meanwhile
+            const here = () => live();
             const poll = (tries) => setTimeout(async () => {
               if (!here()) return;
               let np; try { np = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); } catch { return; }

@@ -303,8 +303,8 @@ pub(crate) async fn artist(
     let svc = find(&source)?;
     let mut a = svc.artist(&s, &id).await?;
     let lib = s.library.lock().expect("library poisoned");
-    for h in &mut a.albums {
-        mark_library(&lib, h);
+    for r in &mut a.albums {
+        mark_library(&lib, &mut r.hit);
     }
     if a.library_artist_id.is_none() {
         a.library_artist_id = lib
