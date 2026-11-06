@@ -3258,12 +3258,13 @@
     if (prevUri && prevUri !== (it.uri || '')) state.npSwap = { at: now, src: prevSrc };
     const swap = state.npSwap && now - state.npSwap.at < 400;
     overlay.classList.toggle('np-swap', !!swap);
+    if (swap) { const t = $('.np-titles', overlay); if (t) t.style.animationDelay = `-${now - state.npSwap.at}ms`; }
     overlay.classList.toggle('np-sheet-swap', !one && (sheet || '') !== (keep.sheet || ''));
-    if (swap && state.npSwap.src) { const big = $('.np-big', overlay); if (big) { const old = new Image(); old.className = 'np-prev'; old.src = state.npSwap.src; old.style.animationDelay = `-${now - state.npSwap.at}ms`; old.onanimationend = () => old.remove(); big.appendChild(old); setTimeout(() => old.remove(), 1200); } }
+    if (swap && state.npSwap.src) { const big = $('.np-big', overlay); if (big) { const old = new Image(); old.className = 'np-prev'; old.alt = ''; old.src = state.npSwap.src; old.style.animationDelay = `-${now - state.npSwap.at}ms`; old.onanimationend = () => old.remove(); big.appendChild(old); setTimeout(() => old.remove(), 1200); } }
     overlay.dataset.transport = z.transport || '';
     // A transport change that came with this redraw pops the play icon as the tick would
     if (prevTransport && prevTransport !== (z.transport || '')) state.npPop = now;
-    if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => ic.classList.add('swap'));
+    if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => { ic.style.animationDelay = `-${now - state.npPop}ms`; ic.classList.add('swap'); });
     // (the tick doesn't redraw again for this item)
     renderNowPlaying.lastItem = it; renderNowPlaying.lastTitle = np.stream_title;
     if (!one) {
@@ -3473,16 +3474,21 @@
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
-    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines${l.synced ? ' synced' : ''}">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}" role="button" tabindex="0" title="Play from here"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines${l.synced ? ' synced' : ''}">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}" role="button" tabindex="0" title="Play from here"${ln.text ? '' : ' aria-label="Instrumental: play from here"'}` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
     // Synced: a tap on a line plays from it; a scroll by hand pauses the following for a few seconds
     const lines = $('.lyric-lines', box);
     if (l.synced && lines) {
       const seekTo = (ln) => transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) });
       lines.addEventListener('click', (e) => { const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) seekTo(ln); });
-      lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); seekTo(ln); } });
-      lines.addEventListener('scroll', () => { if (lines.dataset.auto) return; state.lyricsHold = Date.now() + 4000; }, { passive: true });
-      lines.addEventListener('touchstart', () => { state.lyricsHold = Date.now() + 4000; }, { passive: true });
-      lines.addEventListener('wheel', () => { state.lyricsHold = Date.now() + 4000; }, { passive: true });
+      // (Space and Enter on a line are the line's: the page's Space is play/pause)
+      lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); e.stopPropagation(); seekTo(ln); } });
+      // A scroll counts as the listener's only right after their touch, wheel or key: the page's own
+      // scrolls (the follower, a redraw putting the place back) don't hold the following off
+      const mine = () => { state.lyricsUser = Date.now(); };
+      lines.addEventListener('touchstart', mine, { passive: true });
+      lines.addEventListener('wheel', mine, { passive: true });
+      lines.addEventListener('keydown', (e) => { if (/^(Arrow|Page|Home|End)/.test(e.key)) mine(); });
+      lines.addEventListener('scroll', () => { if (lines.dataset.auto) return; if (state.lyricsUser && Date.now() - state.lyricsUser < 1500) state.lyricsHold = Date.now() + 4000; }, { passive: true });
     }
   };
   // Library songs: their own lyrics, else LRCLIB (the node decides); streamed songs: LRCLIB by title

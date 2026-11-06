@@ -4,7 +4,8 @@
 //      `lint-allow-glyph` when the glyph is a component's own styled text (the rating stars);
 //   3. every class the UI uses has a rule in app.css;
 //   4. every transition and animation takes its duration from the motion scale (--dur-fast/base/slow),
-//      except a looping indicator (spin, shimmer, pulse, progress bars) and a bar's width.
+//      except a looping indicator (spin, shimmer, pulse, progress bars) and a bar's width; the
+//      long-hand duration and delay properties too.
 //   node tools/design-lint.js [static dir]
 const fs = require('fs');
 const path = require('path');
@@ -72,14 +73,18 @@ for (const [c, at] of [...used.entries()].sort()) {
 // 4. durations on the motion scale
 {
   const cssFiles = fs.readdirSync(DIR).filter((f) => f.endsWith('.css'));
-  const LOOP = /\b(spin|shimmer|conn-pulse|navprog|nudge)\b|\binfinite\b|\bwidth\b/;
+  const LOOP = /\b(spin|shimmer|conn-pulse|navprog|nudge)\b|\binfinite\b|(?<![-\w])width\b/;
   for (const f of cssFiles) {
     const src = fs.readFileSync(path.join(DIR, f), 'utf8');
-    const re = /(transition|animation):([^;{}]*)/g; let m;
+    const re = /(transition|animation|transition-duration|animation-duration|animation-delay):([^;{}]*)/g; let m;
     while ((m = re.exec(src))) {
-      const decl = m[2];
-      if (LOOP.test(decl) || decl.includes('var(--dur-') || /^\s*none\b/.test(decl)) continue;
-      if (/(^|[^\w.-])\d*\.?\d+m?s\b/.test(decl)) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.trim().slice(0, 60)}`);
+      // (each comma-separated part on its own: one on the scale doesn't excuse another)
+      for (const part of m[2].split(',')) {
+        const decl = part.trim();
+        if (!decl || LOOP.test(decl) || /^none\b/.test(decl)) continue;
+        const first = decl.match(/(^|[^\w.-])(\d*\.?\d+m?s)\b/); // the duration is the first time; a delay after a scale duration is fine
+        if (first && !/var\(--dur-/.test(decl.slice(0, first.index + 1))) problems.push(`${f}:${src.slice(0, m.index).split('\n').length}  ${m[1]} with a raw duration: use var(--dur-fast|base|slow): ${decl.slice(0, 60)}`);
+      }
     }
   }
 }

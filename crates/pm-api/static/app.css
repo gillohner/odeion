@@ -33,6 +33,7 @@
      three durations (tools/design-lint.js checks); only transform and opacity move, so nothing reflows.
      Under reduced motion the three are 0 (below). */
   --dur-fast: 120ms; --dur-base: 200ms; --dur-slow: 320ms;
+  --dur-step: 28ms; /* between one staggered tile and the next */
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --glass: rgba(22, 23, 29, 0.7);
@@ -313,7 +314,8 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 .np-sheet-swap .np-sheet-body { animation: fadein var(--dur-base) var(--ease) both; }
 .icon-btn.play .ic.swap { animation: popin var(--dur-fast) var(--ease); }
 @keyframes popin { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
-@property --fill { syntax: '<percentage>'; inherits: false; initial-value: 0%; }
+/* (inherited: the track pseudo-element reads it from its input) */
+@property --fill { syntax: '<percentage>'; inherits: true; initial-value: 0%; }
 #npseek { transition: --fill var(--dur-slow) linear; }
 #npseek::-webkit-slider-thumb { transition: opacity var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
 #npseek:hover::-webkit-slider-thumb, #npseek:active::-webkit-slider-thumb, #npseek[data-dragging]::-webkit-slider-thumb { opacity: 1; transform: scale(1.5); }
@@ -339,14 +341,17 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 /* No scrollbars (owner: "scrollbars on lyrics"), long lines wrap; synced lyrics read like a player's:
    the current line larger and full colour, its neighbours dimmer the further away (a class per
    distance, set by followLyrics); plain lyrics keep the type without highlight */
-.lyric-lines { max-height: 320px; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; overscroll-behavior: contain; padding: 4px 2px; }
+.lyric-lines { max-height: 320px; overflow-y: auto; overflow-x: hidden; scrollbar-width: none; padding: 4px 2px; }
+/* (the page keeps scrolling past the box's end on a phone's one screen: no overscroll trap there) */
+html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 .lyric-lines::-webkit-scrollbar { display: none; }
 .lyric-line { margin: 0 0 10px; color: var(--fg-2); font-size: 16px; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; transform-origin: left center; transition: color var(--dur-slow) var(--ease), opacity var(--dur-slow) var(--ease), transform var(--dur-slow) var(--ease); }
 /* (the current line grows by a fifth from its left edge: the lines leave it that room, so the
    panel never scrolls sideways) */
-.lyric-lines.synced .lyric-line { opacity: 0.25; cursor: pointer; max-width: 84%; }
-.lyric-lines.synced .lyric-line.near2 { opacity: 0.4; }
-.lyric-lines.synced .lyric-line.near1 { opacity: 0.6; }
+/* (dimmed, never under 4.5:1: the far lines are still read and tapped) */
+.lyric-lines.synced .lyric-line { color: var(--fg); opacity: 0.62; cursor: pointer; max-width: 84%; }
+.lyric-lines.synced .lyric-line.near2 { opacity: 0.74; }
+.lyric-lines.synced .lyric-line.near1 { opacity: 0.86; }
 .lyric-lines.synced .lyric-line.on { color: var(--fg); opacity: 1; transform: scale(1.18); }
 .lyric-line:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 /* Toasts above the phone sheets (z-index 60): a change made in a sheet says how it went */
@@ -603,8 +608,10 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
   .kv { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; }
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-step: 0ms; }
   * { transition: none !important; animation: none !important; }
+  /* (the last cover would sit over the new one with its fade off) */
+  .np-big .np-prev { display: none; }
 }
 
 .card.genre { border: 1px solid var(--line); color: var(--fg); font: inherit; transition: transform var(--dur-base) var(--ease), border-color var(--dur-base) var(--ease); }
@@ -830,7 +837,7 @@ html[data-shell="phone"] .idbar { max-width: none; }
    dialogs rise in; the mini player cross-fades on a track change. */
 .main.view-in { animation: viewin var(--dur-base) var(--ease) both; }
 @keyframes viewin { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-.main.view-in :is(.grid, .list, .tracks) > :nth-child(-n+12) { animation: fadein var(--dur-base) var(--ease) both; animation-delay: calc(var(--stagger, 0) * 28ms); }
+.main.view-in :is(.grid, .list, .tracks) > :nth-child(-n+12) { animation: fadein var(--dur-base) var(--ease) both; animation-delay: calc(var(--stagger, 0) * var(--dur-step)); }
 .main.view-in :is(.grid, .list, .tracks) > :nth-child(2) { --stagger: 1; }
 .main.view-in :is(.grid, .list, .tracks) > :nth-child(3) { --stagger: 2; }
 .main.view-in :is(.grid, .list, .tracks) > :nth-child(4) { --stagger: 3; }
@@ -844,7 +851,10 @@ html[data-shell="phone"] .idbar { max-width: none; }
 .main.view-in :is(.grid, .list, .tracks) > :nth-child(12) { --stagger: 11; }
 .tile .art { transition: transform var(--dur-base) var(--ease), box-shadow var(--dur-base) var(--ease); }
 .tile:active .art { transform: scale(0.97); transition-duration: var(--dur-fast); }
-.chip, .pop-item, .bnav, .list-row.clickable { transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+/* (rows get no transform transition: their swipe moves them by transform and must follow the finger) */
+.chip, .pop-item, .bnav { transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease); }
+.list-row.clickable { transition: background var(--dur-fast) var(--ease); }
+.list-row.swiping { transition: none; }
 .chip:active, .pop-item:active, .bnav:active { transform: scale(0.97); }
 :focus-visible { animation: focusin var(--dur-fast) var(--ease); }
 @keyframes focusin { from { outline-color: transparent; } }

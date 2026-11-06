@@ -79,10 +79,15 @@ const lyricBox = (page) => page.evaluate(() => {
     const seek = state.hits.slice(hits0).find((x) => /\/zones\/linn\/transport|\/zones\/linn\/seek/.test(x.v) && x.body && /20000/.test(x.body));
     check(!!seek, `${at}: a tap on a line asks the node to play from its time (${seek ? seek.v : 'no seek sent'})`);
     // A scroll by hand holds the following off: the box stays where the finger left it
+    // (the song moves on to line 51 meanwhile: the panel must not follow it during the hold, and
+    // must follow the next line once the hold is over)
     await page.$eval('#nplyrics .lyric-lines', (box) => { box.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, bubbles: true })); box.scrollTop = 0; });
-    await sleep(1600);
-    const held = await page.$eval('#nplyrics .lyric-lines', (box) => box.scrollTop);
-    check(held === 0, `${at}: after a scroll by hand the panel stays put for a while (at ${held})`);
+    state.send({ ...zone, now_playing: { ...np, position_ms: 70000 } }); await sleep(1600);
+    const held = await page.evaluate(() => ({ top: document.querySelector('#nplyrics .lyric-lines').scrollTop, on: document.querySelector('#nplyrics .lyric-line.on')?.dataset.ms }));
+    check(held.top === 0 && held.on === '70000', `${at}: after a scroll by hand the panel stays put for a while (at ${held.top}, the current line moved on to ${held.on})`);
+    await sleep(2600); state.send({ ...zone, now_playing: { ...np, position_ms: 74000 } }); await sleep(900);
+    const resumed = await page.$eval('#nplyrics .lyric-lines', (box) => box.scrollTop);
+    check(resumed > 0, `${at}: once the hold is over the panel follows again (at ${resumed})`);
     // A pause: the cover settles back and the play icon pops
     state.send({ ...zone, transport: 'paused' }); await sleep(900);
     const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label'), swapped: !!b.querySelector('.ic.swap') }; });
