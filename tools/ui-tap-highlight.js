@@ -64,15 +64,26 @@ const open = async (browser, w, touch) => {
       // Focus from the keyboard for real: land on the control, step back and forward with Tab
       const found = await page.evaluate((sel) => { const el = [...document.querySelectorAll(sel)].find((e) => e.getClientRects().length); if (!el) return null; el.dataset.tapProbe = '1'; return getComputedStyle(el).borderRadius; }, sel);
       if (found == null) { check(false, `${at}: ${name} is on the page (${sel})`); continue; }
-      if (!/^(50%|999px|9999px)/.test(found)) { console.log(`skip ${at}: ${name} isn't round here (${found})`); await page.evaluate(() => { delete document.querySelector('[data-tap-probe]').dataset.tapProbe; }); continue; }
-      await page.focus('[data-tap-probe]'); await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab'); await sleep(30);
-      const r = await page.evaluate((before) => { const el = document.querySelector('[data-tap-probe]'); const cs = getComputedStyle(el); const r = { before, after: cs.borderRadius, outline: cs.outlineStyle, focused: document.activeElement === el, fv: el.matches(':focus-visible') }; delete el.dataset.tapProbe; return r; }, found);
+      if (!/^(50%|999px|9999px)/.test(found)) { console.log(`skip ${at}: ${name} isn't round here (${found})`); await page.evaluate(() => { const el = document.querySelector('[data-tap-probe]'); if (el) delete el.dataset.tapProbe; }); continue; }
+      // (Now playing redraws on its own clock: a probe whose control was replaced meanwhile is tried again)
+      let r = null;
+      for (let i = 0; i < 3 && !(r && r.focused); i++) {
+        if (i) await page.evaluate((sel) => { const el = [...document.querySelectorAll(sel)].find((e) => e.getClientRects().length); if (el) el.dataset.tapProbe = '1'; }, sel);
+        if (!(await page.$('[data-tap-probe]'))) continue;
+        await page.focus('[data-tap-probe]').catch(() => {}); await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab'); await sleep(30);
+        r = await page.evaluate((before) => { const el = document.querySelector('[data-tap-probe]'); if (!el) return null; const cs = getComputedStyle(el); const r = { before, after: cs.borderRadius, outline: cs.outlineStyle, focused: document.activeElement === el, fv: el.matches(':focus-visible') }; delete el.dataset.tapProbe; return r; }, found);
+      }
+      r = r || { before: found, after: '?', outline: 'none', focused: false, fv: false };
       check(r.focused && r.fv && r.outline !== 'none' && r.after === r.before, `${at}: ${name} keeps its radius with a keyboard focus ring (${r.before} → ${r.after}${r.focused ? '' : ', focus went elsewhere'}${r.fv ? '' : ', not focus-visible'})`);
     }
     // Keyboard focus on the play button really draws the ring (Tab from the previous button)
     const [from, to] = TAB_FROM(phone);
-    await page.focus(from); await page.keyboard.press('Tab'); await sleep(50);
-    const ring = await page.evaluate((to) => { const el = document.activeElement; const cs = getComputedStyle(el); return { isPlay: el.matches(to), fv: el.matches(':focus-visible'), outline: cs.outlineStyle, radius: cs.borderRadius }; }, to);
+    let ring = null;
+    for (let i = 0; i < 3 && !(ring && ring.isPlay); i++) {
+      await page.focus(from).catch(() => {}); await page.keyboard.press('Tab'); await sleep(50);
+      ring = await page.evaluate((to) => { const el = document.activeElement; if (!el || el === document.body) return null; const cs = getComputedStyle(el); return { isPlay: el.matches(to), fv: el.matches(':focus-visible'), outline: cs.outlineStyle, radius: cs.borderRadius }; }, to);
+    }
+    ring = ring || { isPlay: false, fv: false, outline: 'none', radius: '?' };
     check(ring.isPlay && ring.fv && ring.outline !== 'none' && isRound(ring.radius), `${at}: Tab to play/pause draws a focus ring on a round button (${JSON.stringify(ring)})`);
     await page.screenshot({ path: path.join(SHOTS, `focus-${w}.png`), clip: { x: 0, y: w < 600 ? 844 - 180 : 900 - 110, width: w, height: w < 600 ? 180 : 110 } });
     if (touch) {
