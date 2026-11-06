@@ -3144,6 +3144,8 @@
     if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
     const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
     if (npCompact()) state.npSheet = null;
+    // Focus goes back to the mini player that opened it, not to the page's top
+    if (was && (!document.activeElement || document.activeElement === document.body || overlay.contains(document.activeElement))) { const b = $('#np'); if (b) b.focus({ preventScroll: true }); }
     if (was && fromBack !== true) popTransient();
   };
   // Phones: swipe up on the mini player opens Now playing; swipe down from its top closes it

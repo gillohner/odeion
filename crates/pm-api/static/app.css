@@ -1354,6 +1354,14 @@ html[data-shell="phone"] .player-right .zone-btn span { max-width: 96px; overflo
 html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) :is(.zone-btn span, .quality .qsrc, .quality:not(:has(.qbadge))) { display: none; }
 @media (max-width: 374px) { html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) .quality { display: none; } }
 html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
+/* Docked on the tabs (owner, 2026-11-05: "bottom spacing … look shit"): the mini player and the
+   tabs are one surface, one border on top, no gap or slivers at the sides. The cover's source badge
+   (it reads as a second queue icon at this size) is left out. */
+html[data-shell="phone"] .player { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--surface); box-shadow: none; padding: 6px 12px; min-height: 58px; }
+html[data-shell="phone"] .bottomnav { border-top: 0; }
+/* Library: the filter row and the quality chips under it had no space between them */
+html[data-shell="phone"] .main > .page-head + .chips { margin-top: 12px; }
+html[data-shell="phone"] .player .np-art .src-badge, html[data-shell="phone"] .player .np-art .src-badges { display: none; }
 html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
 html[data-shell="phone"] body.np-open .player { display: none; }
 html[data-shell="phone"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
@@ -1726,7 +1734,9 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np-sec-h { font-size: 15px; margin: 0 0 10px; }
 .np-sec-h:focus { outline: none; }
 /* (the rules below are for the old sheet mode, unused on the one screen) */
-.np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 520px))); }
+/* One side inset for everything (16 px): the cover is the content's width wherever the screen is
+   tall enough for the player under it, and narrower (centred) only on short screens */
+.np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 420px))); }
 .np2.compact .np-strip { display: flex; align-items: center; gap: 12px; padding: 4px 0 12px; }
 .np2.compact .np-strip-art { width: 48px; height: 48px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
 .np2.compact .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
