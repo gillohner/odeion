@@ -443,6 +443,7 @@ fn upnp(name: &str, udn: &str) -> Arc<pm_out_upnp::UpnpOutput> {
         rendering_control: None,
         connection_manager: None,
         zone_group_topology: None,
+        events: Default::default(),
         location: "http://127.0.0.1:9/desc.xml".into(),
     };
     Arc::new(pm_out_upnp::UpnpOutput::new(

@@ -311,10 +311,11 @@ html:not([data-shell="phone"]) .player-right > .zone-btn span { min-width: 4em; 
 .lyric-lines { max-height: 320px; overflow-y: auto; padding-right: 8px; scrollbar-width: thin; }
 .lyric-line { margin: 0 0 8px; color: var(--muted); font-size: 15px; line-height: 1.45; transition: color .2s, transform .2s; transform-origin: left center; }
 .lyric-line.on { color: var(--fg); font-weight: 600; transform: scale(1.03); }
+/* Toasts above the phone sheets (z-index 60): a change made in a sheet says how it went */
 .toast {
   position: fixed; left: 50%; bottom: calc(var(--player) + 18px); transform: translate(-50%, 8px);
   background: var(--surface-3); color: var(--fg); border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
-  padding: 10px 14px; border-radius: 10px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; z-index: 40;
+  padding: 10px 14px; border-radius: 10px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; z-index: 65;
   transition: opacity 0.2s var(--ease), transform 0.2s var(--ease); max-width: min(90vw, 520px);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
@@ -394,6 +395,10 @@ html[data-shell="phone"] .actions > :is(.hero-zone, #imore, #plmore) { min-width
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .sk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 18px; }
 .sk-grid .skeleton { aspect-ratio: 1; }
+/* A tile while it loads: its text lines keep their line height, the bar fills part of the width */
+.sk-text { display: inline-block; width: 70%; color: transparent; }
+.sk-text.short { width: 45%; }
+.sk-tile, .sk-srow { cursor: default; }
 
 /* ---- covers & tiles ---- */
 .art { position: relative; width: 100%; aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; background: var(--surface-3); display: flex; align-items: center; justify-content: center; color: rgba(255, 255, 255, 0.85); font-weight: 700; font-size: 28px; letter-spacing: 0.02em; }
@@ -1317,9 +1322,12 @@ html[data-shell="phone"] .shell { grid-template-columns: minmax(0, 1fr); grid-te
 html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display: none; }
 html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
-html[data-shell="phone"] .search { flex: 1 1 auto; }
+/* Nothing in the top bar may be wider than the screen: a too-wide bar made the whole page wider,
+   and the WebView then panned it sideways (owner's recording, 2026-11-06). The search field and the
+   status chip shrink; the buttons keep their size. */
+html[data-shell="phone"] .search { flex: 1 1 auto; min-width: 0; }
 html[data-shell="phone"] .topbar-right:empty { display: none; }
-html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none; max-width: 40%; }
+html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: 0 1 auto; min-width: 0; max-width: 40%; }
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
 /* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
 html[data-shell="phone"] .player { grid-template-columns: minmax(150px, 1fr) fit-content(48%) auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
@@ -1346,13 +1354,24 @@ html[data-shell="phone"] .player-right .zone-btn span { max-width: 96px; overflo
 html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) :is(.zone-btn span, .quality .qsrc, .quality:not(:has(.qbadge))) { display: none; }
 @media (max-width: 374px) { html[data-shell="phone"] .player-right:has(> #jobchip:not([hidden])) .quality { display: none; } }
 html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
+/* Docked on the tabs (owner, 2026-11-05: "bottom spacing … look shit"): the mini player and the
+   tabs are one surface, one border on top, no gap or slivers at the sides. The cover's source badge
+   (it reads as a second queue icon at this size) is left out. */
+html[data-shell="phone"] .player { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--surface); box-shadow: none; padding: 6px 12px; min-height: 58px; }
+html[data-shell="phone"] .bottomnav { border-top: 0; }
+/* Library: the filter row and the quality chips under it had no space between them */
+html[data-shell="phone"] .main > .page-head + .chips { margin-top: 12px; }
+html[data-shell="phone"] .player .np-art .src-badge, html[data-shell="phone"] .player .np-art .src-badges { display: none; }
 html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
 html[data-shell="phone"] body.np-open .player { display: none; }
 html[data-shell="phone"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
 html[data-shell="phone"] .np-transport .icon-btn { width: 44px; height: 44px; }
 html[data-shell="phone"] .np-transport .icon-btn.play { width: 56px; height: 56px; }
 /* Now playing fills the screen down to the tabs */
-html[data-shell="phone"] body.np-open .overlay { bottom: calc(57px + env(safe-area-inset-bottom)); }
+/* Now playing takes the whole phone screen: the tabs would be a second row of icons under its own
+   (owner, 2026-11-05: "bad submenu navigation"); its chevron and a swipe down close it */
+html[data-shell="phone"] body.np-open .bottomnav { display: none; }
+html[data-shell="phone"] body.np-open .overlay { bottom: 0; }
 
 /* Volume: the slider when the bar has room, else a button that opens a small volume popover (one
    slider for the zone in the bar area at any width; the Sound panel has none) */
@@ -1440,6 +1459,22 @@ html[data-shell] .topbar { height: calc(var(--topbar) + env(safe-area-inset-top,
 }
 /* Menus as a bottom sheet on phones; the playlist picker */
 .popover.menu.sheet { border-radius: 16px 16px 0 0; max-height: 70vh; padding-bottom: calc(10px + env(safe-area-inset-bottom)); z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); }
+/* Phones: every panel is a bottom sheet the width of the screen, like the menus (owner's recording,
+   2026-11-06: Play to opened as a narrow panel beside the page and ran off the bottom). A handle on
+   top, its own scroll, the gesture bar's inset below; the scrim, Back and a swipe down close it. */
+html[data-shell="phone"] .popover:not(.menu) {
+  left: 0; right: 0; top: auto; bottom: 0; width: auto; max-width: none; max-height: 85vh; max-height: 85dvh;
+  border-width: 1px 0 0; border-radius: 16px 16px 0 0; padding: 0 8px calc(10px + env(safe-area-inset-bottom));
+  z-index: 60; box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.25); overscroll-behavior: contain;
+}
+html[data-shell="phone"] .popover:not(.menu)::before, .popover.menu.sheet::before {
+  content: ""; display: block; position: sticky; top: 0; width: 36px; height: 4px; margin: 0 auto 6px;
+  border-top: 8px solid var(--surface-2); border-bottom: 6px solid var(--surface-2); box-sizing: content-box;
+  background: var(--line-strong); background-clip: content-box; border-radius: 2px; z-index: 1;
+}
+.popover.menu.sheet { padding-top: 0; overscroll-behavior: contain; }
+html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto; }
+.popover.sheet-drag { transition: none !important; }
 .picker { max-height: 50vh; overflow: auto; margin: 10px 0; }
 .picker .list-row { width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); font: inherit; color: var(--fg); cursor: pointer; }
 .picker .list-row:first-child { border-top: 0; }
@@ -1672,11 +1707,41 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np2:not(.compact) .np-body { grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 32px; }
 .np2:not(.compact) .np-sheet { border-left: 1px solid var(--line); padding-left: 24px; }
 .np2:not(.compact) .np-player { justify-content: flex-start; padding-top: 8px; }
-/* Compact (phones, windows up to 720 px): the five sheets in a row under the transport; an open sheet takes the screen below a strip */
-.np2.compact { padding: 6px 16px 8px; }
-.np2.compact .np-tabs { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); margin-top: auto; }
-.np2.compact.has-sheet .np-player, .np2.compact.has-sheet .np-top { display: none; }
-.np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 520px))); }
+/* Compact (phones, windows up to 720 px): one screen that scrolls. The player fills the first
+   screen (the free height spread around the cover); under it the five parts as cards, reached by
+   one row of chips that stays at the top once the transport scrolls away. */
+.np2.compact { height: auto; min-height: 100%; padding: 6px 16px calc(24px + env(safe-area-inset-bottom, 0px)); }
+.np2.compact .np-top { margin-bottom: 12px; }
+.np2.compact .np-body { display: block; }
+.np2.compact .np-player { max-width: none; min-height: calc(100dvh - 62px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); justify-content: space-evenly; }
+.np2.compact .np-tabs, .np2.compact .np-sheet { display: none; }
+/* (a narrow desktop window: the overlay stops above the player bar) */
+html:not([data-shell="phone"]) .np2.compact .np-player { min-height: calc(100dvh - 62px - var(--player)); }
+/* One row whose height doesn't change when it sticks (the cover and Play come in beside the chips),
+   so nothing below it moves */
+.np-jump { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; min-height: 60px; margin: 8px -16px 0; padding: 8px 16px; background: var(--bg); }
+.np-jump { border-bottom: 1px solid transparent; }
+.np-jump.stuck { border-bottom-color: var(--line); box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12); }
+.np-jump-strip { display: flex; align-items: center; flex: none; order: 0; }
+.np-jump-strip .np-strip-text { display: none; }
+.np2.compact .np-jump-strip .np-strip-art { width: 40px; height: 40px; }
+.np-jump-strip .np-strip-art { width: 40px; height: 40px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
+.np-jump-strip .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.np-jump-play { width: 44px; height: 44px; flex: none; order: 2; }
+.np-jump-strip .src-badge, .np-jump-strip .src-badges { display: none; }
+.np-jump:not(.stuck) .np-jump-strip, .np-jump:not(.stuck) .np-jump-play { display: none; }
+.np-jump-chips { flex: 1 1 auto; min-width: 0; order: 1; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.np-jump-chips::-webkit-scrollbar { display: none; }
+.np-jump-chips .chip { flex: none; min-height: 40px; }
+.np-jump-chips .chip[aria-current="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.np-sec { margin-top: 12px; padding: 14px 16px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); }
+.np-sec-h { font-size: 15px; margin: 0 0 10px; }
+.np-sec-body { min-width: 0; }
+.np-sec-h:focus { outline: none; }
+/* (the rules below are for the old sheet mode, unused on the one screen) */
+/* One side inset for everything (16 px): the cover is the content's width wherever the screen is
+   tall enough for the player under it, and narrower (centred) only on short screens */
+.np2.compact .np-big { width: min(100%, max(140px, calc(100dvh - 420px))); }
 .np2.compact .np-strip { display: flex; align-items: center; gap: 12px; padding: 4px 0 12px; }
 .np2.compact .np-strip-art { width: 48px; height: 48px; border-radius: 8px; overflow: hidden; flex: none; background: var(--surface-3); }
 .np2.compact .np-strip-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
