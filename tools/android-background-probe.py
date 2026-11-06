@@ -143,7 +143,13 @@ def connect_app():
     # The address form opens under the link: let it draw before looking for its fields
     time.sleep(2)
     tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
-    adb("shell", "input", "text", "10.0.2.2:7788")
+    # The runner as 10.0.2.2, except on the API 37 image, which can't reach it there ("Can't reach
+    # http://10.0.2.2:7788" on 6226c456): there through `adb reverse`, as the update and Ring probes do
+    if sdk >= 37:
+        adb("reverse", "tcp:7788", "tcp:7788")
+        adb("shell", "input", "text", "127.0.0.1:7788")
+    else:
+        adb("shell", "input", "text", "10.0.2.2:7788")
     # The node has a token (as android-endpoint.py sets it up): a node without one answers only at
     # its loopback names, and the app reaches it as 10.0.2.2
     tap(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field")
@@ -412,12 +418,16 @@ def app_mode():
     """Start the service as the app does when it plays the music itself (through the tunnel, the
     offline app): `zone` false. The probe's app reaches its node directly, so it never picks this
     mode itself (the unit test the_player_service_mode_for_each_connection covers the choice)."""
+    # (quoted: `adb shell` hands the words to the device's shell, which split the text and took
+    # the rest, the zone extra too, for other arguments; the service then started as a zone)
     r = adb("shell", "am", "start-foreground-service", "-n", f"{PKG}/.PlayerService",
-            "--es", "text", "Plays music from the probe", "--ez", "zone", "false", check=False)
+            "--es", "text", "'Plays music from the probe'", "--ez", "zone", "false", check=False)
     time.sleep(3)
     fg = service_foreground()
-    log(f"E: app mode: {r.strip()[:120]}; service foreground {fg}")
-    return fg and "Error" not in r
+    starts = [l for l in ep.logcat().splitlines() if "player service: start" in l]
+    app = bool(starts) and starts[-1].rstrip().endswith("start app mode")
+    log(f"E: app mode: {r.strip()[:120]}; service foreground {fg}; the service says {starts[-1].split('player service: ')[-1].strip() if starts else 'nothing'}")
+    return fg and app and "Error" not in r
 
 
 def part_e():
