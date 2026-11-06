@@ -3485,7 +3485,8 @@
       // (a line the listener chose is followed at once: the hold their tap set is over)
       // (the hold their tap set is over once the seek has landed: not before, or the panel would
       // first go back to the old line)
-      const seekTo = (ln) => Promise.resolve(transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) })).finally(() => { state.lyricsHold = 0; state.lyricsUser = 0; });
+      // (only the hold of that tap: a scroll by hand while the seek is on its way is newer, and stays)
+      const seekTo = (ln) => { const stamp = state.lyricsUser; return Promise.resolve(transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) })).finally(() => { if (state.lyricsUser === stamp) { state.lyricsHold = 0; state.lyricsUser = 0; } }); };
       lines.addEventListener('click', (e) => { const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) seekTo(ln); });
       // (Space and Enter on a line are the line's: the page's Space is play/pause)
       lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); e.stopPropagation(); seekTo(ln); } });

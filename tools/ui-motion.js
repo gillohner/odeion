@@ -75,7 +75,13 @@ const lyricBox = (page) => page.evaluate(() => {
     await page.screenshot({ path: path.join(SHOTS, `lyrics-${w}.png`) });
     // A tap on a line seeks there (the node is asked for position = the line's time)
     const hits0 = state.hits.length;
-    await page.click('#nplyrics .lyric-line[data-ms="20000"]'); await sleep(400);
+    // (the line is put at the very bottom of the box first, outside the band the follower keeps, and
+    // clicked where it is: so the follow after the seek is what moves it)
+    await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const box = ln.closest('.lyric-lines'); box.dataset.auto = '1'; box.scrollTop += ln.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom + 2; setTimeout(() => { delete box.dataset.auto; }, 50); });
+    await sleep(120);
+    const placed = await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => { const b = ln.closest('.lyric-lines').getBoundingClientRect(); const o = ln.getBoundingClientRect(); return (o.top - b.top + o.height / 2) / b.height; });
+    check(placed > 0.7, `${at}: the line to tap sits low in the box before the tap (${Math.round(placed * 100)}%)`);
+    await page.$eval('#nplyrics .lyric-line[data-ms="20000"]', (ln) => ln.click()); await sleep(400);
     const seek = state.hits.slice(hits0).find((x) => /\/zones\/linn\/transport|\/zones\/linn\/seek/.test(x.v) && x.body && /20000/.test(x.body));
     check(!!seek, `${at}: a tap on a line asks the node to play from its time (${seek ? seek.v : 'no seek sent'})`);
     // …and once the node is there, the panel follows that line at once (the tap's own hold is over)
@@ -98,8 +104,8 @@ const lyricBox = (page) => page.evaluate(() => {
     const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label'), swapped: !!b.querySelector('.ic.swap') }; });
     check(paused.t === 'paused' && paused.scale < 0.99 && paused.label === 'Play' && paused.swapped, `${at}: a pause settles the cover back (×${paused.scale.toFixed(2)}) and swaps the icon to Play with a pop`);
     // Under the finger the fill is where the finger is (no glide), and letting go without a change lets go of the drag
-    const drag = await page.evaluate(() => { const sk = document.querySelector('#npseek'); sk.dataset.dragging = '1'; const t = getComputedStyle(sk).transitionProperty; sk.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return new Promise((r) => setTimeout(() => r({ t, cleared: !sk.dataset.dragging }), 20)); });
-    check(drag.t === 'none' && drag.cleared, `${at}: the seek fill doesn't glide under a drag (${drag.t}) and a drag let go without a change is over (${drag.cleared})`);
+    const drag = await page.evaluate(() => { const sk = document.querySelector('#npseek'); sk.dataset.dragging = '1'; const t = getComputedStyle(sk).transitionProperty; sk.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); const bar = document.querySelector('#seek'); bar.dataset.dragging = '1'; bar.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return new Promise((r) => setTimeout(() => r({ t, cleared: !sk.dataset.dragging, barCleared: !bar.dataset.dragging }), 20)); });
+    check(drag.t === 'none' && drag.cleared && drag.barCleared, `${at}: the seek fill doesn't glide under a drag (${drag.t}) and a drag let go without a change is over, in Now playing (${drag.cleared}) and the bar (${drag.barCleared})`);
     // A real drag on the seek bar still sends the seek (with a mouse: a phone's touch emulation gives a
     // range input no change from a synthetic mouse drag)
     if (w >= 600) {
