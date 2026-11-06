@@ -285,6 +285,13 @@ const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 /// Each UPnP renderer that had a zone: its UDN → its description URL, so a start whose SSDP
 /// search misses it (a lost datagram, a device slow to answer) still finds it.
 const UPNP_KNOWN_KEY: &str = "outputs.upnp_known";
+
+/// Where a UPnP renderer that had a zone was described, and when (Unix seconds) it was last seen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KnownRenderer {
+    pub location: String,
+    pub seen: u64,
+}
 /// Endpoint addresses (the desktop app's player) it registered.
 const ENDPOINT_ADDRESSES_KEY: &str = "outputs.endpoint_addresses";
 /// Their keys, by address, in the data folder (0600): `{"<host:port>": "<key>"}`. Not in the
@@ -1060,7 +1067,8 @@ impl NodeState {
     pub(crate) fn add_found_output(&self, out: Arc<dyn Output>) -> bool {
         static ADDING: Mutex<()> = Mutex::new(());
         let _one = ADDING.lock().unwrap_or_else(|e| e.into_inner());
-        if !self.room_for_found_output() {
+        // (two passes at once, a rescan and the UPnP watch, found the same device: the first one wins)
+        if self.outputs.get(&out.id()).is_some() || !self.room_for_found_output() {
             return false;
         }
         self.outputs.register(out);
@@ -1141,14 +1149,15 @@ impl NodeState {
             return Vec::new();
         }
         // (a description already behind an output isn't fetched again: a later pass is cheap)
+        // (only one answering as itself, by its USN's UUID: another device given its address is described)
         let known = self.upnp_known();
-        let have = |loc: &str| {
-            known.iter().any(|(udn, l)| {
-                l.eq_ignore_ascii_case(loc)
-                    && self
-                        .outputs
-                        .get(&OutputId::new("upnp", udn.trim_start_matches("uuid:")))
-                        .is_some()
+        let have = |loc: &str, uuid: Option<&str>| {
+            let Some(uuid) = uuid else { return false };
+            known.iter().any(|(udn, k)| {
+                let udn = udn.trim_start_matches("uuid:");
+                udn.eq_ignore_ascii_case(uuid)
+                    && k.location.eq_ignore_ascii_case(loc)
+                    && self.outputs.get(&OutputId::new("upnp", udn)).is_some()
             })
         };
         let renderers = match pm_out_upnp::discover_except(timeout, have) {
@@ -1183,6 +1192,8 @@ impl NodeState {
         );
         let id = OutputId::new("upnp", r.udn.trim_start_matches("uuid:"));
         if self.outputs.get(&id).is_some() {
+            // (it may have moved: the next start looks for it where it is now)
+            self.remember_upnp(&r.udn, &r.location);
             return None;
         }
         if !self.room_for_found_output() {
@@ -1263,9 +1274,13 @@ impl NodeState {
         ours && u.port_or_known_default() == Some(*port) && u.path().starts_with("/upnp/zone/")
     }
 
-    /// The renderers that had a zone: UDN → description URL.
-    pub fn upnp_known(&self) -> std::collections::BTreeMap<String, String> {
+    /// The renderers that had a zone: UDN → where its description was, and when it was last seen.
+    pub fn upnp_known(&self) -> std::collections::BTreeMap<String, KnownRenderer> {
         let lib = self.library.lock().expect("library poisoned");
+        Self::read_known(&lib)
+    }
+
+    fn read_known(lib: &Library) -> std::collections::BTreeMap<String, KnownRenderer> {
         lib.get_setting(UPNP_KNOWN_KEY)
             .ok()
             .flatten()
@@ -1273,25 +1288,67 @@ impl NodeState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn remember_upnp(&self, udn: &str, location: &str) {
-        let mut known = self.upnp_known();
-        if known.get(udn).map(String::as_str) == Some(location) {
-            return;
-        }
-        known.insert(udn.to_string(), location.to_string());
+    /// Remember `udn` at `location` (seen now), or forget it (`None`), in one go under the
+    /// library's lock (two passes at once don't lose each other's). Ones not seen for 30 days are
+    /// dropped, and at most 64 are kept (the longest unseen go first).
+    pub(crate) fn remember_upnp_at(&self, udn: &str, location: Option<&str>) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
         let lib = self.library.lock().expect("library poisoned");
-        let _ = lib.set_setting(
-            UPNP_KNOWN_KEY,
-            &serde_json::to_string(&known).expect("serializes"),
-        );
+        let mut known = Self::read_known(&lib);
+        let before = known.clone();
+        match location {
+            Some(loc) => {
+                let k = known.entry(udn.to_string()).or_default();
+                // (a day's precision is enough: no write on every pass)
+                if k.location != loc || now.saturating_sub(k.seen) > 86_400 {
+                    *k = KnownRenderer {
+                        location: loc.to_string(),
+                        seen: now,
+                    };
+                }
+            }
+            None => {
+                known.remove(udn);
+            }
+        }
+        known.retain(|_, k| now.saturating_sub(k.seen) <= 30 * 86_400);
+        while known.len() > 64 {
+            let oldest = known
+                .iter()
+                .min_by_key(|(_, k)| k.seen)
+                .map(|(u, _)| u.clone())
+                .expect("not empty");
+            known.remove(&oldest);
+        }
+        if known != before {
+            let _ = lib.set_setting(
+                UPNP_KNOWN_KEY,
+                &serde_json::to_string(&known).expect("serializes"),
+            );
+        }
     }
 
-    /// The renderers that had a zone and have none now, described at their last URL (no SSDP):
-    /// a start whose search missed one still gives it its zone. One that doesn't answer stays
-    /// known (it may be off). Blocking.
+    pub(crate) fn remember_upnp(&self, udn: &str, location: &str) {
+        self.remember_upnp_at(udn, Some(location));
+    }
+
+    /// The renderers that had a zone and have none now, described at their last URL (no SSDP,
+    /// 2 s each): a start whose search missed one still gives it its zone. One that doesn't answer
+    /// stays known (it may be off); a URL now answering as another device forgets the old one.
+    /// Off with UPnP discovery. Blocking.
     pub fn restore_known_upnp(self: &Arc<Self>) -> Vec<OutputId> {
+        if !self.upnp {
+            return Vec::new();
+        }
+        self.restore_known()
+    }
+
+    pub(crate) fn restore_known(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for (udn, loc) in self.upnp_known() {
+        for (udn, k) in self.upnp_known() {
             if self
                 .outputs
                 .get(&OutputId::new("upnp", udn.trim_start_matches("uuid:")))
@@ -1299,27 +1356,56 @@ impl NodeState {
             {
                 continue;
             }
-            match pm_out_upnp::describe(&loc) {
-                Ok(Some(r)) => new.extend(self.register_renderer(r)),
+            match pm_out_upnp::describe_within(&k.location, std::time::Duration::from_secs(2)) {
+                Ok(Some(r)) => {
+                    if !r
+                        .udn
+                        .trim_start_matches("uuid:")
+                        .eq_ignore_ascii_case(udn.trim_start_matches("uuid:"))
+                    {
+                        tracing::info!(location = %k.location, was = %udn, now = %r.udn, "a known UPnP renderer's address is another device's now");
+                        self.remember_upnp_at(&udn, None);
+                    }
+                    new.extend(self.register_renderer(r));
+                }
                 Ok(None) => {}
-                Err(e) => tracing::info!(%loc, "known UPnP renderer not answering: {e}"),
+                Err(e) => tracing::info!(location = %k.location, "known UPnP renderer not answering: {e}"),
             }
         }
         new
     }
 
-    /// UPnP renderers that answer late get their zones without a rescan: a pass `first` after
-    /// the start, then one every `every` (SSDP when discovery is on, then the known ones by URL).
-    /// Only new ones are described. Call from inside the runtime.
+    /// UPnP renderers get their zones without a rescan: the known ones at once (in the
+    /// background, so the start doesn't wait on one that is off), then a pass `first` after the
+    /// start and one every `every` (SSDP, then the known ones by URL). Only new ones are
+    /// described. Off with UPnP discovery. Call from inside the runtime.
     pub fn spawn_upnp_watch(self: &Arc<Self>, first: std::time::Duration, every: std::time::Duration) {
+        if !self.upnp {
+            return;
+        }
+        self.spawn_upnp_passes(first, every);
+    }
+
+    pub(crate) fn spawn_upnp_passes(
+        self: &Arc<Self>,
+        first: std::time::Duration,
+        every: std::time::Duration,
+    ) {
         let st = self.clone();
         tokio::spawn(async move {
+            let s = st.clone();
+            let back = tokio::task::spawn_blocking(move || s.restore_known())
+                .await
+                .unwrap_or_default();
+            if !back.is_empty() {
+                tracing::info!(count = back.len(), "known UPnP renderers found at their address");
+            }
             tokio::time::sleep(first).await;
             loop {
                 let s = st.clone();
                 let new = tokio::task::spawn_blocking(move || {
                     let mut new = s.discover_upnp(std::time::Duration::from_secs(3));
-                    new.extend(s.restore_known_upnp());
+                    new.extend(s.restore_known());
                     new
                 })
                 .await

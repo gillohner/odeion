@@ -7364,175 +7364,6 @@ mod tests {
         assert!(!stored().contains(second.expose()));
     }
 
-    /// A Linn-like renderer's description, served on 127.0.0.1 (counting its fetches).
-    async fn fake_renderer_at(listener: tokio::net::TcpListener, hits: Arc<std::sync::atomic::AtomicUsize>) {
-        let desc = r#"<?xml version="1.0"?>
-<root xmlns="urn:schemas-upnp-org:device-1-0">
-  <device>
-    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
-    <friendlyName>Klimax UPnP AV</friendlyName>
-    <manufacturer>Linn Products Ltd.</manufacturer>
-    <UDN>uuid:4c494e4e-0026-0f21-cc3f-0123456789ab</UDN>
-    <serviceList>
-      <service>
-        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
-        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
-        <controlURL>/AVTransport/control</controlURL>
-      </service>
-    </serviceList>
-  </device>
-</root>"#;
-        let mock = Router::new().route(
-            "/desc.xml",
-            get(move || {
-                hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async move { ([(header::CONTENT_TYPE, "text/xml")], desc) }
-            }),
-        );
-        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
-    }
-
-    /// The node's own zones, offered as UPnP renderers, are never taken as outputs: not by their
-    /// UDN, not by their description's address, and not when typed as an address
-    /// (BUG-upnp-rescan-self-and-startup-1106: a rescan made five `<zone>-2` zones playing into
-    /// the node itself).
-    #[tokio::test]
-    async fn our_own_renderers_get_no_zone() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
-        if s.zones.list().is_empty() {
-            s.create_zone("Kitchen", Arc::new(NullOutput::new()));
-        }
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let _adv = s.start_renderer(port, false);
-        let app = router(s.clone());
-        tokio::spawn({
-            let app = app.clone();
-            async move { axum::serve(listener, app).await.unwrap() }
-        });
-        let own = s.renderer.get().unwrap().clone();
-        let (zone, _) = own.zones().into_iter().next().expect("a zone offered");
-        let zones = s.zones.list().len();
-        let r = |udn: String, location: String| pm_out_upnp::Renderer {
-            udn,
-            friendly_name: "Kitchen".into(),
-            manufacturer: None,
-            model: None,
-            av_transport: "http://192.0.2.9/avt".into(),
-            rendering_control: None,
-            connection_manager: None,
-            zone_group_topology: None,
-            location,
-            events: Default::default(),
-        };
-        // Our UDN, wherever it says it is
-        let by_udn = r(
-            format!("uuid:{}", own.udn(&zone)),
-            "http://192.0.2.9:1400/desc.xml".into(),
-        );
-        assert!(s.is_own_renderer(&by_udn));
-        assert!(s.register_renderer(by_udn).is_none());
-        // Our description (this host, our port, a zone's path), whatever its UDN
-        let by_place = r(
-            "uuid:somebody-else".into(),
-            format!("http://127.0.0.1:{port}/upnp/zone/{zone}/desc.xml"),
-        );
-        assert!(s.is_own_renderer(&by_place));
-        assert!(s.register_renderer(by_place).is_none());
-        // Someone else's on another port is not ours
-        assert!(!s.is_own_renderer(&r(
-            "uuid:linn".into(),
-            format!("http://127.0.0.1:{}/upnp/zone/{zone}/desc.xml", port + 1)
-        )));
-        assert_eq!(s.zones.list().len(), zones, "no zone for our own renderer");
-        // Typed as an address: refused, saying why, and not remembered
-        let address = format!("http://127.0.0.1:{port}/upnp/zone/{zone}/desc.xml");
-        let (st, e) = call(
-            &app,
-            "POST",
-            "/v1/outputs/upnp",
-            Some(serde_json::json!({"address": address})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
-        assert!(e["error"].as_str().unwrap().contains("own zone"), "{e}");
-        assert!(s.upnp_addresses().is_empty());
-        assert_eq!(s.zones.list().len(), zones);
-    }
-
-    /// A renderer that had a zone comes back at a start whose SSDP search missed it, described at
-    /// its last URL; one that answers only later gets its zone from the watch, without a rescan.
-    #[tokio::test]
-    async fn a_known_renderer_missed_by_the_search_gets_its_zone() {
-        let udn = "uuid:4c494e4e-0026-0f21-cc3f-0123456789ab";
-        let named = |s: &Arc<NodeState>| {
-            s.zones
-                .list()
-                .iter()
-                .filter(|z| z.name == "Klimax UPnP AV")
-                .count()
-        };
-        // Known, answering: back at once (once: a second pass describes nothing)
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
-        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!(
-            "http://127.0.0.1:{}/desc.xml",
-            listener.local_addr().unwrap().port()
-        );
-        fake_renderer_at(listener, hits.clone()).await;
-        s.remember_upnp(udn, &url);
-        let new = tokio::task::spawn_blocking({
-            let s = s.clone();
-            move || s.restore_known_upnp()
-        })
-        .await
-        .unwrap();
-        assert_eq!(new.len(), 1);
-        assert_eq!(named(&s), 1);
-        let fetched = hits.load(std::sync::atomic::Ordering::SeqCst);
-        let again = tokio::task::spawn_blocking({
-            let s = s.clone();
-            move || s.restore_known_upnp()
-        })
-        .await
-        .unwrap();
-        assert!(again.is_empty());
-        assert_eq!(
-            hits.load(std::sync::atomic::Ordering::SeqCst),
-            fetched,
-            "a renderer with its zone isn't described again"
-        );
-        assert_eq!(s.upnp_known().get(udn), Some(&url));
-
-        // Known, answering only after the start: the watch gives it its zone
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
-        let port = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        s.remember_upnp(udn, &format!("http://127.0.0.1:{port}/desc.xml"));
-        s.spawn_upnp_watch(
-            std::time::Duration::from_millis(50),
-            std::time::Duration::from_millis(150),
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        assert_eq!(named(&s), 0, "nothing answers yet");
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
-        fake_renderer_at(listener, Arc::new(Default::default())).await;
-        let mut waited = 0;
-        while named(&s) == 0 && waited < 50 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            waited += 1;
-        }
-        assert_eq!(named(&s), 1, "the late renderer got its zone without a rescan");
-    }
-
     /// an output and a zone, is remembered for the next start, and can be
     /// forgotten again.
     #[tokio::test]
@@ -22935,4 +22766,232 @@ exec sleep 300
 
     /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).
     mod release_sections;
+
+    /// A renderer's description (Linn-like, `udn`), served on 127.0.0.1 and counting its fetches;
+    /// 503 until `ready` (a device not answering yet, on a port held all along).
+    async fn fake_renderer_at(
+        listener: tokio::net::TcpListener,
+        udn: &'static str,
+        name: &'static str,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let desc = format!(
+            r#"<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+    <friendlyName>{name}</friendlyName>
+    <manufacturer>Linn Products Ltd.</manufacturer>
+    <UDN>{udn}</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+        <controlURL>/AVTransport/control</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>"#
+        );
+        let mock = Router::new().route(
+            "/desc.xml",
+            get(move || {
+                let desc = desc.clone();
+                let ok = ready.load(std::sync::atomic::Ordering::SeqCst);
+                if ok {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                async move {
+                    if ok {
+                        ([(header::CONTENT_TYPE, "text/xml")], desc).into_response()
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+    }
+
+    /// The node's own zones, offered as UPnP renderers, are never taken as outputs: not by their
+    /// UDN, not by their description's address (loopback or a LAN address of this host), and not
+    /// when typed as an address. A rescan once made `<zone>-2` zones playing into the node itself.
+    #[tokio::test]
+    async fn our_own_renderers_get_no_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        if s.zones.list().is_empty() {
+            s.create_zone("Kitchen", Arc::new(NullOutput::new()));
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _adv = s.start_renderer(port, false);
+        let app = router(s.clone());
+        tokio::spawn({
+            let app = app.clone();
+            async move { axum::serve(listener, app).await.unwrap() }
+        });
+        let own = s.renderer.get().unwrap().clone();
+        let (zone, _) = own.zones().into_iter().next().expect("a zone offered");
+        let zones = s.zones.list().len();
+        let r = |udn: String, location: String| pm_out_upnp::Renderer {
+            udn,
+            friendly_name: "Kitchen".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: "http://192.0.2.9/avt".into(),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location,
+            events: Default::default(),
+        };
+        // Our UDN, wherever it says it is
+        let by_udn = r(
+            format!("uuid:{}", own.udn(&zone)),
+            "http://192.0.2.9:1400/desc.xml".into(),
+        );
+        assert!(s.is_own_renderer(&by_udn));
+        assert!(s.register_renderer(by_udn).is_none());
+        // Our description (this host, our port, a zone's path), whatever its UDN
+        let by_place = r(
+            "uuid:somebody-else".into(),
+            format!("http://127.0.0.1:{port}/upnp/zone/{zone}/desc.xml"),
+        );
+        assert!(s.is_own_renderer(&by_place));
+        assert!(s.register_renderer(by_place).is_none());
+        // …also at this host's LAN address, as the node announces it
+        if let Some(ip) = pm_out_upnp::local_ipv4_addrs().first() {
+            assert!(s.is_own_location(&format!("http://{ip}:{port}/upnp/zone/{zone}/desc.xml")));
+        }
+        // Someone else's: another port, or another path
+        assert!(!s.is_own_location(&format!(
+            "http://127.0.0.1:{}/upnp/zone/{zone}/desc.xml",
+            port + 1
+        )));
+        assert!(!s.is_own_location(&format!("http://127.0.0.1:{port}/desc.xml")));
+        assert_eq!(s.zones.list().len(), zones, "no zone for our own renderer");
+        // Typed as an address: refused, saying why, and not remembered
+        let address = format!("http://127.0.0.1:{port}/upnp/zone/{zone}/desc.xml");
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/outputs/upnp",
+            Some(serde_json::json!({"address": address})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("own zone"), "{e}");
+        assert!(s.upnp_addresses().is_empty());
+        assert_eq!(s.zones.list().len(), zones);
+    }
+
+    /// A renderer that had a zone comes back at a start whose SSDP search missed it, described at
+    /// its last URL (once: one with its zone isn't described again); one that answers only later
+    /// gets its zone from the next pass, without a rescan; another device now at a known URL gets
+    /// its own zone and the old one is forgotten.
+    #[tokio::test]
+    async fn a_known_renderer_missed_by_the_search_gets_its_zone() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let linn = "uuid:4c494e4e-0026-0f21-cc3f-0123456789ab";
+        let named = |s: &Arc<NodeState>, n: &str| s.zones.list().iter().filter(|z| z.name == n).count();
+        let restore = |s: &Arc<NodeState>| {
+            let s = s.clone();
+            tokio::task::spawn_blocking(move || s.restore_known())
+        };
+        // Known, answering: back at once, and described once
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/desc.xml",
+            listener.local_addr().unwrap().port()
+        );
+        fake_renderer_at(
+            listener,
+            linn,
+            "Klimax UPnP AV",
+            hits.clone(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await;
+        s.remember_upnp(linn, &url);
+        assert_eq!(restore(&s).await.unwrap().len(), 1);
+        assert_eq!(named(&s, "Klimax UPnP AV"), 1);
+        let fetched = hits.load(Ordering::SeqCst);
+        assert!(restore(&s).await.unwrap().is_empty());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            fetched,
+            "a renderer with its zone isn't described again"
+        );
+        assert_eq!(s.upnp_known().get(linn).map(|k| k.location.clone()), Some(url));
+
+        // Known, answering only after the start: the next pass gives it its zone
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let ready = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        s.remember_upnp(
+            linn,
+            &format!(
+                "http://127.0.0.1:{}/desc.xml",
+                listener.local_addr().unwrap().port()
+            ),
+        );
+        fake_renderer_at(
+            listener,
+            linn,
+            "Klimax UPnP AV",
+            Arc::new(AtomicUsize::new(0)),
+            ready.clone(),
+        )
+        .await;
+        s.spawn_upnp_passes(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(named(&s, "Klimax UPnP AV"), 0, "nothing answers yet");
+        assert!(s.upnp_known().contains_key(linn), "one not answering stays known");
+        ready.store(true, Ordering::SeqCst);
+        let mut waited = 0;
+        while named(&s, "Klimax UPnP AV") == 0 && waited < 50 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            waited += 1;
+        }
+        assert_eq!(
+            named(&s, "Klimax UPnP AV"),
+            1,
+            "the late renderer got its zone without a rescan"
+        );
+
+        // Another device now at a known URL: its own zone, and the old one forgotten
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/desc.xml",
+            listener.local_addr().unwrap().port()
+        );
+        let tv = "uuid:2555a126-0000-4000-8000-000000000001";
+        fake_renderer_at(
+            listener,
+            tv,
+            "The Frame",
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await;
+        s.remember_upnp(linn, &url);
+        assert_eq!(restore(&s).await.unwrap().len(), 1);
+        assert_eq!(named(&s, "The Frame"), 1);
+        assert!(
+            !s.upnp_known().contains_key(linn),
+            "the old renderer at that URL is forgotten"
+        );
+        assert_eq!(s.upnp_known().get(tv).map(|k| k.location.clone()), Some(url));
+    }
 }

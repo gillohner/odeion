@@ -69,16 +69,20 @@ pub struct RendererEvents {
 /// SSDP M-SEARCH for media renderers; collects unique LOCATIONs within
 /// `timeout`, then fetches and parses each description.
 pub fn discover(timeout: Duration) -> Result<Vec<Renderer>, UpnpError> {
-    discover_except(timeout, |_| false)
+    discover_except(timeout, |_, _| false)
 }
 
-/// [`discover`], without fetching the descriptions `skip` says are known already (a renderer
-/// that has its output: a second pass only describes what is new).
-pub fn discover_except(timeout: Duration, skip: impl Fn(&str) -> bool) -> Result<Vec<Renderer>, UpnpError> {
-    let locations = ssdp_search(timeout)?;
+/// [`discover`], without fetching the descriptions `skip` says are known already: it gets each
+/// answer's LOCATION and the UUID its USN names (when it does), so a renderer that has its output
+/// isn't described again, while another device given its address is.
+pub fn discover_except(
+    timeout: Duration,
+    skip: impl Fn(&str, Option<&str>) -> bool,
+) -> Result<Vec<Renderer>, UpnpError> {
+    let answers = ssdp_search_usn(timeout)?;
     let mut out = Vec::new();
-    for loc in locations {
-        if skip(&loc) {
+    for (loc, uuid) in answers {
+        if skip(&loc, uuid.as_deref()) {
             continue;
         }
         match describe(&loc) {
@@ -92,13 +96,26 @@ pub fn discover_except(timeout: Duration, skip: impl Fn(&str) -> bool) -> Result
 }
 
 /// When, from its start, a search of `timeout` asks again: a datagram can be lost, and a device
-/// busy at the first one (a TV, a Linn waking its UPnP side) may answer a later one. Each comes
-/// early enough for an answer within MX.
+/// busy at the first one (a TV, a Linn waking its UPnP side) may answer a later one.
 pub fn search_resends(timeout: Duration) -> Vec<Duration> {
     [Duration::from_millis(1000), Duration::from_millis(2000)]
         .into_iter()
-        .filter(|d| *d + Duration::from_millis(500) <= timeout)
+        .filter(|d| *d + Duration::from_millis(1000) <= timeout)
         .collect()
+}
+
+/// The MX (seconds a device may wait before answering) of a search of `timeout`: the time left
+/// after its last resend, so every answer can come within the window (1 at least).
+pub fn search_mx(timeout: Duration) -> u64 {
+    let last = search_resends(timeout).last().copied().unwrap_or_default();
+    timeout.saturating_sub(last).as_secs().clamp(1, 5)
+}
+
+/// [`describe`] with its own `timeout` (a remembered renderer that is off shouldn't hold a pass).
+pub fn describe_within(location: &str, timeout: Duration) -> Result<Option<Renderer>, UpnpError> {
+    let client = reqwest::blocking::Client::builder().timeout(timeout).build()?;
+    let xml = client.get(location).send()?.error_for_status()?.text()?;
+    parse_description(location, &xml)
 }
 
 /// One SSDP answer, for diagnostics: who answered, what it claims to be,
@@ -436,7 +453,15 @@ fn friendly_name_of(location: &str) -> Option<String> {
 
 /// Raw SSDP: the LOCATION headers of every MediaRenderer that answers.
 pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
-    let mx = timeout.as_secs().clamp(1, 5);
+    Ok(ssdp_search_usn(timeout)?
+        .into_iter()
+        .map(|(loc, _)| loc)
+        .collect())
+}
+
+/// [`ssdp_search`], each LOCATION with the UUID its USN names (`uuid:…::urn:…`), when it does.
+pub fn ssdp_search_usn(timeout: Duration) -> Result<Vec<(String, Option<String>)>, UpnpError> {
+    let mx = search_mx(timeout);
     let msg = format!(
         "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {mx}\r\nST: {MEDIA_RENDERER}\r\n\r\n"
     );
@@ -444,7 +469,7 @@ pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
     let start = Instant::now();
     let deadline = start + timeout;
     let mut resends: Vec<Instant> = search_resends(timeout).into_iter().map(|d| start + d).collect();
-    let mut found: Vec<String> = Vec::new();
+    let mut found: Vec<(String, Option<String>)> = Vec::new();
     let mut buf = [0u8; 4096];
     while Instant::now() < deadline {
         if resends.first().is_some_and(|t| Instant::now() >= *t) {
@@ -458,8 +483,8 @@ pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
                 Ok((n, _)) => {
                     let text = String::from_utf8_lossy(&buf[..n]);
                     if let Some(loc) = header(&text, "LOCATION") {
-                        if !found.iter().any(|l| l.eq_ignore_ascii_case(&loc)) {
-                            found.push(loc);
+                        if !found.iter().any(|(l, _)| l.eq_ignore_ascii_case(&loc)) {
+                            found.push((loc, header(&text, "USN").and_then(|u| usn_uuid(&u))));
                         }
                     }
                 }
@@ -494,11 +519,11 @@ pub fn local_ipv4_addrs() -> Vec<Ipv4Addr> {
     v
 }
 
+const SSDP_GROUP: &str = "239.255.255.250:1900";
+
 /// One socket per interface, each sending `msg` to the SSDP group through
 /// that interface (the kernel otherwise uses the default route only). Falls
 /// back to a single unbound socket when the interfaces cannot be listed.
-const SSDP_GROUP: &str = "239.255.255.250:1900";
-
 fn multicast_sockets(msg: &str) -> Result<Vec<UdpSocket>, UpnpError> {
     let dest: SocketAddr = SSDP_GROUP.parse().expect("ssdp address");
     let mut sockets = Vec::new();
@@ -528,6 +553,13 @@ fn multicast_sockets(msg: &str) -> Result<Vec<UdpSocket>, UpnpError> {
         sockets.push(socket);
     }
     Ok(sockets)
+}
+
+/// The UUID a USN names: `uuid:abc::urn:…` → `abc`.
+pub fn usn_uuid(usn: &str) -> Option<String> {
+    let rest = usn.trim().strip_prefix("uuid:")?;
+    let id = rest.split("::").next()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 fn header(resp: &str, name: &str) -> Option<String> {
@@ -699,11 +731,25 @@ mod tests {
             ms(&super::search_resends(Duration::from_secs(3))),
             vec![1000, 2000]
         );
+        assert_eq!(ms(&super::search_resends(Duration::from_secs(2))), vec![1000]);
+        assert!(super::search_resends(Duration::from_millis(1500)).is_empty());
+        // Every answer within the window: MX is what is left after the last resend
+        assert_eq!(super::search_mx(Duration::from_secs(3)), 1);
+        assert_eq!(super::search_mx(Duration::from_millis(1500)), 1);
+        assert_eq!(super::search_mx(Duration::from_secs(10)), 5);
+    }
+
+    #[test]
+    fn a_usn_names_its_uuid() {
         assert_eq!(
-            ms(&super::search_resends(Duration::from_millis(1500))),
-            vec![1000]
+            super::usn_uuid("uuid:4c494e4e-0026::urn:schemas-upnp-org:device:MediaRenderer:1").as_deref(),
+            Some("4c494e4e-0026")
         );
-        assert!(super::search_resends(Duration::from_secs(1)).is_empty());
+        assert_eq!(super::usn_uuid("uuid:abc").as_deref(), Some("abc"));
+        assert_eq!(
+            super::usn_uuid("urn:schemas-upnp-org:device:MediaRenderer:1"),
+            None
+        );
     }
 
     use super::*;

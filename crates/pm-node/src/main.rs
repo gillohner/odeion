@@ -344,8 +344,6 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
             found.extend(st.discover_bluos(std::time::Duration::from_millis(1500)));
             found.extend(st.discover_mpd());
             found.extend(st.restore_upnp_addresses());
-            // (a renderer that had a zone, missed by this start's search: described at its last URL)
-            found.extend(st.restore_known_upnp());
             found.extend(st.restore_endpoint_addresses());
             found
         })
@@ -357,7 +355,9 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
                 .count();
             tracing::info!(count = found.len(), upnp, "outputs found");
         }
-        // Renderers that answer late (a TV, a Linn waking its UPnP side) get their zones without a rescan
+        // Renderers that had a zone come back at their last address (in the background: the start
+        // doesn't wait on one that is off), and ones that answer late (a TV, a Linn waking its UPnP
+        // side) get their zones without a rescan
         state.spawn_upnp_watch(
             std::time::Duration::from_secs(20),
             std::time::Duration::from_secs(300),
