@@ -48,8 +48,11 @@ const fixtures = { '/zones': { body: zones }, '/outputs': { body: outputs }, '/h
         if (!q) {
           if (c === "'" || c === '"' || c === '`') { q = c; buf = ''; at = line; } else if (c === '/' && code[i + 1] === '/') { while (i < code.length && code[i] !== '\n') i++; line++; } else if (c === '/' && code[i + 1] === '*') { const j = code.indexOf('*/', i + 2); line += (code.slice(i, j < 0 ? code.length : j).match(/\n/g) || []).length; i = j < 0 ? code.length : j + 1; } else if (c === '/') {
             // a regex literal (after an operator or an opening bracket): to its closing slash, past classes and escapes
-            const before = code.slice(0, i).replace(/\s+$/, '').slice(-1);
-            if (!before || '(,=:[!&|?{};+-*%<>~^'.includes(before) || /\b(return|typeof|case|do|else|in|of)$/.test(code.slice(Math.max(0, i - 7), i))) { let j = i + 1; let cls = false; while (j < code.length && (cls || code[j] !== '/') && code[j] !== '\n') { if (code[j] === '\\') j++; else if (code[j] === '[') cls = true; else if (code[j] === ']') cls = false; j++; } i = j; }
+            // (after ++ or -- it is a division; a skip that ends at a newline leaves the newline to the loop)
+            let k = i - 1; while (k >= 0 && /\s/.test(code[k])) k--;
+            const before = k >= 0 ? code[k] : ''; const upto = code.slice(Math.max(0, k - 6), k + 1);
+            const postfix = (before === '+' || before === '-') && code[k - 1] === before;
+            if (!postfix && (!before || '(,=:[!&|?{};+-*%<>~^'.includes(before) || /\b(return|typeof|case|do|else|in|of)$/.test(upto))) { let j = i + 1; let cls = false; while (j < code.length && (cls || code[j] !== '/') && code[j] !== '\n') { if (code[j] === '\\') j++; else if (code[j] === '[') cls = true; else if (code[j] === ']') cls = false; j++; } i = code[j] === '\n' ? j - 1 : j; }
           }
           continue;
         }

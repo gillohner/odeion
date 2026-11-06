@@ -1971,8 +1971,10 @@ body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.sign
   .icon-btn::before, .chip::before, .btn.sm::before { content: ''; position: absolute; inset: -6px; z-index: -1; }
   .chip::before, .btn.sm::before { inset: -8px -4px; }
   /* A row of chips that scrolls sideways keeps the reach inside its box (no vertical scroll, no clip):
-     the room above and below is padding, taken back by margin */
-  html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs), .np-jump-chips { padding-top: 8px; padding-bottom: 8px; margin-top: -8px; margin-bottom: -8px; }
+     the room above and below is padding, taken out of the row's own margins so nothing moves
+     (the library nav already has its 8 px; the sheet tabs wrap when they are not compact) */
+  html:not([data-shell="desktop"]) .scopechips { padding-top: 8px; padding-bottom: 8px; margin-top: -4px; margin-bottom: 8px; }
+  .np2.compact .np-sheet-tabs, .np-jump-chips { padding-top: 8px; padding-bottom: 8px; margin-top: -8px; margin-bottom: 8px; }
 }
 /* A button that is its icon on a phone (its label says what it does elsewhere) */
 html[data-shell="phone"] .btn.iconic .btn-label { display: none; }
