@@ -2879,14 +2879,16 @@ impl Library {
         })
     }
 
-    /// Songs the owner left as they are, with their file's path (to find them by album).
+    /// Songs the owner left as they are, with their file's path (to find them by album). Songs
+    /// whose file is offline or gone are listed too, so "bring back all" reaches every one.
     pub fn skipped_track_paths(&self) -> Result<Vec<(i64, String)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT t.id, f.path FROM tracks t JOIN files f ON f.track_id = t.id AND f.missing = 0
+            "SELECT t.id, COALESCE(MIN(f.path), '') FROM tracks t
              JOIN identify_state s ON s.track_id = t.id
+             LEFT JOIN files f ON f.track_id = t.id
              WHERE t.canonical_uri IS NULL AND s.state = 'skipped'
-             ORDER BY t.id",
+             GROUP BY t.id ORDER BY t.id",
         )?;
         let rows = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -6716,6 +6718,18 @@ mod identify_tests {
             vec![b]
         );
         assert_eq!(lib.skipped_track_paths().unwrap().len(), 1);
+        // Its file offline: still found, so "bring back all" reaches it
+        let missing = |m: i64| {
+            lib.lock()
+                .execute("UPDATE files SET missing = ?2 WHERE track_id = ?1", params![a, m])
+                .unwrap()
+        };
+        missing(1);
+        assert_eq!(
+            lib.skipped_track_paths().unwrap(),
+            vec![(a, "/m/one/a.flac".to_string())]
+        );
+        missing(0);
         let retry: Vec<i64> = lib
             .tracks_to_identify(true)
             .unwrap()
