@@ -380,6 +380,43 @@ class BitPerfect private constructor() {
             return (am.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 + max / 2) / max
         }
 
+        /// Android's own attenuation of media, in dB, for the USB DAC it plays to now
+        /// (getStreamVolumeDb, Android 9+), for Exclusive USB's hand-over: NaN when it can't say,
+        /// so the DAC starts muted. The media volume index is the one of media's current route, so
+        /// it is read only when that route is the USB DAC and nothing else: a DAC merely attached
+        /// while media plays on Bluetooth or the speaker gives NaN, never that output's level.
+        /// Android 13+ names the route (getAudioDevicesForAttributes); 9 to 12 only through the
+        /// hidden getDevicesForStream (output device bits): when that can't be called, NaN.
+        @JvmStatic
+        fun mediaVolumeDbOnUsb(): Float {
+            if (Build.VERSION.SDK_INT < 28) return Float.NaN
+            val am = audio() ?: return Float.NaN
+            val type = usbMediaRoute(am) ?: return Float.NaN
+            return runCatching {
+                am.getStreamVolumeDb(AudioManager.STREAM_MUSIC, am.getStreamVolume(AudioManager.STREAM_MUSIC), type)
+            }.getOrDefault(Float.NaN)
+        }
+
+        /// The USB output type media plays to now when that is its only route, else null.
+        private fun usbMediaRoute(am: AudioManager): Int? {
+            val usb = setOf(AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET)
+            if (Build.VERSION.SDK_INT >= 33) {
+                val routed = runCatching { am.getAudioDevicesForAttributes(media).map { it.type } }.getOrNull()
+                    ?: return null
+                return routed.singleOrNull()?.takeIf { it in usb }
+            }
+            // AudioSystem's output bits: USB device 0x4000, USB headset 0x4000000
+            val bits = runCatching {
+                AudioManager::class.java.getMethod("getDevicesForStream", Int::class.javaPrimitiveType)
+                    .invoke(am, AudioManager.STREAM_MUSIC) as Int
+            }.getOrNull() ?: return null
+            return when (bits) {
+                0x4000 -> AudioDeviceInfo.TYPE_USB_DEVICE
+                0x4000000 -> AudioDeviceInfo.TYPE_USB_HEADSET
+                else -> null
+            }
+        }
+
         /// Devices went away (UsbAudio's callback): tracks on them stop at once.
         fun removed(ids: Set<Int>) {
             val lost = synchronized(tracks) { tracks.values.filter { it.dacId in ids } }

@@ -9,7 +9,10 @@
 // when the app already has permission for it, its raw descriptors: this never asks.
 //
 // On Android 14+ the report also lists the DAC's mixer attributes, and BitPerfect.kt plays
-// to it bit-perfect; removing a device stops its bit-perfect tracks at once.
+// to it bit-perfect; removing a device stops its bit-perfect tracks at once. While the app holds
+// the DAC for Exclusive USB (UsbExclusive.kt) Android lists no audio device for it: the report
+// says the app holds it ("held"), and Android's "becoming noisy" warning, which taking it causes,
+// is not passed on.
 package to.synonym.pubkymusic
 
 import android.app.Activity
@@ -72,11 +75,18 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
         /// treats the DAC as gone at once (its shared stream goes silent, the zone pauses), before
         /// the device's removal arrives. A fresh report follows in two seconds either way.
         fun noisy() {
+            if (UsbExclusive.holding()) return
             publish(
                 JSONObject().put("v", 1).put("sdk", Build.VERSION.SDK_INT).put("devices", JSONArray())
                     .put("noisy", true).toString()
             )
             BitPerfect.handler().postDelayed({ watcher?.refresh() }, 2000)
+        }
+
+        /// A fresh report now (on the worker thread): Exclusive USB took or gave back the DAC, or
+        /// Android answered its permission dialog.
+        fun refreshNow() {
+            BitPerfect.handler().post { watcher?.refresh() }
         }
 
         /// Starts watching (once); on the UI thread, whose looper delivers the callbacks.
@@ -86,10 +96,14 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             val context = activity.applicationContext
             val am = context.getSystemService(AudioManager::class.java) ?: return
             BitPerfect.init(context)
+            UsbExclusive.init(context)
             // The app closing: the DAC's mixer back to Android's choice (system sounds come back)
             activity.application.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
                 override fun onActivityDestroyed(a: Activity) {
-                    if (a.isFinishing) BitPerfect.clearIfIdle()
+                    if (a.isFinishing) {
+                        BitPerfect.clearIfIdle()
+                        UsbExclusive.appClosing()
+                    }
                 }
                 override fun onActivityCreated(a: Activity, b: android.os.Bundle?) {}
                 override fun onActivityStarted(a: Activity) {}
@@ -237,12 +251,14 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
             }
             // Android's media volume: bit-perfect plays at full level, so the Rust side ends Auto's
             // bit-perfect the moment it is turned down (reported again at every change)
-            return JSONObject()
+            val o = JSONObject()
                 .put("v", 1)
                 .put("sdk", Build.VERSION.SDK_INT)
                 .put("devices", devices)
                 .put("media_volume", BitPerfect.mediaVolume())
-                .toString()
+            UsbExclusive.heldJson()?.let { o.put("held", it) }
+            if (UsbExclusive.closingNow()) o.put("release_exclusive", true)
+            return o.toString()
         }
     }
 }

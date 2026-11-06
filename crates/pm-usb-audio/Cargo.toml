@@ -8,3 +8,7 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
+
+# The kernel's usbfs interface (the exclusive USB driver on Android, and Linux)
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = "0.2"

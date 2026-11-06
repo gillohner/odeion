@@ -37,7 +37,9 @@ silently cannot connect.
    USB audio outputs (name, rates, encodings, Android 14's mixer attributes) to the player, which
    tells the node. It never asks for USB permission. Bit-perfect playback to the DAC
    (tools/release/android/BitPerfect.kt) sets the DAC's mixer attributes, which needs
-   MODIFY_AUDIO_SETTINGS (a normal permission, granted at install). ProGuard keep rules for both.
+   MODIFY_AUDIO_SETTINGS (a normal permission, granted at install). Exclusive USB
+   (tools/release/android/UsbExclusive.kt) asks USB permission for the DAC only when the listener
+   chooses it in Settings, and hands the device to the app's own driver. ProGuard keep rules for all three.
 
 Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """
@@ -117,6 +119,7 @@ crash = "-keep class **.CrashReport { public static *; }\n-keep class **.PubkyMu
 updater = "-keep class **.AppUpdate { public static *; }"
 usb_audio = "-keep class **.UsbAudio { public static *; }"
 bit_perfect = "-keep class **.BitPerfect { public static *; }"
+exclusive = "-keep class **.UsbExclusive { public static *; }"
 if player not in existing:
     existing = existing.rstrip("\n") + "\n\n# The player service's start/stop (called over JNI from src/android.rs)\n" + player + "\n"
 if crash.split("\n")[0] not in existing:
@@ -127,6 +130,8 @@ if usb_audio not in existing:
     existing = existing.rstrip("\n") + "\n\n# USB DACs: start() and next() are called over JNI from src/android.rs\n" + usb_audio + "\n"
 if bit_perfect not in existing:
     existing = existing.rstrip("\n") + "\n\n# Bit-perfect playback: its static methods are called over JNI from src/android.rs\n" + bit_perfect + "\n"
+if exclusive not in existing:
+    existing = existing.rstrip("\n") + "\n\n# Exclusive USB: its static methods are called over JNI from src/android.rs\n" + exclusive + "\n"
 proguard.write_text(existing)
 
 # 4. multicast permission
@@ -302,6 +307,11 @@ bp_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", bp_kt, count=1
 if n != 1:
     die("BitPerfect.kt has no package line")
 (activities[0].parent / "BitPerfect.kt").write_text(bp_kt)
+ex_kt = (Path(__file__).parent / "android" / "UsbExclusive.kt").read_text()
+ex_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", ex_kt, count=1, flags=re.M)
+if n != 1:
+    die("UsbExclusive.kt has no package line")
+(activities[0].parent / "UsbExclusive.kt").write_text(ex_kt)
 mtext = manifest.read_text()
 audio_perm = '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />'
 if audio_perm not in mtext:
@@ -312,5 +322,5 @@ if audio_perm not in mtext:
 
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect)"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB)"
 )

@@ -196,6 +196,8 @@ pub enum PreferredMode {
     Auto,
     BitPerfect,
     Shared,
+    /// The app drives the DAC itself (its own USB driver; Android's permission is asked).
+    Exclusive,
     /// A choice this node does not know yet: as `auto`.
     #[serde(other)]
     Unknown,
@@ -695,5 +697,24 @@ mod tests {
             caps
         );
         assert_eq!(caps_for_source(&[], AudioFormat::pcm(96_000, 24, 2), &caps), caps);
+    }
+
+    /// The listener's modes on the wire, Exclusive USB among them; one from a newer app is Unknown
+    /// (taken as auto).
+    #[test]
+    fn the_preferred_modes_on_the_wire() {
+        for (text, mode) in [
+            ("auto", PreferredMode::Auto),
+            ("bit_perfect", PreferredMode::BitPerfect),
+            ("exclusive", PreferredMode::Exclusive),
+            ("shared", PreferredMode::Shared),
+            ("hyper_perfect", PreferredMode::Unknown),
+        ] {
+            let s: DeviceSettings = serde_json::from_value(serde_json::json!({ "mode": text })).unwrap();
+            assert_eq!(s.mode, mode, "{text}");
+            if mode != PreferredMode::Unknown {
+                assert_eq!(serde_json::to_value(mode).unwrap(), text);
+            }
+        }
     }
 }

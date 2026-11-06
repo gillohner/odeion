@@ -28,6 +28,9 @@ pub mod usb_dac;
 // Bit-perfect playback to that DAC on Android 14+ (decisions and the sink; built on every host)
 pub mod bit_perfect;
 
+// Exclusive USB: the app's own driver for that DAC (decisions and the sink; built on every host)
+pub mod exclusive;
+
 // The shared sink's waits and stream faults, apart from cpal (built and tested on every host)
 pub mod sink_wait;
 
