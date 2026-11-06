@@ -73,8 +73,8 @@ const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { bod
       check(top.sections.join(',') === 'npsec-queue,npsec-lyrics,npsec-details,npsec-sources,npsec-tags' && top.chips.every((c) => c.tag === 'BUTTON') && top.chips.length === 5, `${at}: Up next, Lyrics, Details, Sources and Tags in the same scroll, with five chip buttons (${top.sections.join(' ')})`);
       if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-${w}.png`) });
       await sleep(1600);
-      const ly = await page.evaluate(() => ({ top: document.querySelector('#nowplaying').scrollTop, lines: !!document.querySelector('#nplyrics .lyric-line.on'), barH: document.querySelector('.np-jump').getBoundingClientRect().height }));
-      check(ly.top === 0 && ly.lines, `${at}: synced lyrics follow in their own box and the page stays on the player (page at ${ly.top}, a current line ${ly.lines})`);
+      const ly = await page.evaluate(() => { const box = document.querySelector('#nplyrics .lyric-lines'); const on = document.querySelector('#nplyrics .lyric-line.on'); const b = box && box.getBoundingClientRect(); const o = on && on.getBoundingClientRect(); return { top: document.querySelector('#nowplaying').scrollTop, lines: !!on, boxTop: box ? box.scrollTop : 0, inBox: !!(b && o && o.top >= b.top - 1 && o.bottom <= b.bottom + 1), barH: document.querySelector('.np-jump').getBoundingClientRect().height }; });
+      check(ly.top === 0 && ly.lines && ly.boxTop > 0 && ly.inBox, `${at}: synced lyrics follow in their own box (scrolled ${ly.boxTop}, the current line in view ${ly.inBox}) and the page stays on the player (at ${ly.top})`);
       // A chip: its section just under the chips row, the row stuck with the song and Play
       await page.click('[data-npjump="details"]'); await sleep(900);
       const jumped = await page.evaluate(() => {

@@ -3184,7 +3184,7 @@
   let npObs = null; // the one screen's observers (sticky chips, the part in view, Sources when near)
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
-    const oneScroll = overlay.scrollTop; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
+    const oneScroll = overlay.scrollTop; const prevUri = overlay.dataset.npuri || ''; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
       setTimeout(setArtTint, 0); // no cover: no tint
@@ -3293,7 +3293,7 @@
     bindNpLinks(overlay, it, () => toggleNowPlaying());
     $$('[data-npqi]', overlay).forEach((b) => b.onclick = () => { transport({ action: 'play', index: Number(b.dataset.npqi) }); setTimeout(renderNowPlaying, 500); });
     const qf = $('#npqfull'); if (qf) qf.onclick = () => setView('queue');
-    overlay.dataset.sheet = sheet || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
+    overlay.dataset.sheet = sheet || ''; overlay.dataset.npuri = it.uri || ''; overlay.dataset.layout = `${shellMode()}-${npCompact()}`;
     state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: (one || sheet === 'lyrics') && (one || keep.sheet === 'lyrics') ? keep.lyric : null, focus: keep.focus };
     npRestore();
     if (sheet === 'sources' && songPage && !one) fillNpSources(songPage, gen);
@@ -3301,7 +3301,17 @@
     if (one) {
       // The parts fill again after this (Sources, Tags): the page keeps its height meanwhile, so a
       // listener reading near the end isn't thrown back up
-      const pg = $('.np-page', overlay); if (pg && keep.height) { pg.style.minHeight = `${keep.height}px`; setTimeout(() => { if (pg.isConnected) pg.style.minHeight = ''; }, 3000); }
+      // (until the listener's next own move, or 15 s: by then the parts have filled, however long
+      // their answers took, and two redraws can come before they do; the height is carried across)
+      const pg = $('.np-page', overlay);
+      const prior = state.npHold && Date.now() < state.npHold.until && state.npHold.uri === it.uri ? state.npHold.height : 0;
+      // (the same song only: another one has its own height)
+      const want = prevUri === (it.uri || '') ? Math.max(keep.height || 0, prior) : 0;
+      if (pg && want) {
+        state.npHold = { height: want, until: Date.now() + 15000, uri: it.uri };
+        pg.style.minHeight = `${want}px`;
+        setTimeout(() => { if (pg.isConnected && state.npHold && Date.now() >= state.npHold.until - 50) { pg.style.minHeight = ''; state.npHold = null; } }, 15000);
+      }
       overlay.scrollTop = oneScroll;
       const bar = $('.np-jump', overlay); const chips = $$('[data-npjump]', overlay);
       chips.forEach((c) => c.onclick = () => jump(c.dataset.npjump));
@@ -3323,7 +3333,7 @@
       };
       let queued = false;
       overlay.onscroll = () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; mark(); }); } };
-      overlay.ontouchstart = overlay.onwheel = overlay.onkeydown = overlay.onpointerdown = () => { state.npPin = null; };
+      overlay.ontouchstart = overlay.onwheel = overlay.onkeydown = overlay.onpointerdown = () => { state.npPin = null; if (state.npHold) { state.npHold = null; const p = $('.np-page', overlay); if (p) p.style.minHeight = ''; } };
       npMark = mark;
       mark();
       // A part asked for (the quality line, a link from elsewhere) is shown once
