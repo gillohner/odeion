@@ -1263,6 +1263,12 @@ async fn search_lane(
                         let c = rank_track_hits(&m.track, hits);
                         if c.is_empty() {
                             m.outcome
+                        } else if matches!(m.outcome, Outcome::Error(_)) {
+                            // The fingerprint failed: the search's options are added to what the
+                            // song has, and it isn't marked checked (its fingerprint options stay,
+                            // and a later run asks the fingerprint again)
+                            settle_with(s, &m.track, Outcome::Suggest(c), found, false).await?;
+                            continue;
                         } else {
                             Outcome::Suggest(c)
                         }
@@ -1282,6 +1288,18 @@ async fn search_lane(
 
 /// Store what a song's ladder found and count it.
 async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> Result<(), ApiError> {
+    settle_with(s, t, outcome, found, true).await
+}
+
+/// [`settle`]; `replace` false: options found are added to the song's open ones and the song
+/// isn't marked checked (part of its check failed).
+async fn settle_with(
+    s: &NodeState,
+    t: &Track,
+    outcome: Outcome,
+    found: &RunCtx,
+    replace: bool,
+) -> Result<(), ApiError> {
     use pm_library::db::{SettleAnswer, Settled};
     let id = t.id.map(|i| i.0).unwrap_or_default();
     let input_key = found.inputs.get(&id).cloned();
@@ -1303,7 +1321,7 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &RunCtx) -> R
         Outcome::Suggest(c) => SettleAnswer::Suggest {
             candidates: c.clone(),
             input_key,
-            replace: true,
+            replace,
         },
         Outcome::Unknown => SettleAnswer::State {
             state: "unknown".into(),

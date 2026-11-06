@@ -2646,12 +2646,9 @@ fn insert_suggestions(
 impl Library {
     /// Open suggestions, grouped by track (best first within a track).
     /// One track's open suggestions, best first.
+    /// A song's open options, also when the owner left it as it is (its own page lists them).
     pub fn suggestions_for(&self, track: i64) -> Result<Vec<SuggestionRow>> {
-        Ok(self
-            .suggestions()?
-            .into_iter()
-            .filter(|r| r.track_id == track)
-            .collect())
+        self.suggestions_for_tracks(&[track])
     }
 
     pub fn suggestions(&self) -> Result<Vec<SuggestionRow>> {
@@ -3077,8 +3074,19 @@ impl Library {
                 params![track],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            // The owner left it as it is ("Leave as is"): no run changes that
+            // The owner left it as it is ("Leave as is"): no run changes that. "Which song is
+            // this?" still stores what it finds, for the song's page; the song stays left
             if now.as_deref() == Some("skipped") {
+                if let SettleAnswer::Suggest {
+                    candidates,
+                    replace: false,
+                    ..
+                } = answer
+                {
+                    insert_suggestions(&tx, track, candidates)?;
+                    tx.commit()?;
+                    return Ok(Settled::Stored);
+                }
                 return Ok(Settled::Kept);
             }
             let rules = crate::identify::RULES_VERSION;
@@ -3173,8 +3181,10 @@ impl Library {
                     // Options added to open ones ("Which song is this?") aren't a check under
                     // these rules: the song keeps its version, so a run still checks it again
                     let stamp = (*replace || open_before == 0).then_some(rules);
+                    // Not a check under these rules: not its inputs either, so a run checks it again
+                    let input = stamp.and(input_key.as_deref());
                     if open > 0 {
-                        put_state_as("suggested", None, None, input_key.as_deref(), stamp)?;
+                        put_state_as("suggested", None, None, input, stamp)?;
                         Settled::Stored
                     } else {
                         let why = (!candidates.is_empty()).then_some("suggestions rejected");

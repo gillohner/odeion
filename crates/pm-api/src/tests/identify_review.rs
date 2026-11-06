@@ -3448,3 +3448,81 @@ async fn a_failed_check_again_counts_as_an_error() {
     assert_eq!(options, vec![rec(91)]);
     assert_eq!(lib.identity_counts().unwrap().outdated, 1);
 }
+
+/// The fingerprint failing while a waiting song is checked again, and the search finding options
+/// but not the file's exact song: the search's options are added, the song's fingerprint options
+/// stay, and it isn't marked checked (a later run asks the fingerprint again).
+#[tokio::test]
+async fn a_failed_fingerprint_keeps_a_waiting_songs_options() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, true).await;
+    let id = pending_song(&s, dir.path(), 'L', 1);
+    suggest(
+        &s,
+        id,
+        &[option(&rec(93), None, "Old option", 0.9, "fingerprint")],
+    );
+    {
+        // Its AcoustID answer can't be read: the fingerprint fails
+        let lib = s.library.lock().unwrap();
+        let path = lib.get_track(pm_model::TrackId(id)).unwrap().unwrap().file.path;
+        lib.save_lookup(&Library::file_key(&path).unwrap(), "{").unwrap();
+    }
+    identify::run_with(&s, identify::RunOptions::quick(true))
+        .await
+        .unwrap();
+    let lib = s.library.lock().unwrap();
+    let options: Vec<String> = lib
+        .suggestions_for(id)
+        .unwrap()
+        .into_iter()
+        .map(|r| r.recording_mbid)
+        .collect();
+    assert!(
+        options.contains(&rec(93)),
+        "the fingerprint option stays: {options:?}"
+    );
+    assert!(
+        options.contains(&pending_id(0xb0, 1, 0)),
+        "the search's added: {options:?}"
+    );
+    assert_eq!(lib.identity_counts().unwrap().outdated, 1, "not marked checked");
+    assert!(
+        !lib.identify_inputs()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|k| k.is_some()),
+        "its inputs aren't stamped"
+    );
+}
+
+/// "Which song is this?" on a song left as it is: what it finds is stored and listed on the song's
+/// page, and the song stays left (out of review).
+#[tokio::test]
+async fn which_song_is_this_lists_options_for_a_left_song() {
+    let recordings = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dir = tempfile::tempdir().unwrap();
+    let s = recheck_state(dir.path(), recordings, true).await;
+    let id = pending_song(&s, dir.path(), 'C', 5);
+    left_by_older_rules(&s, id, &[91]);
+    assert_eq!(s.library.lock().unwrap().skip_review(&[id]).unwrap(), 1);
+    let (st, b) = call(
+        &router(s.clone()),
+        "GET",
+        &format!("/v1/library/tracks/{id}/candidates"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{b}");
+    let listed: Vec<&str> = b["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["recording_mbid"].as_str())
+        .collect();
+    assert!(listed.len() > 1, "its option and what was found: {b}");
+    assert!(listed.contains(&rec(91).as_str()), "{b}");
+    let c = s.library.lock().unwrap().identity_counts().unwrap();
+    assert_eq!((c.skipped, c.suggested), (1, 0));
+}
