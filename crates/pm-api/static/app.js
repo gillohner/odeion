@@ -1455,7 +1455,7 @@
   // A YouTube item that can't be embedded (the uploader turned it off, removed, private): say so and go on
   yt.addEventListener('yterror', (e) => {
     const it = state.browserQueue[state.browserIndex];
-    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube won\u2019t play it outside youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
+    const why = { 2: 'the link is not a valid video', 5: `${hereName().toLowerCase()} cannot play it`, 100: 'the video is gone or private', 101: 'YouTube only plays it on youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)', 150: 'YouTube only plays it on youtube.com (its owner turned that off, or YouTube wants you signed in first: see the player)' }[e.detail] || `YouTube error ${e.detail}`;
     toast(`\u201c${(it && it.title) || 'This video'}\u201d can't play here: ${why}.`, 'error');
     if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
   });
@@ -2282,6 +2282,8 @@
   $('#prev').onclick = () => transport({ action: 'previous' });
   const seek = $('#seek');
   seek.addEventListener('input', () => { seek.dataset.dragging = '1'; setFill(seek); });
+  // (a drag let go on its start value sends no change: the bar's seek let go too)
+  for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) seek.addEventListener(ev, () => { setTimeout(() => { delete seek.dataset.dragging; }, 0); }, { passive: true });
   seek.addEventListener('change', () => {
     delete seek.dataset.dragging;
     const z = currentZone(); const d = z && z.now_playing ? z.now_playing.duration_ms : 0;
@@ -2655,9 +2657,16 @@
   // The shell's arrangement; off the desktop the services warning moves from the sidebar to the top bar
   // The phone's tabs mark the current place; again when the shell changes
   const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'releases', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
-  const markTabs = (v = state.view) => {
+  // A page opened from a tab (an album from Home, an artist from Search) keeps that tab marked: Back
+  // goes there. The tab rides in the page's history entry, so Back and Forward mark it again. A page
+  // opened on its own (a link, a reload without the entry) is marked as before: Library's pages are Library's
+  const DETAIL_VIEWS = new Set(['item', 'album', 'artist', 'releases', 'person', 'playlist', 'genre', 'tag', 'source-item', 'source-artist', 'shared', 'home-section', 'smart', 'smart-edit', 'lossless', 'lossy', 'dsd']);
+  const TAB_ROOTS = { home: 'home', search: 'search', zones: 'zones' };
+  // (Identify for some songs, opened from their album's tags, is a page of that album's tab)
+  const tabFor = (v, from, arg) => TAB_ROOTS[v] || ((DETAIL_VIEWS.has(v) || (v === 'identify' && arg)) && from ? from : LIB_VIEWS.includes(v) ? 'library' : null);
+  const markTabs = () => {
     // Sources is a Library section on phones
-    $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    $$('.bnav').forEach((b) => { const on = b.dataset.bnav === state.tab; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   };
   const applyShell = () => {
     const now = shellFor(window.innerWidth, layoutPref());
@@ -2679,6 +2688,8 @@
   window.addEventListener('resize', fadeRows);
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
   applyShell();
+  // Marked before the node answers: the page's own entry says its tab (a reload); Home is Home
+  state.tab = (history.state && history.state.tab) || (location.pathname === '/' ? 'home' : undefined); markTabs();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
   const narrow = () => mq('(max-width: 1100px)'); // the sidebar is icons there unless expanded
   const applySide = () => { let m = 'auto'; try { m = localStorage.getItem('pm.sidebar') || 'auto'; } catch { /* no storage */ } shell.classList.toggle('collapsed', m === 'icons'); shell.classList.toggle('expanded', m === 'names'); };
@@ -2969,6 +2980,9 @@
     const it = np.item;
     const live = np.stream_title;
     const links = npLinksHtml(it, live, barPlain());
+    // A track change cross-fades the mini player
+    const npEl = $('#np'); const wasUri = npEl.dataset.uri || ''; npEl.dataset.uri = it.uri || '';
+    if (wasUri && wasUri !== (it.uri || '') && !waitHtml && !errHtml) { npEl.classList.remove('swap'); void npEl.offsetWidth; npEl.classList.add('swap'); clearTimeout(npEl.swapT); npEl.swapT = setTimeout(() => npEl.classList.remove('swap'), 500); }
     $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
     // On a touch screen the whole bar opens Now playing (the song page is one tap further, from
     // its title there); with a mouse the bar's title and artist are links of their own
@@ -3219,7 +3233,8 @@
   let npObs = null; // the one screen's observers (sticky chips, the part in view, Sources when near)
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
-    const oneScroll = overlay.scrollTop; const prevUri = overlay.dataset.npuri || ''; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
+    const oneScroll = overlay.scrollTop; const prevUri = overlay.dataset.npuri || ''; const prevTransport = overlay.dataset.transport || '';
+    const prevImg = $('#nowplaying .np-big img'); const prevSrc = prevImg && prevImg.complete && prevImg.naturalWidth ? (prevImg.currentSrc || prevImg.src) : null; if (npObs) { npObs.forEach((o) => o.disconnect()); npObs = null; }
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
       setTimeout(setArtTint, 0); // no cover: no tint
@@ -3281,6 +3296,32 @@
         </div>
       </div>`;
     const sk = $('#npseek'); setFill(sk);
+    // A track change: the last cover fades out over the new one, the title slides in; a sheet change
+    // fades its panel in; the cover's rest state follows the transport
+    // (each marker is kept in state for its animation's length: a second redraw can follow at once,
+    // from the queue's refresh, and must not wipe it)
+    const now = Date.now();
+    if (prevUri && prevUri !== (it.uri || '')) state.npSwap = { at: now, src: prevSrc };
+    const swap = state.npSwap && now - state.npSwap.at < 400;
+    overlay.classList.toggle('np-swap', !!swap);
+    if (swap) { const t = $('.np-titles', overlay); if (t) t.style.animationDelay = `-${now - state.npSwap.at}ms`; }
+    overlay.classList.toggle('np-sheet-swap', !one && (sheet || '') !== (keep.sheet || ''));
+    if (swap && state.npSwap.src) { const big = $('.np-big', overlay); if (big) { const old = new Image(); old.className = 'np-prev'; old.alt = ''; old.src = state.npSwap.src; old.style.animationDelay = `-${now - state.npSwap.at}ms`; old.onanimationend = () => old.remove(); big.appendChild(old); setTimeout(() => old.remove(), 1200); } }
+    overlay.dataset.transport = z.transport || '';
+    // A transport change that came with this redraw pops the play icon as the tick would
+    if (prevTransport && prevTransport !== (z.transport || '')) state.npPop = now;
+    if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => { ic.style.animationDelay = `-${now - state.npPop}ms`; ic.classList.add('swap'); });
+    // (the tick doesn't redraw again for this item)
+    renderNowPlaying.lastItem = it; renderNowPlaying.lastTitle = np.stream_title;
+    if (!one) {
+      const tabs = $('.np-sheet-tabs', overlay); const on = tabs && $('.chip.on', tabs);
+      if (tabs && on) {
+        // (from where the last render's mark was, so it slides)
+        const was = state.npTabMark; if (was) { tabs.style.setProperty('--tab-x', was.x); tabs.style.setProperty('--tab-w', was.w); }
+        const next = { x: `${on.offsetLeft}px`, w: String(on.offsetWidth / 100) }; state.npTabMark = next;
+        requestAnimationFrame(() => { tabs.style.setProperty('--tab-x', next.x); tabs.style.setProperty('--tab-w', next.w); });
+      }
+    }
     // Now playing's own transport (phones: the mini player hides behind it)
     // Volume in Now playing (phones and windows under 760 px have none in the bar; UX sweep 11-01, A6):
     // it moves the bar's own slider, which sets the zone's volume
@@ -3289,6 +3330,8 @@
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
+    // (a drag that ends without a change, or is cancelled, lets go too)
+    for (const ev of ['pointerup', 'pointercancel', 'touchend', 'touchcancel']) sk.addEventListener(ev, () => { setTimeout(() => { delete sk.dataset.dragging; }, 0); }, { passive: true });
     $('#npclose').onclick = () => toggleNowPlaying();
     $('#npzone').onclick = () => $('#zonebtn').click();
     // On a phone's one screen a part is scrolled to, not opened
@@ -3479,7 +3522,29 @@
     if (!l) { box.hidden = true; box.innerHTML = ''; return; }
     box.hidden = false;
     const off = state.lyricsOffset || 0;
-    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}"` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    box.innerHTML = `<h3>Lyrics${l.synced ? ' <span class="muted small">synced</span>' : ''}${l.source === 'lrclib' ? ' <a class="muted small" href="https://lrclib.net" target="_blank" rel="noopener">from LRCLIB</a>' : ''}${l.synced ? ` <span class="lyric-nudge"><button class="icon-btn sm" data-lnudge="-500" title="Lines earlier (0.5 s)" aria-label="Show lines half a second earlier">−</button><span class="muted small">${off ? `${off > 0 ? '+' : ''}${(off / 1000).toFixed(1)} s` : ''}</span><button class="icon-btn sm" data-lnudge="500" title="Lines later (0.5 s)" aria-label="Show lines half a second later">+</button></span>` : ''}</h3><div class="lyric-lines${l.synced ? ' synced' : ''}">${l.lines.map((ln) => `<p class="lyric-line" ${ln.ms != null ? `data-ms="${ln.ms}" role="button" tabindex="0" title="Play from here"${ln.text ? '' : ' aria-label="Instrumental: play from here"'}` : ''}>${esc(ln.text) || icon('notes')}</p>`).join('')}</div>`;
+    // Synced: a tap on a line plays from it; a scroll by hand pauses the following for a few seconds
+    const lines = $('.lyric-lines', box);
+    if (l.synced && lines) {
+      // (a line the listener chose is followed at once: the hold their tap set is over)
+      // (the hold their tap set is over once the seek has landed: not before, or the panel would
+      // first go back to the old line)
+      // (only the hold of that tap: a scroll by hand while the seek is on its way is newer, and stays)
+      const seekTo = (ln) => { const stamp = state.lyricsUser; return Promise.resolve(transport({ action: 'seek', position_ms: Math.max(0, Number(ln.dataset.ms) + (state.lyricsOffset || 0)) })).finally(() => { if (state.lyricsUser === stamp) { state.lyricsHold = 0; state.lyricsUser = 0; } }); };
+      lines.addEventListener('click', (e) => { const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) seekTo(ln); });
+      // (Space and Enter on a line are the line's: the page's Space is play/pause)
+      lines.addEventListener('keydown', (e) => { if (e.key !== 'Enter' && e.key !== ' ') return; const ln = e.target.closest('.lyric-line[data-ms]'); if (ln) { e.preventDefault(); e.stopPropagation(); seekTo(ln); } });
+      // A scroll counts as the listener's only right after their touch, wheel or key: the page's own
+      // scrolls (the follower, a redraw putting the place back) don't hold the following off
+      // (the listener's own input holds at once, and a scroll right after it holds again)
+      const mine = () => { state.lyricsUser = Date.now(); state.lyricsHold = Date.now() + 4000; };
+      lines.addEventListener('touchstart', mine, { passive: true });
+      lines.addEventListener('touchmove', mine, { passive: true });
+      lines.addEventListener('wheel', mine, { passive: true });
+      lines.addEventListener('focusin', mine);
+      lines.addEventListener('keydown', (e) => { if (/^(Arrow|Page|Home|End)/.test(e.key)) mine(); });
+      lines.addEventListener('scroll', () => { if (lines.dataset.auto) return; if (state.lyricsUser && Date.now() - state.lyricsUser < 1500) state.lyricsHold = Date.now() + 4000; }, { passive: true });
+    }
   };
   // Library songs: their own lyrics, else LRCLIB (the node decides); streamed songs: LRCLIB by title
   const lyricsKey = (it) => { const id = trackIdOf(it); return id != null ? `t${id}` : it && it.title && it.artist ? `s${it.uri || ''}|${it.title}|${it.artist}` : null; };
@@ -3497,10 +3562,24 @@
   const followLyrics = (positionMs) => {
     const lines = $$('#nplyrics .lyric-line[data-ms]'); if (!lines.length) return;
     const at = positionMs - (state.lyricsOffset || 0);
-    let cur = null; for (const ln of lines) { if (Number(ln.dataset.ms) <= at) cur = ln; else break; }
-    for (const ln of lines) ln.classList.toggle('on', ln === cur);
-    // (only the lyrics' own box scrolls: on a phone's one screen the page holds them too)
-    if (cur && !cur.dataset.seen) { lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1'; try { const box = cur.closest('.lyric-lines'); if (box) box.scrollTo({ top: cur.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - (box.clientHeight - cur.offsetHeight) / 2, behavior: 'smooth' }); } catch { /* jsdom */ } }
+    let k = -1; for (let i = 0; i < lines.length; i++) { if (Number(lines[i].dataset.ms) <= at) k = i; else break; }
+    const cur = k >= 0 ? lines[k] : null;
+    // The current line, its neighbours by distance (dimmer the further away)
+    lines.forEach((ln, i) => { const d = k < 0 ? 9 : Math.abs(i - k); ln.classList.toggle('on', d === 0); ln.classList.toggle('near1', d === 1); ln.classList.toggle('near2', d === 2); });
+    if (!cur) return;
+    // The box keeps the current line about a third of the way down (only the lyrics' own box
+    // scrolls: on a phone's one screen the page holds them too); a scroll by hand holds it off for
+    // a few seconds, then it eases back
+    const box = cur.closest('.lyric-lines'); if (!box) return;
+    const held = state.lyricsHold && Date.now() < state.lyricsHold;
+    if (held) { delete cur.dataset.seen; return; }
+    if (!cur.dataset.seen) {
+      lines.forEach((ln) => delete ln.dataset.seen); cur.dataset.seen = '1';
+      const top = cur.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - box.clientHeight / 3 + cur.offsetHeight / 2;
+      box.dataset.auto = '1'; clearTimeout(box.autoT);
+      try { box.scrollTo({ top: Math.max(0, top), behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }); } catch { /* jsdom */ }
+      box.autoT = setTimeout(() => { delete box.dataset.auto; }, 700);
+    }
   };
   // Keep the overlay's progress moving without rebuilding it on every tick.
   setInterval(() => {
@@ -3508,6 +3587,11 @@
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
     if (!np || !s || s.dataset.dragging) return;
     if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
+    if ((z.transport || '') !== (overlay.dataset.transport || '')) {
+      overlay.dataset.transport = z.transport || '';
+      const playing = z.transport === 'playing';
+      $$('[data-npt="toggle"]', overlay).forEach((b) => { b.innerHTML = icon(playing ? 'pause' : 'play'); b.setAttribute('aria-label', playing ? 'Pause' : 'Play'); const ic = $('.ic', b); if (ic) ic.classList.add('swap'); });
+    }
     s.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(s);
     const p = $('#nppos'); if (p) p.textContent = fmt(np.position_ms);
     followLyrics(np.position_ms);
@@ -3657,6 +3741,7 @@
   // History stores only what restores a view (search keeps its query, not its results).
   const histArg = (v, arg) => (v === 'search' ? (arg && arg.q ? (arg.in && arg.in !== 'everywhere' ? { q: arg.q, in: arg.in } : { q: arg.q }) : null) : (arg && typeof arg === 'object' && !Array.isArray(arg) ? JSON.parse(JSON.stringify(arg)) : arg ?? null));
   let navDepth = 0;
+  let tabsBooted = false; // the first page (a reload keeps its history entry): its tab comes from the entry
   // For tests (tools/ui-item-pages.js): every view with a path round-trips through routeFromPath.
   window.pmRoutes = {
     check: () => {
@@ -3686,6 +3771,9 @@
     if (isListener() && LISTENER_VIEWS_OFF.has(v)) { v = 'albums'; arg = undefined; }
     if (isOffline() && !OFFLINE_VIEWS.has(v)) { v = 'downloads'; arg = undefined; }
     { const sb = document.getElementById('search'); if (sb && NAV_VIEWS.includes(v) && document.activeElement !== sb) sb.value = ''; }
+    // (on Back or Forward, history.state is already the entry being shown; on a reload it is the page's own)
+    const fromEntry = how === 'pop' || !tabsBooted; tabsBooted = true;
+    const tab = tabFor(v, fromEntry ? history.state && history.state.tab : state.tab, arg);
     if (how !== 'pop') {
       const path = pathFor(v, arg) || location.pathname + location.search;
       const cur = history.state || {};
@@ -3694,15 +3782,15 @@
       // A page opened from a menu takes the menu's transient entry (still a new page for back).
       const viaTransient = !!cur.transient && how !== 'replace';
       const replace = how === 'replace' || viaTransient || (v === state.view && (v === 'search' || v === 'discover' || path === location.pathname + location.search)) || !state.view;
-      const entry = { transient: false, v, arg: histArg(v, arg), backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
+      const entry = { transient: false, v, arg: histArg(v, arg), tab, backLabel: replace && !viaTransient ? cur.backLabel : hereLabel(), depth: replace && !viaTransient ? (cur.depth || 0) : (cur.depth || 0) + 1, scroll: 0 };
       try { if (replace) history.replaceState(entry, '', path); else history.pushState(entry, '', path); } catch { /* sandboxed */ }
       navDepth = entry.depth;
     }
     // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
-    state.view = v; state.viewArg = arg;
+    state.view = v; state.viewArg = arg; state.tab = tab;
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
-    markTabs(v);
+    markTabs();
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || ((v === 'artist' || v === 'releases') && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $('#scrim').hidden = true; closePop();
     if (!overlay.hidden) toggleNowPlaying(false, true); // the page takes Now playing's history entry
@@ -5252,7 +5340,10 @@
     // done, when a newer navigation takes over, or after 15 s at the most: the control that started it
     // (a sidebar place) and the bar never stay busy for good
     let mo = null; let cap = 0; let drawing = null;
-    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
+    // A fresh page comes in with a short rise (and its first tiles and rows after one another); the
+    // class goes after that, so what arrives later on the page doesn't move
+    const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
+    const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
     const rendering = render(); navRendering = rendering; drawing = lastDrawing;
     return Promise.race([rendering, superseded, drawn]).finally(end);
@@ -6795,12 +6886,36 @@
           const zs = zoneList();
           // Two zones with one name get their kind after it; an output id is never the text (UX sweep A14)
           const named = (z) => zs.filter((y) => y.name === z.name).length > 1 ? `${esc(z.name)} <span class="muted small">· ${esc(PROTO_WORDS[String(z.output || z.id).split(':')[0]] || String(z.output || '').split(':')[0])}</span>` : esc(z.name);
-          main.innerHTML = pageHead('Zones', `${zs.length} · multi-room overview`, `<button class="btn" id="zgroup">${icon('plus')} Group outputs…</button>`) + `<div class="cards">${zs.map((z) => {
+          // One device seen two ways (the owner's Linn: AirPlay and UPnP) is one card with a chip per
+          // way (owner's recording, 2026-11-06: "same device listed twice"). Zones are of one family
+          // when their names agree once the way's words are taken out; the card shows the one of
+          // them that is selected, else playing, else first.
+          const protoOf = (z) => String(z.output || z.id).split(':')[0];
+          const WAY_WORDS = /\b(airplay|upnp(?:[ -]?av)?|dlna|chromecast|cast|sonos|bluos|heos|snapcast|squeezelite|squeezebox|slimproto)\b/gi;
+          // (the name without its way words, in any script; a name that is only a way word, or one
+          // word of three letters or fewer, is too little to go on)
+          const familyOf = (z) => { if (z.id === BROWSER || String(z.id).startsWith('group:')) return ''; const f = String(z.name || '').replace(WAY_WORDS, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); return f.length >= 4 || /[^\x00-\x7f]/.test(f) ? f : ''; };
+          const familyName = (z) => String(z.name || '').replace(WAY_WORDS, '').replace(/[\s:·(),-]+$/g, '').replace(/^[\s:·(),-]+/g, '').replace(/\(\s*\)/g, '').replace(/\s{2,}/g, ' ').trim() || z.name;
+          const families = new Map();
+          for (const z of zs) { const f = familyOf(z); if (f) families.set(f, [...(families.get(f) || []), z]); }
+          const seen = new Set();
+          const cards = zs.flatMap((z) => {
+            const f = familyOf(z); const fam = f ? families.get(f) : null;
+            // (two of them playing at once are two devices, not one seen two ways)
+            if (!fam || fam.length < 2 || new Set(fam.map(protoOf)).size < 2 || fam.filter((m) => m.transport === 'playing').length > 1) return [{ z, ways: null }];
+            if (seen.has(f)) return []; seen.add(f);
+            const lead = fam.find((m) => m.id === state.zone) || fam.find((m) => m.transport === 'playing') || fam[0];
+            return [{ z: lead, ways: fam }];
+          });
+          main.innerHTML = pageHead('Zones', `${cards.length} · multi-room overview`, `<button class="btn iconic" id="zgroup" aria-label="Group outputs">${icon('plus')}<span class="btn-label">Group outputs…</span></button>`) + `<div class="cards">${cards.map(({ z, ways }) => {
             const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
+            const title = ways ? esc(familyName(z)) : named(z);
+            const wayChips = ways ? `<div class="chips zc-ways" role="group" aria-label="Ways to play to ${esc(familyName(z))}">${ways.map((m) => `<button class="chip ${m.id === state.zone ? 'on' : ''}" data-zsel="${esc(m.id)}" aria-pressed="${m.id === state.zone}" title="Play to ${esc(m.name)}">${esc(PROTO_WORDS[protoOf(m)] || protoOf(m))}</button>`).join('')}</div>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
-              <div class="zc-head">${icon('zone')}<h3>${named(z)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
-              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
+              <div class="zc-head">${icon('zone')}<h3>${title}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
+              ${wayChips}
+              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : `<div class="np-art placeholder zc-ph" aria-hidden="true">${icon('zone')}</div>`}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" data-repeat title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
@@ -7412,7 +7527,7 @@
                 ? row('Homeserver', `<code>${esc(t.homeserver_domain || '')}</code>${t.published === false ? ' · not published yet' : t.published ? ' · published: Pubky apps find it at this address' : ''}`, yes(t.homeserver_reachable, 'Reachable', 'Not reachable'))
                   + (t.music_hostname ? row('This node', `<code>${esc(t.music_hostname)}</code>`, yes(t.music_reachable, 'Reachable', 'Not reachable')) : '')
                   + (t.restart_needed ? `<div class="notice warn" role="status">Restart the homeserver once so it publishes the address. ${t.restart_hint ? esc(t.restart_hint) : `On the machine, in <code>deploy/bundle</code>: <code>${esc(t.restart_command || '')}</code> <button class="btn sm ghost" data-copylink="${esc(t.restart_command || '')}">Copy</button>`}</div>` : '')
-                  + row('Check from outside', 'Opens both addresses over HTTPS, as someone outside your network would.', '<button class="btn" id="rtcheck">Check now</button>')
+                  + row('Check from the internet', 'Opens both addresses over HTTPS, as someone on the internet would.', '<button class="btn" id="rtcheck">Check now</button>')
                 : row('Not set up', 'Reach this node and its homeserver from anywhere, with no open ports or static IP.', ''))
               + block(t.configured ? 'Change the tunnel' : 'Set up', 'In Cloudflare Zero Trust › Networks › Tunnels, create a tunnel and give it two public hostnames: one to <code>http://localhost:6286</code> (the homeserver), one to <code>http://localhost:7788</code> (this node). Paste the tunnel’s token and the hostnames here. With the compose bundle, start cloudflared once: <code>docker compose --profile tunnel up -d</code> (the bare-metal install starts it by itself).', `<form class="stack" id="rtform"><input class="input" id="rttoken" type="password" autocomplete="off" placeholder="${t.configured ? 'Tunnel token (saved; paste to replace)' : 'Tunnel token'}" aria-label="Cloudflare tunnel token"><input class="input" id="rths" placeholder="Homeserver hostname, e.g. pubky.example.org" aria-label="Homeserver hostname" value="${esc(t.homeserver_domain || '')}"><input class="input" id="rtmusic" placeholder="This node’s hostname (optional), e.g. music.example.org" aria-label="This node's hostname" value="${esc(t.music_hostname || '')}"><div class="actions"><button class="btn primary" id="rtsave" type="submit">Save tunnel</button>${t.configured ? '<button class="btn ghost" id="rtdel" type="button">Remove tunnel</button>' : ''}</div></form>`))
               + group('Other ways', row('Your own domain', 'A static IP, ports 80, 443 and 6287 forwarded, and Caddy in front: see “With its own Pubky homeserver” in the deploy guide (docs/deploy.md).', ''));

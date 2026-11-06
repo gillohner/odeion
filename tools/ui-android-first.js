@@ -16,6 +16,8 @@
 //     it is working, and after 5 s without an answer says so and offers Try again and another node;
 //   * Home doesn't move while it loads: opened again, each row's placeholder is the size it had
 //     (covers as tiles, songs as rows, Pubky rows their height), so every header stays within 4 px.
+//   * the bottom bar keeps the tab a page was opened from: an album from Home leaves Home marked (not
+//     Library), and so do Back and Forward; the same album opened on its own is Library's.
 //   node tools/ui-android-first.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -171,6 +173,39 @@ const pull = (page, sel, dy) => page.$eval(sel, (el, dy) => {
       check(before.length > 3 && !moved.length, `${w}: Home opened again doesn't move while it loads (${before.length} headers${moved.length ? `; moved: ${moved.map(([t, d]) => `${t} ${d}`).join(', ')}` : ''})`);
       await context.close();
     }
+  }
+  // The tab a page was opened from stays marked (the owner, 2026-11-06: an album opened from Home
+  // marked Library while Back said Home)
+  {
+    const album = { ...fx.track.album, album_artist: 'Sefa', year: 2017 };
+    let slow = false; // (the node's /info held back: what the bar marks before the node answers)
+    const { page, context } = await fx.create(browser, 390, { mobile: true, delay: (v) => (slow && v === '/info' ? 2500 : 0), fixtures: { ...fixtures, '/library/home': { body: { recently_played: [album], recently_added: [album], forgotten: [] } } } });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const marked = () => page.evaluate(() => [...document.querySelectorAll('.bnav.on')].map((b) => b.dataset.bnav + (b.getAttribute('aria-current') === 'page' ? '' : '(no aria-current)')).join(','));
+    const settle = async (pathNot) => { const ok = await page.waitForFunction((p) => location.pathname !== p && document.querySelector('#main') && !document.querySelector('#main > .skeleton'), pathNot, { timeout: 6000 }).then(() => true, () => false); check(ok, `the tabs: the page left ${pathNot}`); await sleep(250); };
+    slow = true; await page.goto(fx.ORIGIN + '/', { waitUntil: 'domcontentloaded' }); await page.waitForSelector('.bnav'); await sleep(300);
+    check(await marked() === 'home' && !(await page.$('#h-played .tile:not(.sk-tile)')), `the tabs: Home is marked before the node answers (${await marked()})`);
+    slow = false; await page.waitForSelector('#h-played .tile:not(.sk-tile)');
+    check(await marked() === 'home', `the tabs: Home marks Home (${await marked()})`);
+    await page.locator('#h-played .tile:not(.sk-tile)').first().click(); await settle('/');
+    const albumPath = await page.evaluate(() => location.pathname + location.search);
+    check(albumPath !== '/' && await marked() === 'home', `an album opened from Home keeps Home marked, not Library (${albumPath}: ${await marked()})`);
+    await page.goBack(); await page.waitForFunction(() => location.pathname === '/'); await sleep(250);
+    check(await marked() === 'home', `Back to Home marks Home (${await marked()})`);
+    await page.goForward(); await page.waitForFunction((p) => location.pathname + location.search === p, albumPath); await sleep(250);
+    check(await marked() === 'home', `Forward to the album marks Home again, from its history entry (${await marked()})`);
+    // (the album page drawn: the boot's own navigation has marked the bar, not only the start-up mark)
+    await page.reload(); await page.waitForFunction(() => document.querySelector('#main > :not(.skeleton)') && !document.querySelector('#main > .skeleton')); await sleep(400);
+    check(await marked() === 'home', `a reload of the album opened from Home keeps Home marked (${await marked()})`);
+    await page.goBack(); await page.waitForFunction(() => location.pathname === '/'); await sleep(250);
+    check(await marked() === 'home', `…and Back from it marks Home (${await marked()})`);
+    await page.goForward(); await page.waitForFunction((p) => location.pathname + location.search === p, albumPath); await sleep(250);
+    await page.locator('.bnav[data-bnav="zones"]').click(); await settle(albumPath);
+    check(await marked() === 'zones', `Zones marks Zones (${await marked()})`);
+    await fx.go(page, albumPath); await page.waitForSelector('#main'); await sleep(400);
+    check(await marked() === 'library', `the album opened on its own (a link, a reload) is Library's (${await marked()})`);
+    await page.screenshot({ path: path.join(SHOTS, 'tabs-album-cold-390.png') });
+    await context.close();
   }
   await browser.close();
   console.log(failed ? `${failed} failed` : 'all passed'); console.log(`screenshots: ${SHOTS}`);
