@@ -349,8 +349,19 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         })
         .await?;
         if !found.is_empty() {
-            tracing::info!(count = found.len(), "UPnP renderers found");
+            let upnp = found
+                .iter()
+                .filter(|id| id.to_string().starts_with("upnp:"))
+                .count();
+            tracing::info!(count = found.len(), upnp, "outputs found");
         }
+        // Renderers that had a zone come back at their last address (in the background: the start
+        // doesn't wait on one that is off), and ones that answer late (a TV, a Linn waking its UPnP
+        // side) get their zones without a rescan
+        state.spawn_upnp_watch(
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(300),
+        );
     }
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
