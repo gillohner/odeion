@@ -10,8 +10,9 @@
 //!   once.
 //!
 //! Each request carries a [`Caller`] (an extension) for handlers that care who is asking.
-//! Listeners' own playlists, bookmarks and history (on their own homeserver) come with the
-//! node agent's per-person sync; until then a listener's writes to them are refused.
+//! A listener's own bookmarks live on their own homeserver, through the grant they give the
+//! node (personal.rs, `/v1/me/homeserver`). Their own playlists and history come later; until
+//! then a listener's writes to those are refused.
 
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
@@ -673,10 +674,14 @@ const OWNER_ONLY: &[&str] = &[
 ];
 
 /// What a listener may read: the shared library, public catalogues and directories, their
-/// zones, and who they are. Everything else (the owner's bookmarks, playlists, tags, reviews,
-/// history, podcast subscriptions and streaming accounts) stays the owner's.
+/// zones, who they are and their own bookmarks (bookmarks.rs answers each person's own).
+/// Everything else (the owner's bookmarks, playlists, tags, reviews, history, podcast
+/// subscriptions and streaming accounts) stays the owner's.
 const LISTENER_READS: &[&str] = &[
     "/me",
+    "/bookmarks",
+    // The same, by its older name (the page and the offline app's sync still use it)
+    "/favourites",
     "/events",
     "/info",
     "/status",
@@ -857,7 +862,11 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     if path == "/presence/along" {
         return None;
     }
-    Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")
+    // Their own bookmarks, on their own homeserver (bookmarks.rs answers each person's)
+    if path == "/bookmarks" || path == "/favourites" {
+        return None;
+    }
+    Some("listeners' own playlists and history are not built yet; this change would land in the owner's")
 }
 
 /// The request's caller, from its token: the API token or an owner's browser session is the
@@ -1022,6 +1031,7 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
             }
         }
     }
+    crate::personal::forget(s, key);
     let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
     crate::tidal::forget_streams_of(&on_node);

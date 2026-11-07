@@ -185,6 +185,8 @@ pub struct NodeState {
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
     pub renewals: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Listeners' homeservers as a test stands them in (personal.rs); none: their grants.
+    personal_homeserver: Mutex<Option<Arc<dyn crate::personal::PersonalHomeserver>>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
     pub events: crate::events::EventBus,
@@ -468,6 +470,7 @@ impl NodeState {
             login: tokio::sync::Mutex::new(None),
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             renewals: Default::default(),
+            personal_homeserver: Mutex::new(None),
             upload_jobs: Default::default(),
             pinakes_caps: Default::default(),
             copy_seams: Default::default(),
@@ -2082,6 +2085,15 @@ impl NodeState {
                 }
             }
         }
+    }
+
+    /// Listeners' homeservers through something else than their grants: a test's fake.
+    pub fn set_personal_homeserver(&self, h: Arc<dyn crate::personal::PersonalHomeserver>) {
+        *self.personal_homeserver.lock().expect("personal lock") = Some(h);
+    }
+
+    pub(crate) fn personal_override(&self) -> Option<Arc<dyn crate::personal::PersonalHomeserver>> {
+        self.personal_homeserver.lock().expect("personal lock").clone()
     }
 
     pub fn sync_handle(&self) -> Option<Arc<crate::sync::PubkySync>> {

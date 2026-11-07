@@ -303,8 +303,9 @@ impl NodeHomeserver {
                 None => unknown.push(path),
             }
         }
+        // A bookmark removed between the listing and its fetch (in another app) is simply gone
         for (path, bytes) in self
-            .fetch_many(&user, unknown, Visibility::Private, Some(session))
+            .fetch_present(&user, unknown, Visibility::Private, Some(session))
             .await?
         {
             if let Some((uri, created_at)) = crate::v1::music_bookmark(&path, &bytes) {
@@ -333,6 +334,33 @@ impl NodeHomeserver {
             .collect()
             .await;
         results.into_iter().map(|(p, r)| r.map(|b| (p, b))).collect()
+    }
+
+    /// [`Self::fetch_many`], leaving out a file that is gone (404) since it was listed.
+    async fn fetch_present(
+        &self,
+        user: &PublicKey,
+        paths: Vec<String>,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<(String, Vec<u8>)>, HomeserverError> {
+        use futures_util::StreamExt;
+        let results: Vec<(String, Result<Vec<u8>, HomeserverError>)> = futures_util::stream::iter(paths)
+            .map(|path| async move {
+                let r = self.fetch(user, &path, visibility, session).await;
+                (path, r)
+            })
+            .buffered(FETCH_AT_ONCE)
+            .collect()
+            .await;
+        results
+            .into_iter()
+            .filter_map(|(p, r)| match r {
+                Ok(b) => Some(Ok((p, b))),
+                Err(HomeserverError::Pubky(e)) if is_not_found(&e) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
     }
 
     async fn list_paths(

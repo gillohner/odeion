@@ -6,6 +6,12 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-07
 
+- **Listeners have their own bookmarks, on their own homeserver** (owner's ask, 11-02 and 11-03).
+  - A listener approves the node once in Pubky Ring for their bookmarks and collections folders only (Settings › You › My homeserver, or the first heart). The node keeps that session only for the person who approved it, in a private file of its own; Disconnect, or People › Remove, forgets it.
+  - Their hearts and Favourites are theirs: written to their homeserver with their session, never into the owner's. When their homeserver doesn't answer, a change waits on the node and is written later; when it refuses the node (revoked in Ring), the page says so and asks them to approve it again.
+  - Settings › You lists their own streaming accounts (TIDAL, Qobuz, Spotify) with their own sign-in ways. What the node's owner sets up (the Spotify and Qobuz apps, the TIDAL device client) is never a listener's to see or change.
+  - The "your own come in a later version" sentence is gone. Their own collections come next.
+
 - **Looking for devices no longer adds the node's own zones as speakers, and late speakers find their zone by themselves** (a rescan on the NUC made five `<zone>-2` zones that would have played into the node itself, and a start missed the Linn's UPnP AV side and the TV). The zones the node offers as UPnP/DLNA renderers are recognised by their ID or their address and never taken as outputs, typed addresses included. At start the search asks three times within its window; each UPnP renderer that had a zone is remembered at its description address and found there when the search misses it; and the node looks again 20 s after starting and every 5 minutes, so a TV or a Linn that answers late gets its zone without pressing "Look for devices". A device that answered but couldn't be described now says so in the log.
 
 - **Leaving matches as they are: clearer Undo** (follow-ups from the reviews of "Reviewing matches is optional"). Pressing Undo says at once that the songs are coming back, and on the review page the focus returns to the page, not its body. An album's Undo says it brings back that album's skipped songs (earlier ones too). **Bring back N skipped** asks for a second press, since it undoes every "Leave as is" at once. While Identify runs, the card doesn't offer Skip all unsure (its redraws could take a press twice).

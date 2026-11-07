@@ -756,6 +756,9 @@ jobs:
       - name: People on phones and tablets (invite cards, paste and scan a key, folds, tag chips to touch; 390 and 768)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-people.js ci-token http://127.0.0.1:7788
+      - name: a listener's own bookmarks and sign-ins (connect, lost, pending, Settings › You; 1280, 820 and 390)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-listener-library.js ci-token http://127.0.0.1:7788
       - name: tags in the top card (two scopes, pubky.app chips and taggers, overflow, unmatched; 1280, 820 and 390)
         timeout-minutes: 8
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-tags-hero.js ci-token http://127.0.0.1:7788
