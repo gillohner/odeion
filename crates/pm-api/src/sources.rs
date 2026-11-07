@@ -174,22 +174,30 @@ impl NodeSources {
     }
 }
 
+/// How long a stream's server may take to answer, and to send the next bytes of its body,
+/// before the open or the read fails: a server that never answers ends the track with an error
+/// instead of holding the zone.
+pub(crate) const STREAM_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The settings of every blocking stream client. reqwest's blocking `timeout` is not a total
+/// deadline: it bounds the wait for the response headers and then each body read on its own, so
+/// a live stream still plays for as long as it sends. (`bytes()`, `text()` and `json()` read the
+/// whole body under one wait; requests that read big bodies that way set their own.)
+fn stream_client_builder(wait: std::time::Duration) -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Dead peers are noticed by keepalive; the body reader thread
+        // then ends instead of lingering until the OS gives up.
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .timeout(wait)
+}
+
 /// Blocking HTTP client for stream sources, built on first use on the audio
-/// thread (never inside a tokio runtime). No overall timeout: a live stream
-/// never ends. A stalled server keeps the zone waiting until it stops it.
+/// thread (never inside a tokio runtime), with [`STREAM_WAIT`].
 pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            // Dead peers are noticed by keepalive; the body reader thread
-            // then ends instead of lingering until the OS gives up.
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-            .timeout(None)
-            .build()
-            .expect("http client")
-    })
+    CLIENT.get_or_init(|| stream_client_builder(STREAM_WAIT).build().expect("http client"))
 }
 
 /// How long a live stream may go silent before the track ends with an error
@@ -526,11 +534,7 @@ fn literal_ok(url: &url::Url, reach: FetchLimit) -> bool {
 /// A client for one guarded stream: its resolver and every redirect keep to `reach`; no proxy
 /// (a proxy would resolve the name itself).
 fn guarded_client(reach: FetchLimit) -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .tcp_keepalive(std::time::Duration::from_secs(30))
-        .timeout(None)
+    stream_client_builder(STREAM_WAIT)
         .no_proxy()
         .dns_resolver(std::sync::Arc::new(GuardResolver(reach)))
         .redirect(reqwest::redirect::Policy::custom(move |a| {
@@ -1044,6 +1048,106 @@ mod tests {
         let mut out = String::new();
         r.read_to_string(&mut out).unwrap();
         assert_eq!(out, "xyz");
+    }
+
+    /// A test server on 127.0.0.1: each connection gets `serve` on its own thread.
+    fn serve_each(serve: fn(std::net::TcpStream)) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/live", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                std::thread::spawn(move || serve(c));
+            }
+        });
+        url
+    }
+
+    /// `f` on its own thread, failed after `limit` instead of hanging the test run.
+    fn within<T: Send + 'static>(limit: std::time::Duration, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(limit).expect("still waiting: no deadline")
+    }
+
+    fn read_request(c: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let mut got = Vec::new();
+        while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+            match c.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_that_never_answers_fails_to_open() {
+        // Accepts, reads the request, never writes a byte
+        let url = serve_each(|mut c| {
+            read_request(&mut c);
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            drop(c);
+        });
+        let wait = std::time::Duration::from_millis(400);
+        let client = stream_client_builder(wait).build().unwrap();
+        let t = std::time::Instant::now();
+        let r = within(std::time::Duration::from_secs(10), move || {
+            open_http_stream_via(&client, &url, &[], None, None).map(|_| ())
+        });
+        assert!(r.is_err(), "no answer is an error");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_stream_wait_is_per_read_not_a_total() {
+        use std::io::{Read, Write};
+        let wait = std::time::Duration::from_millis(600);
+        // Headers after half the wait, then a chunk every half wait for four waits: it all arrives
+        let url = serve_each(|mut c| {
+            read_request(&mut c);
+            let half = std::time::Duration::from_millis(300);
+            std::thread::sleep(half);
+            let _ = c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            for _ in 0..8 {
+                std::thread::sleep(half);
+                if c.write_all(b"4\r\nabcd\r\n").and_then(|_| c.flush()).is_err() {
+                    return;
+                }
+            }
+            let _ = c.write_all(b"0\r\n\r\n");
+        });
+        let client = stream_client_builder(wait).build().unwrap();
+        let (n, took) = within(std::time::Duration::from_secs(15), move || {
+            let t = std::time::Instant::now();
+            let mut resp = client.get(&url).send().expect("headers within the wait");
+            let mut body = Vec::new();
+            resp.read_to_end(&mut body).expect("each chunk within the wait");
+            (body.len(), t.elapsed())
+        });
+        assert_eq!(n, 32);
+        assert!(took > wait * 3, "longer than the wait in all: {took:?}");
+        // A body that stops for longer than the wait fails the read
+        let url = serve_each(|mut c| {
+            read_request(&mut c);
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n");
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        });
+        let client = stream_client_builder(wait).build().unwrap();
+        let r = within(std::time::Duration::from_secs(10), move || {
+            let mut resp = client.get(&url).send().unwrap();
+            let mut body = Vec::new();
+            resp.read_to_end(&mut body).map(|_| body.len())
+        });
+        assert!(r.is_err(), "a silent body fails after the wait: {r:?}");
     }
 
     #[test]
