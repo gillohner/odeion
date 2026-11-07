@@ -942,6 +942,15 @@ impl NodeState {
         Arc::new(move |item: &pm_zones::QueueItem| {
             let mut meta = pm_zones::TrackMeta::from_item(item);
             let Some(s) = state.upgrade() else { return meta };
+            // A library cover by its node link (the web UI's queue items): the keyed art link
+            // a renderer can fetch, instead of a link only a signed-in browser could
+            if meta.image.is_none() {
+                meta.image = item
+                    .image
+                    .as_deref()
+                    .and_then(cover_album_id)
+                    .map(|aid| s.art_url(aid));
+            }
             let id = item
                 .uri
                 .strip_prefix(crate::sources::TRACK_SCHEME)
@@ -2224,6 +2233,13 @@ fn volume_poll() -> std::time::Duration {
 /// Where a zone's crossfade length (ms) is kept.
 pub fn crossfade_key(zone: &ZoneId) -> String {
     format!("crossfade/{}", zone.0)
+}
+
+/// The album of a node cover link, `/v1/library/albums/{id}/cover` (with or without a query).
+fn cover_album_id(link: &str) -> Option<i64> {
+    let rest = link.strip_prefix("/v1/library/albums/")?;
+    let (id, tail) = rest.split_once('/')?;
+    (tail == "cover" || tail.starts_with("cover?")).then(|| id.parse().ok())?
 }
 
 fn queue_key(id: &ZoneId) -> String {

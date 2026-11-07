@@ -63,7 +63,85 @@ impl FetchLimit {
     }
 }
 
+/// Where a node link's `token` query parameter sits: the start of the query (`?`), and the
+/// parameter's first and last byte. A node link is `/v1/…`, or an absolute URL whose path starts
+/// with `/v1/`.
+fn node_link_token_span(link: &str) -> Option<(usize, usize, usize)> {
+    let path = if link.starts_with("/v1/") {
+        0
+    } else {
+        let host = ["http://", "https://"]
+            .iter()
+            .find(|s| link.starts_with(*s))?
+            .len();
+        let slash = host + link[host..].find('/')?;
+        if slash == host || !link[slash..].starts_with("/v1/") {
+            return None;
+        }
+        slash
+    };
+    let q = path + link[path..].find('?')?;
+    let end = link[q..].find('#').map_or(link.len(), |h| q + h);
+    let mut at = q + 1;
+    for p in link[q + 1..end].split('&') {
+        if p == "token" || p.starts_with("token=") {
+            return Some((q, at, at + p.len()));
+        }
+        at += p.len() + 1;
+    }
+    None
+}
+
+/// The `token` query parameter's value of a link on the node (`/v1/…`, or an absolute URL whose
+/// path starts with `/v1/`), when it has one.
+pub fn node_link_token(link: &str) -> Option<&str> {
+    let (_, from, to) = node_link_token_span(link)?;
+    Some(
+        link[from..to]
+            .strip_prefix("token")
+            .map_or("", |v| v.strip_prefix('=').unwrap_or("")),
+    )
+}
+
+/// A link on the node without its `token` query parameter; `None` when it has none. The node's
+/// own links never carry a sign-in: a zone's queue is read by everyone who may use the zone,
+/// saved across restarts and shown by renderers.
+pub fn node_link_without_token(link: &str) -> Option<String> {
+    let (q, from, _) = node_link_token_span(link)?;
+    let end = link[q..].find('#').map_or(link.len(), |h| q + h);
+    let mut kept = Vec::new();
+    let mut at = q + 1;
+    for p in link[q + 1..end].split('&') {
+        if at != from && !p.is_empty() {
+            kept.push(p);
+        }
+        at += p.len() + 1;
+    }
+    let mut out = link[..q].to_string();
+    if !kept.is_empty() {
+        out.push('?');
+        out.push_str(&kept.join("&"));
+    }
+    out.push_str(&link[end..]);
+    Some(out)
+}
+
 impl QueueItem {
+    /// Drops the `token` query parameter from the item's node links (`uri`, `image`). Whether
+    /// anything changed.
+    pub fn without_node_token(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(u) = node_link_without_token(&self.uri) {
+            self.uri = u;
+            changed = true;
+        }
+        if let Some(i) = self.image.as_deref().and_then(node_link_without_token) {
+            self.image = Some(i);
+            changed = true;
+        }
+        changed
+    }
+
     pub fn new(uri: impl Into<String>) -> Self {
         Self {
             id: 0,
@@ -219,6 +297,8 @@ impl Queue {
                 self.next_id += 1;
                 it.id = self.next_id;
                 ids.push(it.id);
+                // Every way into a queue passes here: a node link never keeps a sign-in
+                it.without_node_token();
                 it
             })
             .collect();
@@ -476,6 +556,51 @@ mod tests {
         let v = q.version();
         assert_eq!(q.add(vec![], Insert::End), Vec::<u64>::new());
         assert_eq!(q.version(), v);
+    }
+
+    #[test]
+    fn node_links_lose_their_token_on_the_way_in() {
+        let t = |l: &str| node_link_without_token(l);
+        assert_eq!(
+            t("/v1/library/albums/7/cover?token=pmo_abc").as_deref(),
+            Some("/v1/library/albums/7/cover")
+        );
+        assert_eq!(
+            t("http://192.168.1.5:7788/v1/library/albums/7/cover?token=s3cret#x").as_deref(),
+            Some("http://192.168.1.5:7788/v1/library/albums/7/cover#x")
+        );
+        assert_eq!(
+            t("/v1/sources/tidal/stream/9?q=1&token=t&k=2").as_deref(),
+            Some("/v1/sources/tidal/stream/9?q=1&k=2")
+        );
+        assert_eq!(t("/v1/x?token").as_deref(), Some("/v1/x"));
+        assert_eq!(node_link_token("/v1/x?a=1&token=pml_z"), Some("pml_z"));
+        assert_eq!(node_link_token("/v1/x?token"), Some(""));
+        // Not the node's links, or no token: untouched
+        for l in [
+            "track:1",
+            "/v1/library/albums/7/cover",
+            "https://cdn.example/img.jpg?token=theirs",
+            "https://example.com/v1x?token=a",
+            "file:///v1/x?token=a",
+            "/music/a.flac?token=a",
+            "/v1/x?mytoken=a",
+        ] {
+            assert_eq!(t(l), None, "{l}");
+            assert_eq!(node_link_token(l), None, "{l}");
+        }
+        let mut q = Queue::default();
+        let mut it = QueueItem::new("/v1/library/tracks/1/file?token=pmo_abc");
+        it.image = Some("/v1/library/albums/7/cover?token=pmo_abc".into());
+        let mut other = QueueItem::new("https://radio.example/live?token=theirs");
+        other.image = Some("https://cdn.example/a.jpg".into());
+        q.add(vec![it, other.clone()], Insert::End);
+        assert_eq!(q.items()[0].uri, "/v1/library/tracks/1/file");
+        assert_eq!(q.items()[0].image.as_deref(), Some("/v1/library/albums/7/cover"));
+        assert_eq!(
+            (&q.items()[1].uri, &q.items()[1].image),
+            (&other.uri, &other.image)
+        );
     }
 
     #[test]

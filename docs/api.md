@@ -4,7 +4,7 @@ The node also serves a built-in browser controller at `/` (one static page over 
 search, play to any zone or in the browser itself, queue, playlists, discover, settings).
 
 HTTP + WebSocket served by `pm-node serve` on `[api] listen` (default `127.0.0.1:7788`).
-Set `[api] token` to require `Authorization: Bearer <token>` (or `?token=` on the WebSocket).
+Set `[api] token` to require `Authorization: Bearer <token>` (or `?token=` on what a browser loads by address: the WebSocket, a song's file or download, covers, pictures and avatars, a service stream; nowhere else).
 Without one, a node listening beyond localhost makes its own on first start (`<data_dir>/api-token`, 0600); a documented placeholder such as `change-me` is never used as the token. Remote access by pubkey (M5) wraps this API.
 
 | Method | Path | Body / query | Returns |

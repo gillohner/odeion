@@ -1111,7 +1111,7 @@ pub async fn listener_response(resp: axum::response::Response, roots: &[String])
     let rewritten = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|mut v| {
-            (hide_file_paths(&mut v) | hide_paths_under(&mut v, roots))
+            (hide_file_paths(&mut v) | hide_paths_under(&mut v, roots) | hide_node_tokens(&mut v))
                 .then(|| serde_json::to_vec(&v).ok())
                 .flatten()
         });
@@ -1123,6 +1123,115 @@ pub async fn listener_response(resp: axum::response::Response, roots: &[String])
         None => bytes.into(),
     };
     axum::response::Response::from_parts(parts, body)
+}
+
+/// Every link on the node (`/v1/…`) in the answer loses its `token` query parameter: a queue
+/// item's cover or stream link made by a browser never hands that browser's sign-in to whoever
+/// else reads the zone. Queues drop it on the way in (`pm_zones::QueueItem::without_node_token`);
+/// this is the second look, on every answer. Whether anything changed.
+pub fn hide_node_tokens(v: &mut serde_json::Value) -> bool {
+    use serde_json::Value;
+    match v {
+        Value::String(t) => match pm_zones::node_link_without_token(t) {
+            Some(clean) => {
+                *t = clean;
+                true
+            }
+            None => false,
+        },
+        Value::Object(o) => o.values_mut().fold(false, |c, x| hide_node_tokens(x) | c),
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_node_tokens(x) | c),
+        _ => false,
+    }
+}
+
+/// What cleaning the saved queues at start found: how many items carried a sign-in in one of
+/// their node links, and what ended because of it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CleanedQueues {
+    pub items: usize,
+    /// The owner's browser sessions and device sign-ins ended (one of theirs, or the API token,
+    /// was in a saved queue).
+    pub owner_sessions_ended: bool,
+    /// The node's API token itself was in a saved queue: it can only be replaced by hand.
+    pub api_token_found: bool,
+    /// Listeners' tokens that were in a saved queue and ended.
+    pub listener_tokens_ended: usize,
+}
+
+/// At start, before the zones restore their queues: every saved queue (`queue.*`) loses the
+/// `token` query parameter of its node links, and whatever sign-in was in one ends, since the
+/// queue was readable by everyone who could use the zone. Browsers and apps sign in again by
+/// themselves; the API token is the owner's to replace (Settings).
+pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
+    let mut out = CleanedQueues::default();
+    let mut found: Vec<String> = Vec::new();
+    let lib = s.library.lock().expect("library poisoned");
+    for (key, json) in lib.settings_with_prefix("queue.")? {
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let Some(items) = v.get_mut("items").and_then(|i| i.as_array_mut()) else {
+            continue;
+        };
+        let mut n = 0;
+        for it in items.iter_mut() {
+            let mut carried = false;
+            for f in ["uri", "image"] {
+                if let Some(serde_json::Value::String(link)) = it.get_mut(f) {
+                    if let Some(t) = pm_zones::node_link_token(link) {
+                        found.push(t.to_string());
+                        carried = true;
+                    }
+                    if let Some(clean) = pm_zones::node_link_without_token(link) {
+                        *link = clean;
+                    }
+                }
+            }
+            n += usize::from(carried);
+        }
+        if n > 0 {
+            out.items += n;
+            lib.set_setting(&key, &v.to_string())?;
+        }
+    }
+    if found.is_empty() {
+        return Ok(out);
+    }
+    let api = s.token();
+    let mut listener_keys = Vec::new();
+    for t in &found {
+        if api.as_deref() == Some(t.as_str()) {
+            out.api_token_found = true;
+        }
+        if let Some(h) = t.strip_prefix("pml_").map(|_| hash(t)) {
+            let key = update_in(&lib, TOKENS, |all| {
+                let key = all.iter().find(|x| x.hash == h).map(|x| x.key.clone());
+                all.retain(|x| x.hash != h);
+                key
+            })?;
+            if let Some(key) = key {
+                out.listener_tokens_ended += 1;
+                listener_keys.push(key);
+            }
+        } else {
+            // An owner's browser session or device sign-in, the API token, or something older:
+            // the owner's sessions end once, as with Make a new token
+            out.owner_sessions_ended = true;
+        }
+    }
+    if out.owner_sessions_ended {
+        update_in(&lib, OWNER_SESSIONS, Vec::clear)?;
+        update_in(&lib, DEVICE_SESSIONS, Vec::clear)?;
+    }
+    drop(lib);
+    if out.owner_sessions_ended {
+        s.usage.revoke_owner();
+    }
+    for key in listener_keys {
+        s.usage.revoke_listener(&key);
+    }
+    Ok(out)
 }
 
 /// Replaces the folder part of every library file's path with nothing, leaving the file name:
@@ -1352,6 +1461,35 @@ pub(crate) async fn set_my_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_links_in_an_answer_lose_their_token() {
+        let mut v = serde_json::json!({
+            "queue": [
+                {"uri": "track:1", "image": "/v1/library/albums/7/cover?token=pmo_abc"},
+                {"uri": "http://127.0.0.1:7788/v1/library/tracks/1/file?token=s3cret", "image": null},
+                {"uri": "https://radio.example/live?token=theirs", "image": "https://cdn.example/a.jpg"}
+            ],
+            "now_playing": {"item": {"image": "/v1/library/albums/7/cover?a=1&token=pml_x#f"}},
+            "error": "no token here"
+        });
+        assert!(hide_node_tokens(&mut v));
+        let text = v.to_string();
+        for t in ["pmo_abc", "s3cret", "pml_x"] {
+            assert!(!text.contains(t), "{t}: {text}");
+        }
+        assert_eq!(v["queue"][0]["image"], "/v1/library/albums/7/cover");
+        assert_eq!(
+            v["queue"][1]["uri"],
+            "http://127.0.0.1:7788/v1/library/tracks/1/file"
+        );
+        assert_eq!(v["queue"][2]["uri"], "https://radio.example/live?token=theirs");
+        assert_eq!(
+            v["now_playing"]["item"]["image"],
+            "/v1/library/albums/7/cover?a=1#f"
+        );
+        assert!(!hide_node_tokens(&mut v), "nothing left to hide");
+    }
 
     /// A library song's open error names its file only in its text: under the library's folders
     /// it is cut to the file name, links are left alone (review of #177).

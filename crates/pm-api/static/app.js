@@ -161,7 +161,7 @@
   // Art for a queue item: a streaming source's image, else the library album cover; a badge for
   // where it plays from (`svc`; null for none), quiet when the art sits in a button.
   const itemArt = (it, cls = '', svc = null, quiet = false) => {
-    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
+    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(imgSrc(it.image))}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
     return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls, svc, quiet);
   };
   // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then. Returns that button
@@ -2129,7 +2129,7 @@
     if (!hasMediaSession) return;
     try {
       const albumId = albumIdOf(it);
-      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: it.image ? [{ src: it.image, sizes: '640x640' }] : albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
+      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: it.image ? [{ src: imgSrc(it.image), sizes: '640x640' }] : albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
     } catch { /* metadata is a nicety */ }
   };
   if (hasMediaSession) {
@@ -4622,8 +4622,10 @@
   // Play through the node's connected services: the library, else the best service link
   // (`GET /v1/discover/play`); nothing connected offers Sources and a preview.
   // ---- one row, one tile, one menu (docs/ux/08-item-page.md) ----
+  // A node link with this browser's sign-in, for the places that load it (an <img>, MediaSession
+  // artwork). Never in data sent to the node: a queue item's image is kept as the page gave it.
   const imgSrc = (u) => (u && u.startsWith('/v1/') ? u + tokenQ() : u);
-  const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
+  const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: t.image || fallback.image || null });
   // Library tracks by id, in order and with duplicates: the ones a page already loaded come
   // from the track cache, the rest are read four at a time (not one request per song at once).
   const readTracks = async (ids) => {

@@ -1000,7 +1000,7 @@ async fn auth(
     next: middleware::Next,
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
-    let token = bearer(&headers, &query);
+    let token = bearer_for(&headers, &query, req.method(), req.uri().path());
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
         // (the page keeps it), it works again once the identity is. Log out still ends it, so the
@@ -1059,6 +1059,42 @@ async fn auth(
     } else {
         resp
     }
+}
+
+/// Where `?token=` stands in for the header: what a browser loads by address and can't set
+/// headers on (the WebSocket; a song's file or download, a cover, a picture, an avatar, a
+/// service stream). Everything else takes the header only, so a token in a link that is shared,
+/// saved or logged opens nothing else.
+fn token_in_query_ok(method: &axum::http::Method, path: &str) -> bool {
+    let path = path.strip_prefix("/v1").unwrap_or(path);
+    if path == "/events" {
+        return true;
+    }
+    matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)
+        && path
+            .split('/')
+            .any(|seg| matches!(seg, "file" | "download" | "cover" | "image" | "avatar" | "stream"))
+}
+
+/// The request's bearer token, or `?token=` on the routes a browser loads by address
+/// ([`token_in_query_ok`]).
+fn bearer_for(
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+    method: &axum::http::Method,
+    path: &str,
+) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| {
+            query
+                .get("token")
+                .cloned()
+                .filter(|_| token_in_query_ok(method, path))
+        })
 }
 
 /// The request's bearer token (or `?token=`, for WebSocket upgrades).
@@ -3722,6 +3758,8 @@ mod tests {
         );
         // Never reach the real Deezer API from tests; a closed port fails fast.
         *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
+        // As the node does at start (main.rs)
+        accounts::clean_saved_queues(&s).unwrap();
         s.zones_for_all_outputs();
         s
     }
@@ -6155,7 +6193,7 @@ mod tests {
             assert!(v.to_string().contains("Not for listeners"), "{v}");
         }
         // Playing on a zone: yes, until the owner limits listeners to another zone
-        let (_, zones) = call(&app, "GET", "/v1/zones?token=s3cret", None).await;
+        let (_, zones) = send("GET", "/v1/zones".into(), "s3cret".into(), None).await;
         let zid = zones[0]["id"].as_str().unwrap().to_string();
         let (st, v) = send(
             "POST",
@@ -12745,8 +12783,42 @@ exec sleep 300
             .body(Body::empty())
             .unwrap();
         assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        // `?token=` opens only what a browser loads by address: the event stream, a song's file
+        // or download, a cover, a picture, an avatar, a service stream (a token in a shared link
+        // opens nothing else)
         let (st, _) = call(&app, "GET", "/v1/info?token=s3cret", None).await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(&app, "GET", "/v1/zones?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(&app, "GET", "/v1/library/albums?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/zones/x/queue?token=s3cret",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "no writes by address");
+        for p in [
+            "/v1/library/artists/1/image",
+            "/v1/sources/jellyfin/cover/x",
+            "/v1/profiles/x/avatar",
+            "/v1/auth/pubky/owner/avatar",
+        ] {
+            let (st, _) = call(&app, "GET", &format!("{p}?token=s3cret"), None).await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED, "{p}: past the token check");
+        }
+        let (st, _) = call(&app, "GET", "/v1/library/albums/1/cover?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/library/tracks/1/file?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/library/tracks/1/download?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/sources/tidal/stream/1?token=s3cret", None).await;
+        assert_ne!(st, StatusCode::UNAUTHORIZED, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/events?token=s3cret", None).await;
+        assert_ne!(st, StatusCode::UNAUTHORIZED, "past the token check");
     }
 
     #[tokio::test]
@@ -22782,6 +22854,9 @@ exec sleep 300
 
     /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).
     mod release_sections;
+
+    /// Links on the node in a queue never carry a sign-in (their own file).
+    mod queue_links;
 
     /// A renderer's description (Linn-like, `udn`), served on 127.0.0.1 and counting its fetches;
     /// 503 until `ready` (a device not answering yet, on a port held all along).

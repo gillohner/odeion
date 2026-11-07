@@ -357,6 +357,7 @@ async fn send_for<T: Serialize>(
         Ok(mut j) => {
             crate::accounts::hide_file_paths(&mut j);
             crate::accounts::hide_paths_under(&mut j, roots);
+            crate::accounts::hide_node_tokens(&mut j);
             send_json(tx, &j).await
         }
         Err(_) => send_json(tx, v).await,
