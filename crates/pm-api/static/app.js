@@ -7809,22 +7809,30 @@
       const was = us.textContent; const disarm = () => { delete us.dataset.armed; us.textContent = was; };
       // (a key held down doesn't press it again and again)
       us.onkeydown = (e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault(); };
+      let armedAt = 0; let expire = null;
       us.onclick = (ev) => {
-        // (the clicks of one double-click are one press, however slow; a keyboard's press has detail 0)
+        // (the clicks of one double-click are one press, however slow; a keyboard's press has detail 0;
+        // a touch screen may give each tap of a double-tap detail 1, so a tap soon after the one that
+        // asked counts as part of it)
         if (ev && ev.detail > 1) return undefined;
-        if (!us.dataset.armed) { us.dataset.armed = '1'; us.textContent = `Bring back all ${n(c.skipped)}? Press again`; toast(`Press again to bring back all ${n(c.skipped)} skipped songs for review`); setTimeout(() => { if (us.isConnected && us.dataset.armed) disarm(); }, 4000); return undefined; }
+        if (us.dataset.sending) return undefined;
+        if (!us.dataset.armed) { us.dataset.armed = '1'; armedAt = Date.now(); us.textContent = `Bring back all ${n(c.skipped)}? Press again`; toast(`Press again to bring back all ${n(c.skipped)} skipped songs for review`); expire = setTimeout(() => { if (us.isConnected && us.dataset.armed && !us.dataset.sending) disarm(); }, 4000); return undefined; }
+        if (ev && ev.pointerType === 'touch' && Date.now() - armedAt < 500) return undefined;
+        // (sent: the card isn't drawn again under it until the answer, the 4 s no longer runs)
+        clearTimeout(expire); us.dataset.sending = '1';
         return busy(us, async () => {
           bringingBack();
-          let u; try { u = await api('POST', '/library/suggestions/unskip', { all: true }); } catch (e) { disarm(); throw e; }
+          let u; try { u = await api('POST', '/library/suggestions/unskip', { all: true }); } catch (e) { delete us.dataset.sending; disarm(); throw e; }
           toast(`${countOf(u.restored, 'songs')} back for review`); await renderIdentify();
-          // (the button is gone: the focus goes to the card's first control, if it was left on the page)
-          const f = [$('#idskipall'), $('#idrun'), $('#idbox [data-view="identify"]')].find((b) => b && !b.disabled); if (f && focusLeft()) f.focus();
+          // (the button is gone: the focus goes to the card's heading, which a held Enter can't press,
+          // if it was left on the page)
+          const blk = $('#idcard') && $('#idcard').closest('.set-block'); const h = blk && blk.querySelector('.set-name'); if (h && focusLeft()) { h.tabIndex = -1; h.focus(); }
         }, ev);
       };
     }
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
-    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); const ar = $('#idunskip'); if ((k && k.value) || (ch && ch.disabled) || (ar && ar.dataset.armed)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
+    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); const ar = $('#idunskip'); if ((k && k.value) || (ch && ch.disabled) || (ar && (ar.dataset.armed || ar.dataset.sending))) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
     if (p.running) idTimer = setTimeout(idAgain, 1500);
   };
   const watchScan = (info) => {

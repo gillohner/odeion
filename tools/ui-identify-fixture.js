@@ -316,6 +316,7 @@ const server = http.createServer(async (req, res) => {
       await sleep(300); // (a press a moment later, not part of the double-click)
       await page.locator('#idunskip').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and the second press brings them back`);
+      check(await until(async () => page.evaluate(() => !!document.activeElement && document.activeElement.matches('.set-block .set-name') && !!document.activeElement.closest('.set-block').querySelector('#idcard'))), `${W} …then the focus is on the card's title, which a held Enter can't press (${await page.evaluate(() => (document.activeElement && (document.activeElement.className || document.activeElement.tagName)) || '')})`);
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
       fx.log.length = 0;
       await page.goto(`${BASE}/library/node`);
@@ -344,7 +345,7 @@ const server = http.createServer(async (req, res) => {
       await until(async () => (await page.locator('#toast .toast-act').count()) === 1);
       await page.locator('#toast .toast-act').click();
       const movedTo = await page.evaluate(() => { const b = [...document.querySelectorAll('.nav-item, .bnav')].find((x) => x.getClientRects().length); if (!b) return ''; b.focus(); return b.dataset.view || b.dataset.bnav || ''; });
-      await until(async () => /back for review/.test(await page.locator('#toast').textContent()), 4000); await sleep(400);
+      check(await until(async () => /back for review/.test(await page.locator('#toast').textContent()), 4000), `${W} …the card's slow Undo is answered`); await sleep(400);
       check(await page.evaluate((v) => !!document.activeElement && (document.activeElement.dataset.view === v || document.activeElement.dataset.bnav === v), movedTo), `${W} the card's Undo leaves a focus moved meanwhile where it was put (${movedTo}; now ${await page.evaluate(() => (document.activeElement && (document.activeElement.dataset.view || document.activeElement.dataset.bnav || document.activeElement.id || document.activeElement.tagName)) || '')})`);
       // A node without the route (405: the path is another method's route there) says to update it
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 0, outdated: 0, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: { 'POST /library/suggestions/skip': async () => [405, {}] } });
