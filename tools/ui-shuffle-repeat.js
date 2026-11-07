@@ -17,7 +17,8 @@
 //   * the zone's loads and toggles go one after another, in the order asked: a toggle after a queued
 //     Shuffle turns it off, a queued load takes the repeat set meanwhile, and a press shows at once;
 //   * a page with no songs of its own (found elsewhere) loads what is found with the mode asked for, and
-//     keeps its turn among the zone's changes while it is found (its mode pending meanwhile); an add to the queue waits for a load
+//     keeps its turn among the zone's changes while it is found (its mode pending meanwhile, and its
+//     load never putting that mode back over a newer press); a repeat press waits its turn too; an add to the queue waits for a load
 //     asked before it; a playlist's Play counts as asking shuffle off; a toggle the node refuses
 //     shows the mode as it is;
 //   * Shuffle starts on a random song (on the zone and here: not always the first, over three);
@@ -64,6 +65,9 @@ const pressMode = async (page, which) => {
   if (await np.count() && await np.isVisible()) return np.click();
   return page.locator(which === 'shuffle' ? '#shufflebtn' : '#repeatbtn').click();
 };
+// A press that lands now: Now playing redraws while a load is on its way, and a click that waits for a
+// settled button lands after it; this one goes as soon as the button has its handler
+const pressNow = (page, which) => until(async () => page.evaluate((which) => { const b = document.querySelector(`#nowplaying:not([hidden]) [data-npt="${which}"]`) || document.querySelector(which === 'shuffle' ? '#shufflebtn' : '#repeatbtn'); if (!b || !b.onclick) return false; b.click(); return true; }, which), 1500);
 const openNp = async (page, w) => { if (await page.locator('#nowplaying:not([hidden])').count()) return; await page.click(w >= 600 && await page.locator('#npart').isVisible() ? '#npart' : '#np'); await page.waitForSelector('#nowplaying:not([hidden])'); await sleep(250); };
 const closeNp = async (page) => { if (!(await page.locator('#nowplaying:not([hidden])').count())) return; await page.keyboard.press('Escape'); await until(async () => !(await page.locator('#nowplaying:not([hidden])').count()), 2000); };
 const saved = (page) => page.evaluate(() => { try { return { q: JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').map((it) => it.uri), at: JSON.parse(localStorage.getItem('pm.browserAt') || 'null'), shuffle: localStorage.getItem('pm.shuffle'), repeat: localStorage.getItem('pm.repeat') }; } catch { return null; } });
@@ -223,11 +227,15 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await until(async () => allAre((await modes(page)).shuffle, false, 'Shuffle: off')), `${T} …and every copy shows the mode as it is: ${say((await modes(page)).shuffle)}`);
         await closeNp(page);
         // An add to the queue waits for the load asked before it
-        const n3 = sent.length; slowLoad = 700;
+        const n3 = sent.length; slowLoad = 4000;
         await page.click('#smplay'); await sleep(50);
         await rowMenu(page, 'Song 4', 'Add to queue');
+        if (!(await page.locator('#repeatbtn').isVisible())) await openNp(page, w);
+        await pressMode(page, 'repeat'); await closeNp(page);
         check(await until(async () => sent.slice(n3).filter((x) => x.m === 'POST' && /\/(load|queue)$/.test(x.v)).length === 2, 8000), `${T} the load and the add go out`);
-        const [ld3, add3] = sent.slice(n3).filter((x) => x.m === 'POST' && /\/(load|queue)$/.test(x.v));
+        check(await until(async () => sent.slice(n3).some((x) => /\/repeat$/.test(x.v)), 8000), `${T} repeat pressed while the load waits goes out`);
+        const [ld3, add3] = sent.slice(n3).filter((x) => x.m === 'POST' && /\/(load|queue)$/.test(x.v)); const rp3 = sent.slice(n3).find((x) => /\/repeat$/.test(x.v));
+        check(!!rp3 && !!ld3 && ld3.done && rp3.at >= ld3.done, `${T} …and only once that load is answered (repeat at +${rp3 && ld3 ? rp3.at - ld3.at : '?'} ms, the load answered at +${ld3 && ld3.done ? ld3.done - ld3.at : '?'})`);
         check(!!ld3 && !!add3 && /load$/.test(ld3.v) && /queue$/.test(add3.v) && ld3.done && add3.at >= ld3.done, `${T} …the add goes only once the load it was asked after is answered (add at +${add3 && ld3 ? add3.at - ld3.at : '?'} ms, the load answered at +${ld3 && ld3.done ? ld3.done - ld3.at : '?'})`);
         // A playlist's Play asks shuffle off: a toggle after it, queued behind a slow Shuffle, turns it on
         slowLoad = 900; const n4 = sent.length;
@@ -251,10 +259,18 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         await page.click('#ishuffle'); await sleep(100);
         if (!(await page.locator('#shufflebtn').isVisible())) await openNp(page, w);
         check(allAre((await modes(page)).shuffle, true, 'Shuffle: on'), `${T} the page's Shuffle is the pending mode while its songs are found: ${say((await modes(page)).shuffle)}`);
-        await pressMode(page, 'shuffle');
-        check(await until(async () => sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').length === 2, 8000), `${T} the found page's load and the toggle go out`);
+        check(await pressNow(page, 'shuffle'), `${T} a toggle lands while the songs are found`);
+        // (the page's load, going after the press, must not put its "on" back over the press's "off":
+        // a third press while that load is on its way turns from the press, not from the load)
+        slowLoad = 900;
+        check(await until(async () => sent.slice(n5).some((x) => /\/load$/.test(x.v)), 8000), `${T} the found page's load goes out`);
+        // (pressed as soon as the button has its handler: Now playing redraws while the load is on its
+        // way, and a click that waits for a settled button would land after it)
+        await sleep(150);
+        check(await pressNow(page, 'shuffle'), `${T} …a third press lands while that load is on its way`);
+        check(await until(async () => sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').length === 3, 8000), `${T} …and the two toggles after it`);
         const dOrder = sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}:${x.body.shuffle}`);
-        check(dOrder.join() === 'load:true,shuffle:false', `${T} …the load first, then the toggle turning the page's shuffle off (${dOrder.join(', ')})`);
+        check(dOrder.join() === 'load:true,shuffle:false,shuffle:true', `${T} …the load first, then the toggles off and on again (${dOrder.join(', ')})`);
         state.delay = 0;
         await closeNp(page);
 
