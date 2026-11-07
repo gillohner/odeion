@@ -210,6 +210,32 @@ pub struct Listing<T = String> {
 /// pubky URL).
 pub(crate) type Page<T> = Vec<(T, String)>;
 
+/// Each path's size from `stat`, [`FETCH_AT_ONCE`] at a time and in order, each read given at
+/// most `limit`: a size that isn't read in time is `None`, never a listing that hangs.
+pub(crate) async fn sizes_within<F, Fut>(
+    paths: Vec<String>,
+    limit: std::time::Duration,
+    stat: F,
+) -> Vec<RemoteFile>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Option<u64>>,
+{
+    use futures_util::StreamExt;
+    let stat = &stat;
+    futures_util::stream::iter(paths)
+        .map(|path| async move {
+            let size = tokio::time::timeout(limit, stat(path.clone()))
+                .await
+                .ok()
+                .flatten();
+            RemoteFile { path, size }
+        })
+        .buffered(FETCH_AT_ONCE)
+        .collect()
+        .await
+}
+
 /// A listing within `bounds`, page by page from `page(cursor)`, which answers `Ok(None)` for a
 /// directory that isn't there (it lists as empty). The listing stops, incomplete, at the entry
 /// cap (entries past it are dropped, from the page that crosses it too), the page cap, the
@@ -229,11 +255,17 @@ where
     let mut cursor: Option<String> = None;
     let mut seen = std::collections::HashSet::new();
     let mut complete = false;
+    let mut answered = false;
     for _ in 0..bounds.max_pages {
         let left = bounds.deadline.saturating_sub(started.elapsed());
         let Ok(got) = tokio::time::timeout(left, page(cursor.clone())).await else {
+            // Not one page in time: the homeserver didn't answer, which is not an empty one
+            if !answered {
+                return Err(HomeserverError::Timeout);
+            }
             break;
         };
+        answered = true;
         let Some(got) = got? else {
             complete = true;
             break;
@@ -886,7 +918,6 @@ impl NodeHomeserver {
         session: &PubkySession,
         bounds: ListBounds,
     ) -> Result<Vec<RemoteFile>, HomeserverError> {
-        use futures_util::StreamExt;
         let storage = session.storage();
         let listing = list_within(bounds, PRIVATE_FILES_DIR, |cursor| {
             let storage = &storage;
@@ -908,19 +939,15 @@ impl NodeHomeserver {
         })
         .await?;
         let storage = &storage;
-        Ok(futures_util::stream::iter(listing.entries)
-            .map(|path| async move {
-                let size = within(OBJECT_TIMEOUT, async { Ok(storage.stats(path.as_str()).await) })
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .flatten()
-                    .and_then(|s| s.content_length);
-                RemoteFile { path, size }
-            })
-            .buffered(FETCH_AT_ONCE)
-            .collect()
-            .await)
+        Ok(sizes_within(listing.entries, OBJECT_TIMEOUT, |path| async move {
+            storage
+                .stats(path.as_str())
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.content_length)
+        })
+        .await)
     }
 
     /// The size of one private file, as the homeserver reports it (`None`: not there; `Some(None)`:
@@ -1476,6 +1503,46 @@ mod listing_tests {
             started.elapsed()
         );
         assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_size_that_isnt_read_in_time_is_left_out() {
+        // One stat never answers: its size is None, the others are read, and the whole takes
+        // about one limit, not forever
+        let started = std::time::Instant::now();
+        let paths: Vec<String> = (0..20).map(|i| format!("/priv/f{i}")).collect();
+        let got = sizes_within(paths, std::time::Duration::from_millis(200), |p| async move {
+            if p == "/priv/f3" {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+            Some(p.len() as u64)
+        })
+        .await;
+        assert_eq!(got.len(), 20);
+        assert_eq!(got[3].size, None);
+        assert!(got
+            .iter()
+            .enumerate()
+            .all(|(i, f)| i == 3 || f.size == Some(f.path.len() as u64)));
+        assert_eq!(got[19].path, "/priv/f19", "in order");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_answers_no_page_in_time_is_an_error() {
+        // Not "no entries": the reader says the homeserver didn't answer
+        let asked = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let e = list(usize::MAX / 2, 1, bounds(10_000, 100, 300), &asked)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, HomeserverError::Timeout), "{e}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
