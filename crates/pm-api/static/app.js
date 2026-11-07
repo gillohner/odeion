@@ -193,6 +193,18 @@
   const focusUndo = (b) => { const a = document.activeElement; if (b && b.isConnected && (!a || a === document.body)) b.focus(); };
   // A node without a route answers 404, or 405 when the path matches another method's route
   const noRoute = (e) => (e && (e.status === 404 || e.status === 405) ? new Error('This node doesn’t offer that yet: update it first') : e);
+  // An Undo pressed says so at once (bringing back thousands of songs takes the node a moment)
+  const bringingBack = () => toast('Bringing the songs back…');
+  // After an Undo the review page is drawn again: the focus goes to its first control (Skip all, else
+  // its heading), not to the page's body
+  const focusReview = async () => {
+    for (let k = 0; k < 60; k++) {
+      if (state.view !== 'identify') return;
+      const f = !$('#main .idloading') && ($('#idskipall') || $('#main .page-head h2'));
+      if (f) { if (f.tagName === 'H2') f.tabIndex = -1; f.focus(); return; }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
   // The Undo of a skip says how many songs came back (the node's unskip can bring back earlier skips too)
   const undoLabel = (r) => (r && r.counts && r.counts.skipped > r.skipped ? `Undo (brings back all ${r.counts.skipped.toLocaleString()} skipped)` : 'Undo');
   // ---- Every click shows progress and fires once (owner, 2026-11-04) ----
@@ -5612,7 +5624,7 @@
             const ska = $('#idskipall', main); if (ska) ska.disabled = [...locked.values()].some((b) => b !== ska);
           };
           // Undo of a skip: the page is loaded again when it is still the one on screen (any generation)
-          const undoSkip = (body) => async () => { const u = await api('POST', '/library/suggestions/unskip', body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') setView('identify', undefined, 'replace'); else if ($('#idbox')) renderIdentify(); };
+          const undoSkip = (body) => async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', body); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); } else if ($('#idbox')) renderIdentify(); };
           const MAX_CONFIRM = 500;
           const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search by tags');
           const holdWhy = { search: 'found by its title and artist only', weak: 'a weak match', other_release: 'on another release than the rest of the album' };
@@ -5661,7 +5673,8 @@
               const a = albums[ai]; const key = a.key; const nSongs = a.songs.length;
               let r; try { r = await api('POST', '/library/suggestions/skip', { albums: [key] }); } catch (e) { hold(ai, null); throw noRoute(e); }
               // (the toast and its Undo come even when the page was left meanwhile: the songs are skipped)
-              const ub = toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo', run: undoSkip({ albums: [key] }) });
+              // (the node's unskip of an album brings back every song of it left as it is, earlier ones too)
+              const ub = toast(`${countOf(r.skipped != null ? r.skipped : nSongs, 'songs')} left as they are`, '', { label: 'Undo (this album’s skipped songs)', run: undoSkip({ albums: [key] }) });
               if (!live()) return;
               a.songs.forEach((g) => choices.delete(g.track.id)); a.songs = []; a.ready = 0; a.conflicts = 0;
               page.songs = Math.max(0, page.songs - nSongs);
@@ -7766,7 +7779,7 @@
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
-      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button><button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip">Bring back ${n(c.skipped)} skipped</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
+      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button>${p.running ? '' : '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>'}` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip">Bring back ${n(c.skipped)} skipped</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
@@ -7783,11 +7796,16 @@
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
     // (the Undo button goes with the click: the focus comes back to the card)
-    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); return; } await renderIdentify(); const f = $('#idskipall') || $('#idrun'); if (f) f.focus(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
-    const us = $('#idunskip'); if (us) us.onclick = (ev) => busy(us, async () => { const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); }, ev);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); const f = $('#idskipall') || $('#idrun'); if (f) f.focus(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
+    // (a second press to confirm: it undoes every "Leave as is" at once, and the node answers how many
+    // came back, not which, so there is no Undo for it)
+    const us = $('#idunskip'); if (us) us.onclick = (ev) => {
+      if (!us.dataset.armed) { us.dataset.armed = '1'; const was = us.textContent; us.textContent = `Bring back all ${n(c.skipped)}? Press again`; setTimeout(() => { if (us.isConnected && us.dataset.armed) { delete us.dataset.armed; us.textContent = was; } }, 4000); return undefined; }
+      return busy(us, async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); }, ev);
+    };
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
-    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); if ((k && k.value) || (ch && ch.disabled)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
+    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); const ar = $('#idunskip'); if ((k && k.value) || (ch && ch.disabled) || (ar && ar.dataset.armed)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
     if (p.running) idTimer = setTimeout(idAgain, 1500);
   };
   const watchScan = (info) => {

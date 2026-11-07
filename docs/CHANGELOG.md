@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-07
+
+- **Leaving matches as they are: clearer Undo** (follow-ups from the reviews of "Reviewing matches is optional"). Pressing Undo says at once that the songs are coming back, and on the review page the focus returns to the page, not its body. An album's Undo says it brings back that album's skipped songs (earlier ones too). **Bring back N skipped** asks for a second press, since it undoes every "Leave as is" at once. While Identify runs, the card doesn't offer Skip all unsure (its redraws could take a press twice).
+
 ### 2026-11-06
 
 - **Reviewing matches is optional** (owner: a pile of 7,412 songs "to confirm" read as work owed). The Identify card says "Finished", with the unsure songs as a quiet second line: they play and show as usual, identified or not. **Skip all unsure** leaves them as they are (reviewed without an identity, left alone by the next Identify), with Undo; on the review page each album has **Leave as is**, with Undo; the card counts the songs left as they are and those an older suggestion makes worth a re-check, and offers to bring skipped songs back.
