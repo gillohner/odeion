@@ -23131,6 +23131,21 @@ exec sleep 300
         );
         assert_eq!(named(&s, "The Frame"), 1);
 
+        // A restore's save keeps an address another pass saved meanwhile, and adds one not known
+        s.remember_upnp(linn, "http://192.0.2.5/desc.xml");
+        s.remember_upnp_unless_moved(linn, "http://192.0.2.4/desc.xml");
+        assert_eq!(
+            s.upnp_known().get(linn).map(|k| k.location.clone()).as_deref(),
+            Some("http://192.0.2.5/desc.xml")
+        );
+        s.remember_upnp_unless_moved("uuid:fresh", "http://192.0.2.6/desc.xml");
+        assert_eq!(
+            s.upnp_known()
+                .get("uuid:fresh")
+                .map(|k| k.location.clone())
+                .as_deref(),
+            Some("http://192.0.2.6/desc.xml")
+        );
         // Forgetting is for the address it was at: one found elsewhere meanwhile stays
         s.remember_upnp(linn, "http://192.0.2.7/desc.xml");
         s.forget_upnp_at(linn, &url);

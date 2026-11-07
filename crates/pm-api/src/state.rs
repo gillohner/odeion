@@ -1254,7 +1254,12 @@ impl NodeState {
                 .expect("sonos lock")
                 .insert(id.clone(), out.clone());
         }
-        self.remember_upnp(&r.udn, &r.location);
+        // (a restore's remembered address never replaces one another pass has just saved for it)
+        if fresh {
+            self.remember_upnp(&r.udn, &r.location);
+        } else {
+            self.remember_upnp_unless_moved(&r.udn, &r.location);
+        }
         self.create_zone(&r.friendly_name, out);
         Some(id)
     }
@@ -1361,6 +1366,28 @@ impl NodeState {
                     k.seen = now;
                 }
             }
+        });
+    }
+
+    /// Remember `udn` at `location` as a restore does: seen now when it is still remembered there, added
+    /// when it isn't remembered at all, and left as it is when another pass has saved it elsewhere.
+    pub(crate) fn remember_upnp_unless_moved(&self, udn: &str, location: &str) {
+        self.edit_known(|known, now| match known.get_mut(udn) {
+            None => {
+                known.insert(
+                    udn.to_string(),
+                    KnownRenderer {
+                        location: location.to_string(),
+                        seen: now,
+                    },
+                );
+            }
+            Some(k) if k.location == location => {
+                if now.saturating_sub(k.seen) > 86_400 {
+                    k.seen = now;
+                }
+            }
+            Some(_) => {}
         });
     }
 
