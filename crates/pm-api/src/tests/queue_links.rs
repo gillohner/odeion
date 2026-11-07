@@ -390,7 +390,7 @@ async fn a_cover_link_under_another_of_the_nodes_names_loses_its_sign_in() {
 }
 
 /// The API token found in a saved queue can only be replaced by hand: Settings and Home's first
-/// steps say so from then on, and Make a new token clears it.
+/// steps say so from then on, and Make a new token ends it (the note names the old token).
 #[tokio::test]
 async fn an_exposed_api_token_is_said_until_it_is_replaced() {
     let dir = tempfile::tempdir().unwrap();
@@ -427,4 +427,105 @@ async fn an_exposed_api_token_is_said_until_it_is_replaced() {
         !fs["steps"].as_array().unwrap().iter().any(|x| x["id"] == "token"),
         "{fs}"
     );
+}
+
+/// A node whose token is set in its config (`PM_TOKEN`, as the bundle and the ISO set it): the
+/// exposed token is said on Home as a step to change it there, and in Settings' config-token
+/// row; `POST /v1/node/token` can't replace it (409); a restart with another token in the config
+/// ends the warning by itself. A backup never carries the note to another node.
+#[tokio::test]
+async fn an_exposed_config_token_is_said_until_the_config_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("from-the-config")).await;
+    let app = router(s.clone());
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            "queue.somewhere",
+            &serde_json::json!({"items": [{"id": 1, "uri": "track:1", "image": "/v1/library/albums/1/cover?token=from-the-config"}],
+                "repeat": "off", "radio": false, "shuffle": false, "order": []})
+            .to_string(),
+        )
+        .unwrap();
+    assert!(accounts::clean_saved_queues(&s).unwrap().api_token_found);
+    let (_, ns) = call_as(&app, "from-the-config", "/v1/node/settings").await;
+    assert_eq!(ns["token_replaceable"], false, "{ns}");
+    assert!(ns["api_token_exposed_at"].as_i64().is_some_and(|t| t > 0), "{ns}");
+    let (_, fs) = call_as(&app, "from-the-config", "/v1/me/first-steps").await;
+    assert_eq!(fs["steps"][0]["id"], "token_config", "{fs}");
+    let (st, _) = as_token(&app, "from-the-config", "POST", "/v1/node/token", None).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // The note stays this node's: a backup leaves it out
+    let copy = pm_library::Library::open_in_memory().unwrap();
+    let note = s
+        .library
+        .lock()
+        .unwrap()
+        .get_setting(accounts::API_TOKEN_EXPOSED)
+        .unwrap()
+        .unwrap();
+    assert!(
+        !note.contains("from-the-config"),
+        "a hash, never the token: {note}"
+    );
+    copy.set_setting(accounts::API_TOKEN_EXPOSED, &note).unwrap();
+    crate::backup::forget_node_own(&copy).unwrap();
+    assert_eq!(copy.get_setting(accounts::API_TOKEN_EXPOSED).unwrap(), None);
+    // The owner changes the token in the config and restarts: said no more
+    drop(app);
+    drop(s);
+    let s2 = state(dir.path(), Some("a-new-one")).await;
+    let app2 = router(s2.clone());
+    let (_, ns) = call_as(&app2, "a-new-one", "/v1/node/settings").await;
+    assert!(ns.get("api_token_exposed_at").is_none(), "{ns}");
+    let (_, fs) = call_as(&app2, "a-new-one", "/v1/me/first-steps").await;
+    assert!(
+        !fs["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == "token_config" || x["id"] == "token"),
+        "{fs}"
+    );
+}
+
+/// The real wiring of a queue's own check (`NodeState::new` gives every zone's queue the node's
+/// sign-ins): a saved queue whose link names the node under another name and carries the API
+/// token comes back from `restore_queue` without it, with no start-up cleanup in between, and a
+/// listener reads it that way too.
+#[tokio::test]
+async fn a_restored_queue_under_another_name_loses_the_nodes_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    let app = router(s.clone());
+    let listener = let_in(&s, LISTENER);
+    let (_, zones) = call_as(&app, "s3cret", "/v1/zones").await;
+    let zid = zones[0]["id"].as_str().unwrap().to_string();
+    let zone = s.zones.get(&pm_zones::ZoneId(zid.clone())).unwrap();
+    zone.clear();
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            &format!("queue.{zid}"),
+            &serde_json::json!({"items": [
+                {"id": 1, "uri": "https://radio.example/a", "image": "http://localhost:7788/v1/library/albums/1/cover?token=s3cret"},
+                {"id": 2, "uri": "https://other-node.example/v1/library/tracks/1/file?token=theirs"}],
+                "repeat": "off", "radio": false, "shuffle": false, "order": []})
+            .to_string(),
+        )
+        .unwrap();
+    s.restore_queue(&zone);
+    let (_, q) = call_as(&app, "s3cret", &format!("/v1/zones/{zid}/queue")).await;
+    assert_eq!(
+        q[0]["image"], "http://localhost:7788/v1/library/albums/1/cover",
+        "{q}"
+    );
+    assert_eq!(
+        q[1]["uri"], "https://other-node.example/v1/library/tracks/1/file?token=theirs",
+        "{q}"
+    );
+    let (_, q) = call_as(&app, &listener, &format!("/v1/zones/{zid}/queue")).await;
+    assert!(!q.to_string().contains("s3cret"), "{q}");
 }

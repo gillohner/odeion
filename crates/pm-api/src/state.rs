@@ -93,6 +93,9 @@ pub struct NodeState {
     return_page: std::sync::RwLock<String>,
     /// What the last scan did (shown when it ends, and in Settings).
     pub last_scan: Mutex<Option<crate::types::LastScan>>,
+    /// The node's sign-ins as a queue's own check reads them (`accounts::known_tokens`): read
+    /// without the library lock while they haven't changed.
+    pub(crate) known_tokens: std::sync::RwLock<Option<crate::accounts::KnownCache>>,
     pub name: String,
     /// Stable id of this node (a UUID kept in the library), for LAN discovery and controllers
     /// that remember a node across address changes.
@@ -523,6 +526,7 @@ impl NodeState {
             zones_in_listeners_hands: Mutex::new(Default::default()),
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
+            known_tokens: std::sync::RwLock::new(None),
         });
         // A queue's links on the node lose their sign-in on the way in (pm_zones::node_link_path),
         // and a link under any other name loses the node's own sign-ins
@@ -705,7 +709,7 @@ impl NodeState {
     }
 
     /// Put the saved queue back into a freshly created zone (no playback).
-    fn restore_queue(&self, zone: &Arc<Zone>) {
+    pub(crate) fn restore_queue(&self, zone: &Arc<Zone>) {
         let json = {
             let lib = self.library.lock().expect("library poisoned");
             lib.get_setting(&queue_key(zone.id())).ok().flatten()

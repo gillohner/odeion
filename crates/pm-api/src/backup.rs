@@ -85,6 +85,7 @@ const NODE_OWN: &[&str] = &[
     crate::accounts::OWNER_SESSIONS,
     crate::accounts::DEVICE_SESSIONS,
     crate::access_token::PUBLISHED_TOKEN_KEY,
+    crate::accounts::API_TOKEN_EXPOSED,
     crate::copy_jobs::JOBS_KEY,
     crate::files::BRING_RESUME_KEY,
     crate::copy_guard::IN_FLIGHT_KEY,
@@ -703,6 +704,8 @@ pub async fn restore(
     }
     let result = restore_locked(s, &parsed, secrets).await;
     s.end_scan();
+    // The sign-in stores may have been replaced: read again
+    crate::accounts::sign_ins_changed();
     let mut report = result?;
     // A copy made by an older version may hold sign-ins in its saved queues' links: cleaned as
     // at a start, and what they were ends

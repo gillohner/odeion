@@ -2987,7 +2987,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
             on(item::PREFER_FULL_KEY),
             on(first_steps::HIDDEN_KEY),
             accounts::source_policy(&lib),
-            accounts::api_token_exposed_at(&lib),
+            accounts::api_token_exposed_at(&lib, s.token().as_deref()),
         )
     };
     NodeSettingsView {

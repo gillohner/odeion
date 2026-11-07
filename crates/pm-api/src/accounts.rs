@@ -421,6 +421,9 @@ fn update_in<R>(
         .unwrap_or_default();
     let r = f(&mut all);
     lib.set_setting(setting, &serde_json::to_string(&all).expect("serializes"))?;
+    if [TOKENS, OWNER_SESSIONS, DEVICE_SESSIONS].contains(&setting) {
+        sign_ins_changed();
+    }
     Ok(r)
 }
 
@@ -1173,11 +1176,68 @@ pub fn hide_node_tokens(v: &mut serde_json::Value, origins: &[String], known: &d
 /// and device sessions and of the listeners' tokens. Read from the library once, on first use.
 pub struct KnownTokens<'a> {
     s: &'a NodeState,
-    set: std::sync::OnceLock<KnownSet>,
+}
+
+/// Goes up whenever a sign-in store changes ([`update_in`]): a cached [`KnownSet`] from an
+/// older count is read again.
+static SIGN_INS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Say that the sign-ins changed (also after a restore, which replaces the stores).
+pub(crate) fn sign_ins_changed() {
+    SIGN_INS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// A cached [`KnownSet`]: valid while no sign-in changed, the API token is the same, and it is
+/// younger than two seconds (a store written some other way is read again soon).
+pub struct KnownCache {
+    generation: u64,
+    api: Option<String>,
+    at: std::time::Instant,
+    set: std::sync::Arc<KnownSet>,
+}
+
+const KNOWN_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The node's sign-ins, from the cache while it is valid, else read again: waiting for the
+/// library when `wait`, else (a queue's check, which runs under the queue's lock) only when it
+/// is free, and the last set read otherwise.
+fn known_tokens(s: &NodeState, wait: bool) -> Option<std::sync::Arc<KnownSet>> {
+    let generation = SIGN_INS.load(std::sync::atomic::Ordering::SeqCst);
+    let api = s.token();
+    let cached = s
+        .known_tokens
+        .read()
+        .expect("known tokens lock")
+        .as_ref()
+        .map(|c| {
+            (
+                c.generation == generation && c.api == api && c.at.elapsed() < KNOWN_FOR,
+                c.set.clone(),
+            )
+        });
+    if let Some((true, set)) = &cached {
+        return Some(set.clone());
+    }
+    let set = if wait {
+        let lib = s.library.lock().expect("library poisoned");
+        std::sync::Arc::new(KnownSet::load(&lib, api.clone()))
+    } else {
+        match s.library.try_lock() {
+            Ok(lib) => std::sync::Arc::new(KnownSet::load(&lib, api.clone())),
+            Err(_) => return cached.map(|(_, set)| set),
+        }
+    };
+    *s.known_tokens.write().expect("known tokens lock") = Some(KnownCache {
+        generation,
+        api,
+        at: std::time::Instant::now(),
+        set: set.clone(),
+    });
+    Some(set)
 }
 
 #[derive(Default)]
-struct KnownSet {
+pub struct KnownSet {
     api: Option<String>,
     hashes: std::collections::HashSet<String>,
 }
@@ -1205,46 +1265,46 @@ impl KnownSet {
 
 impl<'a> KnownTokens<'a> {
     pub fn lazy(s: &'a NodeState) -> Self {
-        Self {
-            s,
-            set: std::sync::OnceLock::new(),
-        }
+        Self { s }
     }
 
-    /// Whether `t` is one of this node's sign-ins.
+    /// Whether `t` is one of this node's sign-ins (as they are now: an event stream open for
+    /// hours sees a sign-in made after it opened).
     pub fn has(&self, t: &str) -> bool {
-        self.set
-            .get_or_init(|| {
-                let lib = self.s.library.lock().expect("library poisoned");
-                KnownSet::load(&lib, self.s.token())
-            })
-            .has(t)
+        known_tokens(self.s, true).is_some_and(|k| k.has(t))
     }
 }
 
-/// [`KnownTokens::has`] for a queue's own check (`pm_zones::TokenCheck`), which may run while
-/// another thread holds the library: it waits a little for it, and a link that can't be checked
-/// then keeps its token, which every listener answer still hides ([`hide_node_tokens`]).
+/// [`KnownTokens::has`] for a queue's own check (`pm_zones::TokenCheck`), which runs under the
+/// queue's lock and never waits for the library: the cached sign-ins, read again only when the
+/// library is free. A sign-in made a moment ago may be missed while the library is busy; every
+/// listener answer still hides it ([`hide_node_tokens`]) and the request's own look
+/// (`drop_sign_ins`) catches it on the way in.
 pub fn is_node_token_if_free(s: &NodeState, t: &str) -> bool {
-    for _ in 0..20 {
-        if let Ok(lib) = s.library.try_lock() {
-            return KnownSet::load(&lib, s.token()).has(t);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    false
+    known_tokens(s, false).is_some_and(|k| k.has(t))
 }
 
-/// Setting: when the API token itself was found in a saved queue's link (Unix seconds). Home and
-/// Settings say so until the token is replaced, which clears it.
-pub const API_TOKEN_EXPOSED: &str = "security.api_token_exposed_at";
+/// Setting: the API token found in a saved queue's link, as `{"at": <unix s>, "hash": <the
+/// token's hash>}`. Home and Settings say so while the node's token is still that one: a new
+/// token (made here, or changed in the config and restarted) ends it by itself. A node's own
+/// (`backup::NODE_OWN`): never carried to another node by a backup.
+pub const API_TOKEN_EXPOSED: &str = "security.api_token_exposed";
 
-/// When the API token was last found in a saved queue's link, until it is replaced.
-pub fn api_token_exposed_at(lib: &pm_library::Library) -> Option<i64> {
-    lib.get_setting(API_TOKEN_EXPOSED)
-        .ok()
+/// Note that `token`, the node's API token, was exposed.
+fn note_api_token_exposed(lib: &pm_library::Library, token: &str) -> Result<(), ApiError> {
+    let v = serde_json::json!({"at": pm_library::db::now_unix(), "hash": hash(token)});
+    Ok(lib.set_setting(API_TOKEN_EXPOSED, &v.to_string())?)
+}
+
+/// When the node's API token `token` was found in a saved queue's link; `None` once the token in
+/// use is another one.
+pub fn api_token_exposed_at(lib: &pm_library::Library, token: Option<&str>) -> Option<i64> {
+    let v: serde_json::Value =
+        serde_json::from_str(&lib.get_setting(API_TOKEN_EXPOSED).ok().flatten()?).ok()?;
+    let token = token?;
+    (v["hash"].as_str() == Some(hash(token).as_str()))
+        .then(|| v["at"].as_i64())
         .flatten()
-        .and_then(|v| v.parse().ok())
 }
 
 /// What cleaning the saved queues at start found: how many items carried a sign-in in one of
@@ -1338,7 +1398,9 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     }
     // The API token can't be replaced here: Home and Settings say so until the owner does
     if out.api_token_found {
-        lib.set_setting(API_TOKEN_EXPOSED, &pm_library::db::now_unix().to_string())?;
+        if let Some(t) = api.as_deref() {
+            note_api_token_exposed(&lib, t)?;
+        }
     }
     // The owner's sign-ins end once, as with Make a new token: one of them was readable, and
     // with the API token, every session made under it should be made again too
