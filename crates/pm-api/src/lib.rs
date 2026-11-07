@@ -22814,12 +22814,14 @@ exec sleep 300
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
     }
 
-    /// [`fake_renderer_at`], answering after `delay_ms`.
-    async fn fake_renderer_slow(
+    /// [`fake_renderer_at`] that says when a request has come (`arrived`) and answers it only once
+    /// let go (`release`): a description provably on its way while something else happens.
+    async fn fake_renderer_gated(
         listener: tokio::net::TcpListener,
         udn: &'static str,
         name: &'static str,
-        delay_ms: Arc<std::sync::atomic::AtomicU64>,
+        arrived: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
     ) {
         let desc = format!(
             r#"<?xml version="1.0"?>
@@ -22842,9 +22844,11 @@ exec sleep 300
             "/desc.xml",
             get(move || {
                 let desc = desc.clone();
-                let ms = delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+                let arrived = arrived.clone();
+                let release = release.clone();
                 async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    arrived.notify_one();
+                    release.notified().await;
                     ([(header::CONTENT_TYPE, "text/xml")], desc)
                 }
             }),
@@ -22931,7 +22935,7 @@ exec sleep 300
     /// its own zone and the old one is forgotten.
     #[tokio::test]
     async fn a_known_renderer_missed_by_the_search_gets_its_zone() {
-        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         let linn = "uuid:4c494e4e-0026-0f21-cc3f-0123456789ab";
         let named = |s: &Arc<NodeState>, n: &str| s.zones.list().iter().filter(|z| z.name == n).count();
         let restore = |s: &Arc<NodeState>| {
@@ -23035,19 +23039,25 @@ exec sleep 300
             Some(url.clone())
         );
         // A restore still describing a renderer at its old address while another pass registers it
-        // at its new one: the old address isn't written back over the new
+        // at its new one: the old address isn't written back over the new (the old description is held
+        // until the registration is done, so the restore is surely past its own check)
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let slow = Arc::new(AtomicU64::new(600));
+        let (arrived, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let old_url = format!(
             "http://127.0.0.1:{}/desc.xml",
             listener.local_addr().unwrap().port()
         );
-        fake_renderer_slow(listener, linn, "Klimax UPnP AV", slow.clone()).await;
+        fake_renderer_gated(listener, linn, "Klimax UPnP AV", arrived.clone(), release.clone()).await;
         s.remember_upnp(linn, &old_url);
         let restoring = restore(&s);
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), arrived.notified())
+            .await
+            .expect("the restore asks the old address");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let new_url = format!(
             "http://127.0.0.1:{}/desc.xml",
@@ -23073,6 +23083,7 @@ exec sleep 300
         .await
         .unwrap();
         assert!(registered, "registered at its new address meanwhile");
+        release.notify_one();
         assert!(
             restoring.await.unwrap().is_empty(),
             "the late answer registers nothing"
@@ -23083,6 +23094,43 @@ exec sleep 300
             "the new address stands"
         );
         assert_eq!(named(&s, "Klimax UPnP AV"), 1);
+
+        // A known address now answered by another device that already has its zone: the old one is
+        // forgotten there all the same
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shared = format!(
+            "http://127.0.0.1:{}/desc.xml",
+            listener.local_addr().unwrap().port()
+        );
+        fake_renderer_at(
+            listener,
+            tv,
+            "The Frame",
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await;
+        let has_zone = tokio::task::spawn_blocking({
+            let s = s.clone();
+            let url = shared.clone();
+            move || {
+                s.register_renderer(pm_out_upnp::describe(&url).unwrap().unwrap())
+                    .is_some()
+            }
+        })
+        .await
+        .unwrap();
+        assert!(has_zone);
+        s.remember_upnp(linn, &shared);
+        assert!(restore(&s).await.unwrap().is_empty());
+        assert!(
+            !s.upnp_known().contains_key(linn),
+            "the old renderer at that address is forgotten"
+        );
+        assert_eq!(named(&s, "The Frame"), 1);
+
         // Forgetting is for the address it was at: one found elsewhere meanwhile stays
         s.remember_upnp(linn, "http://192.0.2.7/desc.xml");
         s.forget_upnp_at(linn, &url);

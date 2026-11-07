@@ -1185,6 +1185,13 @@ impl NodeState {
     /// A renderer as an output with its own pull stream and a zone; `None`
     /// when it is already registered.
     pub fn register_renderer(self: &Arc<Self>, r: pm_out_upnp::Renderer) -> Option<OutputId> {
+        self.register_found(r, true)
+    }
+
+    /// [`Self::register_renderer`]. `fresh`: `r` was found where it is now (a search, a typed address),
+    /// so a renderer already registered is remembered at that address; not for a remembered address
+    /// described again, which may be stale while another pass found it elsewhere.
+    fn register_found(self: &Arc<Self>, r: pm_out_upnp::Renderer, fresh: bool) -> Option<OutputId> {
         // Our own zones answer the same search once we offer them: one adopted would play into itself
         if self.is_own_renderer(&r) {
             tracing::debug!(renderer = %r.friendly_name, "our own renderer; no zone");
@@ -1202,7 +1209,9 @@ impl NodeState {
         let id = OutputId::new("upnp", r.udn.trim_start_matches("uuid:"));
         if self.outputs.get(&id).is_some() {
             // (it may have moved: the next start looks for it where it is now)
-            self.remember_upnp(&r.udn, &r.location);
+            if fresh {
+                self.remember_upnp(&r.udn, &r.location);
+            }
             return None;
         }
         if !self.room_for_found_output() {
@@ -1389,15 +1398,8 @@ impl NodeState {
             }
             match pm_out_upnp::describe_within(&k.location, std::time::Duration::from_secs(2)) {
                 Ok(Some(r)) => {
-                    // (registered meanwhile by another pass, at the address it answered there: this
-                    // answer, from an address that may be stale, says nothing newer)
-                    if self
-                        .outputs
-                        .get(&OutputId::new("upnp", r.udn.trim_start_matches("uuid:")))
-                        .is_some()
-                    {
-                        continue;
-                    }
+                    // Another device at that address now: the old one is forgotten there (whether or not
+                    // the device answering has its zone already)
                     if !r
                         .udn
                         .trim_start_matches("uuid:")
@@ -1406,7 +1408,9 @@ impl NodeState {
                         tracing::info!(location = %k.location, was = %udn, now = %r.udn, "a known UPnP renderer's address is another device's now");
                         self.forget_upnp_at(&udn, &k.location);
                     }
-                    new.extend(self.register_renderer(r));
+                    // (not `fresh`: registered meanwhile by another pass, it was remembered where that
+                    // pass found it, and this answer from a remembered address says nothing newer)
+                    new.extend(self.register_found(r, false));
                 }
                 Ok(None) => {}
                 Err(e) => tracing::info!(location = %k.location, "known UPnP renderer not answering: {e}"),
