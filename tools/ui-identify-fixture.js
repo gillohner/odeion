@@ -310,8 +310,10 @@ const server = http.createServer(async (req, res) => {
       check(/6 unsure \(2 to re-check\)/.test(card.legend) && /3 left as they are/.test(card.legend) && !/^.*\b2 to re-check\b(?!\))/.test(card.legend.replace(/\(2 to re-check\)/, '')), `${W} the legend counts unsure (with those to re-check among them, not again) and left as they are (${card.legend.slice(0, 120)})`);
       check(card.skipAll && card.unskip === 'Bring back 3 skipped', `${W} "Skip all unsure" and "Bring back 3 skipped" are offered`);
       // "Bring back 3 skipped" undoes every Leave as is: a second press to confirm
-      await page.locator('#idunskip').click(); await sleep(300);
-      check(asked('POST', '/library/suggestions/unskip').length === 0 && /Press again/.test(await page.locator('#idunskip').textContent()), `${W} "Bring back" asks a second press first (${await page.locator('#idunskip').textContent()})`);
+      await page.locator('#idunskip').dblclick(); await sleep(300);
+      check(asked('POST', '/library/suggestions/unskip').length === 0 && /Press again/.test(await page.locator('#idunskip').textContent()), `${W} "Bring back" asks a second press first, a double-click being one (${await page.locator('#idunskip').textContent()})`);
+      check(/Press again to bring back all 3/.test(await page.locator('#toast').textContent()), `${W} …and says so where a screen reader hears it (the toast)`);
+      await sleep(300); // (a press a moment later, not part of the double-click)
       await page.locator('#idunskip').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and the second press brings them back`);
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
@@ -345,8 +347,11 @@ const server = http.createServer(async (req, res) => {
       await page.goto(`${BASE}/library/node`);
       await until(async () => (await page.locator('#idbox .idbar').count()) === 1);
       check((await page.locator('#idskipall').count()) === 0 && (await page.locator('#idbox [data-view="identify"]').count()) > 0, `${W} while a run goes the card offers the review but no Skip all`);
-      // The review page: Skip all unsure, then Leave as is on one album
-      fx = base({ routes: skipRoutes() });
+      // The review page: Skip all unsure, then Leave as is on one album (the unskip answers slowly, so
+      // the Undo's word at once is surely before its answer)
+      const slowUnskip = skipRoutes(); const unskip0 = slowUnskip['POST /library/suggestions/unskip'];
+      slowUnskip['POST /library/suggestions/unskip'] = async (u, b) => [...(await unskip0(u, b)).slice(0, 2), 700];
+      fx = base({ routes: slowUnskip });
       await page.goto(`${BASE}/identify`);
       await until(async () => (await page.locator('section.idalbum').count()) === 2);
       await page.locator('#idskipall').click();
@@ -356,7 +361,7 @@ const server = http.createServer(async (req, res) => {
       await page.locator('#toast .toast-act').click();
       check(await until(async () => /Bringing the songs back/.test(await page.locator('#toast').textContent()), 600), `${W} …the Undo says at once that it is bringing the songs back`);
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && (await page.locator('section.idalbum').count()) === 2), `${W} Undo brings the albums back on the page`);
-      check(await until(async () => page.evaluate(() => !!document.activeElement && (document.activeElement.id === 'idskipall' || document.activeElement.matches('#main .page-head h2')))), `${W} …and the focus is on the page again, not its body (${await page.evaluate(() => (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || '')})`);
+      check(await until(async () => page.evaluate(() => !!document.activeElement && document.activeElement.matches('#main .page-head h2'))), `${W} …and the focus is on the page's heading again, not its body (${await page.evaluate(() => (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || '')})`);
       fx = base({ routes: skipRoutes() });
       await page.goto(`${BASE}/identify`);
       await until(async () => (await page.locator('section.idalbum').count()) === 2);
