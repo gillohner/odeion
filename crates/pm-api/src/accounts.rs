@@ -832,6 +832,11 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
         }
         return None;
     }
+    // Their own collections, on their own homeserver (personal_collections.rs answers each
+    // person's); the rest of /collections and /playlists stays the owner's
+    if crate::personal_collections::is_own_route(method, path) {
+        return None;
+    }
     if *method == Method::GET || *method == Method::HEAD {
         if !under(path, LISTENER_READS) || LISTENER_READ_EXCEPTIONS.iter().any(|x| path.contains(x)) {
             return Some("that is the owner's");
@@ -866,7 +871,7 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     if path == "/bookmarks" || path == "/favourites" {
         return None;
     }
-    Some("listeners' own playlists and history are not built yet; this change would land in the owner's")
+    Some("that is the owner's: a listener's own are their bookmarks and collections")
 }
 
 /// The request's caller, from its token: the API token or an owner's browser session is the
