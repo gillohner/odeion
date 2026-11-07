@@ -334,6 +334,18 @@ const server = http.createServer(async (req, res) => {
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
       check(await until(async () => /11 songs back for review/.test(await page.locator('#toast').textContent())), `${W} …and the toast says how many came back`);
       check(await until(async () => await page.evaluate(() => document.activeElement && ['idskipall', 'idrun'].includes(document.activeElement.id))), `${W} the focus is back on the card after Undo`);
+      // The card's Undo with a slow unskip: a focus the user moves meanwhile stays where they put it
+      { const slow = skipRoutes(); const un0 = slow['POST /library/suggestions/unskip'];
+        slow['POST /library/suggestions/unskip'] = async (u, b) => [...(await un0(u, b)).slice(0, 2), 700];
+        fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: slow }); }
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idskipall').count()) === 1);
+      await page.locator('#idskipall').click();
+      await until(async () => (await page.locator('#toast .toast-act').count()) === 1);
+      await page.locator('#toast .toast-act').click();
+      const movedTo = await page.evaluate(() => { const b = [...document.querySelectorAll('.nav-item, .bnav')].find((x) => x.getClientRects().length); if (!b) return ''; b.focus(); return b.dataset.view || b.dataset.bnav || ''; });
+      await until(async () => /back for review/.test(await page.locator('#toast').textContent()), 4000); await sleep(400);
+      check(await page.evaluate((v) => !!document.activeElement && (document.activeElement.dataset.view === v || document.activeElement.dataset.bnav === v), movedTo), `${W} the card's Undo leaves a focus moved meanwhile where it was put (${movedTo}; now ${await page.evaluate(() => (document.activeElement && (document.activeElement.dataset.view || document.activeElement.dataset.bnav || document.activeElement.id || document.activeElement.tagName)) || '')})`);
       // A node without the route (405: the path is another method's route there) says to update it
       fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 0, outdated: 0, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: { 'POST /library/suggestions/skip': async () => [405, {}] } });
       await page.goto(`${BASE}/library/node`);
@@ -360,8 +372,16 @@ const server = http.createServer(async (req, res) => {
       check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
       await page.locator('#toast .toast-act').click();
       check(await until(async () => /Bringing the songs back/.test(await page.locator('#toast').textContent()), 600), `${W} …the Undo says at once that it is bringing the songs back`);
+      // (a focus the user moves while the songs come back stays where they put it)
+      const moved = await page.evaluate(() => { const b = [...document.querySelectorAll('.nav-item, .bnav')].find((x) => x.getClientRects().length); if (!b) return ''; b.focus(); return b.dataset.view || b.dataset.bnav || ''; });
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && (await page.locator('section.idalbum').count()) === 2), `${W} Undo brings the albums back on the page`);
-      check(await until(async () => page.evaluate(() => !!document.activeElement && document.activeElement.matches('#main .page-head h2'))), `${W} …and the focus is on the page's heading again, not its body (${await page.evaluate(() => (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || '')})`);
+      await sleep(400);
+      check(await page.evaluate((v) => !!document.activeElement && (document.activeElement.dataset.view === v || document.activeElement.dataset.bnav === v), moved), `${W} …a focus moved meanwhile stays where it was put (${moved}; now ${await page.evaluate(() => (document.activeElement && (document.activeElement.dataset.view || document.activeElement.dataset.bnav || document.activeElement.id || document.activeElement.tagName)) || '')})`);
+      // (left on the page, it goes to the heading after the next Undo)
+      await page.locator('#idskipall').click();
+      await until(async () => (await page.locator('#toast .toast-act').count()) === 1);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => page.evaluate(() => !!document.activeElement && document.activeElement.matches('#main .page-head h2'))), `${W} …and left on the page, the focus is on the page's heading again, not its body (${await page.evaluate(() => (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || '')})`);
       fx = base({ routes: skipRoutes() });
       await page.goto(`${BASE}/identify`);
       await until(async () => (await page.locator('section.idalbum').count()) === 2);

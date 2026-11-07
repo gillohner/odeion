@@ -176,9 +176,10 @@
     t.className = `toast show ${kind}`;
     clearTimeout(toast.h);
     // (a toast with an action waits while the pointer or the focus is on it: it goes 4 s after both left)
-    const stay = kind === 'error' ? 6000 : kind === 'wait' ? 60000 : action ? 8000 : 3800;
+    // (a 'wait' toast stays until the next toast replaces it: the answer's, or its error)
+    const stay = kind === 'error' ? 6000 : action ? 8000 : 3800;
     const arm = (ms) => { clearTimeout(toast.h); toast.h = setTimeout(hide, ms); };
-    arm(stay);
+    if (kind !== 'wait') arm(stay);
     unhook();
     if (action) {
       const ac = new AbortController(); toast.ac = ac; const on = (type, fn) => t.addEventListener(type, fn, { signal: ac.signal });
@@ -199,8 +200,9 @@
   // After an Undo the review page is drawn again: the focus goes to its heading (not Skip all, which
   // an Enter meant for the Undo would press), and only when it was left on the page's body or the
   // toast: a user who moved it meanwhile keeps it where they put it
+  const focusLeft = () => { const a = document.activeElement; return !a || a === document.body || !!a.closest('#toast'); };
   const focusReview = async () => {
-    for (let k = 0; k < 60; k++) {
+    for (let k = 0; k < 300; k++) {
       if (state.view !== 'identify') return;
       const a = document.activeElement;
       if (a && a !== document.body && !a.closest('#toast') && !a.closest('#main')) return;
@@ -7800,15 +7802,26 @@
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
     // (the Undo button goes with the click: the focus comes back to the card)
-    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); const f = [$('#idskipall'), $('#idrun'), $('#idbox [data-view="identify"]')].find((b) => b && !b.disabled); if (f) f.focus(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); const f = [$('#idskipall'), $('#idrun'), $('#idbox [data-view="identify"]')].find((b) => b && !b.disabled); if (f && focusLeft()) f.focus(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
     // (a second press to confirm: it undoes every "Leave as is" at once, and the node answers how many
     // came back, not which, so there is no Undo for it)
-    const us = $('#idunskip'); if (us) us.onclick = (ev) => {
-      if (!us.dataset.armed) { us.dataset.armed = String(Date.now()); const was = us.textContent; us.textContent = `Bring back all ${n(c.skipped)}? Press again`; toast(`Press again to bring back all ${n(c.skipped)} skipped songs for review`); setTimeout(() => { if (us.isConnected && us.dataset.armed) { delete us.dataset.armed; us.textContent = was; } }, 4000); return undefined; }
-      // (a double-click is one press: the second has to come a moment later)
-      if (Date.now() - Number(us.dataset.armed) < 400) return undefined;
-      return busy(us, async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); renderIdentify(); }, ev);
-    };
+    const us = $('#idunskip'); if (us) {
+      const was = us.textContent; const disarm = () => { delete us.dataset.armed; us.textContent = was; };
+      // (a key held down doesn't press it again and again)
+      us.onkeydown = (e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault(); };
+      us.onclick = (ev) => {
+        // (the clicks of one double-click are one press, however slow; a keyboard's press has detail 0)
+        if (ev && ev.detail > 1) return undefined;
+        if (!us.dataset.armed) { us.dataset.armed = '1'; us.textContent = `Bring back all ${n(c.skipped)}? Press again`; toast(`Press again to bring back all ${n(c.skipped)} skipped songs for review`); setTimeout(() => { if (us.isConnected && us.dataset.armed) disarm(); }, 4000); return undefined; }
+        return busy(us, async () => {
+          bringingBack();
+          let u; try { u = await api('POST', '/library/suggestions/unskip', { all: true }); } catch (e) { disarm(); throw e; }
+          toast(`${countOf(u.restored, 'songs')} back for review`); await renderIdentify();
+          // (the button is gone: the focus goes to the card's first control, if it was left on the page)
+          const f = [$('#idskipall'), $('#idrun'), $('#idbox [data-view="identify"]')].find((b) => b && !b.disabled); if (f && focusLeft()) f.focus();
+        }, ev);
+      };
+    }
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
     const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); const ar = $('#idunskip'); if ((k && k.value) || (ch && ch.disabled) || (ar && ar.dataset.armed)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
