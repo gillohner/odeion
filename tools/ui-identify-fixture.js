@@ -334,7 +334,7 @@ const server = http.createServer(async (req, res) => {
       if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
       check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
       check(await until(async () => /11 songs back for review/.test(await page.locator('#toast').textContent())), `${W} …and the toast says how many came back`);
-      check(await until(async () => await page.evaluate(() => document.activeElement && ['idskipall', 'idrun'].includes(document.activeElement.id))), `${W} the focus is back on the card after Undo`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('.set-block .set-name') && !!document.activeElement.closest('.set-block').querySelector('#idcard'))), `${W} the focus is back on the card after Undo, on its title (a held Enter can't press it)`);
       // The card's Undo with a slow unskip: a focus the user moves meanwhile stays where they put it
       { const slow = skipRoutes(); const un0 = slow['POST /library/suggestions/unskip'];
         slow['POST /library/suggestions/unskip'] = async (u, b) => [...(await un0(u, b)).slice(0, 2), 700];

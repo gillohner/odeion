@@ -7738,6 +7738,12 @@
   let idTimer = null; let idRenderGen = 0; // an older card draw that answers last is dropped
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
   const idHow = (by) => { const n = (k) => (by || {})[k] || 0; const parts = [[n('album_fit'), 'by album'], [n('fingerprint') + n('fingerprint+release'), 'by fingerprint'], [n('tag_match'), 'by title, artist and length']].filter(([x]) => x); return parts.length ? ` (${parts.map(([x, how]) => `${x} ${how}`).join(', ')})` : ''; };
+  // "Bring back N skipped": asked (armed until `until`) and on its way (sending), kept outside the
+  // card's markup so any redraw of the card keeps them (a poll's, a saved key's)
+  const idUnskip = { armedUntil: 0, sending: false, lastKey: 0 };
+  // The card's title: where the focus goes when a press removed its button (a key held down can't
+  // press a title), and only when the focus was left on the page
+  const focusCardTitle = () => { const blk = $('#idcard') && $('#idcard').closest('.set-block'); const h = blk && blk.querySelector('.set-name'); if (h && focusLeft()) { h.tabIndex = -1; h.focus(); } };
   const renderIdentify = async () => {
     const box = $('#idbox'); if (!box) return;
     const g = ++idRenderGen;
@@ -7785,7 +7791,7 @@
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
-      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button>${p.running ? '' : '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>'}` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip">Bring back ${n(c.skipped)} skipped</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
+      <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button>${p.running ? '' : '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>'}` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip" ${idUnskip.sending ? 'disabled' : ''}>${idUnskip.armedUntil > Date.now() ? `Bring back all ${n(c.skipped)}? Press again` : `Bring back ${n(c.skipped)} skipped`}</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
@@ -7802,37 +7808,38 @@
     // Skip all unsure: marked reviewed without an identity (kept out of re-checks); undoable
     // (the node's unskip of all brings back earlier skips too: the Undo says so when there are any)
     // (the Undo button goes with the click: the focus comes back to the card)
-    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); const f = [$('#idskipall'), $('#idrun'), $('#idbox [data-view="identify"]')].find((b) => b && !b.disabled); if (f && focusLeft()) f.focus(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
+    const sk = $('#idskipall'); if (sk) sk.onclick = (ev) => busy(sk, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: async () => { bringingBack(); const u = await api('POST', '/library/suggestions/unskip', { all: true }); toast(`${countOf(u.restored, 'songs')} back for review`); if (state.view === 'identify') { setView('identify', undefined, 'replace'); focusReview(); return; } await renderIdentify(); focusCardTitle(); } }); renderIdentify().then(() => focusUndo(ub)); }, ev);
     // (a second press to confirm: it undoes every "Leave as is" at once, and the node answers how many
     // came back, not which, so there is no Undo for it)
     const us = $('#idunskip'); if (us) {
-      const was = us.textContent; const disarm = () => { delete us.dataset.armed; us.textContent = was; };
-      // (a key held down doesn't press it again and again)
-      us.onkeydown = (e) => { if (e.repeat && (e.key === 'Enter' || e.key === ' ')) e.preventDefault(); };
-      let armedAt = 0; let expire = null;
+      // (a key's press: a click within 100 ms of its keydown; a key held down doesn't press it again)
+      us.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { if (e.repeat) e.preventDefault(); else idUnskip.lastKey = Date.now(); } };
       us.onclick = (ev) => {
-        // (the clicks of one double-click are one press, however slow; a keyboard's press has detail 0;
-        // a touch screen may give each tap of a double-tap detail 1, so a tap soon after the one that
-        // asked counts as part of it)
+        if (idUnskip.sending) return undefined;
+        // (the clicks of one double-click are one press, however slow; on a touch screen each tap of a
+        // double-tap may come with detail 1, so a pointer press soon after the one that asked counts as
+        // part of it; a key's press counts at once)
         if (ev && ev.detail > 1) return undefined;
-        if (us.dataset.sending) return undefined;
-        if (!us.dataset.armed) { us.dataset.armed = '1'; armedAt = Date.now(); us.textContent = `Bring back all ${n(c.skipped)}? Press again`; toast(`Press again to bring back all ${n(c.skipped)} skipped songs for review`); expire = setTimeout(() => { if (us.isConnected && us.dataset.armed && !us.dataset.sending) disarm(); }, 4000); return undefined; }
-        if (ev && ev.pointerType === 'touch' && Date.now() - armedAt < 500) return undefined;
-        // (sent: the card isn't drawn again under it until the answer, the 4 s no longer runs)
-        clearTimeout(expire); us.dataset.sending = '1';
+        const byKey = Date.now() - idUnskip.lastKey < 100;
+        if (idUnskip.armedUntil <= Date.now()) {
+          // (30 s to press again: time enough for a switch or dwell; the card's redraws keep it)
+          idUnskip.armedUntil = Date.now() + 30000; idUnskip.armedAt = Date.now();
+          us.textContent = `Bring back all ${n(c.skipped)}? Press again`; toast(`Press again to bring back all ${n(c.skipped)} skipped songs for review`);
+          setTimeout(() => { if (!idUnskip.sending && idUnskip.armedUntil <= Date.now()) { const b = $('#idunskip'); if (b) b.textContent = `Bring back ${n(c.skipped)} skipped`; } }, 30100);
+          return undefined;
+        }
+        if (!byKey && Date.now() - idUnskip.armedAt < 500) return undefined;
+        idUnskip.armedUntil = 0; idUnskip.sending = true; us.disabled = true;
         return busy(us, async () => {
           bringingBack();
-          let u; try { u = await api('POST', '/library/suggestions/unskip', { all: true }); } catch (e) { delete us.dataset.sending; disarm(); throw e; }
-          toast(`${countOf(u.restored, 'songs')} back for review`); await renderIdentify();
-          // (the button is gone: the focus goes to the card's heading, which a held Enter can't press,
-          // if it was left on the page)
-          const blk = $('#idcard') && $('#idcard').closest('.set-block'); const h = blk && blk.querySelector('.set-name'); if (h && focusLeft()) { h.tabIndex = -1; h.focus(); }
-        }, ev);
+          let u; try { u = await api('POST', '/library/suggestions/unskip', { all: true }); } finally { idUnskip.sending = false; }
+          toast(`${countOf(u.restored, 'songs')} back for review`); await renderIdentify(); focusCardTitle();
+        }, ev).finally(() => { if (!idUnskip.sending) { const b = $('#idunskip'); if (b) { b.disabled = false; if (idUnskip.armedUntil <= Date.now()) b.textContent = `Bring back ${n(c.skipped)} skipped`; } } });
       };
     }
     clearTimeout(idTimer);
     // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
-    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); const ar = $('#idunskip'); if ((k && k.value) || (ch && ch.disabled) || (ar && (ar.dataset.armed || ar.dataset.sending))) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
+    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); if ((k && k.value) || (ch && ch.disabled)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
     if (p.running) idTimer = setTimeout(idAgain, 1500);
   };
   const watchScan = (info) => {
