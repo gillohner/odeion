@@ -308,10 +308,18 @@
     // After the one before it on the same line, so the node applies them, and their answers land, in the
     // order they were made (a late answer to the first Next can't undo the second)
     const send = () => apiSend(method, path, snap, opts);
-    const entry = { ask: opts.repeat ? null : ask, p: was ? was.p.catch(() => {}).then(send) : send() };
+    // (one cut while it waits behind another on its line stops waiting)
+    const after = (p) => (opts.signal ? Promise.race([p, new Promise((_, rej) => { const fail = () => rej(opts.signal.why || new Error('aborted')); if (opts.signal.aborted) fail(); else opts.signal.addEventListener('abort', fail, { once: true }); })]) : p);
+    // (`settled`: this one and every earlier one on the line are done, even one cut while it waited:
+    // the next on the line still goes after the earlier ones)
+    const prev = was ? was.settled : Promise.resolve();
+    const entry = { ask: opts.repeat ? null : ask, p: was ? after(prev).then(send) : send() };
+    entry.settled = prev.then(() => entry.p.catch(() => {}));
     inFlight.set(line, entry);
-    const drop = () => { if (inFlight.get(line) === entry) inFlight.delete(line); };
-    entry.p.then(drop, drop);
+    // (kept on its line until it and every earlier one there have settled, even when it was cut while
+    // waiting: a later one still goes after the earlier ones; a failed one isn't handed to a new ask)
+    const done = () => { entry.ask = null; }; entry.p.then(done, done);
+    entry.settled.then(() => { if (inFlight.get(line) === entry) inFlight.delete(line); });
     return entry.p;
   };
   const apiSend = async (method, path, body, opts = {}) => {
@@ -328,7 +336,7 @@
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: opts.signal,
       });
-    } catch (e) { if (opts.signal && opts.signal.aborted) throw e; linkHint(); throw new Error("Can't reach the node."); }
+    } catch (e) { if (opts.signal && opts.signal.aborted) throw opts.signal.why || e; linkHint(); throw new Error("Can't reach the node."); }
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     const text = await r.text();
@@ -1640,29 +1648,33 @@
   // A queue URI the browser can play directly: TIDAL tracks go through the node's proxy.
   const streamUrlFor = (uri) => { const local = /^track:(\d+)$/.exec(uri || ''); if (local) return `/v1/library/tracks/${local[1]}/file${tokenQ()}`; if (ytOf(uri)) return null; const m = /^(tidal|qobuz|soundcloud|bandcamp|deezer|jamendo|subsonic|jellyfin):track:([A-Za-z0-9._-]+)$/.exec(uri || ''); if (m) return `/v1/sources/${m[1]}/stream/${m[2]}${tokenQ()}`; return /^https?:/.test(uri || '') ? uri : null; };
   // Source tracks (TIDAL, archive…) as queue items for the current zone.
-  const playSourceItems = async (qitems, replace = true, at = 'end') => {
+  // `o.shuffle` (a page's Play or Shuffle): the queue is loaded with that mode (see playTracks)
+  const playSourceItems = async (qitems, replace = true, at = 'end', o = {}) => {
     if (!qitems.length) return;
     // YouTube's player lives in this page: it can't send audio to the node's zones (unless yt-dlp is on)
     const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
-    if (!isBrowser() && !ytZones && qitems.some((q) => ytOf(q.uri))) {
+    if (!onBrowser(o) && !ytZones && qitems.some((q) => ytOf(q.uri))) {
       const rest = qitems.filter((q) => !ytOf(q.uri));
       if (!rest.length) {
-        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: `YouTube plays only ${hereOnly()}` }, { label: `Play ${hereOnly()}`, icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at); } }]);
+        showMenu(document.activeElement && document.activeElement !== document.body ? document.activeElement : $('#zonebtn'), [{ title: `YouTube plays only ${hereOnly()}` }, { label: `Play ${hereOnly()}`, icon: 'zone', run: () => { state.zone = BROWSER; try { localStorage.setItem('pm.zone', BROWSER); } catch { /* */ } renderZoneName(); playSourceItems(qitems, replace, at, { ...o, turn: undefined, mode: undefined }); } }]);
         return;
       }
       toast(`${countOf(qitems.length - rest.length, 'YouTube items')} left out: YouTube plays only ${hereOnly()}`);
       qitems = rest;
     }
-    if (isBrowser()) {
+    if (onBrowser(o)) {
       const bitems = qitems.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
       if (at === 'now' && state.browserQueue.length) { state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); browserPlay(state.browserIndex + 1); return; }
-      if (replace || at === 'now') { state.browserQueue = bitems; browserPlay(0); } else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else state.browserQueue.push(...bitems);
+      if (replace || at === 'now') browserLoad(bitems, o.shuffle); else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...bitems); else browserAppend(bitems);
       if (!replace) toast(bitems.length === 1 ? 'Added to queue' : `${countOf(bitems.length, 'tracks')} added`);
       return;
     }
-    if (at === 'now') { try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at: 'next', replace: false, play: false }); await transport({ action: 'next' }); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
-    if (replace) startWait('play', state.zone, qitems[0].title || '', true);
-    try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/queue`, { items: qitems, at, replace, play: replace }); if (replace) startSent(); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    // (every change of the zone's queue takes its turn: an add can't be lost to a replace still waiting)
+    const zid = zoneOf(o);
+    if (at === 'now') { try { await zoneOp(zid, async (t) => { await api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: qitems, at: 'next', replace: false, play: false }, { signal: t.signal }); const ev0 = evOf(zid); const st = await api('POST', `/zones/${encodeURIComponent(zid)}/transport`, { action: 'next' }, { repeat: true, signal: t.signal }); applyAnswer(st, ev0); }, o.turn); renderBar(); refreshQueue(); } catch (e) { toast(e.message, 'error'); } return; }
+    if (replace && o.shuffle !== undefined) return loadZoneQueue(qitems, o.shuffle, o);
+    const wait = replace ? startWait('play', zid, qitems[0].title || '', true, true) : null;
+    try { await zoneOp(zid, (t) => { if (replace) startSending(wait, zid); return api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: qitems, at, replace, play: replace }, { signal: t.signal }); }, o.turn); if (replace) startSent(wait); if (!replace) toast(qitems.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(qitems.length, 'tracks')} added`); refreshQueue(); } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); }
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
@@ -2166,26 +2178,49 @@
   window.addEventListener('pmdesktop:suspended', () => { clearTimeout(stallCheck); stallCheck = null; });
 
   const rememberTracks = (tracks) => { for (const t of tracks || []) if (t && t.id != null) state.trackCache.set('track:' + t.id, t); };
-  const playTracks = async (tracks, replace = true, at = 'end') => {
+  // A node zone's new queue with a mode, in one call: the items in their order, shuffle on or off
+  // (on: a random song first, the rest shuffled after it; the node keeps the order for shuffle off);
+  // the zone's repeat and radio stay
+  const loadZoneQueue = async (items, shuffle, o = {}) => {
+    const zid = zoneOf(o);
+    const index = shuffle ? Math.floor(Math.random() * items.length) : 0;
+    const wait = startWait('play', zid, items[index].title || '', true, true);
+    const mine = o.mode || askMode(shufflePending, zid, shuffle);
+    try {
+      await zoneOp(zid, async (t) => {
+        // (the zone's repeat and radio, and the song this replaces, as they are when the load goes)
+        startSending(wait, zid);
+        const z = state.zones[zid] || {}; const ev0 = evOf(zid);
+        const st = await api('POST', `/zones/${encodeURIComponent(zid)}/load`, { items, index, transport: 'playing', shuffle, repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
+        applyAnswer(st, ev0);
+      }, o.turn);
+      startSent(wait); refreshQueue();
+    } catch (e) { startFail(e.message, false, wait); } finally { if (!o.mode) doneMode(shufflePending, zid, mine); }
+  };
+  // A page's Play and Shuffle (`o.shuffle` false or true) load the queue in its order with that mode:
+  // Shuffle starts on a random song. Without it a new queue keeps the zone's mode (shuffled after its
+  // first song when on)
+  const playTracks = async (tracks, replace = true, at = 'end', o = {}) => {
     tracks = (tracks || []).filter((t) => t && t.id != null);
     if (!tracks.length) return;
     rememberTracks(tracks);
-    if (isBrowser()) {
+    if (onBrowser(o)) {
       const items = tracks.map((t) => ({ id: t.id, uri: 'track:' + t.id, track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album ? t.album.title : '', duration_ms: t.duration_ms }));
-      if (replace) { state.browserQueue = items; browserPlay(0); }
+      if (replace) browserLoad(items, o.shuffle);
       else if (at === 'next') state.browserQueue.splice(state.browserIndex + 1, 0, ...items);
-      else state.browserQueue.push(...items);
+      else browserAppend(items);
       if (!replace) toast(items.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(items.length, 'tracks')} added`);
       if (state.view === 'queue') render();
       return;
     }
-    if (replace) startWait('play', state.zone, tracks[0].title, true);
+    if (replace && o.shuffle !== undefined) return loadZoneQueue(tracks.map((t) => ({ uri: `track:${t.id}`, title: t.title || null, artist: artists(t) || null, album: t.album ? t.album.title : null, duration_ms: t.duration_ms || null })), o.shuffle, o);
+    const zid = zoneOf(o); const wait = replace ? startWait('play', zid, tracks[0].title, true, true) : null;
     try {
-      await api('POST', `/zones/${state.zone}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at });
-      if (replace) startSent();
+      await zoneOp(zid, (t) => { if (replace) startSending(wait, zid); return api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { track_ids: tracks.map((t) => t.id), replace, play: replace, at }, { signal: t.signal }); }, o.turn);
+      if (replace) startSent(wait);
       if (!replace) toast(tracks.length === 1 ? (at === 'next' ? 'Playing next' : 'Added to queue') : `${countOf(tracks.length, 'tracks')} added`);
       refreshQueue();
-    } catch (e) { if (replace) startFail(e.message); else toast(e.message, 'error'); }
+    } catch (e) { if (replace) startFail(e.message, false, wait); else toast(e.message, 'error'); }
   };
   const transport = async (action) => {
     if (isBrowser()) {
@@ -2245,13 +2280,22 @@
         if (!songs.length && !local.length) return toast(left ? `${left}; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
         // Say what was omitted before starting: a playback failure must remain the last notice.
         if (left) toast(`${left}; left out of ${hereName().toLowerCase()}'s queue`);
-        await playSongs([...songs, ...local]);
+        await playSongs([...songs, ...local], 0, 'replace', undefined, undefined, undefined, { shuffle: false });
         return;
       }
-      startWait('play', state.zone, (state.playlists.find((x) => x.id === id) || {}).name || '', true);
-      const r = await api('POST', `/playlists/${id}/play`, { zone: state.zone });
-      startSent();
-      toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
+      // Play is in the list's order: shuffle goes off first (Shuffle loads through playSongs); both on
+      // the zone in use when pressed
+      const zid = state.zone;
+      const wait = startWait('play', zid, (state.playlists.find((x) => x.id === id) || {}).name || '', true, true);
+      // (its shuffle off is the zone's pending mode, as a page's Play would be)
+      const mine = askMode(shufflePending, zid, false);
+      try {
+        // (asked whenever the node has the mode, not only when this app sees it on: what the zone's
+        // earlier changes left may not be in yet; the node does nothing when it is off already)
+        const r = await zoneOp(zid, async (t) => { startSending(wait, zid); if ('shuffle' in (state.zones[zid] || {})) await setZoneShuffle(false, zid, t.signal); return api('POST', `/playlists/${id}/play`, { zone: zid }, { signal: t.signal }); });
+        startSent(wait);
+        toast(`Queued ${r.queued} song${r.queued === 1 ? '' : 's'}${r.missing.length ? `; ${r.missing.length} not playable here` : ''}`);
+      } catch (e) { startFail(e.message, true, wait); toast(e.message, 'error'); } finally { doneMode(shufflePending, zid, mine); }
     } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
   const refreshQueue = async (rerender = true) => {
@@ -2262,30 +2306,119 @@
     if (!$('#nowplaying').hidden) renderNowPlaying();
   };
 
-  // Repeat (off → all → one) for the zone in use; this browser keeps its own choice
+  // Shuffle and repeat are modes of the zone in use, as in any player: the node's come with its state
+  // (on /v1/events, so another open app sees them too); this browser keeps its own next to its queue.
+  // Repeat goes off → all → one. Shuffle on plays what comes next in a random order, the current song
+  // staying; off puts the queue back in its original order, the current song in its place.
   const REPEATS = ['off', 'all', 'one'];
+  // Each zone's states from the node's events, counted: an answer to a request is newer than the
+  // zone's state here only when no event for that zone came while it was on its way
+  const zoneEvents = new Map();
+  const evOf = (id) => zoneEvents.get(id) || 0;
+  const countEvent = (id) => zoneEvents.set(id, evOf(id) + 1);
+  const applyAnswer = (st, ev0) => { if (st && st.id && state.zones[st.id] && evOf(st.id) === ev0) state.zones[st.id] = st; };
+  // One change of a zone's mode or queue at a time from this app, in the order asked (a toggle,
+  // a page's Play or Shuffle, a playlist's shuffle off): the last one asked is the node's last word
+  const zoneOps = new Map();
+  // `fn(turn)` runs when the ones asked before it are done. What it goes on to load (discovery finding
+  // songs, the library read for a page's rows) runs inside its turn, given `turn`, rather than waiting
+  // on itself. A turn over 60 s is cut: its requests take `turn.signal`, so none of its answers lands
+  // here after the ones that follow (the node may still act on one; its next event says)
+  const TURN_MS = 60000;
+  const zoneOp = (zid, fn, turn) => {
+    if (turn && turn.zid === zid && turn.open) return Promise.resolve().then(() => fn(turn));
+    const mine = { zid, open: false, signal: null };
+    const run = (zoneOps.get(zid) || Promise.resolve()).then(() => {
+      const ac = new AbortController(); mine.signal = ac.signal; mine.open = true;
+      const why = new Error('The node did not answer in 60 seconds'); ac.signal.why = why; // (older engines pass no reason)
+      const t = setTimeout(() => ac.abort(why), TURN_MS);
+      return Promise.resolve().then(() => fn(mine)).finally(() => { clearTimeout(t); mine.open = false; });
+    });
+    zoneOps.set(zid, run.catch(() => {})); return run;
+  };
+  // The zone a change goes to: its turn's when it runs inside one (the zone in use may have changed
+  // meanwhile), else the zone in use. `onBrowser(o)` likewise
+  const zoneOf = (o) => (o && o.turn ? o.turn.zid : state.zone);
+  const onBrowser = (o) => (o && o.turn ? o.turn.zid === BROWSER : isBrowser());
+  // The mode a zone was last asked for (a toggle, a page's Play or Shuffle, a playlist's Play), until
+  // it is in: a press turns from it, and an older change can't put its own back over a newer press
+  const shufflePending = new Map(); const repeatPending = new Map();
+  const askMode = (map, zid, value) => { const token = { value }; map.set(zid, token); renderModes(); return token; };
+  const doneMode = (map, zid, token) => { if (map.get(zid) === token) { map.delete(zid); renderModes(); } };
+  // A page's Play or Shuffle on a node zone: its mode is asked for when its turn is, and goes with the
+  // turn to what it loads (the library read, the finding of songs, the load itself)
+  const withTurn = (zid, o, fn) => { const mode = o.shuffle !== undefined && !o.mode ? askMode(shufflePending, zid, o.shuffle) : null; return zoneOp(zid, (turn) => fn({ ...o, turn, mode: o.mode || mode })).finally(() => { if (mode) doneMode(shufflePending, zid, mode); }); };
   const browserRepeat = () => { try { return localStorage.getItem('pm.repeat') || 'off'; } catch { return 'off'; } };
   const zoneRepeat = () => (isBrowser() ? browserRepeat() : (state.zones[state.zone] || {}).repeat || 'off');
+  const browserShuffle = () => { try { return localStorage.getItem('pm.shuffle') === 'on'; } catch { return false; } };
+  const setBrowserShuffle = (on) => { try { if (on) localStorage.setItem('pm.shuffle', 'on'); else localStorage.removeItem('pm.shuffle'); } catch { /* no storage */ } };
+  const zoneShuffle = () => (isBrowser() ? browserShuffle() : !!(state.zones[state.zone] || {}).shuffle);
+  // Fisher-Yates on a[from…]
+  const shuffleFrom = (a, from = 0) => { for (let k = a.length - 1; k > from; k--) { const j = from + Math.floor(Math.random() * (k - from + 1)); [a[k], a[j]] = [a[j], a[k]]; } return a; };
+  // This browser's original order while shuffled: each item's `ord`. One added with "Add to queue"
+  // ends it (browserAppend); one with no `ord` ("Play next", or put in by hand) follows the item
+  // before it in the play order, so "Play next" is next in both orders. Returns the queue in that
+  // order (and numbers it again)
+  const browserOrder = () => {
+    const q = state.browserQueue; let prev = -1;
+    q.forEach((it) => { if (typeof it.ord !== 'number') it.ord = prev + 1e-6; prev = it.ord; });
+    const orig = q.map((it, k) => [it, k]).sort((a, b) => a[0].ord - b[0].ord || a[1] - b[1]).map(([it]) => it);
+    orig.forEach((it, k) => { it.ord = k; });
+    return orig;
+  };
+  const browserAppend = (items) => { const top = state.browserQueue.reduce((m, it) => (typeof it.ord === 'number' ? Math.max(m, it.ord) : m), -1); items.forEach((it, k) => { it.ord = top + 1 + k; }); state.browserQueue.push(...items); };
+  // A new queue here: in its order, shuffled after the first song when shuffle is on (`shuffle`, from a
+  // page's Play or Shuffle, sets the mode first; Shuffle starts on a random song)
+  const browserLoad = (items, shuffle) => {
+    if (shuffle !== undefined) setBrowserShuffle(shuffle);
+    items.forEach((it, k) => { it.ord = k; });
+    if (browserShuffle()) shuffleFrom(items, shuffle ? 0 : 1);
+    state.browserQueue = items; browserPlay(0); renderModes();
+  };
   const renderModes = () => {
-    const r = zoneRepeat(); const b = $('#repeatbtn'); if (!b) return;
-    const words = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r];
-    b.innerHTML = icon(r === 'one' ? 'repeat-one' : 'repeat'); b.classList.toggle('on', r !== 'off');
-    b.setAttribute('aria-pressed', String(r !== 'off')); b.setAttribute('aria-label', words); b.title = words;
+    const r = !isBrowser() && repeatPending.has(state.zone) ? repeatPending.get(state.zone).value : zoneRepeat();
+    const sh = !isBrowser() && shufflePending.has(state.zone) ? shufflePending.get(state.zone).value : zoneShuffle();
+    const rWords = { off: 'Repeat: off', all: 'Repeat: the whole queue', one: 'Repeat: this song' }[r]; const sWords = `Shuffle: ${sh ? 'on' : 'off'}`;
+    // (on: the accent and a dot under the icon, not colour alone; the state is in the label too)
+    const mark = (b, on, words, ic) => { if (ic && b.dataset.ic !== ic) { b.innerHTML = icon(ic); b.dataset.ic = ic; } b.classList.toggle('on', on); b.setAttribute('aria-pressed', String(on)); b.setAttribute('aria-label', words); b.title = words; };
+    $$('#repeatbtn, [data-npt="repeat"]').forEach((b) => mark(b, r !== 'off', rWords, r === 'one' ? 'repeat-one' : 'repeat'));
+    $$('#shufflebtn, [data-npt="shuffle"]').forEach((b) => mark(b, sh, sWords));
+    const qs = $('#qshuffle'); if (qs && qs.dataset.on !== String(sh)) { qs.dataset.on = String(sh); qs.classList.toggle('primary', sh); qs.setAttribute('aria-pressed', String(sh)); qs.innerHTML = `${icon('shuffle')} Shuffle ${sh ? 'on' : 'off'}`; qs.title = sh ? 'Shuffle is on: press to play the queue in its order again' : 'Play what comes next in a random order; the playing song stays'; }
   };
-  $('#repeatbtn').onclick = async () => {
-    const next = REPEATS[(REPEATS.indexOf(zoneRepeat()) + 1) % REPEATS.length];
-    if (isBrowser()) { try { localStorage.setItem('pm.repeat', next); } catch { /* no storage */ } renderModes(); return; }
-    try { const st = await api('PUT', `/zones/${state.zone}/repeat`, { repeat: next }); if (st && st.id) state.zones[st.id] = st; else if (state.zones[state.zone]) state.zones[state.zone].repeat = next; renderModes(); } catch (e) { toast(e.message, 'error'); }
+  const cycleRepeat = async () => {
+    if (isBrowser()) { const next = REPEATS[(REPEATS.indexOf(zoneRepeat()) + 1) % REPEATS.length]; try { localStorage.setItem('pm.repeat', next); } catch { /* no storage */ } renderModes(); return; }
+    // (in the zone's turn, like a load, which carries the repeat as it is when it goes)
+    const zid = state.zone; const cur = repeatPending.has(zid) ? repeatPending.get(zid).value : zoneRepeat();
+    const next = REPEATS[(REPEATS.indexOf(cur) + 1) % REPEATS.length];
+    const mine = askMode(repeatPending, zid, next);
+    // (a 204 says the node took it: the zone's repeat is that now, whatever event came meanwhile, so
+    // a load after it carries it; a newer change from elsewhere comes with its own event)
+    try { await zoneOp(zid, async (t) => { const ev0 = evOf(zid); const st = await api('PUT', `/zones/${encodeURIComponent(zid)}/repeat`, { repeat: next }, { signal: t.signal }); if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid]) state.zones[zid].repeat = next; }); } catch (e) { toast(e.message, 'error'); } finally { doneMode(repeatPending, zid, mine); }
   };
-  $('#shufflebtn').onclick = async () => {
+  // The node's mode, set (a node from before modes answers 404/405: it says to update)
+  const setZoneShuffle = async (on, zid = state.zone, signal) => {
+    const ev0 = evOf(zid);
+    let st; try { st = await api('PUT', `/zones/${encodeURIComponent(zid)}/shuffle`, { shuffle: on }, { signal }); } catch (e) { throw noRoute(e); }
+    if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid] && evOf(zid) === ev0) state.zones[zid].shuffle = on;
+  };
+  // (two presses before the node answers, on two copies: the second turns the first's choice back)
+  // (the mode buttons carry data-repeat: a press while the last one is still on its way turns the
+  // choice back, so every press runs; the busy guard would drop it)
+  const toggleShuffle = async () => {
     if (isBrowser()) {
-      const q = state.browserQueue; const i = state.browserIndex;
-      const rest = q.slice(i + 1); if (rest.length < 2) { toast('Nothing to shuffle: add more songs to the queue first'); return; }
-      for (let k = rest.length - 1; k > 0; k--) { const j = Math.floor(Math.random() * (k + 1)); [rest[k], rest[j]] = [rest[j], rest[k]]; }
-      state.browserQueue = [...q.slice(0, i + 1), ...rest]; toast('Shuffled what comes next'); if (state.view === 'queue') render(); return;
+      const on = !browserShuffle();
+      const q = state.browserQueue; const cur = q[state.browserIndex];
+      if (on) { q.forEach((it, k) => { it.ord = k; }); shuffleFrom(q, state.browserIndex + 1); } else { state.browserQueue = browserOrder(); if (cur) state.browserIndex = state.browserQueue.indexOf(cur); }
+      // (Up next in Now playing and the Queue page show the new order: their rows play by position)
+      setBrowserShuffle(on); renderModes(); if (state.view === 'queue') render(); if (!$('#nowplaying').hidden) renderNowPlaying(); return;
     }
-    try { await api('POST', `/zones/${state.zone}/shuffle`); toast('Shuffled what comes next'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+    // (one write at a time per zone, in the order pressed: the last press is the node's last word)
+    const zid = state.zone; const on = !(shufflePending.has(zid) ? shufflePending.get(zid).value : zoneShuffle());
+    const mine = askMode(shufflePending, zid, on); // (the press shows at once)
+    try { await zoneOp(zid, (t) => setZoneShuffle(on, zid, t.signal)); refreshQueue(); } catch (e) { toast(e.message, 'error'); } finally { doneMode(shufflePending, zid, mine); }
   };
+  $('#repeatbtn').onclick = cycleRepeat;
+  $('#shufflebtn').onclick = toggleShuffle;
   $('#toggle').onclick = () => transport({ action: 'toggle' });
   // Next and Previous pressed twice skip twice: they don't wait for the last press (data-repeat)
   $('#next').dataset.repeat = ''; $('#prev').dataset.repeat = '';
@@ -2444,8 +2577,9 @@
     const wasPlaying = cur && cur.transport === 'playing';
     try {
       if (from === BROWSER) {
-        let queue = state.browserQueue;
-        const cur = state.browserIndex >= 0 ? queue[state.browserIndex] : null;
+        // (shuffle on: the items in their original order, so the node keeps it; it draws the rest again)
+        const cur = state.browserIndex >= 0 ? state.browserQueue[state.browserIndex] : null;
+        let queue = browserShuffle() ? browserOrder() : state.browserQueue;
         // YouTube plays in this page: a zone takes it only with yt-dlp on (as playSourceItems)
         const ytZones = (state.sources || []).some((x) => x.id === 'youtube' && x.enabled !== false && /zones/.test(x.status));
         if (!ytZones && queue.some((q) => ytOf(q.uri))) {
@@ -2460,7 +2594,7 @@
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
         // Pause here first: the node may take seconds to open the track, and both would play meanwhile
         if (transport === 'playing') { audio.pause(); resume = true; }
-        const zs = await api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), radio: false });
+        const zs = await zoneOp(target, (t) => api('POST', `/zones/${encodeURIComponent(target)}/load`, { items, index: index >= 0 ? index : null, position_ms: Math.round((audio.currentTime || 0) * 1000), transport, repeat: browserRepeat(), shuffle: browserShuffle(), radio: false }, { signal: t.signal }));
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
         resume = null;
@@ -2477,6 +2611,8 @@
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
         state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null, limit: it.limit || null }; });
         try { localStorage.setItem('pm.repeat', z.repeat || 'off'); } catch { /* storage unavailable */ }
+        // (shuffle comes along; the zone's original order isn't in its state, so the play order stands for it)
+        state.browserQueue.forEach((it, k) => { it.ord = k; }); setBrowserShuffle(!!z.shuffle);
         if (index >= 0 && index < state.browserQueue.length && z.transport !== 'stopped') browserResumeAt(index, pos, z.transport === 'paused'); else state.browserIndex = -1;
       } else {
         const was = state.zones[from];
@@ -3025,26 +3161,35 @@
   // every play button on every page counts without each call site knowing)
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-act="play"], [data-splay], [data-tileplay], [data-dplay], [data-aplay], [data-vplay], #iplay, #ishuffle, #toggle, [data-npt="toggle"]'); if (b) state.startAnchor = { el: b, at: Date.now() }; }, true);
   // `replace`: the queue is being replaced, so the song still playing does not end the wait
-  const startWait = (what, zoneId = state.zone, title = '', replace = false) => {
+  const startWait = (what, zoneId = state.zone, title = '', replace = false, deferred = false) => {
     startDone(true);
     const a = state.startAnchor && Date.now() - state.startAnchor.at < 1500 ? state.startAnchor.el : null;
     if (a) a.classList.add('starting');
     const zw = state.zones[zoneId]; const oldItem = replace && zw && zw.now_playing ? zw.now_playing.item.id : null;
     // `sent`: a replace waits for the node's answer first, so the old queue moving on by itself
     // (its song ended) isn't taken for the new one starting
-    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace }; state.startError = null;
-    setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
+    const at = Date.now(); state.starting = { zone: zoneId, what, title, at, anchor: a, oldItem, sent: !replace, deferred }; state.startError = null;
+    // (a start waiting its turn behind the zone's other changes: its 20 s run from when its request goes)
+    if (!deferred) armStart(at, zoneId);
     renderBar();
+    return at;
   };
+  const armStart = (at, zoneId) => setTimeout(() => { if (state.starting && state.starting.at === at) { const zn = state.zones[zoneId]; startFail(`${zn ? zn.name : 'The zone'} did not start playing in 20 seconds`); } }, 20000);
   // The node took the replace: from now on the zone playing another song ends the wait (it may
   // already be playing it)
-  const startSent = () => {
-    const s = state.starting; if (!s || s.sent) return; s.sent = true;
+  // The song a replace replaces, as it is when the request goes (a start queued behind others: the
+  // song in hand when it was pressed may have changed meanwhile, and ending the wait on it would be early)
+  const startSending = (wait, zid) => { const s = state.starting; if (!s || s.at !== wait) return; const z = state.zones[zid]; s.oldItem = z && z.now_playing ? z.now_playing.item.id : null; if (s.deferred) { s.deferred = false; armStart(wait, zid); } };
+  // (`wait`, from startWait: a start another start replaced meanwhile is not this one)
+  const startSent = (wait) => {
+    const s = state.starting; if (!s || s.sent || (wait && s.at !== wait)) return; s.sent = true;
     const z = state.zones[s.zone]; if (z && z.transport === 'playing' && z.now_playing && z.now_playing.item.id !== s.oldItem) startDone();
   };
   const startDone = (quiet) => { const s = state.starting; if (!s) return; if (s.anchor) s.anchor.classList.remove('starting'); state.starting = null; if (!quiet) renderBar(); if (s.what === 'move' && !zonePop.hidden) renderZonePop(); };
-  const startFail = (msg, quiet) => {
-    const s = state.starting; if (!s) return; startDone(true);
+  const startFail = (msg, quiet, wait) => {
+    const s = state.starting;
+    if (wait && (!s || s.at !== wait)) { if (!quiet) toast(msg || 'something went wrong', 'error'); return; }
+    if (!s) return; startDone(true);
     // The song still playing (a refused replace leaves it on) doesn't clear the error: a new one does
     const zf = state.zones[s.zone]; const still = zf && zf.transport === 'playing' && zf.now_playing ? zf.now_playing.item.id : null;
     state.startError = { zone: s.zone, msg: msg || 'something went wrong', at: Date.now(), still };
@@ -3296,7 +3441,7 @@
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : hereName()}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn mode-btn" data-npt="shuffle" data-repeat aria-pressed="false" aria-label="Shuffle: off">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" data-repeat aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" data-repeat aria-label="Next">${icon('next')}</button><button class="icon-btn mode-btn" data-npt="repeat" data-repeat aria-pressed="false" aria-label="Repeat: off">${icon('repeat')}</button></div>${zoneVolume(z) ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" aria-label="Volume of ${esc(z.name)}"><span class="vol-level" data-vollevel="${esc(z.id)}"></span></div>` : ''}
             ${one ? '' : `<nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>`}
           </section>
           ${one ? oneHtml() : `          <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -3338,7 +3483,10 @@
     // it moves the bar's own slider, which sets the zone's volume
     const nv = $('#npvol', overlay); if (nv) { applyVol(nv, zoneVolume(z)); bindVolSlider(nv, currentZone); syncVolumeSliders(z); }
     else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = loadOutputs().then(() => { if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
-    $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
+    // The bar's own handlers, called directly; the modes' state comes from renderModes (as the bar's)
+    const npAct = { shuffle: toggleShuffle, repeat: cycleRepeat, prev: () => transport({ action: 'previous' }), toggle: () => transport({ action: 'toggle' }), next: () => transport({ action: 'next' }) };
+    $$('[data-npt]', overlay).forEach((b) => b.onclick = () => npAct[b.dataset.npt]());
+    renderModes();
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
     // (a drag that ends without a change, or is cancelled, lets go too)
@@ -3489,19 +3637,25 @@
     const name = v.label || srcName(srcSvc(v.source));
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Switching…';
     const z0 = playingIt(); const version = z0.queue_version;
-    if (z0.transport === 'playing') startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true);
+    const wait = z0.transport === 'playing' ? startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true, true) : null;
     try {
-      let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
-      // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
-      if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`);
-      const at = queue.findIndex((q) => q.id === itemId);
-      const z = playingIt();
-      if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
-      // The new source's own cover and length: the old item's cover stays only between two items
-      // of the same service (a library file shows its album's); the length comes with the source
-      const scheme = (u) => String(u || '').split(':')[0];
-      const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
-      const zs = await api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio });
+      // (read and loaded in one turn of the zone, so nothing of its queue changes in between)
+      const zs = await zoneOp(zone, async (t) => {
+        if (wait) startSending(wait, zone);
+        let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
+        // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
+        if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
+        const at = queue.findIndex((q) => q.id === itemId);
+        const z = playingIt();
+        if (at < 0 || !z) throw new Error('another song is playing now: open Sources again');
+        // The new source's own cover and length: the old item's cover stays only between two items
+        // of the same service (a library file shows its album's); the length comes with the source
+        const scheme = (u) => String(u || '').split(':')[0];
+        const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
+        return api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
+        // (no shuffle: the node would draw the queue again from its play order, songs heard included;
+        // keeping the mode with its order needs a node call that swaps one item's source in place)
+      });
       // The zone's answer says whether the new source plays (a paused zone sends no event to wait for)
       if (zs && zs.id) state.zones[zs.id] = zs;
       if (zs && zs.error) throw new Error(zs.error);
@@ -4608,29 +4762,36 @@
   const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
   // Library tracks by id, in order and with duplicates: the ones a page already loaded come
   // from the track cache, the rest are read four at a time (not one request per song at once).
-  const readTracks = async (ids) => {
+  const readTracks = async (ids, signal) => {
     const out = ids.map((id) => state.trackCache.get('track:' + id) || null);
     const need = [...new Set(ids.filter((id, k) => !out[k]))]; const got = new Map();
-    const worker = async () => { while (need.length) { const id = need.shift(); got.set(id, await api('GET', `/library/tracks/${id}`)); } };
+    const worker = async () => { while (need.length) { const id = need.shift(); got.set(id, await api('GET', `/library/tracks/${id}`, undefined, { signal })); } };
     await Promise.all(Array.from({ length: Math.min(4, need.length) }, worker));
     rememberTracks([...got.values()]);
     return ids.map((id, k) => out[k] || got.get(id));
   };
   // Play a list of item songs from index k: library tracks, streamed items, or Spotify Connect.
-  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback) => {
+  const playSongs = async (songs, k = 0, how = 'replace', pf, anchorEl, fallback, o = {}) => {
+    // (a node zone's turn first: the library read and the finding wait inside it, and it goes to the
+    // zone it was asked on)
+    if (!onBrowser(o) && !o.turn) return withTurn(state.zone, o, (o2) => playSongs(songs, k, how, pf, anchorEl, fallback, o2));
     const first = songs[k];
-    if (first && first.track_id == null && !first.uri && first.page) {
-      // A song only known by its link: the resolver finds where it plays.
-      return discoverPlay({ uri: first.page, page: first.page, title: first.title, artist: first.artist, image: first.image }, null, anchorEl);
+    // (a page's Play or Shuffle starts from the songs that play; discovery when none does)
+    const playsDirectly = (t) => t.track_id != null || t.uri;
+    if (first && first.track_id == null && !first.uri && first.page && (o.shuffle === undefined || !songs.slice(k).some(playsDirectly))) {
+      // A song only known by its link: the resolver finds where it plays (with the mode asked for, and
+      // where it was asked: next, at the end, or in place of the queue)
+      return discoverPlay({ uri: first.page, page: first.page, title: first.title, artist: first.artist, image: first.image }, null, anchorEl, { ...o, how });
     }
     const list = songs.slice(k).filter((t) => t.track_id != null || t.uri);
     if (!list.length) return toast('Nothing here plays on your services', 'error');
-    if (pf && pf.mode === 'connect') return spotifyPlay(list.map((t) => t.uri).filter(Boolean), anchorEl);
-    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id)); return how === 'replace' ? playTracks(tr, true) : playTracks(tr, false, how); } catch (e) { return toast(e.message, 'error'); } }
+    // (Spotify plays it on its own device, not in the zone's queue: no turn to hold)
+    if (pf && pf.mode === 'connect') { spotifyPlay((o.shuffle ? shuffleFrom([...list]) : list).map((t) => t.uri).filter(Boolean), anchorEl); return; }
+    if (list.every((t) => t.track_id != null)) { try { const tr = await readTracks(list.map((t) => t.track_id), o.turn && o.turn.signal); return how === 'replace' ? playTracks(tr, true, 'end', o) : playTracks(tr, false, how, o); } catch (e) { return toast(e.message, 'error'); } }
     // In a mixed queue a library row has track_id, not a provider URI.
     // Keep every playable row (and duplicates) in its original position.
     const items = list.map((t) => qOf(t, fallback));
-    return how === 'replace' ? playSourceItems(items, true) : playSourceItems(items, false, how);
+    return how === 'replace' ? playSourceItems(items, true, 'end', o) : playSourceItems(items, false, how, o);
   };
   const copyLink = async (path) => { const u = location.origin + path; try { await navigator.clipboard.writeText(u); toast('Link copied'); } catch { toast(u); } };
   // The ⋯ menu, the same on a page's hero and on every song row.
@@ -5074,16 +5235,21 @@
     return sec;
   };
   const mins = (ms) => { if (ms && ms < 60000) return `${Math.round(ms / 1000)} s`; const m = Math.round((ms || 0) / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
-  const discoverPlay = async (it, v, anchor) => {
-    if (v) return playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], true);
+  // `o.shuffle` (a page's Play or Shuffle): what is found loads with that mode, as the page's songs would;
+  // `o.how` ('next', 'end'): where it goes, else in place of the queue. On a node zone the finding takes
+  // the zone's turn first, so what it loads keeps its place among the zone's other changes (and its zone)
+  const discoverPlay = async (it, v, anchor, o = {}) => {
+    if (!onBrowser(o) && !o.turn) return withTurn(state.zone, o, (o2) => discoverPlay(it, v, anchor, o2));
+    const replace = !o.how || o.how === 'replace'; const at = replace ? 'end' : o.how;
+    if (v) return playSourceItems([{ uri: v.uri, title: it.title || '', artist: it.artist || '', album: '', duration_ms: null, image: it.image || null }], replace, at, o);
     let plan;
-    try { plan = await api('GET', `/discover/play?uri=${encodeURIComponent(it.page || it.uri)}`); } catch (e) { return toast(e.message, 'error'); }
+    try { plan = await api('GET', `/discover/play?uri=${encodeURIComponent(it.page || it.uri)}`, undefined, { signal: o.turn && o.turn.signal }); } catch (e) { return toast(e.message, 'error'); }
     const pf = plan.plays_from;
     if (pf && pf.service === 'library') {
-      try { const tracks = await Promise.all(plan.track_ids.map((id) => api('GET', `/library/tracks/${id}`))); return playTracks(tracks, true); } catch (e) { return toast(e.message, 'error'); }
+      try { const tracks = await Promise.all(plan.track_ids.map((id) => api('GET', `/library/tracks/${id}`, undefined, { signal: o.turn && o.turn.signal }))); return playTracks(tracks, replace, at, o); } catch (e) { return toast(e.message, 'error'); }
     }
-    if (pf && pf.mode === 'connect') return spotifyPlay(plan.spotify_uris, anchor);
-    if (pf && plan.items.length) { toast(`Playing from ${pf.label}`); return playSourceItems(plan.items, true); }
+    if (pf && pf.mode === 'connect') { spotifyPlay(o.shuffle ? shuffleFrom([...plan.spotify_uris]) : plan.spotify_uris, anchor); return; }
+    if (pf && plan.items.length) { toast(`Playing from ${pf.label}`); return playSourceItems(plan.items, replace, at, o); }
     const options = [{ title: 'Not on your services' }, ...(plan.connect || []).map((c) => ({ label: `Connect ${SERVICE_NAMES[c] || c}`, icon: 'zone', run: () => setView('sources') }))];
     if (plan.preview) options.push({ label: `Play a 30 s preview (${SERVICE_NAMES[plan.preview.service] || plan.preview.service})`, icon: 'play', run: () => playSourceItems([{ uri: plan.preview.id.startsWith('track:') ? `${plan.preview.service}:${plan.preview.id}` : plan.preview.id, title: it.title || '', artist: it.artist || '', album: `30 s preview · ${SERVICE_NAMES[plan.preview.service] || plan.preview.service}`, duration_ms: 30000, image: it.image || null }], false, 'now') });
     if (anchor) showMenu(anchor, options); else toast('Not on your services: connect one in Sources', 'error');
@@ -5294,8 +5460,8 @@
     // While the files are read the card counts them; when done, Home shows the albums once
     if (info.scanning) { state.setupScanning = true; again(); } else if (state.setupScanning) { state.setupScanning = false; render(); }
     const pb = $('#setupplay'); if (pb) pb.onclick = async () => {
-      // Up to 200 tracks in a random order (albums or not: untagged files have none)
-      try { const r = await api('GET', '/library/tracks?limit=200'); const t = r.tracks.slice(); for (let i = t.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [t[i], t[j]] = [t[j], t[i]]; } await playTracks(t, true); again(); } catch (e) { toast(e.message, 'error'); }
+      // Up to 200 tracks with shuffle on (albums or not: untagged files have none)
+      try { const r = await api('GET', '/library/tracks?limit=200'); await playTracks(r.tracks, true, 'end', { shuffle: true }); again(); } catch (e) { toast(e.message, 'error'); }
     };
     const ci = $('#setupcontact'); if (ci) {
       const save = async () => { const c = ci.value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Saved: Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -5846,8 +6012,8 @@
             + `<section class="section" id="smsongs"><div class="section-head"><h3>Songs</h3></div>${ts.length ? songRows(songs, { numbers: 'index' }) : '<p class="muted small">No song matches these rules right now.</p>'}</section>`;
           $('[data-back]', main).onclick = () => goBack('playlists');
           if (ts.length) { bindSongRows($('#smsongs'), songs, {}); enableSelect($('#smsongs'), songs); }
-          $('#smplay').onclick = () => playTracks(ts, true);
-          $('#smshuffle').onclick = () => playTracks([...ts].sort(() => Math.random() - 0.5), true);
+          $('#smplay').onclick = () => playTracks(ts, true, 'end', { shuffle: false });
+          $('#smshuffle').onclick = () => playTracks(ts, true, 'end', { shuffle: true });
           $('#smedit').onclick = () => setView('smart-edit', sid);
           break;
         }
@@ -6046,7 +6212,7 @@
             const all = [...playable(songs), ...localSongs]; const list = isBrowser() ? all.filter((t) => t.track_id != null || t.uri) : all; const out = all.length - list.length;
             if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
             if (out) toast(`${countOf(out, 'songs')} left out of ${hereName().toLowerCase()}'s queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
-            return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
+            return playSongs(list, 0, 'replace', null, anchorEl, undefined, { shuffle });
           };
           $('#plplay').onclick = (e) => (isBrowser() ? playAll(false, e.currentTarget) : playPlaylist(d.summary.id));
           stickyHead(d.summary.name, (el) => (isBrowser() ? playAll(false, el) : playPlaylist(d.summary.id)));
@@ -6450,15 +6616,7 @@
           }
           if (state.view !== 'source-item' || state.viewArg.id !== id || state.viewArg.source !== source) return;
           const qitems = it.tracks.map((t) => ({ uri: t.url, title: t.title, artist: t.artist || it.creator || '', album: it.title, duration_ms: t.duration_ms, image: it.image || null }));
-          const playFrom = async (i, replace = true) => {
-            const items = qitems.slice(i);
-            if (isBrowser()) {
-              const bitems = items.map((q, k) => ({ id: Date.now() + k, uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }));
-              if (replace) { state.browserQueue = bitems; browserPlay(0); } else state.browserQueue.push(...bitems);
-              return;
-            }
-            try { await api('POST', `/zones/${state.zone}/queue`, { items, replace, play: replace, at: 'end' }); toast(replace ? `Playing from ${srcName}` : 'Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
-          };
+          const playFrom = (i, replace = true) => playSourceItems(qitems.slice(i), replace, 'end', replace ? { shuffle: false } : {}); // (Play: in order, shuffle off)
           const canHeart = !!(await (async () => { try { await api('GET', '/favourites?uri=' + encodeURIComponent(it.url)); return true; } catch { return false; } })());
           main.innerHTML = backBtn('sources', srcName) + `<div class="artist-hero"><div class="portrait" style="border-radius:12px;background:hsl(${hue(it.title)} 35% 28%)">${it.image ? `<img src="${esc(it.image)}" alt="" data-err="remove">` : esc(initials(it.title))}</div><div class="grow"><div class="page-head"><div><div class="eyebrow">${esc(srcName)}</div><h1>${esc(it.title)}</h1><div class="muted">${esc([it.creator, it.year, it.tracks.length + (it.tracks.length === 1 ? ' track' : ' tracks')].filter(Boolean).join(' · '))} · <a href="${esc(webUrl(it.url))}" target="_blank" rel="noopener">open</a>${it.licence ? (/^https?:/.test(it.licence) ? ` · <a href="${esc(webUrl(it.licence))}" target="_blank" rel="noopener">licence</a>` : ` · ${esc(it.licence)}`) : ''}</div></div><div class="actions"><button class="btn primary" id="aplay">${icon('play')} Play</button><button class="btn" id="aadd">${icon('plus')} Add to queue</button><button class="btn" id="amore" title="Add to playlist">${icon('playlist')} Playlist</button>${it.library_album_id ? `<button class="btn ghost" id="ainlib" title="You already have this album">${icon('disc')} In your library</button>` : ''}${canHeart ? `<button class="btn heart ${state.favUris.has(it.url) ? 'on' : ''}" id="aheart">${icon(state.favUris.has(it.url) ? 'heart-fill' : 'heart')} ${state.favUris.has(it.url) ? 'Favourited' : 'Favourite'}</button>` : ''}</div></div>${it.description ? `<p class="bio">${esc(it.description.slice(0, 600))}${it.description.length > 600 ? '…' : ''}</p>` : ''}</div></div>`
             + `<div class="tracks">${it.tracks.map((t, i) => `<div class="track compact" data-i="${i}"><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue">${icon('plus')}</button></div></div>`).join('')}</div>`;
@@ -6467,7 +6625,7 @@
           const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { await setFavourite({ uri: it.url }, !on); render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
           const ainlib = $('#ainlib'); if (ainlib) ainlib.onclick = () => setView('album', it.library_album_id);
-          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
+          $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; browserAppend([{ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }]); toast('Added to queue'); return; } try { const zid = state.zone; await zoneOp(zid, (t) => api('POST', `/zones/${encodeURIComponent(zid)}/queue`, { items: [qitems[i]], at: 'end' }, { signal: t.signal })); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
           break;
         }
         case 'radio': {
@@ -6775,7 +6933,7 @@
           const ia = $('#iartist'); if (ia) ia.onclick = () => setView('item', { kind: 'artist', id: pg.artist.id });
           const iq = $('#iartistq'); if (iq) iq.onclick = () => { search.value = pg.artist.name; runSearch(); };
           const ial = $('#ialbum'); if (ial) ial.onclick = () => setView('item', { kind: 'album', id: pg.album.id });
-          const playAll = (shuffle, how = 'replace', anchorEl) => { if (pg.unavailable) return toast(pg.unavailable, 'error'); if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl); const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs; return playSongs(list, 0, how, pf, anchorEl, fallback); };
+          const playAll = (shuffle, how = 'replace', anchorEl) => { if (pg.unavailable) return toast(pg.unavailable, 'error'); if (!songs.length) return discoverPlay({ uri: pg.uri || '', page: pg.open_on[0] ? pg.open_on[0].url : pg.uri, title: pg.title, artist: fallback.artist, image: pg.image }, null, anchorEl, how === 'replace' ? { shuffle, how } : { how }); return playSongs(songs, 0, how, pf, anchorEl, fallback, how === 'replace' ? { shuffle } : {}); };
           $('#iplay').onclick = (e) => playAll(false, 'replace', e.currentTarget);
           stickyHead(state.itemTitle, (el) => playAll(false, 'replace', el));
           const sh = $('#ishuffle'); if (sh) sh.onclick = (e) => playAll(true, 'replace', e.currentTarget);
@@ -6834,7 +6992,8 @@
           await refreshQueue(false);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
+          const hadQsh = !!document.activeElement && document.activeElement.id === 'qshuffle';
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" data-repeat aria-pressed="false">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
@@ -6895,15 +7054,14 @@
           });
           $$('[data-qdown]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qdown), 'down'));
           $$('[data-qrm]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qrm), 'rm'));
-          const qr = $('#qradio'); if (qr) qr.onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: !(z && z.radio) }); toast(z && z.radio ? 'Radio off' : 'Radio on: similar music follows the queue'); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; render(); } catch (e) { toast(e.message, 'error'); } };
-          const qsh = $('#qshuffle'); if (qsh) qsh.onclick = async () => {
-            if (isBrowser()) {
-              const bq = state.browserQueue; const start = state.browserIndex == null ? 0 : state.browserIndex + 1;
-              for (let i = bq.length - 1; i > start; i--) { const j = start + Math.floor(Math.random() * (i - start + 1)); [bq[i], bq[j]] = [bq[j], bq[i]]; }
-              render(); return;
-            }
-            try { await api('POST', `/zones/${encodeURIComponent(state.zone)}/shuffle`); toast('Upcoming tracks shuffled'); refreshQueue(); } catch (e) { toast(e.message, 'error'); }
+          const qr = $('#qradio'); if (qr) qr.onclick = async () => {
+            // (in the zone's turn, like a load, which carries the radio as it is when it goes)
+            const zid = state.zone; const on = !(z && z.radio);
+            try { await zoneOp(zid, async (t) => { await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on }, { signal: t.signal }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`, undefined, { signal: t.signal }); if (zs && zs.id) state.zones[zs.id] = zs; }); toast(on ? 'Radio on: similar music follows the queue' : 'Radio off'); render(); } catch (e) { toast(e.message, 'error'); }
           };
+          // The same mode as the bar's Shuffle, with its state
+          // (the toggle keeps the focus across the page's redraw)
+          const qsh = $('#qshuffle'); if (qsh) { qsh.onclick = toggleShuffle; renderModes(); if (hadQsh) qsh.focus(); }
           const qt = $('#qtransfer'); if (qt) qt.onclick = () => showMenu(qt, [{ title: 'Move to' }, ...zoneList().filter((o) => o.id !== state.zone).map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]);
           const qsv = $('#qsave'); if (qsv) qsv.onclick = async () => {
             const body = isBrowser() ? { uris: state.browserQueue.map((it) => it.uri), name: `Queue · ${hereName().toLowerCase()}` } : { zone: state.zone };
@@ -7113,7 +7271,7 @@
           bindTrackRows(main, lists);
           $$('[data-dlalbum]', main).forEach((b) => b.onclick = () => { state.dlAlbum = Number(b.dataset.dlalbum); render(); main.scrollTo && main.scrollTo(0, 0); });
           const dc = $('[data-dlclose]', main); if (dc) dc.onclick = () => { state.dlAlbum = null; render(); };
-          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = k === 'all' ? [...lists.all].sort(() => Math.random() - 0.5) : lists[k]; if (ts && ts.length) playTracks(ts, true); });
+          $$('[data-dlplay]', main).forEach((b) => b.onclick = () => { const k = b.dataset.dlplay; const ts = lists[k]; if (ts && ts.length) playTracks(ts, true, 'end', { shuffle: k === 'all' }); });
           $$('[data-dlpl]', main).forEach((b) => b.onclick = () => playTracks(songsOf(pls[Number(b.dataset.dlpl)].track_ids), true));
           break;
         }
@@ -7698,7 +7856,7 @@
     const libChanged = !first && (restarted || (ev.library_rev != null && ev.library_rev !== link.libRev));
     const downFor = link.downSince ? Date.now() - link.downSince : 0;
     link.seq = ev.seq ?? null; link.boot = ev.boot ?? null; link.libRev = ev.library_rev ?? null;
-    state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); state.zonesSeen = true; ensureZone(); renderZoneName();
+    Object.keys(state.zones || {}).forEach(countEvent); state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); ev.zones.forEach((z) => countEvent(z.id)); state.zonesSeen = true; ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
     setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
@@ -7864,7 +8022,7 @@
       }
       if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && state.starting && ev.zone === state.starting.zone) startFail(ev.event.message, true);
       if (ev.type === 'zone') {
-        const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state;
+        const old = state.zones[ev.state.id]; state.zones[ev.state.id] = ev.state; countEvent(ev.state.id);
         syncVolumeSliders(ev.state);
         if (state.starting && ev.state.id === state.starting.zone) {
           const fresh = state.starting.oldItem == null || (ev.state.now_playing && ev.state.now_playing.item.id !== state.starting.oldItem);
@@ -7888,7 +8046,7 @@
         // A group of yours went: rebuilt (follow it) or ended (back to your own zone). Ask first,
         // then fall back as for any zone that goes
         const yours = ev.zone === state.zone && (state.along || state.hosting || state.alongHome);
-        delete state.zones[ev.zone];
+        delete state.zones[ev.zone]; countEvent(ev.zone);
         if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }

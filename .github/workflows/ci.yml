@@ -493,6 +493,7 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-android-first.js $GITHUB_WORKSPACE /tmp/pm/android-first-shots
           node $GITHUB_WORKSPACE/tools/ui-nowplaying-phone.js $GITHUB_WORKSPACE /tmp/pm/nowplaying-phone-shots
           node $GITHUB_WORKSPACE/tools/ui-motion.js $GITHUB_WORKSPACE /tmp/pm/motion-shots
+          node $GITHUB_WORKSPACE/tools/ui-shuffle-repeat.js $GITHUB_WORKSPACE /tmp/pm/shuffle-repeat-shots
           node $GITHUB_WORKSPACE/tools/ui-redesign.js $GITHUB_WORKSPACE /tmp/pm/redesign-shots
           node $GITHUB_WORKSPACE/tools/ui-item-about.js $GITHUB_WORKSPACE /tmp/pm/item-about-shots
           node $GITHUB_WORKSPACE/tools/ui-usb-dac.js $GITHUB_WORKSPACE /tmp/pm/usb-dac-shots
@@ -576,6 +577,12 @@ jobs:
         with:
           name: motion-shots
           path: /tmp/pm/motion-shots
+          if-no-files-found: ignore
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shuffle-repeat-shots
+          path: /tmp/pm/shuffle-repeat-shots
           if-no-files-found: ignore
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
