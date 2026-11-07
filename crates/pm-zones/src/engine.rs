@@ -155,6 +155,10 @@ struct Engine {
     sink: Option<Box<dyn AudioSink>>,
     current: Option<Current>,
     prefetch: Option<Prefetched>,
+    /// A prefetch given up while its open was still in progress (the queue changed, Stop, Next):
+    /// its thread can't be stopped, so no other is started until it ends. At most one open
+    /// ahead per zone, however often the queue changes.
+    parked: Option<Prefetched>,
     /// Crossfade length in ms (0 = off), set from the zone.
     crossfade: Arc<AtomicU64>,
     incoming: Option<Incoming>,
@@ -203,6 +207,7 @@ pub(crate) fn spawn(
         sink: None,
         current: None,
         prefetch: None,
+        parked: None,
         deferred: std::collections::VecDeque::new(),
         crossfade,
         incoming: None,
@@ -352,8 +357,21 @@ impl Engine {
         match cmd {
             Command::Shutdown => return Flow::Exit,
             Command::QueueChanged => {
-                // The next item may have changed; prefetch again lazily.
-                self.prefetch = None;
+                // The next item may have changed: an item opened ahead is kept while it is still
+                // the next one, else given up (and prefetched again lazily)
+                let still = self
+                    .current
+                    .as_ref()
+                    .zip(self.prefetch.as_ref())
+                    .is_some_and(|(cur, p)| {
+                        let q = self.queue.lock().expect("queue poisoned");
+                        q.after_end(cur.item.id)
+                            .and_then(|i| q.get(i).map(|it| (i, it.id)))
+                            == Some((p.index, p.item.id))
+                    });
+                if !still {
+                    self.drop_prefetch();
+                }
                 // A fade in progress goes on only while its track is still the one that plays
                 // after the current one ("Play next", a removal or a repeat change may differ).
                 if let (Some(cur), Some(inc)) = (self.current.as_ref(), self.incoming.as_ref()) {
@@ -790,9 +808,22 @@ impl Engine {
         self.stop();
     }
 
+    /// Give up the item opened ahead: one still opening is parked ([`Engine::parked`]).
+    fn drop_prefetch(&mut self) {
+        if let Some(p) = self.prefetch.take() {
+            self.park(p);
+        }
+    }
+
+    fn park(&mut self, mut p: Prefetched) {
+        if !p.settle(Duration::ZERO) {
+            self.parked = Some(p);
+        }
+    }
+
     fn abort_current(&mut self) {
         self.current = None;
-        self.prefetch = None;
+        self.drop_prefetch();
         self.incoming = None;
         if let Some(s) = self.sink.as_mut() {
             let _ = s.flush();
@@ -946,7 +977,7 @@ impl Engine {
             format,
             seek_from: None,
         });
-        self.prefetch = None;
+        self.drop_prefetch();
         self.error = None;
         self.transport = Transport::Playing;
         self.dirty = true;
@@ -1025,6 +1056,13 @@ impl Engine {
         if self.prefetch.is_some() {
             return;
         }
+        // One open ahead at a time: a given-up one still in progress goes first
+        if let Some(p) = self.parked.as_mut() {
+            if !p.settle(Duration::ZERO) {
+                return;
+            }
+            self.parked = None;
+        }
         let Some(cur) = self.current.as_ref() else {
             return;
         };
@@ -1101,12 +1139,18 @@ impl Engine {
                             break p.wait();
                         }
                         if self.interrupted() {
-                            // Dropped: its thread ends by itself, its result unused
+                            // Its thread ends by itself, its result unused; parked till then
+                            self.park(p);
                             return;
                         }
                     }
                 }
-                _ => self.open(&item),
+                other => {
+                    if let Some(p) = other {
+                        self.park(p);
+                    }
+                    self.open(&item)
+                }
             };
             match opened {
                 Ok((source, proc)) => {
@@ -1135,7 +1179,7 @@ impl Engine {
         }
         // End of the queue: let the tail play out, then close.
         self.current = None;
-        self.prefetch = None;
+        self.drop_prefetch();
         if let Some(mut s) = self.sink.take() {
             if let Err(e) = s.drain() {
                 tracing::warn!(zone = %self.id, "drain: {e}");
@@ -1329,7 +1373,7 @@ impl Engine {
             format,
             seek_from: None,
         });
-        self.prefetch = None;
+        self.drop_prefetch();
         self.error = None;
         self.transport = Transport::Playing;
         self.dirty = true;

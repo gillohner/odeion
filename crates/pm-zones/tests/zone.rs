@@ -749,6 +749,48 @@ async fn other_commands_during_a_pass_are_served_after_it() {
     }
 }
 
+/// The queue changing again and again while the next item's open doesn't return (a listener
+/// adding songs while a silent stream is next) keeps one open ahead in flight, not one per
+/// change: an open given up is waited out before another starts, and one that is still the
+/// next item is kept.
+#[tokio::test]
+async fn queue_changes_keep_one_open_ahead_in_flight() {
+    let r = rig(&[("a", RATE, 2_000)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("hang:first")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    let mut played = 100;
+    for i in 0..6 {
+        // A new next item (the open ahead is given up), then one at the end (it is kept)
+        r.zone
+            .enqueue(vec![QueueItem::new(format!("hang:next{i}"))], Insert::Next);
+        r.zone
+            .enqueue(vec![QueueItem::new(format!("hang:end{i}"))], Insert::End);
+        r.gate.allow(2);
+        played += 200;
+        wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
+        assert_eq!(
+            r.hang.waiting.load(Ordering::SeqCst),
+            1,
+            "round {i}: one open ahead in flight"
+        );
+    }
+    // The given-up open ends: then the next item is opened ahead, still one at a time
+    r.hang.allow(1);
+    r.gate.allow(2);
+    played += 200;
+    wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.hang.allow(100);
+    r.gate.allow(1_000);
+    r.zone.stop();
+    r.zone.wait_stopped().await;
+}
+
 /// The next item is opened ahead on its own thread: a next item whose open doesn't return
 /// never holds the audio thread, so Stop is taken while it is still opening.
 #[tokio::test]
