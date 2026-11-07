@@ -216,6 +216,11 @@ pub(crate) fn external_base(s: &NodeState, headers: &axum::http::HeaderMap) -> S
     }
 }
 
+/// Whether the sign-in returns through the return page (no secret here for the app).
+pub(crate) fn through_return_page(s: &NodeState) -> bool {
+    !creds(s).has_secret()
+}
+
 /// The node's own callback.
 fn callback_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
     format!("{}/tidal/callback", external_base(s, headers))
@@ -1064,6 +1069,13 @@ pub(crate) async fn login(
             StatusCode::PRECONDITION_FAILED,
             "TIDAL is not set up on this node",
         ));
+    }
+    if !c.has_secret() {
+        crate::project_apps::check_return_page(
+            &s,
+            &callback_uri(&s, &headers),
+            "Use the code sign-in, or your own app with its secret.",
+        )?;
     }
     use sha2::Digest;
     let verifier = random_urlsafe(48);

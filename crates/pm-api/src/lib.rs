@@ -24714,4 +24714,132 @@ exec sleep 300
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert_eq!(s.sources.volume_limit(&group), None);
     }
+
+    /// The project's return page forwards only to a node on a local address: a sign-in through
+    /// it from any other address answers 412 (and the apps listing says so), a local address
+    /// signs in through it, and a node's own `[auth] return_page` is never second-guessed.
+    #[tokio::test]
+    async fn the_shared_return_page_needs_a_local_address() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        // A node reached by another name than localhost has a token
+        let s = state(dir.path(), Some("fixture-api")).await;
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "project-app".into(),
+            ..Default::default()
+        };
+        s.spotify.write().unwrap().creds = spotify::SpotifyCredentials {
+            client_id: "own-app".into(),
+            client_secret: String::new(),
+        };
+        let no_secret = |id: &str| drives::App {
+            client_id: id.into(),
+            client_secret: String::new(),
+        };
+        s.set_drive_apps(drives::apps_from(no_secret("g-client"), no_secret("m-client")));
+        let app = router(s.clone());
+        let send = |method: &'static str, path: &'static str, host: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("host", host)
+                    .header("authorization", "Bearer fixture-api")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let b = resp.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let logins = [
+            (
+                "GET",
+                "/v1/sources/tidal/login",
+                "/tidal/callback",
+                "Use the code sign-in",
+            ),
+            (
+                "GET",
+                "/v1/sources/spotify/login",
+                "/spotify/callback",
+                "Use your own app",
+            ),
+            (
+                "POST",
+                "/v1/library/drives/google/login",
+                "/drives/google/callback",
+                "Use your own app",
+            ),
+            (
+                "POST",
+                "/v1/library/drives/onedrive/login",
+                "/drives/onedrive/callback",
+                "Use your own app",
+            ),
+        ];
+        let notes = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| {
+                    a["note"]
+                        .as_str()
+                        .is_some_and(|n| n.contains("returns only to local"))
+                })
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // An internet address: refused before any sign-in starts, with what to use instead
+        for (m, path, _, instead) in logins {
+            let (st, v) = send(m, path, "music.example.com").await;
+            assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{path}: {v}");
+            let msg = v["error"]
+                .as_str()
+                .or(v["message"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                msg.contains("isn't a local one") && msg.contains(instead),
+                "{path}: {v}"
+            );
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
+        assert_eq!(
+            notes(&apps),
+            ["spotify", "tidal", "google-drive", "onedrive"],
+            "{apps}"
+        );
+        // A local address: through the return page, which forwards to this node's callback
+        for (m, path, callback, _) in logins {
+            let (st, v) = send(m, path, "192.168.1.5:7788").await;
+            assert_eq!(st, StatusCode::OK, "{path}: {v}");
+            let u = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+            let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+            assert_eq!(q["redirect_uri"], crate::project_apps::RETURN_PAGE, "{path}");
+            let (_, enc) = q["state"].split_once('.').unwrap();
+            let back = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(enc)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(back).unwrap(),
+                format!("http://192.168.1.5:7788{callback}")
+            );
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "192.168.1.5:7788").await;
+        assert!(notes(&apps).is_empty(), "{apps}");
+        // The node's own return page: its owner's redirector, used from any address
+        s.set_return_page("https://return.example/callback");
+        for (m, path, _, _) in logins {
+            let (st, v) = send(m, path, "music.example.com").await;
+            assert_eq!(st, StatusCode::OK, "{path}: {v}");
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
+        assert!(notes(&apps).is_empty(), "{apps}");
+    }
 }

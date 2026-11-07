@@ -36,8 +36,12 @@ is OAuth 2 with PKCE and no secret, and returns through one static page,
 `https://gillohner.github.io/pubky-music-auth/callback` ([source](https://github.com/gillohner/pubky-music-auth),
 `[auth] return_page` overrides it). The node starts the sign-in with `state = <nonce>.<base64url(its callback URL)>`;
 the page sends the browser on to that callback, and the node checks the nonce and redeems the code with its PKCE
-verifier, which never leaves it. This works for a node on a LAN with no port forwarding. An app with its secret in the
-node config keeps the direct redirect. CI runs `tools/secret-scan.py` over the repository and the built binary.
+verifier, which never leaves it. This works for a node on a LAN with no port forwarding. The page forwards only to a
+local address: `localhost` and `*.localhost`, `.local` and `.home.arpa` names, and loopback, private, link-local and
+`100.64.0.0/10` IP addresses. A node on any other address can't sign in through it: the sign-in answers 412 and
+Settings › This node › Service apps says so. Such a node uses TIDAL's code sign-in, or an app of its own with its
+secret (OneDrive and Spotify have no code sign-in). A node's own `[auth] return_page` is not checked. An app with its
+secret in the node config keeps the direct redirect. CI runs `tools/secret-scan.py` over the repository and the built binary.
 
 **Modes.** A service can have an Official mode (its public API) and an Unofficial mode (its private API, may break, off
 by default, its own warning and sign-in). Sources › TIDAL holds both behind one **Sign in**: the ways sit side by side

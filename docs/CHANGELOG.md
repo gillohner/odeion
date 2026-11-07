@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-10
+
+- **Sign-ins through the shared return page need a local node address.** The project's return page for TIDAL, Spotify, Google Drive and OneDrive sign-ins returns only to a node on a local address (a LAN or loopback address, a `.local` name). From any other address the node now says so before the sign-in starts (412, and a line in Settings › This node › Service apps): use TIDAL's code sign-in, or an app of your own with its secret. A node's own `[auth] return_page` is unchanged.
+
 ### 2026-11-09
 
 - **Listeners have their own collections, on their own homeserver** (owner's ask, 11-02 and 11-03).

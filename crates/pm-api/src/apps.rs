@@ -317,6 +317,20 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
         }
     };
     let return_page = s.return_page();
+    // An app that signs in through the return page, when that page can't come back to this
+    // node's address: its row says so (the sign-in answers 412)
+    let unreachable = !crate::project_apps::return_page_reaches(s, &format!("{base}/"));
+    const UNREACHABLE: &str =
+        "The shared sign-in returns only to local addresses; this node's address isn't one.";
+    let note_if = |through: bool| (unreachable && through).then_some(UNREACHABLE);
+    let drive_through = |p: crate::drives::Provider| {
+        s.drives
+            .read()
+            .expect("drives")
+            .apps
+            .get(&p)
+            .is_none_or(|a| a.client_secret.is_empty())
+    };
     let spotify = crate::spotify::app_origin(s);
     let mut out = vec![
         NodeApp {
@@ -324,6 +338,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             set: (spotify != Some("config")).then_some("PUT /v1/sources/spotify/app"),
             fields: vec![field("client_id", "Client ID")],
             redirects: vec![return_page.clone()],
+            note: note_if(crate::spotify::through_return_page(s)),
             status: Some("GET /v1/sources/spotify/status"),
             get_one: Some("https://developer.spotify.com/dashboard"),
             limits: Some(
@@ -345,6 +360,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
             ),
             status: Some("GET /v1/sources/tidal/status"),
             get_one: Some("https://developer.tidal.com"),
+            note: note_if(crate::tidal::through_return_page(s)),
             ..own_app(
                 "tidal",
                 "TIDAL",
@@ -442,6 +458,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
                 "Until Google verifies an app, at most 100 people can sign in with it, and Google warns \
                  them that the app isn't verified.",
             ),
+            note: note_if(drive_through(crate::drives::Provider::Google)),
             ..own_app(
                 "google-drive",
                 "Google Drive",
@@ -454,6 +471,7 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
         },
         NodeApp {
             status: Some("GET /v1/library/drives"),
+            note: note_if(drive_through(crate::drives::Provider::Onedrive)),
             ..own_app(
                 "onedrive",
                 "OneDrive",
