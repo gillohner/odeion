@@ -5711,6 +5711,15 @@ mod tests {
         let twin = s.create_zone("Fake Linn", other);
         assert_eq!(twin.id(), &zid, "the same name gives the same id");
         twin.wait_acked().await;
+        // The new zone reads its own output's level once it starts: wait for that, so the
+        // comparison below sees only what the renderer's event could change
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while twin.state().volume.is_none() {
+                ms(20).await;
+            }
+        })
+        .await
+        .expect("the new zone never read its output's level");
         let twin_was = twin.state().volume;
         let resp = app.clone().oneshot(notify(&token, 8, &level(9))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
@@ -22721,6 +22730,9 @@ exec sleep 300
             )
             .await;
             assert_eq!(st, StatusCode::OK);
+            // The queue is saved just before the zone's state goes out on the bus, so each zone
+            // event is the moment to look (no fixed poll a loaded runner can outlast)
+            let mut events = s.events.subscribe();
             let (st, z) = call(
                 &app,
                 "PUT",
@@ -22730,18 +22742,22 @@ exec sleep 300
             .await;
             assert_eq!((st, z["shuffle"].as_bool()), (StatusCode::OK, Some(true)), "{z}");
             let key = format!("queue.{zid}");
-            let mut saved = None;
-            for _ in 0..200 {
-                saved = s.library.lock().unwrap().get_setting(&key).unwrap();
-                if saved.as_deref().is_some_and(|j| j.contains("\"shuffle\":true")) {
-                    break;
+            let saved_shuffled = || {
+                s.library
+                    .lock()
+                    .unwrap()
+                    .get_setting(&key)
+                    .unwrap()
+                    .is_some_and(|j| j.contains("\"shuffle\":true"))
+            };
+            let saved = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                while !saved_shuffled() {
+                    // Lagged: look again
+                    let _ = events.recv().await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert!(
-                saved.is_some_and(|j| j.contains("\"shuffle\":true")),
-                "the mode was not saved"
-            );
+            })
+            .await;
+            assert!(saved.is_ok(), "the mode was not saved");
         }
         let s2 = state(dir.path(), None).await;
         let app2 = router(s2.clone());
