@@ -315,6 +315,8 @@
   // resource in between is sent, and so is a repeat after it (A, B, A sends all three, one after another).
   // Reads are left alone.
   const inFlight = new Map();
+  // A listing of someone's shared playlists that may miss some (x-partial)
+  const SHARED_PARTIAL = "Some of their posts couldn't be read, so this list may miss some.";
   const api = (method, path, body, opts = {}) => {
     if (method === 'GET') return apiSend(method, path, body, opts);
     // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
@@ -347,6 +349,8 @@
         signal: opts.signal,
       });
     } catch (e) { if (opts.signal && opts.signal.aborted) throw e; linkHint(); throw new Error("Can't reach the node."); }
+    // opts.onHeaders: a caller that reads a header of the answer (x-partial on a listing that may miss some)
+    if (opts.onHeaders) opts.onHeaders(r.headers);
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     const text = await r.text();
@@ -1114,10 +1118,11 @@
   const bringFiles = async () => {
     let plan; try { plan = await api('POST', '/pubky/files/mirror', { dry_run: true }); } catch (e) { return toast(e.message, 'error'); }
     const broken = plan.broken ? ` ${countOf(plan.broken, 'files')} on the homeserver are empty or a second copy; they are left out (remove them below).` : '';
-    if (!plan.total) return toast(`Nothing to bring: ${countOf(plan.skipped, 'files')} already on this node.${broken}`);
+    const unchecked = plan.unchecked ? ` ${countOf(plan.unchecked, 'files')} couldn't be checked (the homeserver didn't answer in time); they are left out this time, try again later.` : '';
+    if (!plan.total) return toast(`Nothing to bring: ${countOf(plan.skipped, 'files')} already on this node.${broken}${unchecked}`);
     const go = await choiceDialog({
       title: 'Bring files here',
-      text: `${countOf(plan.total, 'files')} (${fmtBytes(plan.bytes_total)}) to bring${plan.skipped ? `, ${plan.skipped} already here` : ''}. They go into this folder, then into your library.${broken}`,
+      text: `${countOf(plan.total, 'files')} (${fmtBytes(plan.bytes_total)}) to bring${plan.skipped ? `, ${plan.skipped} already here` : ''}. They go into this folder, then into your library.${broken}${unchecked}`,
       field: { label: 'Folder', value: plan.dest },
       choices: [{ label: 'Bring them', note: 'Runs on the node at your copy speed; you can leave this page.', value: true, primary: true }],
     });
@@ -5981,8 +5986,8 @@
           const pid = state.viewArg;
           let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + `<div class="notice">${esc(e.message)}</div>`; break; }
           // Their homeserver may not answer: said as such, not as "no shared playlists"
-          let sharedErr = null;
-          const shared = await api('GET', `/shared/${pid}/playlists`).catch((e) => { sharedErr = e.message; return []; });
+          let sharedErr = null; let sharedPartial = false;
+          const shared = await api('GET', `/shared/${pid}/playlists`, undefined, { onHeaders: (h) => { sharedPartial = h.get('x-partial') === '1'; } }).catch((e) => { sharedErr = e.message; return []; });
           if (state.view !== 'person' || state.viewArg !== pid) return;
           state.itemTitle = pg.name;
           const links = (pg.links || []).map((l) => `<a class="chip" href="${esc(webUrl(l.url))}" target="_blank" rel="noopener">${icon('external')} ${esc(l.title || l.url.replace(/^https?:\/\//, ''))}</a>`).join('');
@@ -5993,7 +5998,7 @@
               ${links ? `<div class="chips" style="margin-top:10px">${links}</div>` : ''}<p class="muted small">${countOf(pg.followers || 0, 'followers')} · ${pg.following_count || 0} following</p></div></div>`
             + `<section class="section"><div class="section-head"><h3>Tags they use</h3><span class="muted small">public on Pubky</span></div>${(pg.tags || []).length ? `<div class="chips">${pg.tags.map(([l, c]) => `<button class="chip" data-ptag="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">No music tags from them on Pubky yet.</p>'}</section>`
             + (tagged.length ? `<section class="section"><div class="section-head"><h3>Recently tagged</h3></div><div class="list">${tagged.map((h, k) => `<div class="list-row clickable" data-ptagged="${k}">${h.image ? `<img class="thumb" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" data-err="hide">` : svcBadge('pubky')}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist' }[h.kind] || h.kind, h.subtitle].filter(Boolean).join(' · '))}</div></div></div>`).join('')}</div></section>` : '')
-            + `<section class="section"><div class="section-head"><h3>Playlists they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items || 0, 'songs')}</div></div></div>`).join('')}</div>` : sharedErr ? `<div class="notice warn small" role="status">${esc(sharedErr)}</div>` : '<p class="muted small">No shared playlists.</p>'}</section>`;
+            + `<section class="section"><div class="section-head"><h3>Playlists they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items || 0, 'songs')}</div></div></div>`).join('')}</div>` : sharedErr ? `<div class="notice warn small" role="status">${esc(sharedErr)}</div>` : '<p class="muted small">No shared playlists.</p>'}${sharedPartial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : ''}</section>`;
           $('[data-back]', main).onclick = () => goBack('home');
           $$('[data-ptag]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.ptag }));
           $$('[data-ptagged]', main).forEach((r) => r.onclick = () => { const h = tagged[Number(r.dataset.ptagged)]; setView('item', { kind: h.kind === 'artist' ? 'artist' : h.kind === 'album' ? 'album' : 'song', id: h.id }); });
@@ -6006,10 +6011,10 @@
           loading();
           const a = state.viewArg || {}; const who = shortKey(a.user);
           if (!a.id) {
-            let list; try { list = await api('GET', `/shared/${a.user}/playlists`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+            let list; let partial = false; try { list = await api('GET', `/shared/${a.user}/playlists`, undefined, { onHeaders: (h) => { partial = h.get('x-partial') === '1'; } }); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
             if (state.view !== 'shared') return;
             state.itemTitle = `Shared by ${who}`;
-            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(`Shared by ${who}`, list.length) + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} song${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared playlists on Pubky.'));
+            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(`Shared by ${who}`, list.length) + (partial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : '') + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} song${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared playlists on Pubky.'));
             $$('[data-shpl]', main).forEach((r) => r.onclick = () => setView('shared', { user: a.user, id: r.dataset.shpl }));
             break;
           }
