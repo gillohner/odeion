@@ -64,6 +64,18 @@ struct PatternSource {
     title: Option<String>,
     /// Streams MP3 (a uri ending in `.mp3`), else FLAC.
     mp3: bool,
+    /// How a seek goes (from the uri): `brokenseek` takes it and then fails to read (TIDAL's
+    /// segmented streams before TASK-seek-segmented-streams-1104), `noseek` refuses it (radio).
+    seek: SeekKind,
+    /// A broken seek happened: the next read fails.
+    broken: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SeekKind {
+    Works,
+    Broken,
+    Refused,
 }
 
 impl FrameSource for PatternSource {
@@ -76,6 +88,11 @@ impl FrameSource for PatternSource {
     }
 
     fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        if self.broken {
+            return Err(SourceError::Decode(
+                "isomp4: out-of-bounds seek for a non-seekable stream".into(),
+            ));
+        }
         if self.pos >= self.total {
             return Ok(None);
         }
@@ -90,6 +107,14 @@ impl FrameSource for PatternSource {
     }
 
     fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        match self.seek {
+            SeekKind::Works => {}
+            SeekKind::Broken => {
+                self.broken = true;
+                return Ok(());
+            }
+            SeekKind::Refused => return Err(SourceError::Seek("a live stream".into())),
+        }
         self.pos = (ms * self.fmt.rate_hz as u64 / 1000).min(self.total);
         Ok(())
     }
@@ -149,6 +174,14 @@ impl SourceFactory for Factory {
             gate: self.gate.clone(),
             title: item.uri.contains("icy").then(|| "Nils Frahm - Says".to_string()),
             mp3: item.uri.ends_with(".mp3"),
+            seek: if item.uri.contains("brokenseek") {
+                SeekKind::Broken
+            } else if item.uri.contains("noseek") {
+                SeekKind::Refused
+            } else {
+                SeekKind::Works
+            },
+            broken: false,
         }))
     }
 
@@ -193,6 +226,22 @@ struct Recorder {
     resumes: Mutex<u64>,
     /// Each sink's stream carries this many frames at most (a renderer's stream of fixed size).
     room: Mutex<Option<u64>>,
+    /// The device goes away once this many frames were written (a USB DAC unplugged).
+    gone_after: Mutex<Option<u64>>,
+    /// The device goes away while the sink plays out (at a song boundary).
+    drain_gone: std::sync::atomic::AtomicBool,
+    /// The output's settings changed: sinks open before this ask to be reopened.
+    reopen: std::sync::atomic::AtomicBool,
+    /// Opens from this one on find the device gone (unplugged while the output opens).
+    open_gone_from: Mutex<Option<u64>>,
+    /// The next write must go to a fresh sink (a phone's DAC that would go back to full level).
+    reopen_now: std::sync::atomic::AtomicBool,
+    /// The next resume finds the device gone (unplugged during the pause).
+    resume_gone: std::sync::atomic::AtomicBool,
+    /// Flushes find the device gone (unplugged while the zone waited)
+    flush_gone: std::sync::atomic::AtomicBool,
+    /// Gones the zone said it heard
+    gone_reported: Mutex<u64>,
 }
 
 struct RecOutput {
@@ -212,7 +261,23 @@ impl Output for RecOutput {
         &self.caps
     }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
-        *self.rec.opens.lock().unwrap() += 1;
+        let n = {
+            let mut o = self.rec.opens.lock().unwrap();
+            *o += 1;
+            *o
+        };
+        if self
+            .rec
+            .open_gone_from
+            .lock()
+            .unwrap()
+            .is_some_and(|from| n >= from)
+        {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 is not where Android plays now".into(),
+            ));
+        }
         Ok(Box::new(RecSink {
             fmt,
             rec: self.rec.clone(),
@@ -236,6 +301,14 @@ impl AudioSink for RecSink {
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         pm_zones::sink::check_block(self.fmt, block)?;
+        if let Some(n) = *self.rec.gone_after.lock().unwrap() {
+            if self.written + block.frames() as u64 > n {
+                return Err(SinkError::Gone(
+                    OutputId::new("rec", ""),
+                    "FiiO KA17 was unplugged".into(),
+                ));
+            }
+        }
         // A stream of fixed size takes nothing past its end (the HTTP answer would cut it off)
         if let Some(room) = *self.rec.room.lock().unwrap() {
             if self.written + block.frames() as u64 > room {
@@ -256,11 +329,32 @@ impl AudioSink for RecSink {
     }
     fn flush(&mut self) -> Result<(), SinkError> {
         *self.rec.flushes.lock().unwrap() += 1;
+        if self.rec.flush_gone.load(Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
         Ok(())
+    }
+    fn gone_reported(&mut self) {
+        *self.rec.gone_reported.lock().unwrap() += 1;
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         *self.rec.drains.lock().unwrap() += 1;
+        if self.rec.drain_gone.load(Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
         Ok(())
+    }
+    fn reopen_at_track(&self) -> bool {
+        self.rec.reopen.load(Ordering::SeqCst)
+    }
+    fn reopen_now(&self) -> bool {
+        self.rec.reopen_now.swap(false, Ordering::SeqCst)
     }
     fn pause(&mut self) -> Result<bool, SinkError> {
         if !self.rec.device_pause.load(Ordering::SeqCst) {
@@ -271,6 +365,12 @@ impl AudioSink for RecSink {
     }
     fn resume(&mut self) -> Result<(), SinkError> {
         *self.rec.resumes.lock().unwrap() += 1;
+        if self.rec.resume_gone.swap(false, Ordering::SeqCst) {
+            return Err(SinkError::Gone(
+                OutputId::new("rec", ""),
+                "FiiO KA17 was unplugged".into(),
+            ));
+        }
         if self.rec.fail_resume.swap(false, Ordering::SeqCst) {
             return Err(SinkError::Device("listener went away during the pause".into()));
         }
@@ -528,6 +628,54 @@ async fn pause_resume_seek_positions() {
             "stopped"
         ]
     );
+}
+
+/// A stream that takes a seek and then can't read (TIDAL's DASH before the segmented seek) goes
+/// on from where it was: the track doesn't end and the queue doesn't move on, and the caller
+/// hears that this stream cannot seek. One that refuses the seek (radio) keeps playing as it was.
+#[tokio::test]
+async fn a_seek_the_stream_cannot_follow_keeps_the_track_playing() {
+    for (uri, reopened) in [("a-brokenseek", true), ("a-noseek", false)] {
+        let mut r = rig(&[(uri, RATE, 1000), ("b", RATE, 300)]);
+        r.zone
+            .enqueue(vec![QueueItem::new(uri), QueueItem::new("b")], Insert::End);
+        r.zone.play();
+        r.gate.allow(3);
+        wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+        // The seek is handled after the in-flight block (300..400): from 40 ms
+        r.gate.blocked().await;
+        r.zone.seek_ms(70);
+        r.gate.allow(1);
+        wait_for(|| r.rec.samples.lock().unwrap().len() == 400).await;
+        r.gate.allow(1000);
+        let st = r.zone.wait_stopped().await;
+        assert_eq!(st.error, None, "{uri}");
+        let mut want = frames(0, 1000);
+        want.extend(frames(0, 300));
+        assert_eq!(
+            *r.rec.samples.lock().unwrap(),
+            want,
+            "{uri}: on from 40 ms, then the next track"
+        );
+        let evs = kinds(&drain_events(&mut r.events));
+        let mut expect = vec![format!("start:{uri}:false")];
+        if reopened {
+            expect.extend([
+                "seek:70".to_string(),
+                "seek:40".into(),
+                "error:this stream cannot seek (decode error: isomp4: out-of-bounds seek for a non-seekable stream)".into(),
+            ]);
+        } else {
+            expect.push("error:this stream cannot seek (seek failed: a live stream)".into());
+        }
+        expect.extend([
+            format!("end:{uri}"),
+            "start:b:true".into(),
+            "end:b".into(),
+            "stopped".into(),
+        ]);
+        assert_eq!(evs, expect, "{uri}");
+    }
 }
 
 /// A sink whose device buffers (UPnP, BluOS) is told to pause, not flushed: the renderer stops
@@ -1044,4 +1192,355 @@ async fn a_panic_stops_the_zone_with_an_error_and_the_zone_plays_again() {
     // The queue is usable from outside after the panic (its lock is not poisoned).
     zone.enqueue(vec![QueueItem::new("a")], Insert::End);
     wait_for(|| zone.state().queue.len() == 2).await;
+}
+
+/// The device goes away mid-track (a phone's USB DAC unplugged): the zone pauses where the listener
+/// was, with the reason, writes nothing anywhere else, and Play opens the output again from there.
+#[tokio::test]
+async fn a_device_gone_mid_track_pauses_the_zone() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    *r.rec.gone_after.lock().unwrap() = Some(300);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(4);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    let st = r.zone.state();
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(
+        st.now_playing.as_ref().unwrap().position_ms,
+        30,
+        "where the listener was"
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "no other device opened");
+    assert_eq!(r.rec.samples.lock().unwrap().len(), 300);
+    // Plugged in again; Play carries on from there on a fresh sink
+    *r.rec.gone_after.lock().unwrap() = None;
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    assert_eq!(r.zone.state().error, None, "playing again: the reason is gone");
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2);
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        frames(0, 1000),
+        "nothing lost, nothing twice"
+    );
+    let k = kinds(&drain_events(&mut r.events));
+    assert!(k.contains(&"pause:30".to_string()), "{k:?}");
+    assert!(k.iter().any(|e| e.starts_with("error")), "{k:?}");
+}
+
+/// The device goes away while the old song plays out before a format change: the next song starts
+/// paused, and nothing opens on another device (the phone's speaker); Play opens it on the DAC.
+#[tokio::test]
+async fn a_device_gone_at_a_song_boundary_pauses_the_next_song() {
+    let mut r = rig(&[("a", RATE, 200), ("b", 2 * RATE, 300)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    r.rec.drain_gone.store(true, Ordering::SeqCst);
+    r.gate.allow(3);
+    let mut w = r.zone.watch();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        w.wait_for(|s| s.transport == Transport::Paused),
+    )
+    .await
+    .expect("the zone pauses (it must not play b elsewhere)")
+    .unwrap();
+    let st = r.zone.state();
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(
+        st.now_playing.as_ref().unwrap().item.uri,
+        "b",
+        "paused at the next song"
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "nothing opened for b");
+    r.rec.drain_gone.store(false, Ordering::SeqCst);
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    r.gate.allow(100);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2, "b on a fresh sink");
+    let mut want = frames(0, 200);
+    want.extend(frames(0, 300));
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        want,
+        "nothing lost, nothing twice"
+    );
+    drop(drain_events(&mut r.events));
+}
+
+/// Codex M4 (round 3): the device is not there when the next song's sink opens (the route went
+/// between the drain and the open): the same pause as a drain that finds it gone, never a stopped
+/// zone, and nothing opens elsewhere.
+#[tokio::test]
+async fn a_device_gone_while_the_next_song_opens_pauses_not_stops() {
+    let mut r = rig(&[("a", RATE, 200), ("b", 2 * RATE, 300)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    *r.rec.open_gone_from.lock().unwrap() = Some(2);
+    r.zone.play();
+    r.gate.allow(3);
+    let mut w = r.zone.watch();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        w.wait_for(|s| s.transport == Transport::Paused),
+    )
+    .await
+    .expect("the zone pauses, it does not stop")
+    .unwrap();
+    let st = r.zone.state();
+    assert_eq!(
+        st.error.as_deref(),
+        Some("FiiO KA17 is not where Android plays now: paused")
+    );
+    assert_eq!(st.now_playing.as_ref().unwrap().item.uri, "b");
+    // Back: Play opens b there
+    *r.rec.open_gone_from.lock().unwrap() = None;
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    r.gate.allow(100);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    let mut want = frames(0, 200);
+    want.extend(frames(0, 300));
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        want,
+        "nothing lost, nothing twice"
+    );
+    drop(drain_events(&mut r.events));
+}
+
+/// Unplugged during a pause the device held: Play pauses there with the reason; it doesn't open
+/// the output again (that would be the phone's speaker).
+#[tokio::test]
+async fn a_device_gone_during_a_pause_stays_paused_on_play() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    r.rec.device_pause.store(true, Ordering::SeqCst);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.zone.pause();
+    r.gate.allow(1);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    r.rec.resume_gone.store(true, Ordering::SeqCst);
+    r.zone.play();
+    wait_for(|| r.zone.state().error.is_some()).await;
+    let st = r.zone.state();
+    assert_eq!(st.transport, Transport::Paused);
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(*r.rec.opens.lock().unwrap(), 1, "nothing opened again");
+    drop(drain_events(&mut r.events));
+}
+
+/// Claude L1 (round 5): the listener pauses just after the device went (the sink's flush says so):
+/// the zone pauses with the reason, it doesn't stop, and the sink hears that the zone heard it.
+#[tokio::test]
+async fn a_pause_that_finds_the_device_gone_pauses_with_the_reason() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.rec.flush_gone.store(true, Ordering::SeqCst);
+    r.zone.pause();
+    r.gate.allow(1);
+    wait_for(|| r.zone.state().error.is_some()).await;
+    let st = r.zone.state();
+    assert_eq!(st.transport, Transport::Paused, "{st:?}");
+    assert_eq!(st.error.as_deref(), Some("FiiO KA17 was unplugged: paused"));
+    assert_eq!(*r.rec.gone_reported.lock().unwrap(), 1);
+    drop(drain_events(&mut r.events));
+}
+
+/// A sink that may not go on as it is (a phone's DAC paused in bit-perfect whose volume went
+/// down since): the next write goes to a fresh sink, from where it was, nothing lost.
+#[tokio::test]
+async fn a_sink_that_may_not_go_on_is_replaced_before_the_write() {
+    let mut r = rig(&[("a", RATE, 500)]);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(2);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 200).await;
+    r.gate.blocked().await;
+    let drains = *r.rec.drains.lock().unwrap();
+    r.rec.reopen_now.store(true, Ordering::SeqCst);
+    r.gate.allow(1);
+    wait_for(|| *r.rec.opens.lock().unwrap() == 2).await;
+    assert_eq!(
+        *r.rec.drains.lock().unwrap(),
+        drains,
+        "what may not play is discarded, not played out"
+    );
+    assert!(*r.rec.flushes.lock().unwrap() >= 1);
+    r.gate.allow(100);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        *r.rec.opens.lock().unwrap(),
+        2,
+        "a fresh sink before the next write"
+    );
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        frames(0, 500),
+        "nothing lost, nothing twice"
+    );
+    drop(drain_events(&mut r.events));
+}
+
+/// The output's settings change while it plays (a phone's DAC from shared to bit-perfect): the
+/// next song opens afresh even in the same format, so the change applies there.
+#[tokio::test]
+async fn a_settings_change_applies_at_the_next_song() {
+    let mut r = rig(&[("a", RATE, 200), ("b", RATE, 200), ("c", RATE, 200)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("b"), QueueItem::new("c")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 100).await;
+    r.rec.reopen.store(true, Ordering::SeqCst);
+    r.gate.allow(2);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.rec.reopen.store(false, Ordering::SeqCst);
+    r.gate.allow(100);
+    r.zone.wait_stopped().await;
+    assert_eq!(
+        *r.rec.opens.lock().unwrap(),
+        2,
+        "a, then b afresh; c joins b's sink"
+    );
+    let k = kinds(&drain_events(&mut r.events));
+    assert!(
+        k.contains(&"start:b:false".to_string()),
+        "b is not gapless: {k:?}"
+    );
+    assert!(k.contains(&"start:c:true".to_string()), "c is: {k:?}");
+}
+
+/// The output's settings changed before a crossfade (a phone's DAC switched mode): no crossfade
+/// carries the next song on the old sink; it opens afresh, so the change applies there.
+#[tokio::test]
+async fn a_settings_change_skips_the_crossfade_and_reopens() {
+    let mut r = rig(&[("a", RATE, 1000), ("b", RATE, 1000)]);
+    r.rec.reopen.store(true, Ordering::SeqCst);
+    r.gate.allow(1000);
+    r.zone.set_crossfade_ms(30);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.play();
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    let mut want = frames(0, 1000);
+    want.extend(frames(0, 1000));
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        want,
+        "no mix: a whole, then b whole"
+    );
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2, "b on a fresh sink");
+    drop(drain_events(&mut r.events));
+}
+
+/// A renderer whose set can be held open, and whose read after it fails: the shape of a device
+/// event arriving while a set waits on the device (#265 with #256's one volume).
+struct HeldSet {
+    inner: NullOutput,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    reads_fail: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Output for HeldSet {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        if self.reads_fail.load(Ordering::SeqCst) {
+            return Err(SinkError::Device("no answer".into()));
+        }
+        self.inner.volume().await
+    }
+}
+
+fn pct(p: u8) -> pm_model::ZoneVolume {
+    pm_model::ZoneVolume {
+        level: pm_model::VolumeLevel::Percent(p),
+        muted: false,
+    }
+}
+
+#[tokio::test]
+async fn a_level_the_device_announces_during_a_set_stands() {
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+    }));
+    let out = Arc::new(HeldSet {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Percent),
+        entered: Default::default(),
+        release: Default::default(),
+        reads_fail: Default::default(),
+    });
+    let zone = zones.create("Linn", out.clone());
+    zone.announce_volume(pct(10));
+    wait_for(|| zone.state().volume == Some(pct(10))).await;
+    // A set waits on the device; meanwhile the device announces the level it took, and the
+    // read after the set fails: the announced level stays, not the one before it
+    out.reads_fail.store(true, Ordering::SeqCst);
+    let z = zone.clone();
+    let set = tokio::spawn(async move { z.set_volume(Volume::Percent(20)).await });
+    out.entered.notified().await;
+    zone.announce_volume(pct(20));
+    out.release.notify_one();
+    set.await.expect("the set ran").expect("the set worked");
+    zone.wait_acked().await;
+    assert_eq!(
+        zone.state().volume,
+        Some(pct(20)),
+        "the device's own announcement stands"
+    );
+    // A poll that reads the announced level sends nothing new; one that reads another sends it
+    out.reads_fail.store(false, Ordering::SeqCst);
+    out.inner.pretend_level(pct(20));
+    assert_eq!(zone.refresh_volume().await, Some(pct(20)));
+    zone.wait_acked().await;
+    assert_eq!(zone.state().volume, Some(pct(20)));
+    out.inner.pretend_level(pct(35));
+    assert_eq!(zone.refresh_volume().await, Some(pct(35)));
+    zone.wait_acked().await;
+    assert_eq!(
+        zone.state().volume,
+        Some(pct(35)),
+        "a change read after the announcement shows"
+    );
 }

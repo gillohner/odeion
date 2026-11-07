@@ -7,3 +7,6 @@
 /.cargo-home
 .DS_Store
 /.cargo-armv7
+
+# Python bytecode (py_compile, imports of tools/*.py)
+__pycache__/

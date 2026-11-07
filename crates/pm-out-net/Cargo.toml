@@ -11,11 +11,13 @@ pm-model = { workspace = true }
 pm-zones = { workspace = true }
 pm-stream = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
 pm-audio = { workspace = true }
 pm-endpoint = { workspace = true }
 hound = { workspace = true }
+serde_json = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }

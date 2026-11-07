@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-const SETTING: &str = "people";
+pub(crate) const SETTING: &str = "people";
 
 /// What an invite gives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +131,23 @@ fn store(s: &NodeState, r: &Roster) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Change the roster: `f` gets the stored roster as it is now, and what it leaves is stored, while
+/// every other change waits. Network calls go before, never inside, so a change made while one
+/// was on its way is never overwritten with an older copy. Answers `f`'s value and the roster.
+async fn update<T>(
+    s: &NodeState,
+    f: impl FnOnce(&mut Roster) -> Result<T, ApiError>,
+) -> Result<(T, Roster), ApiError> {
+    let _one = s.roster.lock().await;
+    let mut r = load(s);
+    let before = r.clone();
+    let out = f(&mut r)?;
+    if r != before {
+        store(s, &r)?;
+    }
+    Ok((out, r))
+}
+
 /// Whether `key` (z32, with or without the `pubky` prefix) may use the music service: the owner
 /// always; anyone else while listed with music access on.
 pub fn may_use_music(s: &NodeState, key: &str) -> bool {
@@ -179,21 +196,32 @@ async fn used_tokens(s: &NodeState) -> Result<Vec<(String, String)>, ApiError> {
         .unwrap_or_default())
 }
 
-/// Turns used invites into people (once).
+/// Turns used invites into people (once). The homeserver is asked first; the people it names are
+/// then added to the roster as it is by then.
 async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
-    let mut r = load(s);
+    let r = load(s);
     if r.invites.iter().all(|i| i.token.is_none()) || s.bundled_homeserver().is_none() {
         return Ok(r);
     }
     let used = used_tokens(s).await?;
-    let mut changed = false;
-    r.invites.retain(|inv| {
+    let ((), r) = update(s, |r| {
+        add_used(r, &used);
+        Ok(())
+    })
+    .await?;
+    Ok(r)
+}
+
+/// Invites whose token was used become people.
+fn add_used(r: &mut Roster, used: &[(String, String)]) {
+    let Roster { people, invites } = r;
+    invites.retain(|inv| {
         let Some(t) = &inv.token else { return true };
         let Some((_, key)) = used.iter().find(|(tok, _)| tok == t) else {
             return true;
         };
-        if !r.people.iter().any(|p| &p.key == key) {
-            r.people.push(Person {
+        if !people.iter().any(|p| &p.key == key) {
+            people.push(Person {
                 key: key.clone(),
                 access: inv.access,
                 name: inv.name.clone(),
@@ -202,13 +230,8 @@ async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
                 homeserver_enabled: true,
             });
         }
-        changed = true;
         false
     });
-    if changed {
-        store(s, &r)?;
-    }
-    Ok(r)
 }
 
 /// A person as the owner sees them, with their homeserver account's state.
@@ -367,25 +390,27 @@ fn clean_name(n: Option<String>) -> Option<String> {
 /// Homeserver invites answer with the Ring link and QR; a music-only one adds the person by key.
 pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInvite>) -> ApiResult<Value> {
     let name = clean_name(b.name);
-    let mut r = load(&s);
     if !b.access.on_homeserver() {
         let key = valid_key(b.key.as_deref().unwrap_or(""))?;
-        if let Some(p) = r.people.iter_mut().find(|p| p.key == key) {
-            p.music_enabled = true;
-            if p.access == Access::Homeserver {
-                p.access = Access::HomeserverMusic;
+        update(&s, |r| {
+            if let Some(p) = r.people.iter_mut().find(|p| p.key == key) {
+                p.music_enabled = true;
+                if p.access == Access::Homeserver {
+                    p.access = Access::HomeserverMusic;
+                }
+            } else {
+                r.people.push(Person {
+                    key: key.clone(),
+                    access: Access::Music,
+                    name,
+                    music_enabled: true,
+                    added_at: now(),
+                    homeserver_enabled: true,
+                });
             }
-        } else {
-            r.people.push(Person {
-                key: key.clone(),
-                access: Access::Music,
-                name,
-                music_enabled: true,
-                added_at: now(),
-                homeserver_enabled: true,
-            });
-        }
-        store(&s, &r)?;
+            Ok(())
+        })
+        .await?;
         return Ok(Json(serde_json::json!({"person": key})));
     }
     endpoint(&s)?;
@@ -409,8 +434,11 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
         storage_quota_mb: b.storage_quota_mb,
         created_at: now(),
     };
-    r.invites.push(inv.clone());
-    store(&s, &r)?;
+    update(&s, |r| {
+        r.invites.push(inv.clone());
+        Ok(())
+    })
+    .await?;
     let hs = homeserver_key(&s).await?;
     Ok(Json(
         serde_json::to_value(invite_view(inv, Some(&hs))).expect("serializes"),
@@ -423,13 +451,15 @@ pub(crate) async fn forget_invite(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Value> {
-    let mut r = load(&s);
-    let before = r.invites.len();
-    r.invites.retain(|i| i.id != id);
-    if r.invites.len() == before {
-        return Err(ApiError::not_found("no such invite"));
-    }
-    store(&s, &r)?;
+    update(&s, |r| {
+        let before = r.invites.len();
+        r.invites.retain(|i| i.id != id);
+        if r.invites.len() == before {
+            return Err(ApiError::not_found("no such invite"));
+        }
+        Ok(())
+    })
+    .await?;
     Ok(Json(serde_json::json!({"forgotten": id})))
 }
 
@@ -460,11 +490,11 @@ pub(crate) async fn change(
     Json(b): Json<PersonChange>,
 ) -> ApiResult<Person> {
     let key = valid_key(&key)?;
-    let mut r = reconcile(&s).await?;
-    let Some(i) = r.people.iter().position(|p| p.key == key) else {
+    let r = reconcile(&s).await?;
+    let Some(found) = r.people.iter().find(|p| p.key == key) else {
         return Err(ApiError::not_found("no such person"));
     };
-    let on_hs = r.people[i].access.on_homeserver();
+    let on_hs = found.access.on_homeserver();
     if let Some(q) = &b.storage_quota_mb {
         if !on_hs {
             return Err(ApiError::bad_request(
@@ -494,21 +524,27 @@ pub(crate) async fn change(
         let path = format!("/users/{key}/{}", if on { "enable" } else { "disable" });
         admin(&s, Method::POST, &path, None).await?;
     }
-    let p = &mut r.people[i];
-    if let Some(on) = b.homeserver_enabled {
-        p.homeserver_enabled = on;
-    }
-    if let Some(m) = b.music {
-        p.music_enabled = m;
-        if m && p.access == Access::Homeserver {
-            p.access = Access::HomeserverMusic;
+    // The homeserver calls are done; the change goes to the roster as it is now.
+    let rename = b.name.is_some().then(|| clean_name(b.name));
+    let (out, _) = update(&s, |r| {
+        let Some(p) = r.people.iter_mut().find(|p| p.key == key) else {
+            return Err(ApiError::not_found("no such person"));
+        };
+        if let Some(on) = b.homeserver_enabled {
+            p.homeserver_enabled = on;
         }
-    }
-    if b.name.is_some() {
-        p.name = clean_name(b.name);
-    }
-    let out = p.clone();
-    store(&s, &r)?;
+        if let Some(m) = b.music {
+            p.music_enabled = m;
+            if m && p.access == Access::Homeserver {
+                p.access = Access::HomeserverMusic;
+            }
+        }
+        if let Some(name) = rename {
+            p.name = name;
+        }
+        Ok(p.clone())
+    })
+    .await?;
     // Music access gone: their phones and laptops go too (devices.rs)
     if b.music == Some(false) {
         crate::devices::forget_all_of(&s, &out.key);
@@ -524,20 +560,23 @@ pub(crate) async fn change(
 /// in sight; anyone else leaves People.
 pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<String>) -> ApiResult<Roster> {
     let key = valid_key(&key)?;
-    let mut r = reconcile(&s).await?;
-    let Some(i) = r.people.iter().position(|p| p.key == key) else {
-        return Err(ApiError::not_found("no such person"));
-    };
-    if r.people[i].access.on_homeserver() {
-        let p = &mut r.people[i];
-        p.music_enabled = false;
-        if p.access == Access::HomeserverMusic {
-            p.access = Access::Homeserver;
+    reconcile(&s).await?;
+    let ((), r) = update(&s, |r| {
+        let Some(i) = r.people.iter().position(|p| p.key == key) else {
+            return Err(ApiError::not_found("no such person"));
+        };
+        if r.people[i].access.on_homeserver() {
+            let p = &mut r.people[i];
+            p.music_enabled = false;
+            if p.access == Access::HomeserverMusic {
+                p.access = Access::Homeserver;
+            }
+        } else {
+            r.people.remove(i);
         }
-    } else {
-        r.people.remove(i);
-    }
-    store(&s, &r)?;
+        Ok(())
+    })
+    .await?;
     crate::accounts::forget_person(&s, &key)?;
     Ok(Json(r))
 }

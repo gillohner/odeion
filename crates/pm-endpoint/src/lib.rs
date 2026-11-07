@@ -9,11 +9,11 @@
 //! the address. A connection without the key is closed within the `Hello` deadline and never holds
 //! a session slot.
 
-use pm_model::AudioFormat;
+use pm_model::{AudioBlock, AudioFormat};
 use pm_stream::{block_on, decode_samples, read_frame, write_frame, Frame, Incoming, Key, StreamError};
 /// The outputs an endpoint offers (for the app, which has no other use for `pm-zones`).
 pub use pm_zones::OutputRegistry;
-use pm_zones::{AudioSink, Output, OutputId};
+use pm_zones::{AudioSink, Output, OutputId, SinkError};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
@@ -405,6 +405,20 @@ impl Endpoint {
                     };
                     write_frame(w, &reply)?;
                 }
+                Frame::Configure { output, settings } => {
+                    let reply = match self.outputs.get(&OutputId(output.clone())) {
+                        Some(o) => match block_on(o.configure_device(settings)) {
+                            Ok(()) => Frame::Done,
+                            Err(e) => Frame::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        None => Frame::Error {
+                            message: format!("no output {output}"),
+                        },
+                    };
+                    write_frame(w, &reply)?;
+                }
                 Frame::Open { output, format } => {
                     let id = OutputId(output.clone());
                     let Some(out) = self.outputs.get(&id) else {
@@ -438,6 +452,14 @@ impl Endpoint {
                                     message: e.to_string(),
                                 },
                             );
+                            // Say it, then close cleanly: closing with the node's audio unread
+                            // would reset the connection, and the node might never read why (a
+                            // USB DAC unplugged: it pauses the zone on that)
+                            let _ = std::io::Write::flush(w);
+                            let _ = w.get_ref().shutdown(std::net::Shutdown::Write);
+                            let _ = r.get_ref().set_read_timeout(Some(Duration::from_secs(1)));
+                            let _ =
+                                std::io::copy(&mut r.by_ref().take(64 * 1024 * 1024), &mut std::io::sink());
                             return Err(e);
                         }
                     }
@@ -480,28 +502,53 @@ impl Endpoint {
                 buffer_frames: sink.buffer_level().capacity_frames,
             },
         )?;
+        // Frames written by sinks this stream replaced (see `reopen_now`): the node's count goes on
+        let mut before = 0u64;
+        // The latest blocks written (at least what the sink can hold): what a replaced sink still
+        // held unplayed is written again on its successor
+        let mut recent = Recent::default();
         loop {
             match read_frame(r) {
                 Ok(Incoming::Audio(bytes)) => {
                     let block = decode_samples(format, &bytes)?;
-                    sink.write(&block)
-                        .map_err(|e| StreamError::Remote(e.to_string()))?;
+                    // A sink that may not go on as it is (a phone's DAC that would go back to full
+                    // level without consent): the output opens afresh in the same format, planned
+                    // as it is now (shared), the old one closed first; what it held unplayed is
+                    // played on the new one, so the song goes on where it was (a short gap)
+                    if sink.reopen_now() {
+                        let unplayed = sink.buffer_level().queued_frames.min(recent.frames);
+                        before += sink.frames_written().saturating_sub(unplayed);
+                        // Its device gone meanwhile: said (the zone pauses), never replaced by
+                        // another device
+                        sink.flush().map_err(|e| remote(&mut *sink, e))?;
+                        drop(std::mem::replace(&mut sink, Box::new(Closed(format))));
+                        sink = block_on(out.open(format)).map_err(|e| StreamError::Remote(e.to_string()))?;
+                        for b in recent.tail(unplayed) {
+                            sink.write(&b).map_err(|e| remote(&mut *sink, e))?;
+                        }
+                    }
+                    sink.write(&block).map_err(|e| remote(&mut *sink, e))?;
+                    recent.keep(block, sink.buffer_level().capacity_frames);
                     write_frame(
                         w,
                         &Frame::Ack {
                             level: sink.buffer_level(),
-                            frames_written: sink.frames_written(),
+                            frames_written: before + sink.frames_written(),
+                            reopen: sink.reopen_at_track(),
                         },
                     )?;
                 }
                 Ok(Incoming::Control(Frame::Flush)) => {
-                    sink.flush().map_err(|e| StreamError::Remote(e.to_string()))?;
+                    sink.flush().map_err(|e| remote(&mut *sink, e))?;
+                    recent = Recent::default();
                     write_frame(w, &Frame::Flushed)?;
                 }
                 Ok(Incoming::Control(Frame::Drain)) => {
-                    sink.drain().map_err(|e| StreamError::Remote(e.to_string()))?;
+                    sink.drain().map_err(|e| remote(&mut *sink, e))?;
                     write_frame(w, &Frame::Drained)?;
                 }
+                // Closed: a Gone found now reaches nobody, so the sink keeps it (the next open
+                // pauses instead of opening another device)
                 Ok(Incoming::Control(Frame::Close)) => {
                     let _ = sink.flush();
                     return Ok(());
@@ -522,6 +569,90 @@ impl Endpoint {
                 Err(e) => return Err(e),
             }
         }
+    }
+}
+
+/// A sink's error for the node: a Gone said to it is one the zone hears (it pauses), so the sink
+/// need not keep the loss for the next open.
+fn remote(sink: &mut dyn AudioSink, e: SinkError) -> StreamError {
+    if e.gone_reason().is_some() {
+        sink.gone_reported();
+    }
+    StreamError::Remote(e.to_string())
+}
+
+/// The latest blocks written to a sink, to write again what it held unplayed on its successor.
+#[derive(Default)]
+struct Recent {
+    blocks: std::collections::VecDeque<AudioBlock>,
+    frames: u64,
+}
+
+impl Recent {
+    /// Keep `block`, and as many before it as make at least `hold` frames (what the sink holds).
+    fn keep(&mut self, block: AudioBlock, hold: u64) {
+        self.frames += block.frames() as u64;
+        self.blocks.push_back(block);
+        while let Some(f) = self.blocks.front().map(|b| b.frames() as u64) {
+            if self.frames - f < hold.max(1) {
+                break;
+            }
+            self.frames -= f;
+            self.blocks.pop_front();
+        }
+    }
+
+    /// The last `frames` frames kept, as blocks (integer PCM; other samples aren't replayed).
+    fn tail(&self, frames: u64) -> Vec<AudioBlock> {
+        let mut left = frames;
+        let mut out = Vec::new();
+        for b in self.blocks.iter().rev() {
+            if left == 0 {
+                break;
+            }
+            let n = b.frames() as u64;
+            if n <= left {
+                out.push(b.clone());
+                left -= n;
+            } else if let pm_model::Samples::PcmI32(v) = &b.samples {
+                let ch = usize::from(b.format.channels.max(1));
+                let skip = (n - left) as usize * ch;
+                out.push(AudioBlock::pcm_i32(b.format, v[skip..].to_vec()));
+                left = 0;
+            } else {
+                break;
+            }
+        }
+        out.reverse();
+        out
+    }
+}
+
+/// The place of a sink being replaced, for the moment between closing the old one and opening the
+/// new one (so the old one's device is let go first).
+struct Closed(AudioFormat);
+
+impl AudioSink for Closed {
+    fn format(&self) -> AudioFormat {
+        self.0
+    }
+    fn write(&mut self, _block: &AudioBlock) -> Result<(), SinkError> {
+        Err(SinkError::Device("the sink is being replaced".into()))
+    }
+    fn buffer_level(&self) -> pm_zones::BufferLevel {
+        pm_zones::BufferLevel {
+            queued_frames: 0,
+            capacity_frames: 0,
+        }
+    }
+    fn flush(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
+    fn drain(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
+    fn frames_written(&self) -> u64 {
+        0
     }
 }
 

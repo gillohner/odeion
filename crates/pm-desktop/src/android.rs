@@ -173,21 +173,61 @@ fn take_lock(
     env.new_global_ref(lock)
 }
 
-/// Start the player's foreground service (`PlayerService.kt`, added to the
-/// generated project by tools/release/android-patch.py): it keeps the phone's
-/// zone playing while the app is in the background. Must run while the app
-/// is on screen; starting it again only updates its notification.
-pub fn start_player_service(app: &tauri::AppHandle, text: String) {
+/// What the player service should be: started with its text and whether the phone is a zone of
+/// the node, or stopped (`None`). Kept so the service can be started again when the app comes
+/// back (a start from the background is refused from Android 12, and the app's own-player mode
+/// ends itself when nothing plays), and read when each scheduled call runs on the activity's
+/// thread: calls run in order there and each applies the newest wish, so an older start or a
+/// resume never undoes a later change (a forget, a reconnect in the other mode).
+static WANTED: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
+fn wanted() -> std::sync::MutexGuard<'static, Option<(String, bool)>> {
+    WANTED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Start the player's foreground service (`PlayerService.kt`, added to the generated project by
+/// tools/release/android-patch.py), which keeps the app playing while it is in the background.
+/// `zone`: the node reaches this phone's player, and the service runs as long as the app is
+/// connected; otherwise the app plays the music itself (through the tunnel, the offline app) and
+/// the service ends after a while with nothing playing out of sight. Both keep the CPU and Wi-Fi
+/// awake. Must run while the app is on screen; starting it again only updates its notification.
+pub fn start_player_service(app: &tauri::AppHandle, text: String, zone: bool) {
+    *wanted() = Some((text, zone));
+    run_service(app);
+}
+
+/// The app is back on screen: start the service again as wanted (a no-op when it still runs).
+pub fn resume_player_service(app: &tauri::AppHandle) {
+    if wanted().is_some() {
+        run_service(app);
+    }
+}
+
+/// No node any more (forgotten): the service ends, and is not started again on resume.
+pub fn stop_player_service(app: &tauri::AppHandle) {
+    *wanted() = None;
+    run_service(app);
+}
+
+/// Bring the service to what is wanted when this runs, on the activity's thread.
+fn run_service(app: &tauri::AppHandle) {
     use tauri::Manager;
     let Some(window) = app.get_webview_window(crate::MAIN) else {
         return;
     };
     let scheduled = window.with_webview(move |wv| {
         wv.jni_handle().exec(move |env, activity, _webview| {
-            let started = crate::crash::guarded("the player service", || start_service(env, activity, &text))
-                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
-            match started {
-                Ok(()) => tracing::info!("player service started"),
+            let how = wanted().clone();
+            let starting = how.is_some();
+            let done = crate::crash::guarded("the player service", || match &how {
+                Some((text, zone)) => start_service(env, activity, text, *zone),
+                None => stop_service(env, activity).map(|()| true),
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            match done {
+                Ok(true) if starting => tracing::info!("player service started"),
+                Ok(false) => tracing::info!("player service: start refused; again when the app is back"),
+                Ok(_) => tracing::info!("player service stopped"),
                 Err(e) => {
                     // A Java exception stays pending until cleared.
                     if env.exception_check().unwrap_or(false) {
@@ -195,22 +235,24 @@ pub fn start_player_service(app: &tauri::AppHandle, text: String) {
                         let _ = env.exception_clear();
                     }
                     tracing::warn!(
-                        "no player service ({e}); the phone's zone stops when the app is in the background"
+                        "no player service ({e}); the app's music stops when it is in the background"
                     )
                 }
             }
         });
     });
     if let Err(e) = scheduled {
-        tracing::warn!("cannot reach the activity to start the player service: {e}");
+        tracing::warn!("cannot reach the activity for the player service: {e}");
     }
 }
 
+/// `PlayerService.start(activity, text, zone)`: whether Android took the start.
 fn start_service(
     env: &mut jni021::JNIEnv,
     activity: &jni021::objects::JObject,
     text: &str,
-) -> jni021::errors::Result<()> {
+    zone: bool,
+) -> jni021::errors::Result<bool> {
     use jni021::objects::{JClass, JValue};
     // The service sits next to MainActivity, in its package. Loaded through
     // the app's class loader: JNI's FindClass may only see system classes.
@@ -242,8 +284,48 @@ fn start_service(
     env.call_static_method(
         &cls,
         "start",
-        "(Landroid/app/Activity;Ljava/lang/String;)V",
-        &[JValue::Object(activity), JValue::Object(&jtext)],
+        "(Landroid/app/Activity;Ljava/lang/String;Z)Z",
+        &[
+            JValue::Object(activity),
+            JValue::Object(&jtext),
+            JValue::Bool(u8::from(zone)),
+        ],
+    )?
+    .z()
+}
+
+/// `PlayerService.stop(context)`, loaded like `start`.
+fn stop_service(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&class, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let service = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.PlayerService"),
+        None => "PlayerService".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&service)?;
+    let cls = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let cls = JClass::from(cls);
+    env.call_static_method(
+        &cls,
+        "stop",
+        "(Landroid/content/Context;)V",
+        &[JValue::Object(activity)],
     )?;
     Ok(())
 }
@@ -497,6 +579,590 @@ fn updater(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -> jni
         activity: env.new_global_ref(activity)?,
         class: env.new_global_ref(class)?,
     })
+}
+
+/// Watch the USB DACs attached to the phone (`UsbAudio`, tools/release/android/UsbAudio.kt): its
+/// callback starts on the UI thread, then a thread of ours, attached to the JVM, waits for each new
+/// report, describes the DAC (`pm_out_local::usb_dac`) for the phone's output and calls `changed`
+/// when that is different. Builds without the class watch nothing.
+pub fn watch_usb_audio(app: &tauri::AppHandle, changed: impl Fn() + Send + 'static) {
+    use tauri::Manager;
+    let Some(window) = app.get_webview_window(crate::MAIN) else {
+        return;
+    };
+    let scheduled = window.with_webview(move |wv| {
+        wv.jni_handle().exec(move |env, activity, _webview| {
+            let started = crate::crash::guarded("the USB audio watcher", || start_usb_audio(env, activity))
+                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_describe();
+                let _ = env.exception_clear();
+            }
+            let (vm, class) = match started {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("no USB DAC detection ({e})");
+                    return;
+                }
+            };
+            // The bit-perfect player (BitPerfect.kt), for the phone's output
+            match crate::crash::guarded("the bit-perfect player", || {
+                app_class(env, activity, "BitPerfect")
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")))
+            {
+                Ok(bp) => match env.get_java_vm() {
+                    Ok(vm2) => pm_out_local::bit_perfect::set_backend(std::sync::Arc::new(JniBitPerfect {
+                        vm: std::sync::Arc::new(vm2),
+                        class: bp,
+                    })),
+                    Err(e) => tracing::warn!("no bit-perfect player: {e}"),
+                },
+                Err(e) => {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                    tracing::warn!("no bit-perfect player ({e})");
+                }
+            }
+            // Exclusive USB (UsbExclusive.kt): the app's own driver for the phone's DAC
+            match crate::crash::guarded("the exclusive USB driver", || {
+                app_class(env, activity, "UsbExclusive")
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")))
+            {
+                Ok(c) => match env.get_java_vm() {
+                    Ok(vm3) => {
+                        pm_out_local::exclusive::set_backend(std::sync::Arc::new(JniUsbExclusive {
+                            vm: std::sync::Arc::new(vm3),
+                            class: c,
+                        }));
+                        // A DAC a killed app left without Android's driver goes back to it
+                        let _ = std::thread::Builder::new()
+                            .name("usb-recover".into())
+                            .spawn(pm_out_local::exclusive::recover);
+                    }
+                    Err(e) => tracing::warn!("no exclusive USB driver: {e}"),
+                },
+                Err(e) => {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                    tracing::warn!("no exclusive USB driver ({e})");
+                }
+            }
+            let spawned = std::thread::Builder::new()
+                .name("usb-audio".into())
+                .spawn(move || usb_audio_loop(vm, class, changed));
+            if let Err(e) = spawned {
+                tracing::warn!("no USB DAC detection: {e}");
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!("cannot reach the activity to watch USB DACs: {e}");
+    }
+}
+
+/// `UsbAudio.start(activity)`, and what the waiting thread needs: the JVM and the class.
+fn start_usb_audio(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+) -> jni021::errors::Result<(jni021::JavaVM, jni021::objects::GlobalRef)> {
+    use jni021::objects::{JClass, JValue};
+    let cls = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let full = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.UsbAudio"),
+        None => "UsbAudio".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&full)?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let class = JClass::from(class);
+    env.call_static_method(
+        &class,
+        "start",
+        "(Landroid/app/Activity;)V",
+        &[JValue::Object(activity)],
+    )?;
+    Ok((env.get_java_vm()?, env.new_global_ref(&class)?))
+}
+
+/// `<package>.<name>` through the activity's class loader, as a global reference.
+fn app_class(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    name: &str,
+) -> jni021::errors::Result<jni021::objects::GlobalRef> {
+    use jni021::objects::JValue;
+    let cls = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let full = env
+        .call_method(&cls, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let full: String = env.get_string(&full.into())?.into();
+    let full = match full.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.{name}"),
+        None => name.to_string(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&full)?;
+    let class = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    env.new_global_ref(class)
+}
+
+/// The bit-perfect player (`BitPerfect.kt`) for pm-out-local's `bit_perfect`: its calls run on the
+/// zone's audio thread, attached to the JVM for good (it plays for as long as the app runs).
+struct JniBitPerfect {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+}
+
+/// Run `f` with the JVM on this thread and a local frame, a pending Java exception cleared.
+fn with_jvm<T>(
+    vm: &jni021::JavaVM,
+    f: impl FnOnce(&mut jni021::JNIEnv) -> jni021::errors::Result<T>,
+) -> Result<T, String> {
+    let mut env = vm
+        .attach_current_thread_permanently()
+        .map_err(|e| e.to_string())?;
+    let r = env.with_local_frame(16, |env| f(env));
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    r.map_err(|e| e.to_string())
+}
+
+impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
+    fn open(
+        &self,
+        dac_id: i32,
+        entry: &pm_out_local::usb_dac::MixerEntry,
+    ) -> Result<
+        (
+            Box<dyn pm_out_local::bit_perfect::Track>,
+            pm_out_local::bit_perfect::OpenReport,
+        ),
+        pm_out_local::bit_perfect::OpenError,
+    > {
+        use jni021::objects::{JClass, JValue};
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(
+                    class,
+                    "open",
+                    "(IIII)Ljava/lang/String;",
+                    &[
+                        JValue::Int(dac_id),
+                        JValue::Int(entry.encoding),
+                        JValue::Int(entry.rate as i32),
+                        JValue::Int(entry.channel_mask),
+                    ],
+                )?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })
+        .map_err(pm_out_local::bit_perfect::OpenError::Refused)?;
+        let (handle, buffer_frames, report) = pm_out_local::bit_perfect::parse_open_answer(&answer)?;
+        let track = JniTrack {
+            vm: self.vm.clone(),
+            class: self.class.clone(),
+            handle,
+            buffer_frames,
+        };
+        Ok((Box::new(track), report))
+    }
+
+    fn media_volume(&self) -> Option<u8> {
+        use jni021::objects::JClass;
+        let p = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "mediaVolume", "()I", &[])?.i()
+        })
+        .ok()?;
+        u8::try_from(p).ok().filter(|p| *p <= 100)
+    }
+
+    fn media_db_on_dac(&self) -> Option<f32> {
+        use jni021::objects::JClass;
+        let db = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "mediaVolumeDbOnUsb", "()F", &[])?
+                .f()
+        })
+        .ok()?;
+        // NaN: Android can't say for the DAC; -inf: silent (both: the hand-over mutes)
+        (!db.is_nan()).then_some(db)
+    }
+}
+
+/// Exclusive USB's app side (`UsbExclusive.kt`) for pm-out-local's `exclusive`: Android's
+/// permission for the DAC (asked only when the listener chose Exclusive USB), and the open device's
+/// file descriptor, on which the app's driver speaks usbfs.
+struct JniUsbExclusive {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+}
+
+impl JniUsbExclusive {
+    /// `UsbExclusive.open`'s (or `openDetached`'s) answer as the open device, or why not (with the
+    /// device when a descriptor was handed over: it goes back and is closed).
+    fn opened(answer: &str) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
+        use pm_out_local::exclusive::{parse_open_answer, usbfs, OpenRefused};
+        match parse_open_answer(answer) {
+            Ok((fd, raw)) => Ok((usbfs(fd), raw)),
+            Err((why, opened)) => Err(OpenRefused {
+                why,
+                partial: opened.map(|(fd, raw)| (usbfs(fd), raw)),
+            }),
+        }
+    }
+
+    fn ids(usb: pm_out_local::exclusive::UsbIds) -> [jni021::objects::JValue<'static, 'static>; 2] {
+        [
+            jni021::objects::JValue::Int(i32::from(usb.vendor_id)),
+            jni021::objects::JValue::Int(i32::from(usb.product_id)),
+        ]
+    }
+}
+
+impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
+    fn has_permission(&self, usb: pm_out_local::exclusive::UsbIds) -> bool {
+        use jni021::objects::JClass;
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "hasPermission", "(II)Z", &Self::ids(usb))?
+                .z()
+        })
+        .unwrap_or(false)
+    }
+
+    fn request_permission(&self, usb: pm_out_local::exclusive::UsbIds) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "requestPermission", "(II)V", &Self::ids(usb))?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: cannot ask Android's permission: {e}");
+        }
+    }
+
+    fn open(
+        &self,
+        usb: pm_out_local::exclusive::UsbIds,
+    ) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
+        use jni021::objects::JClass;
+        use pm_out_local::exclusive::OpenRefused;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "open", "(II)Ljava/lang/String;", &Self::ids(usb))?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })
+        .map_err(|why| OpenRefused { why, partial: None })?;
+        Self::opened(&answer)
+    }
+
+    fn open_detached(
+        &self,
+        device_name: &str,
+    ) -> Result<pm_out_local::exclusive::Opened, pm_out_local::exclusive::OpenRefused> {
+        use jni021::objects::{JClass, JValue};
+        use pm_out_local::exclusive::OpenRefused;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let name = env.new_string(device_name)?;
+            let s = env
+                .call_static_method(
+                    class,
+                    "openDetached",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&name)],
+                )?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })
+        .map_err(|why| OpenRefused { why, partial: None })?;
+        Self::opened(&answer)
+    }
+
+    fn forget_claim(&self) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "forgetClaim", "()V", &[])?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: forget the claim: {e}");
+        }
+    }
+
+    fn held_identity(&self) -> Option<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "heldIdentity", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .and_then(|a| pm_out_local::exclusive::parse_identity(&a))
+    }
+
+    fn identity_of(
+        &self,
+        usb: pm_out_local::exclusive::UsbIds,
+    ) -> Option<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "identityOf", "(II)Ljava/lang/String;", &Self::ids(usb))?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .and_then(|a| pm_out_local::exclusive::parse_identity(&a))
+    }
+
+    fn take_detached(&self) -> Vec<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "takeDetached", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .map(|a| pm_out_local::exclusive::parse_detached_devices(&a))
+            .unwrap_or_default()
+    }
+
+    fn claims(&self) -> pm_out_local::exclusive::Claims {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "detached", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .map(|a| pm_out_local::exclusive::parse_claims(&a))
+            .unwrap_or_default()
+    }
+
+    fn release(&self) {
+        use jni021::objects::JClass;
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "release", "()V", &[])?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("Exclusive USB: release: {e}");
+        }
+    }
+}
+
+/// One `AudioTrack` of `BitPerfect.kt`, by its handle.
+struct JniTrack {
+    vm: std::sync::Arc<jni021::JavaVM>,
+    class: jni021::objects::GlobalRef,
+    handle: i64,
+    buffer_frames: u64,
+}
+
+impl JniTrack {
+    fn call(&self, method: &str) {
+        use jni021::objects::{JClass, JValue};
+        let r = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, method, "(J)V", &[JValue::Long(self.handle)])?;
+            Ok(())
+        });
+        if let Err(e) = r {
+            tracing::warn!("bit-perfect player {method}: {e}");
+        }
+    }
+}
+
+/// `BitPerfect.GONE`.
+const TRACK_GONE: i32 = -1000;
+
+impl pm_out_local::bit_perfect::Track for JniTrack {
+    fn write(&mut self, bytes: &[u8]) -> Result<(), pm_out_local::bit_perfect::TrackError> {
+        use jni021::objects::{JClass, JValue};
+        use pm_out_local::bit_perfect::TrackError;
+        let mut at = 0;
+        while at < bytes.len() {
+            let rest = &bytes[at..];
+            let n = with_jvm(&self.vm, |env| {
+                // SAFETY: `rest` outlives the call, and Java only reads from the buffer.
+                let buf = unsafe { env.new_direct_byte_buffer(rest.as_ptr() as *mut u8, rest.len())? };
+                let class: &JClass = self.class.as_obj().into();
+                env.call_static_method(
+                    class,
+                    "write",
+                    "(JLjava/nio/ByteBuffer;I)I",
+                    &[
+                        JValue::Long(self.handle),
+                        JValue::Object(&buf),
+                        JValue::Int(rest.len() as i32),
+                    ],
+                )?
+                .i()
+            })
+            .map_err(TrackError::Other)?;
+            match n {
+                TRACK_GONE => return Err(TrackError::Gone),
+                n if n < 0 => return Err(TrackError::Other(format!("AudioTrack error {n}"))),
+                0 => std::thread::sleep(std::time::Duration::from_millis(5)),
+                n => at += n as usize,
+            }
+        }
+        Ok(())
+    }
+
+    fn played_frames(&self) -> u64 {
+        use jni021::objects::{JClass, JValue};
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "played", "(J)J", &[JValue::Long(self.handle)])?
+                .j()
+        })
+        .map(|n| n.max(0) as u64)
+        .unwrap_or(0)
+    }
+
+    fn buffer_frames(&self) -> u64 {
+        self.buffer_frames
+    }
+
+    fn pause(&mut self) {
+        self.call("pause");
+    }
+
+    fn play(&mut self) {
+        self.call("play");
+    }
+
+    fn flush(&mut self) {
+        self.call("flush");
+    }
+
+    fn stop(&mut self) {
+        self.call("stop");
+    }
+
+    fn still_confirmed(&self) -> Result<(), String> {
+        use jni021::objects::{JClass, JValue};
+        let why = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(
+                    class,
+                    "status",
+                    "(J)Ljava/lang/String;",
+                    &[JValue::Long(self.handle)],
+                )?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        })?;
+        if why.is_empty() {
+            Ok(())
+        } else {
+            Err(why)
+        }
+    }
+}
+
+/// Waits for `UsbAudio.next` reports for as long as the app runs.
+fn usb_audio_loop(vm: jni021::JavaVM, class: jni021::objects::GlobalRef, changed: impl Fn()) {
+    use jni021::objects::{JClass, JValue};
+    let mut env = match vm.attach_current_thread_as_daemon() {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("no USB DAC detection: {e}");
+            return;
+        }
+    };
+    let mut seen: i64 = 0;
+    loop {
+        let answer = env.with_local_frame(8, |env| -> jni021::errors::Result<String> {
+            let class: &JClass = class.as_obj().into();
+            let s = env
+                .call_static_method(
+                    class,
+                    "next",
+                    "(JJ)Ljava/lang/String;",
+                    &[JValue::Long(seen), JValue::Long(30_000)],
+                )?
+                .l()?;
+            Ok(env.get_string(&s.into())?.into())
+        });
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_describe();
+            let _ = env.exception_clear();
+        }
+        let answer = match answer {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!("USB DAC detection: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                continue;
+            }
+        };
+        let Some((version, report)) = pm_out_local::usb_dac::parse_poll(&answer) else {
+            continue;
+        };
+        let version = i64::try_from(version).unwrap_or(i64::MAX);
+        if version == seen {
+            continue;
+        }
+        seen = version;
+        // A report that can't be read clears the DAC rather than keeping the last one
+        if pm_out_local::usb_dac::apply_report(report) {
+            changed();
+        }
+    }
 }
 
 /// Tracing output for `adb logcat -s pubky-music` (Android drops stdout).

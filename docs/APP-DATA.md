@@ -15,7 +15,7 @@ Two layers, two namespaces (STEWARD-SPEC-SPLIT.md):
 | Path | Who writes it | Format | Version |
 | :-- | :-- | :-- | :-- |
 | `/priv/pubky.music/` | the person's Odeion clients | the app's private folder | — |
-| `/priv/pubky.music/node.json` | the node | the node record (ADR 0008): `{name, api_url, token, version, updated_at, iroh?}`, so the person's own devices find their node | unversioned; readers ignore unknown members |
+| `/priv/pubky.music/node.json` | the node | the node record (ADR 0008): `{name, api_url, version, updated_at, iroh?}`, so the person's own devices find their node; never a token (each device signs in to the node itself) | unversioned; readers ignore unknown members |
 | `/priv/pubky.music/settings.json` | the node, after every sync and change | the settings backup: `{version, saved_at, node, contact, folders, settings: {key: value}}`, restored after one Ring sign-in on a new or reinstalled node. Never a sign-in or a token: it is plain JSON, and sign-ins travel in the vault or the encrypted backup file | `version: 1` |
 | `/priv/pubky.music/prefs.json` | every node the person uses (`PUT /v1/me/prefs`) | "You" in Settings: `{version, updated_at, home_layout?, quality?, appearance?}`; the newer copy (`updated_at`) wins between nodes | `version: 1` |
 | `/priv/pubky.music/files/` | the node (uploads, copies, imports) and the person | the person's own music files, any audio format; the node names them `<16 hex digits of the BLAKE3 hash>-<name>` | — |

@@ -877,8 +877,11 @@ pub struct NodeRecord {
     pub name: String,
     /// HTTP(S) origin of the `/v1` API as the user's devices can reach it.
     pub api_url: String,
-    /// Bearer token; fine here because the folder is private to the owner.
-    #[serde(default)]
+    /// Never written: the record says where the node is, not how to sign in to it. A device gets
+    /// its own credential by signing in to the node with Pubky Ring (ADR 0008). Read only to
+    /// recognise a record an older version wrote with the node's API token in it, so the node can
+    /// replace that token.
+    #[serde(default, skip_serializing)]
     pub token: String,
     pub version: String,
     /// Microseconds.

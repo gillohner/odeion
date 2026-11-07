@@ -4874,6 +4874,7 @@ dependencies = [
  "pm-endpoint",
  "pm-model",
  "pm-offline",
+ "pm-out-local",
  "pm-pubky",
  "pm-remote",
  "pm-stream",
@@ -4957,7 +4958,10 @@ dependencies = [
  "async-trait",
  "cpal",
  "pm-model",
+ "pm-usb-audio",
  "pm-zones",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -5006,6 +5010,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "pm-usb-audio"
+version = "0.2.2"
+dependencies = [
+ "libc",
+ "serde",
 ]
 
 [[package]]

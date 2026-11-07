@@ -1,5 +1,5 @@
 // Comments on item pages (TASK-pinakes-social-ux.md B1): a song with a link shows Comments
-// between Tags and About; posting sends the song's link, a reply sends the comment's post, only
+// above About (its tags are in the top card); posting sends the song's link, a reply sends the comment's post, only
 // your own comments have Delete (after a question); "Post about this" in the ⋯ menu sends the song as
 // the post's embed; a song without a link has neither. The
 // node's /v1/comments is mocked here (pm-api's tests cover it against Nexus and a testnet).
@@ -43,8 +43,9 @@ const post = (k, id) => `pubky://${k}/pub/social/v1/posts/${id}`;
       await page.goto(BASE + '/song/lib-1');
       const sec = page.locator('#icomments');
       await sec.locator('li.comment').first().waitFor();
-      const order = await page.$$eval('#main section.section', (els) => els.map((e) => e.id).filter((id) => ['itags', 'icomments', 'iabout'].includes(id)));
-      assert.deepEqual(order, ['itags', 'icomments', 'iabout'], 'Comments sit between Tags and About');
+      const order = await page.$$eval('#main section.section', (els) => els.map((e) => e.id).filter((id) => ['icomments', 'iabout'].includes(id)));
+      assert.deepEqual(order, ['icomments', 'iabout'], 'Comments sit above About');
+      assert.equal(await page.locator('#main .hero #htags').count(), 1, 'the tags are in the top card');
       assert.equal(await sec.locator('li.comment').count(), 2);
       assert.equal(await sec.locator('li.comment').nth(0).locator('[data-cdel]').count(), 0, 'no Delete on someone else\'s comment');
       assert.equal(await sec.locator('li.comment').nth(1).locator('[data-cdel]').count(), 1, 'Delete on your own');

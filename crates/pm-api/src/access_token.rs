@@ -31,6 +31,92 @@ pub struct NewToken {
 
 /// `POST /v1/node/token`.
 pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
+    let token = rotate(&s).await?;
+    if let Some(sync) = s.sync_handle() {
+        let st = s.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sync.publish_node_for(&st).await {
+                tracing::warn!("publishing the node record after the token change failed: {e}");
+            }
+        });
+    }
+    Ok(Json(NewToken { token }))
+}
+
+/// A setting: the SHA-256 of an API token an older version wrote into the node record on the
+/// owner's homeserver. Kept from before the record is rewritten until that token no longer works
+/// here, so a failure or a restart in between never forgets it (`retire_published`).
+pub const PUBLISHED_TOKEN_KEY: &str = "api.published_token";
+
+fn sha256_hex(t: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(t.as_bytes()))
+}
+
+fn published_hash(s: &NodeState) -> Option<String> {
+    let lib = s.library.lock().expect("library poisoned");
+    lib.get_setting(PUBLISHED_TOKEN_KEY).ok().flatten()
+}
+
+/// Notes that the node record held `token`, before the record is rewritten without it.
+pub(crate) fn note_published(s: &NodeState, token: &str) -> Result<(), pm_library::LibraryError> {
+    let lib = s.library.lock().expect("library poisoned");
+    lib.set_setting(PUBLISHED_TOKEN_KEY, &sha256_hex(token))
+}
+
+/// A token the node record once held stops working here:
+/// - the node's token is still that one and the node made it: it is replaced (once; the owner's
+///   browsers and apps sign in to the node again), and the note goes;
+/// - the node's token is another one by now (replaced, or changed in the config): the note goes;
+/// - it is still that one and set in the config, which the node can't change: the note stays and
+///   Health asks the owner to change it ([`config_token_published`]).
+///
+/// A failed replacement keeps the note; the next publish tries again. Callers serialize it.
+pub(crate) async fn retire_published(s: &NodeState) {
+    let Some(published) = published_hash(s) else {
+        return;
+    };
+    let current = s.token().map(|t| sha256_hex(&t));
+    if current.as_deref() != Some(published.as_str()) {
+        let lib = s.library.lock().expect("library poisoned");
+        let _ = lib.delete_setting(PUBLISHED_TOKEN_KEY);
+        return;
+    }
+    if s.token_file().is_none() {
+        tracing::warn!(
+            "an older version kept this node's API token in its address record on the homeserver, and it is set in the node's config: change [api] token (or PM_TOKEN) and restart the node"
+        );
+        return;
+    }
+    match rotate(s).await {
+        Ok(_) => {
+            let lib = s.library.lock().expect("library poisoned");
+            let _ = lib.delete_setting(PUBLISHED_TOKEN_KEY);
+            tracing::warn!(
+                "an older version kept this node's API token in its address record on the homeserver; the token was replaced, so apps and browsers sign in to the node again"
+            );
+        }
+        Err(e) => tracing::warn!(
+            "replacing the API token an older version kept on the homeserver failed (tried again at the next publish): {}",
+            e.message
+        ),
+    }
+}
+
+/// Whether the node still uses a token set in its config that the node record once held.
+pub(crate) fn config_token_published(s: &NodeState) -> bool {
+    if s.token_file().is_some() {
+        return false;
+    }
+    match (s.token(), published_hash(s)) {
+        (Some(t), Some(h)) => sha256_hex(&t) == h,
+        _ => false,
+    }
+}
+
+/// A new API token, in the file and in memory: the old one stops working at once, the owner's
+/// browser sessions end and the event sockets opened with it close. Only a token the node made.
+pub(crate) async fn rotate(s: &NodeState) -> Result<String, ApiError> {
     let Some(file) = s.token_file().map(Path::to_path_buf) else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -40,7 +126,7 @@ pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
     let _one = REPLACING.lock().await;
     // A new token is the answer to a leak: the owner's browser sessions end with the old token.
     // First, so a failure here leaves the old token working instead of a 500 without the new one
-    crate::accounts::end_owner_sessions(&s)?;
+    crate::accounts::end_owner_sessions(s)?;
     let token = new_token();
     let t = token.clone();
     tokio::task::spawn_blocking(move || {
@@ -61,16 +147,8 @@ pub async fn replace(State(s): State<Arc<NodeState>>) -> ApiResult<NewToken> {
     s.usage.revoke_owner();
     // Event sockets opened with the old token end now
     s.token_changed.send_modify(|n| *n += 1);
-    tracing::info!("API token replaced by the owner; the old one no longer works");
-    if let Some(sync) = s.sync_handle() {
-        let st = s.clone();
-        tokio::spawn(async move {
-            if let Err(e) = sync.publish_node_for(&st).await {
-                tracing::warn!("publishing the node record with the new token failed: {e}");
-            }
-        });
-    }
-    Ok(Json(NewToken { token }))
+    tracing::info!("API token replaced; the old one no longer works");
+    Ok(token)
 }
 
 /// Whether the token was replaced after `made_at` (unix seconds), by [`REPLACED_FILE`] in

@@ -394,6 +394,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: Some(format!("{base}/ZoneGroupTopology/Control")),
+            events: Default::default(),
             location: format!("{base}/xml/device_description.xml"),
         }
     }

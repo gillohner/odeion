@@ -1,3 +1,7 @@
+// Drawn once the window has its size: a first frame laid out before it put the page at the top,
+// then it jumped to the middle (owner's recording, 2026-11-06). The window's colour shows meanwhile.
+// First in the file, so nothing below can keep the page hidden.
+(function ready(n) { if (innerHeight > 200 || n > 30) document.body.classList.add('ready'); else requestAnimationFrame(() => ready(n + 1)); })(0);
 // The connect page: reconnect to the remembered node, or connect with
 // Pubky Ring or by address. Commands live in src/lib.rs.
 (() => {
@@ -5,6 +9,10 @@
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
   const $ = (id) => document.getElementById(id);
+  // The saved node's message; a change of state is also said in the live region (the retry
+  // countdown's seconds are not: a screen reader would read every one)
+  const announce = (text) => { const l = $('saved-live'); if (l) l.textContent = text; };
+  const say = (text) => { $('saved-msg').textContent = text; announce(text); };
   let ringUrl = '';
 
   const show = (id, on = true) => { $(id).hidden = !on; };
@@ -64,7 +72,29 @@
       return;
     }
     btn.disabled = true;
-    try { await invoke('connect_manual', { nodeUrl: n.url, token: '' }); } catch (e) { fail(e); } finally { btn.disabled = false; }
+    try {
+      await invoke('connect_manual', { nodeUrl: n.url, token: '' });
+    } catch (e) {
+      // A node without a token answers only at 127.0.0.1: the node on this computer, else it
+      // needs a token (its config, [api] token) to be reached from here
+      if (/no API token/.test(String(e))) {
+        // Only the node that was found: one with another id (or none) at 127.0.0.1 is not taken
+        if (n.id) {
+          const here = new URL(n.url);
+          here.hostname = '127.0.0.1';
+          try {
+            await invoke('connect_manual', { nodeUrl: here.toString().replace(/\/$/, ''), token: '', expectId: n.id });
+            return;
+          } catch (e2) { /* not on this computer, or another node is */ }
+        }
+        $('url').value = n.url;
+        $('manual-box').open = true;
+        show('tok-hint');
+        $('tok').focus();
+        $('manual-box').scrollIntoView({ block: 'nearest' });
+      }
+      fail(e);
+    } finally { btn.disabled = false; }
   }
   $('lan-again').onclick = () => searchLan();
 
@@ -83,10 +113,11 @@
     attempt++;
     show('connect', false);
     show('saved');
+    show('saved-spin', false);
     clearErr();
-    $('saved-msg').textContent = (oldUrl ? 'Your node didn’t answer at ' + oldUrl + ', and a' : 'A')
+    say((oldUrl ? 'Your node didn’t answer at ' + oldUrl + ', and a' : 'A')
       + ' node with its id answers at ' + url + '. If you moved the node or its address changed, use the new address. '
-      + 'Anyone on this network can claim to be your node, so your token goes there only if you say so.';
+      + 'Anyone on this network can claim to be your node, so your token goes there only if you say so.');
     const yes = $('moved-yes');
     yes.textContent = 'Use ' + url;
     yes.disabled = false;
@@ -101,6 +132,9 @@
     return true;
   }
 
+  // A node that hasn't answered after this long: the page says so and offers the ways on, while
+  // it keeps trying (owner's recording: ~6 s of "Connecting…" with nothing else)
+  const SLOW_MS = 5000;
   async function reconnect(nodeUrl) {
     const mine = ++attempt;
     show('connect', false);
@@ -108,34 +142,46 @@
     show('moved-yes', false);
     show('retry', false);
     show('other', false);
+    show('saved-spin');
     clearErr();
-    $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
+    say('Connecting to ' + nodeUrl + '…');
     for (let i = 0; ; i++) {
+      // Each attempt that hangs says so after SLOW_MS (a node that stops answering mid-retry too)
+      const slow = setTimeout(() => {
+        if (mine !== attempt) return;
+        say('Your node at ' + nodeUrl + ' hasn’t answered yet. Still trying…');
+        show('retry');
+        show('other');
+      }, SLOW_MS);
       try {
         await invoke('open_saved');
+        clearTimeout(slow);
         return;
       } catch (e) {
+        clearTimeout(slow);
         if (mine !== attempt) return;
         if (askMoved(e, nodeUrl)) return;
         // Away from the node with music on this device: play it now; the app comes back to the
         // node by itself when it answers (open_offline)
         if (i === 0 && String(e).startsWith("Can't reach") && await invoke('has_downloads').catch(() => false)) {
-          $('saved-msg').textContent = String(e) + '. Playing what this device keeps meanwhile…';
+          say(String(e) + '. Playing what this device keeps meanwhile…');
           try { await invoke('open_offline'); return; } catch (err) { /* fall through to the retries */ }
         }
         show('retry');
         show('other');
         // Only an unreachable node is worth waiting for; a refused token is not
         if (i >= RETRIES.length || !String(e).startsWith("Can't reach")) {
-          $('saved-msg').textContent = String(e) + '.';
+          say(String(e) + '.');
+          show('saved-spin', false);
           return;
         }
         for (let left = RETRIES[i]; left > 0; left--) {
+          if (left === RETRIES[i]) announce(String(e) + '. Trying again shortly.');
           $('saved-msg').textContent = String(e) + '. Trying again in ' + left + ' s…';
           await new Promise((r) => setTimeout(r, 1000));
           if (mine !== attempt) return;
         }
-        $('saved-msg').textContent = 'Connecting to ' + nodeUrl + '…';
+        say('Connecting to ' + nodeUrl + '…');
       }
     }
   }
@@ -147,6 +193,9 @@
   $('other').onclick = async () => { attempt++; await invoke('forget'); connectView(); };
 
   listen('ring-url', (ev) => {
+    // Also while reconnecting: a node that refused this device's sign-in asks for a new one
+    show('saved', false);
+    show('connect');
     ringUrl = ev.payload.url;
     $('qr').innerHTML = ev.payload.qr_svg;
     $('ring').textContent = 'Waiting for Pubky Ring…';

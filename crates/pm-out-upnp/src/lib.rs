@@ -10,6 +10,7 @@
 //! thread, and the few control calls per track do not justify a runtime.
 
 pub mod dlna;
+pub mod gena;
 pub mod heos;
 pub mod output;
 pub mod soap;
@@ -53,21 +54,68 @@ pub struct Renderer {
     /// Sonos: where the group topology is read (`sonos::groups`).
     pub zone_group_topology: Option<String>,
     pub location: String,
+    /// Where the renderer's volume changes are sent (GENA), when it says: the OpenHome `Volume`
+    /// service (a Linn's; what Roon follows) and RenderingControl's `LastChange`.
+    pub events: RendererEvents,
+}
+
+/// The event subscription URLs ([`gena`]) a renderer's description names, absolute.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RendererEvents {
+    pub rendering_control: Option<String>,
+    pub openhome_volume: Option<String>,
 }
 
 /// SSDP M-SEARCH for media renderers; collects unique LOCATIONs within
 /// `timeout`, then fetches and parses each description.
 pub fn discover(timeout: Duration) -> Result<Vec<Renderer>, UpnpError> {
-    let locations = ssdp_search(timeout)?;
+    discover_except(timeout, |_, _| false)
+}
+
+/// [`discover`], without fetching the descriptions `skip` says are known already: it gets each
+/// answer's LOCATION and the UUID its USN names (when it does), so a renderer that has its output
+/// isn't described again, while another device given its address is.
+pub fn discover_except(
+    timeout: Duration,
+    skip: impl Fn(&str, Option<&str>) -> bool,
+) -> Result<Vec<Renderer>, UpnpError> {
+    let answers = ssdp_search_usn(timeout)?;
     let mut out = Vec::new();
-    for loc in locations {
+    for (loc, uuid) in answers {
+        if skip(&loc, uuid.as_deref()) {
+            continue;
+        }
         match describe(&loc) {
             Ok(Some(r)) => out.push(r),
-            Ok(None) => {}
-            Err(e) => tracing::debug!(%loc, "skipping renderer: {e}"),
+            Ok(None) => tracing::debug!(%loc, "not a renderer"),
+            // (said at info: a renderer that answered but couldn't be described gets no zone)
+            Err(e) => tracing::info!(%loc, "UPnP renderer answered but its description failed: {e}"),
         }
     }
     Ok(out)
+}
+
+/// When, from its start, a search of `timeout` asks again: a datagram can be lost, and a device
+/// busy at the first one (a TV, a Linn waking its UPnP side) may answer a later one.
+pub fn search_resends(timeout: Duration) -> Vec<Duration> {
+    [Duration::from_millis(1000), Duration::from_millis(2000)]
+        .into_iter()
+        .filter(|d| *d + Duration::from_millis(1000) <= timeout)
+        .collect()
+}
+
+/// The MX (seconds a device may wait before answering) of a search of `timeout`: the time left
+/// after its last resend, so every answer can come within the window (1 at least).
+pub fn search_mx(timeout: Duration) -> u64 {
+    let last = search_resends(timeout).last().copied().unwrap_or_default();
+    timeout.saturating_sub(last).as_secs().clamp(1, 5)
+}
+
+/// [`describe`] with its own `timeout` (a remembered renderer that is off shouldn't hold a pass).
+pub fn describe_within(location: &str, timeout: Duration) -> Result<Option<Renderer>, UpnpError> {
+    let client = reqwest::blocking::Client::builder().timeout(timeout).build()?;
+    let xml = client.get(location).send()?.error_for_status()?.text()?;
+    parse_description(location, &xml)
 }
 
 /// One SSDP answer, for diagnostics: who answered, what it claims to be,
@@ -405,22 +453,38 @@ fn friendly_name_of(location: &str) -> Option<String> {
 
 /// Raw SSDP: the LOCATION headers of every MediaRenderer that answers.
 pub fn ssdp_search(timeout: Duration) -> Result<Vec<String>, UpnpError> {
-    let mx = timeout.as_secs().clamp(1, 5);
+    Ok(ssdp_search_usn(timeout)?
+        .into_iter()
+        .map(|(loc, _)| loc)
+        .collect())
+}
+
+/// [`ssdp_search`], each LOCATION with the UUID its USN names (`uuid:…::urn:…`), when it does.
+pub fn ssdp_search_usn(timeout: Duration) -> Result<Vec<(String, Option<String>)>, UpnpError> {
+    let mx = search_mx(timeout);
     let msg = format!(
         "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {mx}\r\nST: {MEDIA_RENDERER}\r\n\r\n"
     );
     let sockets = multicast_sockets(&msg)?;
-    let deadline = Instant::now() + timeout;
-    let mut found: Vec<String> = Vec::new();
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut resends: Vec<Instant> = search_resends(timeout).into_iter().map(|d| start + d).collect();
+    let mut found: Vec<(String, Option<String>)> = Vec::new();
     let mut buf = [0u8; 4096];
     while Instant::now() < deadline {
+        if resends.first().is_some_and(|t| Instant::now() >= *t) {
+            resends.remove(0);
+            for socket in &sockets {
+                let _ = socket.send_to(msg.as_bytes(), SSDP_GROUP);
+            }
+        }
         for socket in &sockets {
             match socket.recv_from(&mut buf) {
                 Ok((n, _)) => {
                     let text = String::from_utf8_lossy(&buf[..n]);
                     if let Some(loc) = header(&text, "LOCATION") {
-                        if !found.iter().any(|l| l.eq_ignore_ascii_case(&loc)) {
-                            found.push(loc);
+                        if !found.iter().any(|(l, _)| l.eq_ignore_ascii_case(&loc)) {
+                            found.push((loc, header(&text, "USN").and_then(|u| usn_uuid(&u))));
                         }
                     }
                 }
@@ -455,11 +519,13 @@ pub fn local_ipv4_addrs() -> Vec<Ipv4Addr> {
     v
 }
 
+const SSDP_GROUP: &str = "239.255.255.250:1900";
+
 /// One socket per interface, each sending `msg` to the SSDP group through
 /// that interface (the kernel otherwise uses the default route only). Falls
 /// back to a single unbound socket when the interfaces cannot be listed.
 fn multicast_sockets(msg: &str) -> Result<Vec<UdpSocket>, UpnpError> {
-    let dest: SocketAddr = "239.255.255.250:1900".parse().expect("ssdp address");
+    let dest: SocketAddr = SSDP_GROUP.parse().expect("ssdp address");
     let mut sockets = Vec::new();
     for ip in local_ipv4_addrs() {
         let Ok(socket) = UdpSocket::bind((ip, 0)) else {
@@ -487,6 +553,13 @@ fn multicast_sockets(msg: &str) -> Result<Vec<UdpSocket>, UpnpError> {
         sockets.push(socket);
     }
     Ok(sockets)
+}
+
+/// The UUID a USN names: `uuid:abc::urn:…` → `abc`.
+pub fn usn_uuid(usn: &str) -> Option<String> {
+    let rest = usn.trim().strip_prefix("uuid:")?;
+    let id = rest.split("::").next()?.trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 fn header(resp: &str, name: &str) -> Option<String> {
@@ -522,11 +595,13 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
     let mut manufacturer = None;
     let mut model = None;
     let mut device_type = None;
-    let mut in_service: Option<(Option<String>, Option<String>)> = None; // (serviceType, controlURL)
+    let mut in_service: Option<(Option<String>, Option<String>, Option<String>)> = None; // (serviceType, controlURL, eventSubURL)
     let mut av = None;
     let mut rc = None;
     let mut cm = None;
     let mut zgt = None;
+    let mut rc_event: Option<String> = None;
+    let mut oh_volume_event: Option<String> = None;
     let mut url_base: Option<String> = None;
     let mut text_target: Option<String> = None;
     loop {
@@ -535,7 +610,7 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
                 let name = e.local_name().as_ref().to_string();
                 path.push(name.clone());
                 if name == "service" {
-                    in_service = Some((None, None));
+                    in_service = Some((None, None, None));
                 }
                 text_target = Some(name);
             }
@@ -567,13 +642,26 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
                             s.1 = Some(v);
                         }
                     }
+                    "eventSubURL" => {
+                        if let Some(s) = in_service.as_mut() {
+                            s.2 = Some(v);
+                        }
+                    }
                     _ => {}
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.local_name().as_ref().to_string();
                 if name == "service" {
-                    if let Some((Some(t), Some(c))) = in_service.take() {
+                    if let Some((Some(t), Some(c), ev)) = in_service.take() {
+                        if t.starts_with("urn:schemas-upnp-org:service:RenderingControl:")
+                            && rc_event.is_none()
+                        {
+                            rc_event = ev.clone();
+                        }
+                        if t.starts_with("urn:av-openhome-org:service:Volume:") && oh_volume_event.is_none() {
+                            oh_volume_event = ev.clone();
+                        }
                         if t.starts_with("urn:schemas-upnp-org:service:AVTransport:") && av.is_none() {
                             av = Some(c);
                         } else if t.starts_with("urn:schemas-upnp-org:service:RenderingControl:")
@@ -626,11 +714,44 @@ pub fn parse_description(location: &str, xml: &str) -> Result<Option<Renderer>, 
         connection_manager: cm.map(|c| abs(&c)),
         zone_group_topology: zgt.map(|c| abs(&c)),
         location: location.to_string(),
+        events: RendererEvents {
+            rendering_control: rc_event.map(|c| abs(&c)),
+            openhome_volume: oh_volume_event.map(|c| abs(&c)),
+        },
     }))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_search_asks_again_within_its_window() {
+        use std::time::Duration;
+        let ms = |v: &[Duration]| v.iter().map(|d| d.as_millis()).collect::<Vec<_>>();
+        assert_eq!(
+            ms(&super::search_resends(Duration::from_secs(3))),
+            vec![1000, 2000]
+        );
+        assert_eq!(ms(&super::search_resends(Duration::from_secs(2))), vec![1000]);
+        assert!(super::search_resends(Duration::from_millis(1500)).is_empty());
+        // Every answer within the window: MX is what is left after the last resend
+        assert_eq!(super::search_mx(Duration::from_secs(3)), 1);
+        assert_eq!(super::search_mx(Duration::from_millis(1500)), 1);
+        assert_eq!(super::search_mx(Duration::from_secs(10)), 5);
+    }
+
+    #[test]
+    fn a_usn_names_its_uuid() {
+        assert_eq!(
+            super::usn_uuid("uuid:4c494e4e-0026::urn:schemas-upnp-org:device:MediaRenderer:1").as_deref(),
+            Some("4c494e4e-0026")
+        );
+        assert_eq!(super::usn_uuid("uuid:abc").as_deref(), Some("abc"));
+        assert_eq!(
+            super::usn_uuid("urn:schemas-upnp-org:device:MediaRenderer:1"),
+            None
+        );
+    }
+
     use super::*;
 
     const DESC: &str = r#"<?xml version="1.0"?>
@@ -647,6 +768,13 @@ mod tests {
         <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
         <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
         <controlURL>/RenderingControl/control</controlURL>
+        <eventSubURL>/RenderingControl/event</eventSubURL>
+      </service>
+      <service>
+        <serviceType>urn:av-openhome-org:service:Volume:1</serviceType>
+        <serviceId>urn:av-openhome-org:serviceId:Volume</serviceId>
+        <controlURL>/Volume/control</controlURL>
+        <eventSubURL>/Volume/event</eventSubURL>
       </service>
       <service>
         <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
@@ -676,6 +804,14 @@ mod tests {
         assert_eq!(
             r.rendering_control.as_deref(),
             Some("http://192.168.1.20:55178/RenderingControl/control")
+        );
+        // Where its volume changes are sent: OpenHome Volume and RenderingControl, absolute
+        assert_eq!(
+            r.events,
+            RendererEvents {
+                rendering_control: Some("http://192.168.1.20:55178/RenderingControl/event".into()),
+                openhome_volume: Some("http://192.168.1.20:55178/Volume/event".into()),
+            }
         );
     }
 
