@@ -236,7 +236,10 @@ async fn the_device_list_and_signing_out_through_the_api() {
     assert!(phone.read("tidal").await.is_err());
     let (_, v) = call(&app, "GET", "/v1/vault").await;
     assert_eq!(v["devices"].as_array().unwrap().len(), 1, "{v}");
-    assert_eq!(v["sign_ins"][0]["epoch"], first_epoch + 1);
+    // The phone wrote it and is out, so the node writes past its copy: a later epoch (at the
+    // current time at least, so not first_epoch + 1 once a second has passed)
+    let epoch = v["sign_ins"][0]["epoch"].as_u64().unwrap();
+    assert!(epoch > first_epoch, "{epoch} > {first_epoch}");
     // The node remembers the sign-out: the phone writes the list back without it, and the node
     // still doesn't trust it
     assert!(dir.path().join("vault/revoked.json").exists());

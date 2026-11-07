@@ -1109,10 +1109,15 @@ async fn a_sign_in_is_taken_only_from_a_device_that_signed_it() {
     // What B wrote while trusted is rotated past B, now signed by A; B's copy served again is
     // refused (B is out, and it is older)
     assert_eq!(report.rotated, ["tidal"], "{report:?}");
+    // B's copy is no longer trusted, so A writes past it: above its epoch, and at the current
+    // time at least (not first.epoch + 1 once a second has passed)
     let after = v[0].read("tidal").await.unwrap().unwrap();
-    assert_eq!(
-        (after.signed_by, after.epoch),
-        (Some(v[0].client_key()), first.epoch + 1)
+    assert_eq!(after.signed_by, Some(v[0].client_key()));
+    assert!(
+        after.epoch > by_b.epoch && by_b.epoch == first.epoch,
+        "{} > {}",
+        after.epoch,
+        by_b.epoch
     );
     put(raw(&by_b)).await;
     assert!(v[0].read("tidal").await.is_err(), "B's blob after B's sign-out");
