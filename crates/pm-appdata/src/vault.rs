@@ -535,7 +535,9 @@ pub fn client_entry_problem(
 
 /// The signing key an entry's signer proof gives it, given that proof already verified by the
 /// pubky SDK (`verify_custom_grant_pop`), with the same arguments as [`client_entry_problem`];
-/// else why not.
+/// else why not. The signer proof must carry the entry's own client-proof grant, byte for byte:
+/// another grant of the same person (a signed-out device's) can't attach its key to the entry.
+/// Whether that grant is trusted (signed out or not) is the client proof's check.
 pub fn signer_of_entry(
     entry: &ClientEntry,
     owner: &str,
@@ -557,6 +559,9 @@ pub fn signer_of_entry(
     }
     if d.client_key != entry.client_key {
         return Err("the signer proof is for another key");
+    }
+    if entry.signer.as_ref().map(|p| &p.grant) != Some(&entry.proof.grant) {
+        return Err("the signer proof's grant isn't the entry's own");
     }
     if ed25519_dalek::VerifyingKey::from_bytes(&d.sign_key.0).is_err() {
         return Err("the signer proof's signing key isn't one");

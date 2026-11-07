@@ -28,16 +28,17 @@ renewed, so a blob signed that way would stop verifying though nothing about it 
 - **Every blob is signed by its writer** (`writer: {client_key, sig}`) over the owner, path, epoch, the
   recipients and the ciphertext (which covers the revision and the plaintext). Every rewrite re-signs.
 - **A reader takes a signed blob only from a device trusted today** (a verifying entry, not signed out, with
-  a signer proof), and an unsigned blob only while it has seen no signed copy of that service and, in a
-  node, has no copy of its own. A blob nobody trusted signed is written over by the node's own copy (a new
+  a signer proof under the entry's own grant), and an unsigned blob only while a client from before v2 is
+  still listed, it has seen no signed copy of that service and, in a node, has no copy of its own; it never
+  signs an unsigned blob it took. A blob nobody trusted signed is written over by the node's own copy (a new
   key, the next epoch), never rewritten from its content; signing a device out still rotates what that
   device wrote while trusted, since the rotation runs under the blob's lock right after the list says it
   is out.
 - **Rollback guard:** each reader keeps the highest `(epoch, revision)` seen per blob and the highest
   sign-out-everywhere marker, in a local file beside its record of sign-outs. An older signed copy is refused
-  as stale; a device list with a lower marker doesn't undo a sign-out everywhere. The marks start over when
-  the marker moves, when the reader deletes or finds a blob gone, or when the person takes the vault's copy
-  by hand.
+  as stale; a device list with a lower marker doesn't undo a sign-out everywhere, and a marker dated in the
+  future is ignored. The marks outlive a blob's deletion and a new marker (a blob written anew starts above
+  them, at the current time at least); only the person taking the vault's copy by hand forgets one.
 - **Migration:** the envelope's `version` stays 1 so older readers keep working; a node signs a blob from
   before v2 once its content equals the node's own copy; the window closes in the release after every
   known vault client signs. No vault client exists outside this repository today (the desktop and Android
