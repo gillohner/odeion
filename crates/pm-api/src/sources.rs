@@ -612,15 +612,29 @@ fn read_playlist_within(
         return Err("the playlist is too big (over 64 KiB)".into());
     }
     // Read on a thread of its own and wait for all of it at most `limit`: a read that sends
-    // nothing, a trickle, or an end that comes late are all given up then. The thread ends with
-    // the stream wait at the latest.
+    // nothing, a trickle, or an end that comes late are all given up then. The thread reads in
+    // chunks and stops (dropping the connection) once `limit` has passed, so it ends at most one
+    // stream wait (one read) after the deadline, however slowly the server trickles.
+    let started = std::time::Instant::now();
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("playlist-read".into())
         .spawn(move || {
+            let mut body = resp.take(PLAYLIST_MAX);
             let mut buf = Vec::new();
-            let r = resp.take(PLAYLIST_MAX).read_to_end(&mut buf).map(|_| buf);
-            let _ = tx.send(r.map_err(|e| e.to_string()));
+            let mut chunk = [0u8; 4096];
+            let r = loop {
+                match body.read(&mut chunk) {
+                    Ok(0) => break Ok(buf),
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) => break Err(e.to_string()),
+                }
+                if started.elapsed() > limit {
+                    break Err("past the deadline".into());
+                }
+            };
+            drop(body);
+            let _ = tx.send(r);
         })
         .map_err(|e| e.to_string())?;
     match rx.recv_timeout(limit) {
@@ -1193,11 +1207,21 @@ mod tests {
     }
 
     /// A playlist whose server sends a byte at a time, each within the stream wait, is given
-    /// up after [`PLAYLIST_FOR`] in all: the open fails instead of waiting for the whole file.
+    /// up after [`PLAYLIST_FOR`] in all: the open fails instead of waiting for the whole file,
+    /// and the reading thread lets go of the connection soon after (the server sees it close).
     #[test]
     fn a_trickling_playlist_is_given_up() {
         use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static CLOSED: AtomicBool = AtomicBool::new(false);
         let url = serve_each(|mut c| {
+            struct Closed;
+            impl Drop for Closed {
+                fn drop(&mut self) {
+                    CLOSED.store(true, Ordering::SeqCst);
+                }
+            }
+            let _closed = Closed;
             read_request(&mut c);
             let _ = c.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -1227,6 +1251,15 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+        // The trickle never ends on its own: only the reader letting go ends the server's loop
+        let gone = std::time::Instant::now();
+        while !CLOSED.load(Ordering::SeqCst) {
+            assert!(
+                gone.elapsed() < std::time::Duration::from_secs(5),
+                "the reader still holds the connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// A playlist whose server sends its headers and then nothing, or all of it but its end only
