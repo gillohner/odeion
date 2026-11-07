@@ -66,6 +66,8 @@ pubky = { version = "0.16", optional = true }
 futures-util = { version = "0.3", optional = true }
 pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
+# USB DACs: the report UsbAudio.kt hands over, parsed and kept for the phone's output (src/android.rs).
+pm-out-local = { path = "../pm-out-local", features = ["cpal"] }
 
 [dev-dependencies]
 sha2 = "0.10"

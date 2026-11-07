@@ -28,6 +28,7 @@ Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -39,6 +40,9 @@ from pathlib import Path
 
 PKG = "to.synonym.pubkymusic"
 NODE = os.environ.get("PM_TEST_NODE", "http://127.0.0.1:7788")
+# The node gets an API token: the app reaches it as 10.0.2.2 (the emulator's name for the runner),
+# and a node without one answers only at its loopback names. Made per run.
+TOKEN = secrets.token_hex(16)
 apk, node_bin, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
 
 
@@ -55,7 +59,12 @@ def adb(*args, check=True):
 
 def api(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(NODE + path, data=data, method=method, headers={"content-type": "application/json"})
+    req = urllib.request.Request(
+        NODE + path,
+        data=data,
+        method=method,
+        headers={"content-type": "application/json", "authorization": f"Bearer {TOKEN}"},
+    )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             raw = r.read()
@@ -104,7 +113,8 @@ def system_kills():
     return KILLED.findall(logcat())
 
 
-PROMPT = re.compile(r'text="(Don.t allow|Deny)"')
+# (any case: the API 37 image says "DON’T ALLOW")
+PROMPT = re.compile(r'text="(Don.t allow|Deny)"', re.I)
 
 
 def ui_nodes():
@@ -263,6 +273,7 @@ def main():
 folders = ["{out}/music"]
 [api]
 listen = "{os.environ.get('PM_TEST_LISTEN', '127.0.0.1:7788')}"
+token = "{TOKEN}"
 announce = false
 [outputs]
 discover = false
@@ -307,6 +318,9 @@ def run(node):
         # The address field is the page's first text field (its id and hint differ between WebViews)
         tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
         adb("shell", "input", "text", "10.0.2.2:7788")
+        # The node's token in the form's token field
+        tap(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field")
+        adb("shell", "input", "text", TOKEN)
         adb("shell", "input", "keyevent", "66")
         shot("1-connecting")
         def node_page():

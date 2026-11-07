@@ -72,7 +72,7 @@ impl Link {
         }
     }
 
-    fn connected(&self) -> bool {
+    pub(crate) fn connected(&self) -> bool {
         self.conn.lock().expect("conn").is_some()
     }
 
@@ -272,9 +272,15 @@ impl Output for SlimOutput {
         }))
     }
 
+    /// Percent is a squared gain here (`set_volume`): `10^(dB/40)`, rounded down for a cap.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        squared_percent(db)
+    }
+
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let gain = match v {
-            Volume::Db(db) => 10f64.powf(db.clamp(-60.0, 0.0) as f64 / 20.0),
+            // Below -60 dB too: a volume limit under it still holds
+            Volume::Db(db) => 10f64.powf(db.min(0.0) as f64 / 20.0),
             Volume::Percent(p) => (p.min(100) as f64 / 100.0).powi(2),
             Volume::Mute(true) => 0.0,
             Volume::Mute(false) => 1.0,
@@ -304,6 +310,12 @@ struct SlimSink {
     written: u64,
     /// Frames written before the player's current stream started (it counts from zero).
     base: u64,
+}
+
+/// The highest percent at or below `db` when percent is a squared gain (`(p/100)²`). Only the
+/// top is clamped: a limit under -60 dB still caps below it.
+fn squared_percent(db: f32) -> u8 {
+    (10f64.powf(f64::from(db.min(0.0)) / 40.0) * 100.0).floor() as u8
 }
 
 /// How far the node runs ahead of what the player has played. Socket and player buffers would
@@ -508,6 +520,16 @@ impl Drop for SlimSink {
 mod tests {
     use super::*;
     use crate::read_frame_server;
+
+    #[test]
+    fn a_volume_limit_caps_percent_on_the_squared_gain() {
+        // 17 % is a gain of 0.0289, -30.8 dB: under a -30 dB limit (the linear 50 % was -12 dB)
+        assert_eq!(squared_percent(-30.0), 17);
+        assert_eq!(squared_percent(0.0), 100);
+        // Under -60 dB too: -80 dB is 1 % (a gain of 1e-4), never the 3 % of -60 dB
+        assert!(squared_percent(-80.0) <= 1);
+        assert_eq!(squared_percent(-90.0), 0);
+    }
     use std::io::Write;
     use std::net::TcpListener;
 
@@ -526,7 +548,7 @@ mod tests {
     fn idle_players_get_heartbeats() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(|_| {});
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new(|_| true);
         let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> = Arc::new(|n| n.to_string());
         std::thread::spawn(move || crate::serve(listener, 7788, stream_path, on_player).unwrap());
         let mut player = TcpStream::connect(addr).unwrap();
@@ -553,8 +575,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = std::sync::mpsc::channel::<Arc<SlimOutput>>();
-        let on_player: Arc<dyn Fn(Arc<SlimOutput>) + Send + Sync> = Arc::new(move |o| {
+        let on_player: Arc<dyn Fn(Arc<SlimOutput>) -> bool + Send + Sync> = Arc::new(move |o| {
             let _ = tx.send(o);
+            true
         });
         let stream_path: Arc<dyn Fn(&str) -> String + Send + Sync> =
             Arc::new(|name| format!("/v1/outputs/pull/{name}/stream.wav?token=t"));

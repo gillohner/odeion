@@ -4,7 +4,7 @@
 use pm_library::ArtistSummary;
 use pm_model::{Album, Track, Volume};
 use pm_pubky::{ActivitySource, Playlist};
-use pm_zones::{QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
+use pm_zones::{OutputId, QueueItem, Repeat, ZoneEvent, ZoneId, ZoneState};
 use serde::{Deserialize, Serialize};
 
 pub const API_VERSION: &str = "v1";
@@ -134,6 +134,9 @@ pub struct LoadRequest {
     pub transport: pm_zones::Transport,
     #[serde(default)]
     pub repeat: pm_zones::Repeat,
+    /// Shuffle mode on: `index`'s item plays first, every other item shuffled after it.
+    #[serde(default)]
+    pub shuffle: bool,
     #[serde(default)]
     pub radio: bool,
 }
@@ -162,6 +165,11 @@ pub struct SetRadio {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetRepeat {
     pub repeat: Repeat,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetShuffle {
+    pub shuffle: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,9 +255,64 @@ pub struct SourceArtist {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     pub url: String,
-    pub albums: Vec<SourceHit>,
+    /// The artist's releases on the service, newest first, each with the type the service gives
+    /// it (bounded: see [`crate::releases::MAX_RELEASES`] and `catalogue`).
+    pub albums: Vec<ArtistRelease>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_artist_id: Option<i64>,
+    /// What `albums` is out of the artist's whole catalogue on the service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue: Option<Catalogue>,
+}
+
+/// One of an artist's releases on a service: the hit, and what the service says it is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArtistRelease {
+    #[serde(flatten)]
+    pub hit: SourceHit,
+    #[serde(flatten)]
+    pub release: ReleaseKind,
+}
+
+/// What a service says a release is. Only ever the service's own metadata: never guessed from
+/// a title or a track count. Nothing known is `None`/`false` (the page lists it under "Other
+/// releases").
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseKind {
+    /// `album`, `ep` or `single`, as the service types the release; absent when it says nothing
+    /// (or something else).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_type: Option<String>,
+    /// The release date as the service gives it (`YYYY`, `YYYY-MM` or `YYYY-MM-DD`): newest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released: Option<String>,
+    /// The service marks it a compilation (MusicBrainz's secondary type, Spotify's and Qobuz's
+    /// compilation type).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compilation: bool,
+    /// MusicBrainz's secondary types, as it names them (`Live`, `Remix`, `Compilation`…).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secondary_types: Vec<String>,
+}
+
+/// How much of an artist's catalogue a list holds, honestly: whether every page arrived,
+/// whether the fetch stopped at its bound, the service's own count when it gives one, and why a
+/// list is partial or missing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Catalogue {
+    /// The service the list comes from (`tidal`, `deezer`, `spotify`, `qobuz`, `musicbrainz`).
+    pub source: String,
+    /// Every page arrived: the list is the artist's whole catalogue on that service.
+    pub complete: bool,
+    /// The fetch stopped at its bound and the service lists more.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    /// The service's own count of the artist's releases, when it gives one (TIDAL doesn't).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Why the list is partial or missing (a page failed). Such a list is never cached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Where else a library album or track can be streamed from (Roon's "Versions").
@@ -545,6 +608,9 @@ pub struct NodeSettingsView {
     /// with `POST /v1/node/token`; false when the token is set in the config or there is none.
     #[serde(default)]
     pub token_replaceable: bool,
+    /// Whose TIDAL, Qobuz and Spotify sign-ins listeners play with: `node`, `own` or `choice`.
+    #[serde(default)]
+    pub sources_policy: crate::accounts::SourcePolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -566,6 +632,10 @@ pub struct NodeSettingsUpdate {
     /// Hide Home's "Get started" card for everyone (false shows it again).
     #[serde(default)]
     pub first_steps_hidden: Option<bool>,
+    /// Whose sign-ins listeners play with (`node`, `own`, `choice`); every person's own sign-ins
+    /// and the node's stay as they are whichever is chosen.
+    #[serde(default)]
+    pub sources_policy: Option<crate::accounts::SourcePolicy>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +692,11 @@ pub enum ApiEvent {
     /// The files jobs changed (a state, or ~2 s of progress while one runs): the owner's only.
     Jobs {
         jobs: Box<JobsView>,
+    },
+    /// An output's `device` changed (a USB DAC plugged into or out of a phone): `GET /v1/outputs`
+    /// again. The owner's only, like the outputs.
+    OutputsChanged {
+        output: OutputId,
     },
 }
 
@@ -1441,11 +1516,24 @@ pub struct PageLink {
     pub id: Option<String>,
 }
 
+/// What kind of thing a fact is: something to read about the music (origin, years, genres, a
+/// label), or a reference (an identifier, a raw URL, a file) the page keeps at its foot.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FactKind {
+    #[default]
+    Fact,
+    Ref,
+}
+
 /// One fact in an item page's About section.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Fact {
     pub label: String,
     pub value: String,
+    /// `fact` (read about the music) or `ref` (an id, a URL, a file: the Details at the foot).
+    #[serde(default)]
+    pub kind: FactKind,
     /// A link, sent only when it is http or https (`web::web_link`): a Fact's link can
     /// come from anyone's data, and a `javascript:` one would run in the node's page.
     #[serde(
@@ -1504,6 +1592,10 @@ pub struct ItemPage {
     pub total_ms: u64,
     #[serde(default)]
     pub albums: Vec<ItemAlbum>,
+    /// An artist's releases from a service: how much of the catalogue `albums` is (absent for the
+    /// library, whose albums are all there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue: Option<Catalogue>,
     /// Other recordings (a live take, a remaster, a radio edit), each with its own page.
     #[serde(default)]
     pub versions: Vec<Version>,
@@ -1519,6 +1611,10 @@ pub struct ItemPage {
     /// country"); none when it plays the page's own source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plays_note: Option<String>,
+    /// Why nothing on this page can play (the Internet Archive restricts the item): shown where
+    /// the songs would be, with Play and Shuffle off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
     /// The song (album, artist) itself, on every source: its MusicBrainz or ISRC link. Tags
     /// "on the song" attach here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1609,6 +1705,9 @@ pub struct ItemAlbum {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     pub page: String,
+    /// What the service says the release is (artist pages).
+    #[serde(flatten)]
+    pub release: ReleaseKind,
 }
 
 /// `GET /v1/discover/contents`: what is inside an item, from the service
@@ -1628,6 +1727,13 @@ pub struct ItemContents {
     pub total_ms: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub albums: Vec<ItemAlbum>,
+    /// An artist's: how much of the catalogue `albums` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue: Option<Catalogue>,
+    /// Why nothing here can play, when the source says so (an item the Internet Archive
+    /// restricts): the page shows it instead of an empty list, with Play off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
 }
 
 /// Where an item plays from (the "Plays from" chip).
@@ -1850,6 +1956,11 @@ pub struct ControllerLoginStart {
     /// folders too, as the node needs new ones. Good until a renewal succeeds; ignored while the node needs none.
     #[serde(default)]
     pub renewal: Option<String>,
+    /// The desktop or Android app: the owner's approval makes a sign-in for the device, kept apart
+    /// from browser sessions (a browser's Log out and the browsers' cap leave it; Make a new token
+    /// and a change of the node's identity end it).
+    #[serde(default)]
+    pub device: bool,
 }
 
 /// `POST /v1/auth/pubky/renewal`.

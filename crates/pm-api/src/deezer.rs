@@ -295,27 +295,9 @@ impl StreamingService for Deezer {
 
     async fn artist(&self, s: &NodeState, id: &str) -> Result<SourceArtist, ApiError> {
         let a = numeric(id.strip_prefix("artist:").unwrap_or(id))?;
-        let (p1, p2, q2) = (
-            format!("/artist/{a}"),
-            format!("/artist/{a}/albums"),
-            [("limit", "100".to_string())],
-        );
-        let (ar, albums) = tokio::join!(get_json(s, &p1, &[]), get_json(s, &p2, &q2));
-        let ar = check(ar?, "artist")?;
+        let ar = check(get_json(s, &format!("/artist/{a}"), &[]).await?, "artist")?;
         let name = ar["name"].as_str().unwrap_or("").to_string();
-        let mut albums: Vec<SourceHit> = albums?["data"]
-            .as_array()
-            .map(|l| {
-                l.iter()
-                    .filter_map(|x| {
-                        let mut h = hit("album", x)?;
-                        h.creator = Some(name.clone());
-                        Some(h)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        albums.sort_by_key(|x| std::cmp::Reverse(x.year));
+        let (albums, catalogue) = artist_catalogue(s, a, &name).await;
         Ok(SourceArtist {
             source: SOURCE_ID.into(),
             id: format!("artist:{a}"),
@@ -324,8 +306,101 @@ impl StreamingService for Deezer {
             url: page_url("artist", a),
             albums,
             library_artist_id: None,
+            catalogue: Some(catalogue),
         })
     }
+}
+
+/// An artist's whole catalogue on Deezer (up to [`crate::releases::MAX_RELEASES`]): `index`
+/// pages of 100 until Deezer's `total`, each album with its `record_type`. Calls are bounded by
+/// pages, not by usable rows. Complete only when every row of Deezer's `total` arrived and every
+/// row was usable; a page that fails, an empty page while there is more, rows without an id or
+/// title, or a list ending short of its `total` are said.
+async fn artist_catalogue(s: &NodeState, a: &str, name: &str) -> (Vec<ArtistRelease>, Catalogue) {
+    let max = crate::releases::MAX_RELEASES;
+    let mut cat = Catalogue {
+        source: SOURCE_ID.into(),
+        ..Default::default()
+    };
+    let mut out: Vec<ArtistRelease> = Vec::new();
+    let mut index = 0usize;
+    let mut unusable = 0usize;
+    let mut reached_end = false;
+    for page_no in 0..crate::releases::max_pages(100) {
+        let page = match get_json(
+            s,
+            &format!("/artist/{a}/albums"),
+            &[("limit", "100".to_string()), ("index", index.to_string())],
+        )
+        .await
+        .and_then(|v| check(v, "albums"))
+        {
+            Ok(p) => p,
+            Err(e) => {
+                cat.error = Some(e.message);
+                break;
+            }
+        };
+        if let Some(t) = page["total"].as_u64() {
+            cat.total = Some(t);
+        }
+        let items = page["data"].as_array().cloned().unwrap_or_default();
+        index += items.len();
+        for x in &items {
+            if out.len() == max {
+                cat.truncated = true;
+                break;
+            }
+            match hit("album", x) {
+                Some(mut h) => {
+                    h.creator = Some(name.to_string());
+                    out.push(ArtistRelease {
+                        hit: h,
+                        release: crate::releases::deezer(x),
+                    });
+                }
+                None => unusable += 1,
+            }
+        }
+        if cat.truncated {
+            break;
+        }
+        let more_by_total = cat.total.is_some_and(|t| (index as u64) < t);
+        if !page["next"].is_string() || cat.total.is_some_and(|t| (index as u64) >= t) {
+            reached_end = true;
+            if more_by_total {
+                cat.error = Some(format!(
+                    "Deezer listed {index} of its {} releases",
+                    cat.total.unwrap_or(0)
+                ));
+            }
+            break;
+        }
+        if items.is_empty() {
+            cat.error = Some(format!(
+                "Deezer's page {} brought nothing new but said there was more",
+                page_no + 1
+            ));
+            break;
+        }
+        if out.len() == max {
+            cat.truncated = true;
+            break;
+        }
+    }
+    if !reached_end && cat.error.is_none() {
+        cat.truncated = true;
+    }
+    if unusable > 0 && cat.error.is_none() {
+        cat.error = Some(format!(
+            "Deezer sent {} without an id or title",
+            crate::plural(unusable as u64, "release")
+        ));
+    }
+    crate::releases::dedupe(&mut out);
+    crate::releases::sort_releases(&mut out);
+    cat.complete = cat.error.is_none() && !cat.truncated && reached_end;
+    (out, cat)
 }
 
 // ---- versions: the same release on Deezer, by UPC / ISRC ----

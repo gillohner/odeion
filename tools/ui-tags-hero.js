@@ -46,7 +46,7 @@ const item = (kind, id, o) => ({  kind, id, title: o.title || 'Frenchcore Worldw
   const browser = await chromium.launch();
   try {
     for (const width of [1280, 820, 390]) {
-      const ctx = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: 'reduce', colorScheme: 'dark', hasTouch: width < 1100 });
+      const ctx = await browser.newContext({ viewport: { width, height: 900 }, hasTouch: width < 1025, isMobile: width < 600, reducedMotion: 'reduce', colorScheme: 'dark' });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; }, TOKEN);
       const page = await ctx.newPage();
       const errors = []; page.on('pageerror', (e) => errors.push(e.message));

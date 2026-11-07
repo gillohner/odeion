@@ -50,8 +50,8 @@ const DEFAULT = /^Your library · 24\/96 FLAC · 41\.2 MB · plays by default$/;
     const r = await page.evaluate(() => {
       const marks = [...document.querySelectorAll('#isongs .vmark')];
       const m = marks[0]; if (!m) return { n: 0 };
-      // In view first: a taller top card (tags) can put the row under the player bar at the start
-      m.scrollIntoView({ block: 'center', behavior: 'instant' });
+      // In view, clear of the phone's mini player (a taller top card pushes the songs down)
+      m.closest('.srow').scrollIntoView({ block: 'center', behavior: 'instant' });
       // Its words as drawn (on a touch screen its target reaches further, invisibly)
       const row = m.closest('.srow'); const rr = row.getBoundingClientRect(); const rg = document.createRange(); rg.selectNodeContents(m); const mr = rg.getBoundingClientRect(); const box = m.getBoundingClientRect();
       const parts = [...row.children, ...row.querySelectorAll('.grow > *, .sub > *')].filter((c) => c.getBoundingClientRect().width > 0 && !c.contains(m) && !m.contains(c));

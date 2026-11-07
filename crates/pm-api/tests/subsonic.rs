@@ -42,7 +42,7 @@ fn write_wav(path: &std::path::Path, title: &str, artist: &str, album: &str, no:
             mime_type: "image/jpeg".into(),
             picture_type: id3::frame::PictureType::CoverFront,
             description: String::new(),
-            data: vec![0xff, 0xd8, 1, 2, 3],
+            data: vec![0xff, 0xd8, 0xff, 1, 2, 3],
         });
     }
     t.write_to_path(path, id3::Version::Id3v24).unwrap();
@@ -260,7 +260,40 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let (st, h, art) = get(&app, &format!("/rest/getCoverArt?id={album_id}&{auth}"), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(h["content-type"], "image/jpeg");
-    assert_eq!(art, vec![0xff, 0xd8, 1, 2, 3]);
+    assert_eq!(art, vec![0xff, 0xd8, 0xff, 1, 2, 3]);
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert!(h.contains_key("content-security-policy"));
+    // A cover row an older scan stored with another type is served by its bytes: a page is not
+    // a picture, and a picture labelled as a page goes out as the picture it is.
+    let n: i64 = album_id.trim_start_matches("al-").parse().unwrap();
+    let row = s.library.lock().unwrap().album_art(n).unwrap().unwrap();
+    s.library
+        .lock()
+        .unwrap()
+        .set_album_art(&pm_library::AlbumArt {
+            mime: "text/html".into(),
+            ..row.clone()
+        })
+        .unwrap();
+    std::fs::write(&row.file, b"<html><script>alert(1)</script></html>").unwrap();
+    let (_, h, body) = get(&app, &format!("/rest/getCoverArt?id={album_id}&{auth}"), None).await;
+    assert_ne!(
+        h.get("content-type").map(|v| v.to_str().unwrap()),
+        Some("text/html")
+    );
+    assert!(
+        !String::from_utf8_lossy(&body).contains("<script>"),
+        "the page is not served"
+    );
+    let png = b"\x89PNG\r\n\x1a\n0000".to_vec();
+    std::fs::write(&row.file, &png).unwrap();
+    let (st, h, body) = get(&app, &format!("/rest/getCoverArt?id={album_id}&{auth}"), None).await;
+    assert_eq!(
+        (st, h["content-type"].to_str().unwrap()),
+        (StatusCode::OK, "image/png")
+    );
+    assert_eq!(h["x-content-type-options"], "nosniff");
+    assert_eq!(body, png);
 
     // Playlists: create with the tagged song; the untagged one is kept on this node only
     // (Music Assistant failed on every other song of an untagged library).

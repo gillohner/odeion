@@ -1,0 +1,424 @@
+//! Descriptor parsing against a recorded FiiO KA17 (tests/fixtures/fiio-ka17.bin, rebuilt from a
+//! public FreeBSD `usbconfig -lv` dump with tools/usbconfig-to-raw.py: every configuration adds up to
+//! its wTotalLength), a UAC1 dongle built here, and hostile input.
+
+use pm_usb_audio::*;
+
+const KA17: &[u8] = include_bytes!("fixtures/fiio-ka17.bin");
+
+/// A RANGE reply for the KA17's clock, constructed from FiiO's published rates (44.1–768 kHz,
+/// both families) until one is recorded from the device: one sub-range per rate.
+fn ka17_range_reply() -> Vec<u8> {
+    let rates = [
+        44_100u32, 48_000, 88_200, 96_000, 176_400, 192_000, 352_800, 384_000, 705_600, 768_000,
+    ];
+    let mut b = (rates.len() as u16).to_le_bytes().to_vec();
+    for r in rates {
+        b.extend(r.to_le_bytes());
+        b.extend(r.to_le_bytes());
+        b.extend(0u32.to_le_bytes());
+    }
+    b
+}
+
+#[test]
+fn the_fiio_ka17() {
+    let d = parse(KA17);
+    assert_eq!((d.vendor_id, d.product_id), (0x2972, 0x0093));
+    assert_eq!(d.uac, Some(Uac::V2));
+    assert_eq!(
+        d.clocks,
+        [ClockSource {
+            id: 0x29,
+            programmable: true,
+            settable: true
+        }]
+    );
+    assert_eq!(
+        d.hardware_volume,
+        Some(HardwareVolume {
+            unit_id: 0x0a,
+            volume: true,
+            mute: true
+        })
+    );
+    // Three playback settings: 32-bit PCM, 16-bit PCM, native DSD; asynchronous with feedback
+    let shape: Vec<_> = d
+        .streams
+        .iter()
+        .map(|s| (s.alt, s.subslot_bytes, s.bits, s.pcm, s.dsd_raw, s.channels))
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            (1, 4, 32, true, false, 2),
+            (2, 2, 16, true, false, 2),
+            (3, 4, 32, false, true, 2)
+        ]
+    );
+    // The playback path: USB streaming terminal 2 → feature unit 0x0a → output terminal 0x14,
+    // clocked by source 0x29 through the single-input selector 0x28
+    assert_eq!(d.streams[0].terminal_link, 2);
+    assert_eq!(d.playback_path(2), Some(vec![0x14, 0x0a, 0x02]));
+    assert_eq!(
+        d.playback_unit(2).map(|u| (u.unit_id, u.mute)),
+        Some((0x0a, true))
+    );
+    assert_eq!(d.playback_clock(2), Some(0x29));
+    assert!(d.clock_settable(0x29));
+    // The audio function: control on 0, playback on 1 (what the exclusive driver claims)
+    assert_eq!(d.control_interface, Some(0));
+    assert_eq!(d.audio_interfaces.first(), Some(&0));
+    assert!(d.audio_interfaces.contains(&1));
+    for s in &d.streams {
+        assert_eq!(s.interface, 1);
+        assert_eq!(s.rates, Rates::FromClock(0x29));
+        let e = s.endpoint.as_ref().unwrap();
+        assert_eq!(
+            (e.address, e.sync, e.feedback, e.interval),
+            (0x01, Sync::Async, Some(0x81), 1)
+        );
+    }
+    assert_eq!(d.streams[0].endpoint.as_ref().unwrap().max_packet, 0x0308);
+    assert_eq!(d.streams[1].endpoint.as_ref().unwrap().max_packet, 0x0184);
+
+    let ranges = parse_rate_ranges(&ka17_range_reply());
+    let s = d.summary("FiiO KA17", &ranges);
+    assert_eq!(s.rates.first(), Some(&44_100));
+    assert_eq!(s.rates.last(), Some(&768_000));
+    assert_eq!((s.max_bits, s.dsd, s.hardware_volume), (32, true, true));
+    assert_eq!(
+        s.line(),
+        "FiiO KA17 · PCM up to 768 kHz / 32 bit · DSD · hardware volume"
+    );
+    // Before the clock was asked: no rates, the rest still known
+    assert_eq!(
+        d.summary("FiiO KA17", &[]).line(),
+        "FiiO KA17 · DSD · hardware volume"
+    );
+}
+
+#[test]
+fn rate_ranges() {
+    // One continuous range with a step, as some DACs answer
+    let mut b = 1u16.to_le_bytes().to_vec();
+    for v in [44_100u32, 96_000, 100] {
+        b.extend(v.to_le_bytes());
+    }
+    let r = parse_rate_ranges(&b);
+    assert_eq!(
+        r,
+        [RateRange {
+            min: 44_100,
+            max: 96_000,
+            res: 100
+        }]
+    );
+    assert_eq!(rates_in(&r), [44_100, 48_000, 88_200, 96_000]);
+    // A step that misses a rate leaves it out
+    let coarse = [RateRange {
+        min: 44_100,
+        max: 96_000,
+        res: 3_900,
+    }];
+    assert_eq!(rates_in(&coarse), [44_100, 48_000]);
+    // Short and empty replies
+    assert!(parse_rate_ranges(&[]).is_empty());
+    assert!(parse_rate_ranges(&[2, 0, 1, 2, 3]).is_empty());
+    // A reply saying more sub-ranges than it holds gives the ones it has
+    let mut b = 3u16.to_le_bytes().to_vec();
+    for v in [48_000u32, 48_000, 0] {
+        b.extend(v.to_le_bytes());
+    }
+    assert_eq!(rates_in(&parse_rate_ranges(&b)), [48_000]);
+}
+
+/// A UAC1 dongle: 44.1 and 48 kHz at 16 and 24 bit, adaptive, with a volume and mute.
+fn uac1_dongle() -> Vec<u8> {
+    let mut b = vec![
+        18, 1, 0x00, 0x02, 0, 0, 0, 64, 0xac, 0x05, 0x0a, 0x11, 0x00, 0x01, 1, 2, 3, 1,
+    ];
+    let mut cfg: Vec<u8> = vec![
+        // AudioControl interface, UAC1 (protocol 0)
+        9, 4, 0, 0, 0, 1, 1, 0, 0, 9, 0x24, 1, 0x00, 0x01, 0x27, 0, 1, 1, // header
+        12, 0x24, 2, 1, 0x01, 0x01, 0, 2, 3, 0, 0, 0, // input terminal (USB streaming)
+        10, 0x24, 6, 2, 1, 1, 0x03, 0x00, 0x00, 0, // feature unit: master mute+volume
+        9, 0x24, 3, 3, 0x02, 0x04, 0, 2, 0, // output terminal (headphones)
+        // Streaming interface: alt 0, then alt 1 (16 bit) and alt 2 (24 bit)
+        9, 4, 1, 0, 0, 1, 2, 0, 0, 9, 4, 1, 1, 1, 1, 2, 0, 0, 7, 0x24, 1, 1, 1, 0x01,
+        0x00, // AS_GENERAL: PCM
+        14, 0x24, 2, 1, 2, 2, 16, 2, 0x44, 0xac, 0x00, 0x80, 0xbb, 0x00, // 2 discrete rates
+        9, 5, 0x01, 0x09, 0xc0, 0x00, 1, 0, 0, // iso OUT, adaptive
+        7, 0x25, 1, 0, 0, 0, 0, 9, 4, 1, 2, 1, 1, 2, 0, 0, 7, 0x24, 1, 1, 1, 0x01, 0x00, 14, 0x24, 2, 1, 2,
+        3, 24, 2, 0x44, 0xac, 0x00, 0x80, 0xbb, 0x00, 9, 5, 0x01, 0x09, 0x20, 0x01, 1, 0, 0, 7, 0x25, 1, 0,
+        0, 0, 0,
+    ];
+    let total = (9 + cfg.len()) as u16;
+    let mut head = vec![9, 2];
+    head.extend(total.to_le_bytes());
+    head.extend([2, 1, 0, 0x80, 50]);
+    head.append(&mut cfg);
+    b.extend(head);
+    b
+}
+
+#[test]
+fn a_uac1_dongle() {
+    let d = parse(&uac1_dongle());
+    assert_eq!(
+        (d.vendor_id, d.product_id, d.uac),
+        (0x05ac, 0x110a, Some(Uac::V1))
+    );
+    assert_eq!(
+        d.hardware_volume,
+        Some(HardwareVolume {
+            unit_id: 2,
+            volume: true,
+            mute: true
+        })
+    );
+    assert_eq!(d.streams.len(), 2);
+    assert_eq!(d.streams[0].rates, Rates::Discrete(vec![44_100, 48_000]));
+    assert_eq!((d.streams[1].subslot_bytes, d.streams[1].bits), (3, 24));
+    assert_eq!(d.streams[0].endpoint.as_ref().unwrap().sync, Sync::Adaptive);
+    assert_eq!(
+        d.summary("USB-C dongle", &[]).line(),
+        "USB-C dongle · PCM up to 48 kHz / 24 bit",
+        "its UAC1 unit is not one the app's driver drives: not called its own volume"
+    );
+    assert_eq!(d.exclusive_unit(), None);
+}
+
+#[test]
+fn hostile_descriptors_never_panic() {
+    // Every truncation of the real KA17
+    for n in 0..KA17.len() {
+        let _ = parse(&KA17[..n]);
+    }
+    // Lengths of 0 and 1, lengths past the end, and noise
+    for bad in [
+        &[0u8, 0, 0][..],
+        &[1, 4],
+        &[255, 4, 0, 0],
+        &[9, 4, 0, 0, 0, 1, 1, 0x20, 0, 3, 0x24],
+    ] {
+        let _ = parse(bad);
+    }
+    let mut x: u32 = 0x1234_5678;
+    for _ in 0..2000 {
+        let v: Vec<u8> = (0..64)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x & 0xff) as u8
+            })
+            .collect();
+        let _ = parse(&v);
+        let _ = parse_rate_ranges(&v);
+    }
+}
+
+/// A UAC2 headset whose microphone path comes first in the descriptors: its own clock (0x10) and
+/// feature unit (0x02); playback is terminal 4 → unit 5 → headphones, clocked by 0x11.
+fn uac2_headset() -> Vec<u8> {
+    let mut b = vec![
+        18, 1, 0x00, 0x02, 0xef, 2, 1, 64, 0x34, 0x12, 0x78, 0x56, 0x00, 0x01, 1, 2, 3, 1,
+    ];
+    let fu =
+        |id: u8, src: u8| -> Vec<u8> { vec![18, 0x24, 6, id, src, 0x0f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] };
+    let mut ac_body: Vec<u8> = Vec::new();
+    ac_body.extend([8, 0x24, 0x0a, 0x10, 0x03, 0x07, 0, 0]); // mic clock
+    ac_body.extend([8, 0x24, 0x0a, 0x11, 0x03, 0x07, 0, 0]); // playback clock
+    ac_body.extend([17, 0x24, 2, 0x01, 0x01, 0x02, 0, 0x10, 1, 0, 0, 0, 0, 0, 0, 0, 0]); // IT microphone
+    ac_body.extend(fu(0x02, 0x01)); // the mic's unit, listed first
+    ac_body.extend([12, 0x24, 3, 0x03, 0x01, 0x01, 0, 0x02, 0x10, 0, 0, 0]); // OT USB streaming
+    ac_body.extend([17, 0x24, 2, 0x04, 0x01, 0x01, 0, 0x11, 2, 0, 0, 0, 0, 0, 0, 0, 0]); // IT USB streaming
+    ac_body.extend(fu(0x05, 0x04)); // the playback unit
+    ac_body.extend([12, 0x24, 3, 0x06, 0x02, 0x03, 0, 0x05, 0x11, 0, 0, 0]); // OT headphones
+    let ac_len = (9 + ac_body.len()) as u16;
+    let mut cfg: Vec<u8> = vec![9, 4, 0, 0, 0, 1, 1, 0x20, 0];
+    cfg.extend([9, 0x24, 1, 0x00, 0x02, 4]);
+    cfg.extend(ac_len.to_le_bytes());
+    cfg.push(0);
+    cfg.extend(ac_body);
+    // Playback streaming interface 1: alt 0, alt 1 (16 bit stereo, async OUT 256 bytes)
+    cfg.extend([9, 4, 1, 0, 0, 1, 2, 0x20, 0]);
+    cfg.extend([9, 4, 1, 1, 1, 1, 2, 0x20, 0]);
+    cfg.extend([16, 0x24, 1, 0x04, 0, 1, 1, 0, 0, 0, 2, 3, 0, 0, 0, 0]);
+    cfg.extend([6, 0x24, 2, 1, 2, 16]);
+    cfg.extend([7, 5, 0x01, 0x05, 0x00, 0x01, 1]);
+    cfg.extend([8, 0x25, 1, 0, 0, 0, 0, 0]);
+    let total = (9 + cfg.len()) as u16;
+    let mut head = vec![9, 2];
+    head.extend(total.to_le_bytes());
+    head.extend([2, 1, 0, 0x80, 50]);
+    head.extend(cfg);
+    b.extend(head);
+    b
+}
+
+/// Codex H4 / Claude H2 (round 1 of #306): the unit and clock are the playback path's, not the
+/// first in the descriptors (the microphone's); a clock that can't be told for sure is none.
+#[test]
+fn the_playback_paths_unit_and_clock_not_the_microphones() {
+    let d = parse(&uac2_headset());
+    assert_eq!(d.uac, Some(Uac::V2));
+    assert_eq!(
+        d.hardware_volume.as_ref().map(|v| v.unit_id),
+        Some(0x02),
+        "the first listed: the mic's"
+    );
+    assert_eq!(d.streams.len(), 1);
+    assert_eq!(d.streams[0].terminal_link, 0x04);
+    assert_eq!(d.playback_path(0x04), Some(vec![0x06, 0x05, 0x04]));
+    assert_eq!(d.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+    assert_eq!(d.exclusive_unit().map(|u| u.unit_id), Some(0x05));
+    assert_eq!(d.playback_clock(0x04), Some(0x11));
+    // Not a USB streaming input terminal: no path
+    assert_eq!(d.playback_path(0x01), None);
+    // A selector with two inputs in front of it: the clock can't be told, so none (never
+    // confirmed)
+    let mut amb = d.clone();
+    amb.entities.push(Entity::ClockSelector {
+        id: 0x20,
+        sources: vec![0x10, 0x11],
+    });
+    for e in amb.entities.iter_mut() {
+        if let Entity::InputTerminal { id: 0x04, clock, .. } = e {
+            *clock = Some(0x20);
+        }
+    }
+    assert_eq!(amb.playback_clock(0x04), None);
+    // Claude M3 (round 2 of #306): a setting whose clock can't be told is refused, never played
+    // at a speed nobody set
+    let clocks = [(0x10u8, vec![48_000u32]), (0x11, vec![48_000])];
+    use pm_usb_audio::schedule::Speed;
+    assert!(pm_usb_audio::stream::choose(&d, &clocks, 48_000, 16, 2, Speed::High).is_ok());
+    let e = pm_usb_audio::stream::choose(&amb, &clocks, 48_000, 16, 2, Speed::High).unwrap_err();
+    assert!(e.contains("can't be told"), "{e}");
+    // Two outputs from one terminal: ambiguous, no unit assumed
+    let mut two = d.clone();
+    two.entities.push(Entity::OutputTerminal {
+        id: 0x07,
+        terminal_type: 0x0301,
+        source: 0x04,
+    });
+    assert_eq!(two.playback_unit(0x04), None);
+}
+
+/// Codex H1 (round 5 of #306): a selector (or mixer) that can carry the stream around the
+/// playback path's feature unit leaves it without a unit to trust (its attenuation could be
+/// bypassed); a unit after the selector, on every route, is still the one.
+#[test]
+fn a_unit_a_selector_can_bypass_is_not_the_playback_unit() {
+    let d = parse(&uac2_headset());
+    assert_eq!(d.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+    let route_to = |d: &mut UsbAudioDevice, to: u8| {
+        for e in d.entities.iter_mut() {
+            if let Entity::OutputTerminal { id: 0x06, source, .. } = e {
+                *source = to;
+            }
+        }
+    };
+    // Terminal 4 → selector 9 (input 1: unit 5, input 2: terminal 4 itself) → headphones
+    let mut bypass = d.clone();
+    bypass.entities.push(Entity::Unit {
+        id: 0x09,
+        sources: vec![0x05, 0x04],
+    });
+    route_to(&mut bypass, 0x09);
+    assert_eq!(bypass.playback_path(0x04), Some(vec![0x06, 0x09, 0x05, 0x04]));
+    assert_eq!(
+        bypass.playback_unit(0x04),
+        None,
+        "the selector can go around unit 5"
+    );
+    assert_eq!(bypass.exclusive_unit(), None);
+    // The same selector followed by a unit every route passes: that unit
+    let mut after = bypass.clone();
+    after.entities.push(Entity::Feature {
+        id: 0x0c,
+        source: 0x09,
+        volume: true,
+        mute: true,
+        volume_settable: true,
+        mute_settable: true,
+    });
+    route_to(&mut after, 0x0c);
+    assert_eq!(after.playback_unit(0x04).map(|u| u.unit_id), Some(0x0c));
+    // Both selector inputs through unit 5 (a selector between two of its outputs): still unit 5
+    let mut both = d.clone();
+    both.entities.push(Entity::Unit {
+        id: 0x09,
+        sources: vec![0x05, 0x05],
+    });
+    route_to(&mut both, 0x09);
+    assert_eq!(both.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+}
+
+/// Claude L1 (306f): a selector input the parser doesn't know (an unknown or truncated unit) can't
+/// be told: it might carry the stream around unit 5, so unit 5 isn't trusted.
+#[test]
+fn a_route_through_an_unknown_unit_cant_be_told() {
+    let mut d = parse(&uac2_headset());
+    d.entities.push(Entity::Unit {
+        id: 0x09,
+        sources: vec![0x05, 0x0e],
+    });
+    for e in d.entities.iter_mut() {
+        if let Entity::OutputTerminal { id: 0x06, source, .. } = e {
+            *source = 0x09;
+        }
+    }
+    assert_eq!(d.playback_path(0x04), Some(vec![0x06, 0x09, 0x05, 0x04]));
+    assert_eq!(d.playback_unit(0x04), None);
+    // A line input (a terminal the parser knows) is no route from the USB stream: unit 5 stays
+    d.entities.push(Entity::InputTerminal {
+        id: 0x0e,
+        terminal_type: 0x0603,
+        clock: Some(0x11),
+    });
+    assert_eq!(d.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+}
+
+/// Claude L3 (306f): a hostile topology (a chain of mixers each fed twice by the one before, from
+/// a line input) is searched within a fixed number of steps: nothing is told, at once.
+#[test]
+fn a_hostile_topology_is_searched_in_bounded_steps() {
+    let base = parse(&uac2_headset());
+    for chain_first in [false, true] {
+        let mut d = base.clone();
+        d.entities.push(Entity::InputTerminal {
+            id: 0x30,
+            terminal_type: 0x0603,
+            clock: Some(0x11),
+        });
+        let mut prev = 0x30u8;
+        for i in 0..22u8 {
+            d.entities.push(Entity::Unit {
+                id: 0x40 + i,
+                sources: vec![prev, prev],
+            });
+            prev = 0x40 + i;
+        }
+        let sources = if chain_first {
+            vec![prev, 0x05]
+        } else {
+            vec![0x05, prev]
+        };
+        d.entities.push(Entity::Unit { id: 0x09, sources });
+        for e in d.entities.iter_mut() {
+            if let Entity::OutputTerminal { id: 0x06, source, .. } = e {
+                *source = 0x09;
+            }
+        }
+        let t = std::time::Instant::now();
+        assert_eq!(d.playback_unit(0x04), None, "chain first: {chain_first}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(200),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+}

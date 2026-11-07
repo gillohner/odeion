@@ -100,6 +100,22 @@ fn token_sync_script(token: &str) -> String {
     )
 }
 
+/// Whether reaching the node failed because it wants a new sign-in from this device (it refused
+/// the saved one, or there is none): trying again won't help, signing in again does.
+fn needs_new_sign_in(error: &str) -> bool {
+    error == node::REFUSED || error == node::NEEDS_SIGN_IN
+}
+
+/// The app's connect page (`ui/index.html`), where the window starts.
+fn connect_page() -> url::Url {
+    let page = if cfg!(any(windows, target_os = "android")) {
+        "http://tauri.localhost/index.html"
+    } else {
+        "tauri://localhost/index.html"
+    };
+    url::Url::parse(page).expect("a fixed URL")
+}
+
 /// The app's own pages: `tauri://localhost` on macOS and Linux,
 /// `http(s)://tauri.localhost` on Windows and Android.
 fn is_app_page(u: &url::Url) -> bool {
@@ -159,6 +175,24 @@ fn show_node(app: &AppHandle, s: &Settings) -> Result<(), String> {
     w.navigate(u).map_err(|e| e.to_string())
 }
 
+/// How the player service runs for a connection: its notification's text, and whether the phone
+/// is a zone of the node (the node reaches its player directly: the service runs while connected)
+/// or the app plays the music itself (through the tunnel, or without a player: the service ends
+/// after a while with nothing playing out of sight). Started either way.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn player_service(node_name: &str, direct: bool, native_player: bool) -> (String, bool) {
+    let node = if node_name.is_empty() {
+        "your node"
+    } else {
+        node_name
+    };
+    if direct && native_player {
+        (format!("This phone is a zone of {node}"), true)
+    } else {
+        (format!("Plays music from {node}"), false)
+    }
+}
+
 /// Connected: remember the node, show it and register the player.
 fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::Info) -> Result<(), String> {
     take_moved(state);
@@ -177,29 +211,38 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
         let app = app.clone();
         o.spawn_sync(move || app.state::<AppState>().current());
     }
+    // The player service keeps the app playing in the background (from Android 12 a cached app
+    // is frozen within seconds): the phone's own zone needs it, and so does the in-app player,
+    // through the tunnel too, where the service used to be left out and the music stopped a few
+    // seconds after leaving the app (TASK-android-background-playback-1105).
+    #[cfg(target_os = "android")]
+    {
+        let (text, zone) = player_service(&info.name, s.via.is_empty(), state.player.is_some());
+        android::start_player_service(app, text, zone);
+    }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
     if s.via.is_empty() {
-        let player = state.player.clone();
-        #[cfg(target_os = "android")]
-        if player.is_some() {
-            let node = if info.name.is_empty() {
-                "your node"
-            } else {
-                info.name.as_str()
-            };
-            android::start_player_service(app, format!("This phone is a zone of {node}"));
-        }
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let s = player::register(s, player).await;
-            let state = app.state::<AppState>();
-            if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
-                state.store(Some(s));
-            }
-        });
+        tauri::async_runtime::spawn(register_player(app.clone(), s));
     }
     Ok(())
+}
+
+/// Register the player with the node in `s`, keep its address, and tell the node's page which
+/// output is this app's (`player::output_script`). Again whenever the phone's USB DAC changes, so
+/// the node learns it.
+#[cfg(any(desktop, target_os = "android"))]
+async fn register_player(app: AppHandle, s: Settings) {
+    let player = app.state::<AppState>().player.clone();
+    let s = player::register(s, player).await;
+    let state = app.state::<AppState>();
+    if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
+        state.store(Some(s));
+        let script = player::output_script();
+        if let (false, Some(w)) = (script.is_empty(), app.get_webview_window(MAIN)) {
+            let _ = w.eval(script);
+        }
+    }
 }
 
 /// Whether this device keeps any music (the connect page offers it while the node is away).
@@ -226,6 +269,9 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         .ok_or("the window is gone")?
         .navigate(page)
         .map_err(|e| e.to_string())?;
+    // The offline app plays in the page too: the service keeps it going in the background
+    #[cfg(target_os = "android")]
+    android::start_player_service(&app, "Plays the music kept on this phone".into(), false);
     if !RETURNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -233,11 +279,26 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let state = app.state::<AppState>();
                 let Some(s) = state.current() else { break };
-                if let Ok((s, info)) = reach(&app, &state, s).await {
-                    if let Err(e) = connected(&app, &state, s, &info) {
-                        tracing::warn!("back from offline: {e}");
+                match reach(&app, &state, s).await {
+                    Ok((s, info)) => {
+                        if let Err(e) = connected(&app, &state, s, &info) {
+                            tracing::warn!("back from offline: {e}");
+                        }
+                        break;
                     }
-                    break;
+                    // The node answers but no longer takes this device's sign-in (a new token, the
+                    // one-time change after the update): trying again never helps. Back to the
+                    // connect page, which reconnects and signs in again (`open_saved`)
+                    Err(e) if needs_new_sign_in(&e) => {
+                        tracing::info!("back from offline: the node asks for a new sign-in");
+                        if let Some(w) = app.get_webview_window(MAIN) {
+                            if let Err(e) = w.navigate(connect_page()) {
+                                tracing::warn!("back from offline: {e}");
+                            }
+                        }
+                        break;
+                    }
+                    Err(_) => {}
                 }
             }
             RETURNING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -278,13 +339,32 @@ fn saved(state: State<'_, AppState>) -> Option<Saved> {
     state.current().map(|s| Saved { node_url: s.node_url })
 }
 
-/// Reconnect to the remembered node: check it answers, then show it.
+/// Reconnect to the remembered node: check it answers, then show it. A node that refuses this
+/// device's sign-in (it ended there: Make a new token, or the node signed in as someone else) gets
+/// a new one, with one approval in Pubky Ring, instead of a dead end.
 #[tauri::command]
 async fn open_saved(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let s = state.current().ok_or("No node yet")?;
-    let (s, info) = reach(&app, &state, s).await?;
-    connected(&app, &state, s, &info)?;
-    Ok(info.name)
+    let again = s.clone();
+    match reach(&app, &state, s).await {
+        Ok((s, info)) => {
+            connected(&app, &state, s, &info)?;
+            Ok(info.name)
+        }
+        // The node refused this device's sign-in, or now asks for one it never had: a new one
+        Err(e) if needs_new_sign_in(&e) => {
+            if again.owner.is_empty() {
+                // Saved before the app knew whose node it is (or connected by address): find the
+                // node through the owner's record again, so its sign-in is checked against them
+                return ring_connect(app, state).await;
+            }
+            let mut s = again;
+            s.token.clear();
+            s.via.clear();
+            sign_in_and_connect(&app, &state, s).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Reach the node: at its address; else through the iroh tunnel when its record carries a key
@@ -421,14 +501,30 @@ async fn connect_manual(
     state: State<'_, AppState>,
     node_url: String,
     token: String,
+    expect_id: Option<String>,
 ) -> Result<String, String> {
     if node_url.trim().is_empty() {
         return Err("Enter the node's address".into());
     }
     let s = Settings::new(&node_url, &token);
     let info = node::probe(&s).await?;
+    // The node found on the network, tried at 127.0.0.1: only when the node there is that one
+    if let Some(want) = expect_id.as_deref() {
+        if !same_node(want, &info.id) {
+            return Err(NOT_THAT_NODE.into());
+        }
+    }
     connected(&app, &state, s, &info)?;
     Ok(info.name)
+}
+
+/// What `connect_manual` answers when the node at the address isn't the one asked for.
+const NOT_THAT_NODE: &str = "Another node answers on this computer";
+
+/// Whether the node that answered (`got`, its `/v1/info` id) is the one found on the network
+/// (`want`). A node without an id is never taken for another.
+fn same_node(want: &str, got: &str) -> bool {
+    !want.is_empty() && want == got
 }
 
 #[derive(Clone, Serialize)]
@@ -485,11 +581,92 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         .await
         .map_err(|e| e.to_string())?
         .ok_or("This identity has no node yet: sign the node in once on its web page (Settings → Pubky)")?;
-    let mut s = Settings::new(&record.api_url, &record.token);
+    // The record says where the node is, never how to sign in to it: this device signs in to the
+    // node itself with Pubky Ring and gets a credential of its own (ADR 0008)
+    let mut s = Settings::new(&record.api_url, "");
     s.iroh = record.iroh;
-    let (s, info) = reach(&app, &state, s).await?;
-    connected(&app, &state, s, &info)?;
+    // The identity whose record named this node: the node must say it is theirs, and only their
+    // approval signs this device in
+    s.owner = session.public_key().to_string();
+    sign_in_and_connect(&app, &state, s).await
+}
+
+/// Reach the node at `s` (its address, else through the iroh tunnel) without a token, sign this
+/// device in with Pubky Ring, and show it. A node that asks for no token (on this computer) is
+/// shown at once.
+async fn sign_in_and_connect(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<String, String> {
+    match node::probe(&s).await {
+        Ok(info) => {
+            state.tunnel.lock().await.take();
+            connected(app, state, s, &info)?;
+            return Ok(info.name);
+        }
+        Err(node::ProbeError::NeedsSignIn) => {
+            state.tunnel.lock().await.take();
+        }
+        Err(node::ProbeError::Unreachable(msg)) => s = tunnel_for_sign_in(state, s, msg).await?,
+        Err(e) => return Err(e.into()),
+    }
+    s.token = sign_in_at_node(app, &s).await?;
+    let info = node::probe(&s).await?;
+    connected(app, state, s, &info)?;
     Ok(info.name)
+}
+
+/// The node found through the homeserver, reached over iroh when its address doesn't answer from
+/// here, before this device has signed in to it ([`through_tunnel`] for a device that has).
+async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> Result<Settings, String> {
+    if s.iroh.is_empty() {
+        return Err(msg);
+    }
+    let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
+    let tunnel = pm_remote::ClientTunnel::start(id, &pm_remote::Relays::Public)
+        .await
+        .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
+    tunnel
+        .connect()
+        .await
+        .map_err(|e| format!("{msg}, and the node did not answer remotely either: {e}"))?;
+    s.via = format!("http://{}", tunnel.local_addr());
+    match node::probe(&s).await {
+        Ok(_) | Err(node::ProbeError::NeedsSignIn) => {}
+        Err(e) => return Err(e.into()),
+    }
+    if let Some(old) = state.tunnel.lock().await.replace(tunnel) {
+        old.close().await;
+    }
+    Ok(s)
+}
+
+/// Signs this device in to the node with Pubky Ring (the node's own sign-in, as its web page
+/// does): the QR and link go to the page as a `ring-url` event, like the homeserver step's. Waits
+/// until the owner approves, the page's Cancel, or [`ring_wait::DEADLINE`]; polls only while the
+/// app is on screen (Android cuts a backgrounded app's network).
+async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String> {
+    let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
+    let started = node::start_sign_in(s, &s.owner).await?;
+    let _ = app.emit(
+        "ring-url",
+        RingUrl {
+            qr_svg: qr_svg(&started.url),
+            url: started.url.clone(),
+        },
+    );
+    loop {
+        if let Some(why) = stop.reason() {
+            return Err(why.to_string());
+        }
+        if ring_wait::on_screen() {
+            if let Some(token) = node::poll_sign_in(s, &started).await? {
+                // Cancel pressed while that answer was on its way: not connected
+                if let Some(why) = stop.reason() {
+                    return Err(why.to_string());
+                }
+                return Ok(token);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
 }
 
 /// A Ring sign-in in progress, for [`ring_wait::approval`].
@@ -542,8 +719,13 @@ async fn open_ring(app: AppHandle, url: String) -> Result<(), String> {
 
 /// Forget the node (the connect page's "Connect to another node").
 #[tauri::command]
-fn forget(state: State<'_, AppState>) {
+fn forget(app: AppHandle, state: State<'_, AppState>) {
     state.store(None);
+    // No node: the player service ends (and isn't started again when the app comes back)
+    #[cfg(target_os = "android")]
+    android::stop_player_service(&app);
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -644,6 +826,14 @@ pub fn run() {
                     };
                     if s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str()) {
                         let _ = w.eval(token_sync_script(&s.token));
+                        // Which output is this app's (a phone's USB DAC shows in its Settings)
+                        #[cfg(any(desktop, target_os = "android"))]
+                        {
+                            let script = player::output_script();
+                            if !script.is_empty() {
+                                let _ = w.eval(script);
+                            }
+                        }
                     }
                 });
             #[cfg(desktop)]
@@ -671,28 +861,76 @@ pub fn run() {
             update::spawn(app.handle());
             #[cfg(target_os = "android")]
             android::init_tls(&window);
+            // A USB DAC plugged in or out: the player registers again, so the node and its page learn it
+            #[cfg(target_os = "android")]
+            {
+                // The DAC settings (bit-perfect or shared, the DAC's volume) live with the app
+                if let Ok(dir) = app.path().app_local_data_dir() {
+                    let _ = std::fs::create_dir_all(&dir);
+                    pm_out_local::usb_dac::keep_settings_in(dir.join("usb-dac.json"));
+                }
+                // A confirmation withdrawn while playing (Android's mixer changed): the node learns it
+                let h2 = app.handle().clone();
+                pm_out_local::usb_dac::on_change(move || {
+                    let app = h2.clone();
+                    if let Some(s) = app.state::<AppState>().current() {
+                        if s.via.is_empty() {
+                            tauri::async_runtime::spawn(register_player(app, s));
+                        }
+                    }
+                });
+                let handle = app.handle().clone();
+                android::watch_usb_audio(app.handle(), move || {
+                    let app = handle.clone();
+                    let Some(s) = app.state::<AppState>().current() else {
+                        return;
+                    };
+                    if s.via.is_empty() {
+                        tauri::async_runtime::spawn(register_player(app, s));
+                    }
+                });
+            }
             Ok(())
         })
         .build(tauri::generate_context!());
     match app {
-        Ok(app) => app.run(|_, event| {
+        Ok(app) => app.run(|app, event| {
             // The Ring sign-in waits for the screen (ring_wait): Android onPause / onResume. Not on
             // iOS, whose Suspended (willResignActive) and Resumed (willEnterForeground) do not pair.
             #[cfg(target_os = "android")]
             if let tauri::RunEvent::WindowEvent { event, .. } = &event {
                 match event {
-                    tauri::WindowEvent::Suspended => ring_wait::left(),
-                    tauri::WindowEvent::Resumed => ring_wait::back(),
+                    tauri::WindowEvent::Suspended => {
+                        ring_wait::left();
+                        page_event(app, "pmdesktop:suspended");
+                    }
+                    tauri::WindowEvent::Resumed => {
+                        ring_wait::back();
+                        // The page hears it too: the WebView doesn't always tell it it was out of
+                        // sight (the in-app player checks its sound came back, app.js)
+                        page_event(app, "pmdesktop:resumed");
+                        // On screen again: the player service as it was (refused from the background,
+                        // or ended after a while with nothing playing)
+                        android::resume_player_service(app);
+                    }
                     _ => {}
                 }
             }
             #[cfg(not(target_os = "android"))]
-            let _ = event;
+            let _ = (app, event);
         }),
         Err(e) => {
             tracing::error!("cannot start: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// An event for the page in the main window (`window.dispatchEvent(new Event(name))`).
+#[cfg(target_os = "android")]
+fn page_event(app: &tauri::AppHandle, name: &str) {
+    if let Some(w) = app.get_webview_window(MAIN) {
+        let _ = w.eval(format!("window.dispatchEvent(new Event({name:?}))"));
     }
 }
 
@@ -807,5 +1045,49 @@ mod tests {
             assert!(is_app_page(&url::Url::parse(u).unwrap()), "{u}");
         }
         assert!(!is_app_page(&url::Url::parse("https://tidal.com/").unwrap()));
+    }
+
+    /// The player service's mode for each connection: a zone of the node when the node reaches
+    /// the phone's player directly, else the app playing the music itself, through the tunnel too
+    /// (the owner's case: TASK-android-background-playback-1105). This checks the choice only, not
+    /// its call sites (`connected`, `open_offline`); both modes run on the emulator
+    /// (tools/android-background-probe.py, parts A, B, D and E).
+    #[test]
+    fn the_player_service_mode_for_each_connection() {
+        assert_eq!(
+            player_service("NUC", true, true),
+            ("This phone is a zone of NUC".to_string(), true)
+        );
+        // Through the tunnel the node can't reach the phone's player: the app plays itself
+        assert_eq!(
+            player_service("NUC", false, true),
+            ("Plays music from NUC".to_string(), false)
+        );
+        assert_eq!(
+            player_service("", true, false),
+            ("Plays music from your node".to_string(), false)
+        );
+    }
+
+    /// The node found on the network is taken at 127.0.0.1 only when the node there has its id;
+    /// a node without an id is never taken for another.
+    #[test]
+    fn only_the_found_node_is_taken_at_this_computers_address() {
+        assert!(same_node("node-1", "node-1"));
+        assert!(!same_node("node-1", "node-2"), "another node on this computer");
+        assert!(!same_node("node-1", ""), "a node that names no id");
+        assert!(!same_node("", ""), "nothing to compare");
+    }
+
+    /// Back from offline: a refused or missing sign-in sends the app to its connect page, which
+    /// signs in again; a node that doesn't answer is tried again later.
+    #[test]
+    fn a_refused_sign_in_ends_the_offline_wait() {
+        assert!(needs_new_sign_in(node::REFUSED));
+        assert!(needs_new_sign_in(node::NEEDS_SIGN_IN));
+        assert!(!needs_new_sign_in("Can't reach http://192.168.1.10:7788"));
+        assert!(!needs_new_sign_in("The node answered 503"));
+        assert!(is_app_page(&connect_page()), "the connect page is the app's own");
+        assert!(connect_page().path().ends_with("/index.html"));
     }
 }

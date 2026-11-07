@@ -1082,6 +1082,8 @@ pub(crate) async fn logout(
 /// A full stream: the reader, the extension the decoder probes with, and the media type.
 pub struct FullStream {
     pub reader: Box<dyn std::io::Read + Send>,
+    /// A segmented (DASH) stream's segments, so a zone can seek in it; `reader` reads them all.
+    pub segments: Option<crate::segmented::Segments>,
     pub ext: &'static str,
     pub mime: &'static str,
     /// TIDAL sent AAC (or another lossy codec) where lossless was asked for.
@@ -1278,8 +1280,8 @@ impl std::fmt::Display for Answer {
 enum Media {
     /// One file (BTS): its URL, the decoder's extension, the media type.
     File(String, &'static str, &'static str),
-    /// DASH: the initialization segment, then the media segments.
-    Segments(Vec<String>),
+    /// DASH: the initialization segment, then the media segments, with their times.
+    Segments(crate::segmented::Segments),
 }
 
 /// Asks the private playback endpoint for one track at one quality (python-tidal's
@@ -1371,11 +1373,12 @@ fn read_answer(v: &Value, asked: &str) -> Result<(Answer, Media), FullError> {
             return Err(FullError::Track("TIDAL sends this track encrypted".into()));
         }
         let d = crate::dash::parse(&manifest).map_err(FullError::Mode)?;
+        let segments = d.segments();
         answer.codecs = d.codecs;
         if answer.sample_rate.is_none() {
             answer.sample_rate = d.sample_rate.map(u64::from);
         }
-        return Ok((answer, Media::Segments(d.urls)));
+        return Ok((answer, Media::Segments(segments)));
     }
     Err(FullError::Mode(format!(
         "unknown manifest type {:?}",
@@ -1436,14 +1439,15 @@ pub fn open_blocking(
                 .and_then(|r| r.error_for_status())
                 .map_err(|e| FullError::Track(format!("stream: {}", e.without_url())))?,
         ),
-        Media::Segments(urls) => Box::new(crate::dash::DashReader::new(client, urls.clone())),
+        Media::Segments(segs) => Box::new(crate::segmented::SegmentReader::new(client, segs.urls())),
     };
-    let (ext, mime) = match media {
-        Media::File(_, ext, mime) => (ext, mime),
-        Media::Segments(_) => ("m4a", "audio/mp4"),
+    let (ext, mime, segments) = match media {
+        Media::File(_, ext, mime) => (ext, mime, None),
+        Media::Segments(segs) => ("m4a", "audio/mp4", Some(segs)),
     };
     Ok(Some(FullStream {
         reader,
+        segments,
         ext,
         mime,
         lossy: answer.lossy(),

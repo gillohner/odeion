@@ -149,7 +149,16 @@ async fn probe_all(s: &Arc<NodeState>) -> Vec<HealthPart> {
             Some(part("homeserver", "Your homeserver", r))
         },
     );
-    [hs, p, t, j, sub, jf].into_iter().flatten().collect()
+    let token = crate::access_token::config_token_published(s).then(|| HealthPart {
+        id: "api-token".into(),
+        name: "API token".into(),
+        state: "change".into(),
+        detail: Some(
+            "An older version kept this token in your homeserver's node record: change [api] token (or PM_TOKEN) in the node's config and restart it".into(),
+        ),
+        ms: None,
+    });
+    [hs, p, t, j, sub, jf, token].into_iter().flatten().collect()
 }
 
 /// `GET /v1/health`: each outside part the node uses, `ok`, `down` (with why) or

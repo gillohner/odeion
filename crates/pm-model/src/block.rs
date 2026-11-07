@@ -140,6 +140,23 @@ impl AudioBlock {
         }
         Ok(())
     }
+
+    /// Drop the first `frames` frames (all of them when the block is shorter): what a seek
+    /// that lands inside a block leaves out.
+    pub fn drop_front(&mut self, frames: usize) {
+        let n = frames.min(self.frames()) * self.format.channels.max(1) as usize;
+        match &mut self.samples {
+            Samples::PcmI32(v) => {
+                v.drain(..n);
+            }
+            Samples::PcmF64(v) => {
+                v.drain(..n);
+            }
+            Samples::Dsd(v) => {
+                v.drain(..n);
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -156,6 +173,16 @@ pub enum BlockError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drop_front_leaves_the_rest_of_each_frame() {
+        let fmt = AudioFormat::pcm(48_000, 16, 2);
+        let mut b = AudioBlock::pcm_i32(fmt, vec![1, -1, 2, -2, 3, -3]);
+        b.drop_front(2);
+        assert_eq!(b.samples, Samples::PcmI32(vec![3, -3]));
+        b.drop_front(5);
+        assert!(b.is_empty());
+    }
 
     #[test]
     fn int_float_int_is_exact_at_24_bits() {

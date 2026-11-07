@@ -5,6 +5,7 @@
 
 mod api_token;
 mod config;
+mod file_modes;
 mod library;
 mod outputs;
 mod play;
@@ -176,6 +177,25 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     // First, so a port in use stops the start at once and says why (another node running)
     let listener = pm_api::bind(&cfg.api.listen).await?;
     let db_path = cfg.db_path();
+    // Sign-ins, keys and the token live in these: the node's alone, before the database is opened
+    // (and migrated) and before anything reads them
+    let private = file_modes::private_files(
+        &cfg.data_dir,
+        &db_path,
+        config_file.as_deref(),
+        &session_secret_path(cfg),
+    );
+    let modes = file_modes::tighten(&cfg.data_dir, &private);
+    for (path, was, now) in modes.changed {
+        tracing::info!(path = %path.display(), "made the node's own: {was:o} to {now:o}");
+    }
+    for (path, why, should) in modes.left {
+        tracing::warn!(
+            path = %path.display(),
+            "others may be able to read this and the node can't change it ({why}): run `sudo chmod {should:o} {}`",
+            path.display()
+        );
+    }
     let lib = pm_library::Library::open(&db_path)?;
     let registry = outputs::discover_all(&cfg.outputs);
     pm_api::tidal_unofficial::set_config_client(
@@ -298,7 +318,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         tokio::task::spawn_blocking(move || pm_api::librespot::autostart(&st));
     }
     // A busy port turns Squeezebox players off; the node runs on
-    if let Err(e) = state.start_slimproto() {
+    if let Err(e) = state.start_slimproto_on(cfg.outputs.slimproto_bind) {
         let port = cfg.outputs.slimproto_port;
         if e.kind() == std::io::ErrorKind::AddrInUse {
             tracing::warn!(
@@ -329,8 +349,19 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         })
         .await?;
         if !found.is_empty() {
-            tracing::info!(count = found.len(), "UPnP renderers found");
+            let upnp = found
+                .iter()
+                .filter(|id| id.to_string().starts_with("upnp:"))
+                .count();
+            tracing::info!(count = found.len(), upnp, "outputs found");
         }
+        // Renderers that had a zone come back at their last address (in the background: the start
+        // doesn't wait on one that is off), and ones that answer late (a TV, a Linn waking its UPnP
+        // side) get their zones without a rescan
+        state.spawn_upnp_watch(
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(300),
+        );
     }
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
@@ -472,6 +503,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::podcasts::spawn_background(&state);
     pm_api::gpodder::spawn_background(&state);
     pm_api::audiobookshelf::spawn_background(&state);
+    pm_api::identify::spawn_recheck(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
     pm_api::serve_listener(state, listener).await

@@ -108,6 +108,10 @@ pub struct NodeState {
     pub sonos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
     /// HEOS players (Denon, Marantz) among the renderers: a zone of them only is a HEOS group.
     pub heos: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// Every UPnP renderer by output id: its zone follows the volume by event (upnp_events.rs).
+    pub renderers: Mutex<HashMap<OutputId, Arc<pm_out_upnp::UpnpOutput>>>,
+    /// The renderers' event subscriptions, by callback token.
+    pub gena: crate::upnp_events::Gena,
     /// The snapserver whose groups are zones (`[outputs] snapcast`).
     snapcast: Mutex<Option<String>>,
     /// Offer AirPlay 1 receivers (`[outputs] airplay`).
@@ -120,6 +124,8 @@ pub struct NodeState {
     pub bluos_players: Mutex<HashMap<OutputId, Arc<pm_out_bluos::BluosOutput>>>,
     /// The zones as UPnP/DLNA MediaRenderers, once `start_renderer` ran.
     pub renderer: std::sync::OnceLock<Arc<pm_renderer::Renderer>>,
+    /// The API port those renderers' descriptions are served on.
+    renderer_port: std::sync::OnceLock<u16>,
     pub version: String,
     pub library: Arc<Mutex<Library>>,
     /// Path of the SQLite file, so a scan can use its own connection.
@@ -168,9 +174,13 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Target>>,
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
-    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
+    /// a device of the owner's).
     pub controller_logins: tokio::sync::Mutex<
-        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
+        std::collections::HashMap<
+            String,
+            (pm_pubky::homeserver::LoginFlow, std::time::Instant, String, bool),
+        >,
     >,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
@@ -189,6 +199,9 @@ pub struct NodeState {
     pub sleep: Mutex<HashMap<ZoneId, SleepTimer>>,
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
+    /// Held while the people roster is read, changed and stored (`people::update`), so no change
+    /// is made to a copy older than one stored meanwhile.
+    pub(crate) roster: tokio::sync::Mutex<()>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -264,8 +277,21 @@ fn load_sources_off(lib: &Library) -> std::collections::HashSet<String> {
         .unwrap_or_default()
 }
 
+/// Outputs found on the network (discovery, Squeezebox players) are added while the node has
+/// fewer outputs than this.
+pub const MAX_FOUND_OUTPUTS: usize = 256;
 /// Library setting: JSON list of renderer addresses added by hand.
 const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
+/// Each UPnP renderer that had a zone: its UDN → its description URL, so a start whose SSDP
+/// search misses it (a lost datagram, a device slow to answer) still finds it.
+const UPNP_KNOWN_KEY: &str = "outputs.upnp_known";
+
+/// Where a UPnP renderer that had a zone was described, and when (Unix seconds) it was last seen.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KnownRenderer {
+    pub location: String,
+    pub seen: u64,
+}
 /// Endpoint addresses (the desktop app's player) it registered.
 const ENDPOINT_ADDRESSES_KEY: &str = "outputs.endpoint_addresses";
 /// Their keys, by address, in the data folder (0600): `{"<host:port>": "<key>"}`. Not in the
@@ -407,12 +433,15 @@ impl NodeState {
             stream_secret,
             sonos: Default::default(),
             heos: Default::default(),
+            renderers: Default::default(),
+            gena: Default::default(),
             snapcast: Default::default(),
             airplay: Default::default(),
             mpd: Default::default(),
             bluos: Default::default(),
             bluos_players: Default::default(),
             renderer: Default::default(),
+            renderer_port: Default::default(),
             name: settings.name,
             version: settings.version,
             library,
@@ -449,6 +478,7 @@ impl NodeState {
             vault_pass: tokio::sync::Mutex::new(()),
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
+            roster: tokio::sync::Mutex::new(()),
             discover: Mutex::new(None),
             endpoint_keys: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
@@ -516,20 +546,81 @@ impl NodeState {
         let events = self.events.clone();
         let library = self.library.clone();
         let key = queue_key(zone.id());
+        let shuffled = zone.clone();
         let mut state_rx = zone.watch();
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
         let _ = self.events.send(ApiEvent::Zone { state: initial });
+        // The output's level, read back now and every few seconds (a Linn's own remote changes
+        // it; the pages show what the device says), for outputs with a hardware volume. The
+        // task ends with the zone.
+        if zone.output().caps().hw_volume.is_some() {
+            // A UPnP renderer that sends events: followed live; the poll steps aside meanwhile
+            let following = Arc::new(crate::upnp_events::Following::default());
+            let renderer = self
+                .renderers
+                .lock()
+                .expect("renderers lock")
+                .get(&zone.output().id())
+                .cloned();
+            if let Some(out) = renderer {
+                crate::upnp_events::follow(self, &zone, out, following.clone());
+            }
+            let weak = Arc::downgrade(&zone);
+            let node = Arc::downgrade(self);
+            let zid = zone.id().clone();
+            let bus = self.events.clone();
+            tokio::spawn(async move {
+                let every = volume_poll();
+                let mut tick = tokio::time::interval(every);
+                // A slow device doesn't get reads back to back (a set waits on the same lock)
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut first = true;
+                loop {
+                    // A page that connects reads the level at once, not on the next tick
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        _ = bus.first_watcher() => tick.reset(),
+                    }
+                    // Gone from the registry (ungrouped, the device left): the poll ends too
+                    let Some(n) = node.upgrade() else { break };
+                    if n.zones.get(&zid).is_none() {
+                        break;
+                    }
+                    // Read once at the start; after that only while someone is looking and no
+                    // events are coming
+                    if !first
+                        && (!n.events.watched() || following.live.load(std::sync::atomic::Ordering::Relaxed))
+                    {
+                        continue;
+                    }
+                    first = false;
+                    drop(n);
+                    let Some(z) = weak.upgrade() else { break };
+                    // An unreachable device holds the lock no longer than this
+                    let _ = tokio::time::timeout(
+                        every.min(std::time::Duration::from_secs(4)),
+                        z.refresh_volume(),
+                    )
+                    .await;
+                }
+            });
+        }
         tokio::spawn(async move {
             let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {
                 let state = state_rx.borrow_and_update().clone();
                 if state.queue_version != saved_version {
-                    saved_version = state.queue_version;
+                    // One look at the queue: the items and, while shuffled, their original
+                    // order belong together (a change between two reads would save a wrong one)
+                    let snap = shuffled.queue_snapshot();
+                    saved_version = snap.version;
                     let saved = SavedQueue {
-                        items: state.queue.clone(),
-                        repeat: state.repeat,
-                        radio: state.radio,
+                        items: snap.items,
+                        repeat: snap.repeat,
+                        radio: snap.radio,
+                        shuffle: snap.shuffle,
+                        order: snap.order,
                     };
                     if let Ok(json) = serde_json::to_string(&saved) {
                         let lib = library.lock().expect("library poisoned");
@@ -617,7 +708,10 @@ impl NodeState {
         zone.enqueue(saved.items, pm_zones::Insert::End);
         zone.set_repeat(saved.repeat);
         zone.set_radio(saved.radio);
-        tracing::info!(zone = %zone.id(), items = n, "queue restored");
+        if saved.shuffle {
+            zone.restore_shuffle(&saved.order);
+        }
+        tracing::info!(zone = %zone.id(), items = n, shuffle = saved.shuffle, "queue restored");
     }
 
     pub fn remove_zone(&self, id: &ZoneId) -> Option<Arc<Zone>> {
@@ -906,8 +1000,28 @@ impl NodeState {
             .clone()
     }
 
-    /// Start the Slimproto server (players connect to us) and the UDP
-    /// discovery responder. Call from inside the tokio runtime. Each connecting player becomes an output with a
+    /// The pull output for a device found on the network: the one registered under `name`, or a new
+    /// one that is registered only once the device is taken ([`Self::keep_pull`]). A device the node
+    /// turns away (no room, already known, unreachable) leaves nothing behind.
+    fn found_pull(&self, name: &str) -> Arc<pm_zones::outputs::PullOutput> {
+        self.pulls
+            .lock()
+            .expect("pulls lock")
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Arc::new(pm_zones::outputs::PullOutput::controlled(name)))
+    }
+
+    /// Registers a found device's pull output ([`Self::found_pull`]) for the HTTP route, once the
+    /// device was taken.
+    fn keep_pull(&self, name: &str, pull: Arc<pm_zones::outputs::PullOutput>) {
+        self.pulls
+            .lock()
+            .expect("pulls lock")
+            .entry(name.to_string())
+            .or_insert(pull);
+    }
+
     /// Offer every zone as a UPnP/DLNA MediaRenderer (`pm-renderer`): SSDP on the LAN, the
     /// device and control routes on the API port (merged by `router`, no token). Call from
     /// inside the runtime, before building the router. The advertiser lives as long as the
@@ -921,6 +1035,7 @@ impl NodeState {
         let r = pm_renderer::Renderer::new(host, &self.node_id, env!("CARGO_PKG_VERSION"));
         r.spawn_notifier();
         let _ = self.renderer.set(r.clone());
+        let _ = self.renderer_port.set(api_port);
         tracing::info!(zones = r.zones().len(), "zones offered as UPnP/DLNA renderers");
         if announce {
             pm_renderer::ssdp::start(r, api_port)
@@ -929,12 +1044,52 @@ impl NodeState {
         }
     }
 
-    /// zone; its pull stream is registered for the HTTP route.
+    /// Whether one more output found on the network (discovery, Squeezebox players) may be added:
+    /// at most [`MAX_FOUND_OUTPUTS`] outputs in all, so a network announcing endless devices
+    /// can't fill the node with zones. Warns once each time the node is full.
+    pub(crate) fn room_for_found_output(&self) -> bool {
+        static FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if self.outputs.len() < MAX_FOUND_OUTPUTS {
+            FULL.store(false, std::sync::atomic::Ordering::Relaxed);
+            return true;
+        }
+        if !FULL.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                outputs = self.outputs.len(),
+                "no more outputs added from the network: the node has as many as it takes"
+            );
+        }
+        false
+    }
+
+    /// Register `out`, found on the network, if [`Self::room_for_found_output`]; the check and the
+    /// registration are one step, so outputs found at the same time can't pass the cap together.
+    pub(crate) fn add_found_output(&self, out: Arc<dyn Output>) -> bool {
+        static ADDING: Mutex<()> = Mutex::new(());
+        let _one = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+        // (two passes at once, a rescan and the UPnP watch, found the same device: the first one wins)
+        if self.outputs.get(&out.id()).is_some() || !self.room_for_found_output() {
+            return false;
+        }
+        self.outputs.register(out);
+        true
+    }
+
+    /// Start the Slimproto server (players connect to us) and the UDP discovery responder. Call
+    /// from inside the tokio runtime. Each connecting player becomes an output with a zone; its
+    /// pull stream is registered for the HTTP route.
     pub fn start_slimproto(self: &Arc<Self>) -> std::io::Result<()> {
+        self.start_slimproto_on(None)
+    }
+
+    /// [`Self::start_slimproto`] on one address (`None`: all of them). On a loopback address the
+    /// discovery responder stays off: only players on this machine can connect.
+    pub fn start_slimproto_on(self: &Arc<Self>, bind: Option<std::net::IpAddr>) -> std::io::Result<()> {
         if self.slimproto_port == 0 {
             return Ok(());
         }
-        let listener = std::net::TcpListener::bind(("0.0.0.0", self.slimproto_port))?;
+        let bind = bind.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let listener = std::net::TcpListener::bind((bind, self.slimproto_port))?;
         let web_port = url::Url::parse(&self.public_url)
             .ok()
             .and_then(|u| u.port_or_known_default())
@@ -945,22 +1100,28 @@ impl NodeState {
         let state = self.clone();
         // Players connect on the server's own threads; zones need the runtime.
         let runtime = tokio::runtime::Handle::current();
-        // Once per player: a player that reconnects keeps its output and zone.
-        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) + Send + Sync> = Arc::new(move |out| {
-            let _rt = runtime.enter();
-            let name = out.pull().stream_name().to_string();
-            state
-                .pulls
-                .lock()
-                .expect("pulls lock")
-                .insert(name, out.pull().clone());
-            let zone_name = out.name();
-            state.outputs.register(out.clone());
-            if state.zones.list().iter().all(|z| z.output != out.id()) {
-                state.create_zone(&zone_name, out);
-            }
-        });
+        // Once per player: a player that reconnects keeps its output and zone. A player the node
+        // has no room for is turned away, and offered again when it reconnects.
+        let on_player: Arc<dyn Fn(Arc<pm_out_slimproto::SlimOutput>) -> bool + Send + Sync> =
+            Arc::new(move |out| {
+                let _rt = runtime.enter();
+                if !state.add_found_output(out.clone()) {
+                    return false;
+                }
+                let name = out.pull().stream_name().to_string();
+                state
+                    .pulls
+                    .lock()
+                    .expect("pulls lock")
+                    .insert(name, out.pull().clone());
+                let zone_name = out.name();
+                if state.zones.list().iter().all(|z| z.output != out.id()) {
+                    state.create_zone(&zone_name, out);
+                }
+                true
+            });
         let name = self.name.clone();
+        let port = self.slimproto_port;
         std::thread::Builder::new()
             .name("slimproto".into())
             .spawn(move || {
@@ -968,14 +1129,16 @@ impl NodeState {
                     tracing::warn!("slimproto server stopped: {e}");
                 }
             })?;
-        std::thread::Builder::new()
-            .name("slimproto-discovery".into())
-            .spawn(move || {
-                if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
-                    tracing::info!("slimproto discovery responder unavailable: {e}");
-                }
-            })?;
-        tracing::info!(port = self.slimproto_port, "Slimproto server listening");
+        if !bind.is_loopback() {
+            std::thread::Builder::new()
+                .name("slimproto-discovery".into())
+                .spawn(move || {
+                    if let Err(e) = pm_out_slimproto::discovery_responder(&name) {
+                        tracing::info!("slimproto discovery responder unavailable: {e}");
+                    }
+                })?;
+        }
+        tracing::info!(%bind, port, "Slimproto server listening");
         Ok(())
     }
 
@@ -985,13 +1148,34 @@ impl NodeState {
         if !self.upnp {
             return Vec::new();
         }
-        let renderers = match pm_out_upnp::discover(timeout) {
+        // (a description already behind an output isn't fetched again: a later pass is cheap)
+        // (only one answering as itself, by its USN's UUID: another device given its address is described)
+        // (one skipped answered all the same: it is seen, so it stays known)
+        let known = self.upnp_known();
+        let answered = std::cell::RefCell::new(Vec::new());
+        let have = |loc: &str, uuid: Option<&str>| {
+            let Some(uuid) = uuid else { return false };
+            let hit = known.iter().find(|(udn, k)| {
+                let udn = udn.trim_start_matches("uuid:");
+                udn.eq_ignore_ascii_case(uuid)
+                    && k.location.eq_ignore_ascii_case(loc)
+                    && self.outputs.get(&OutputId::new("upnp", udn)).is_some()
+            });
+            if let Some((udn, k)) = hit {
+                answered.borrow_mut().push((udn.clone(), k.location.clone()));
+            }
+            hit.is_some()
+        };
+        let renderers = match pm_out_upnp::discover_except(timeout, have) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("UPnP discovery failed: {e}");
                 return Vec::new();
             }
         };
+        for (udn, loc) in answered.into_inner() {
+            self.seen_upnp_at(&udn, &loc);
+        }
         renderers
             .into_iter()
             .filter_map(|r| self.register_renderer(r))
@@ -1001,6 +1185,18 @@ impl NodeState {
     /// A renderer as an output with its own pull stream and a zone; `None`
     /// when it is already registered.
     pub fn register_renderer(self: &Arc<Self>, r: pm_out_upnp::Renderer) -> Option<OutputId> {
+        self.register_found(r, true)
+    }
+
+    /// [`Self::register_renderer`]. `fresh`: `r` was found where it is now (a search, a typed address),
+    /// so a renderer already registered is remembered at that address; not for a remembered address
+    /// described again, which may be stale while another pass found it elsewhere.
+    fn register_found(self: &Arc<Self>, r: pm_out_upnp::Renderer, fresh: bool) -> Option<OutputId> {
+        // Our own zones answer the same search once we offer them: one adopted would play into itself
+        if self.is_own_renderer(&r) {
+            tracing::debug!(renderer = %r.friendly_name, "our own renderer; no zone");
+            return None;
+        }
         let name = format!(
             "upnp-{}",
             r.udn
@@ -1012,6 +1208,13 @@ impl NodeState {
         );
         let id = OutputId::new("upnp", r.udn.trim_start_matches("uuid:"));
         if self.outputs.get(&id).is_some() {
+            // (it may have moved: the next start looks for it where it is now)
+            if fresh {
+                self.remember_upnp(&r.udn, &r.location);
+            }
+            return None;
+        }
+        if !self.room_for_found_output() {
             return None;
         }
         // What it accepts decides how the stream is offered; a renderer that takes no PCM stream
@@ -1024,13 +1227,21 @@ impl NodeState {
             tracing::info!(renderer = %r.friendly_name, "UPnP renderer accepts no PCM stream (WAV or LPCM); no zone");
             return None;
         };
-        let pull = self.pull_output(&name);
+        let pull = self.found_pull(&name);
         let out = Arc::new(
-            pm_out_upnp::UpnpOutput::new(r.clone(), pull, self.pull_url(&name))
+            pm_out_upnp::UpnpOutput::new(r.clone(), pull.clone(), self.pull_url(&name))
                 .with_stream_kind(kind.clone())
                 .with_describe(self.describe_for_renderers()),
         );
+        if !self.add_found_output(out.clone()) {
+            return None;
+        }
+        self.keep_pull(&name, pull);
         tracing::info!(renderer = %r.friendly_name, output = %id, stream = ?kind, "UPnP renderer");
+        self.renderers
+            .lock()
+            .expect("renderers lock")
+            .insert(id.clone(), out.clone());
         if pm_out_upnp::heos::is_heos(&r) {
             self.heos
                 .lock()
@@ -1043,9 +1254,239 @@ impl NodeState {
                 .expect("sonos lock")
                 .insert(id.clone(), out.clone());
         }
-        self.outputs.register(out.clone());
+        // (a restore's remembered address never replaces one another pass has just saved for it)
+        if fresh {
+            self.remember_upnp(&r.udn, &r.location);
+        } else {
+            self.remember_upnp_unless_moved(&r.udn, &r.location);
+        }
         self.create_zone(&r.friendly_name, out);
         Some(id)
+    }
+
+    /// Whether `r` is one of this node's zones offered as a renderer (`start_renderer`): its UDN is
+    /// one of ours, or its description is ours (this host, our API port, a zone's path).
+    pub fn is_own_renderer(&self, r: &pm_out_upnp::Renderer) -> bool {
+        let udn = r.udn.trim_start_matches("uuid:");
+        if let Some(own) = self.renderer.get() {
+            if own
+                .zones()
+                .iter()
+                .any(|(zone, _)| own.udn(zone).eq_ignore_ascii_case(udn))
+            {
+                return true;
+            }
+        }
+        self.is_own_location(&r.location)
+    }
+
+    /// Whether `location` is one of our zones' descriptions: this host, our API port, a zone's path.
+    pub fn is_own_location(&self, location: &str) -> bool {
+        let Some(port) = self.renderer_port.get() else {
+            return false;
+        };
+        let Ok(u) = url::Url::parse(location.trim()) else {
+            return false;
+        };
+        let ours = match u.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || pm_out_upnp::local_ipv4_addrs().contains(&ip),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+            None => false,
+        };
+        ours && u.port_or_known_default() == Some(*port) && u.path().starts_with("/upnp/zone/")
+    }
+
+    /// The renderers that had a zone: UDN → where its description was, and when it was last seen.
+    pub fn upnp_known(&self) -> std::collections::BTreeMap<String, KnownRenderer> {
+        let lib = self.library.lock().expect("library poisoned");
+        Self::read_known(&lib)
+    }
+
+    fn read_known(lib: &Library) -> std::collections::BTreeMap<String, KnownRenderer> {
+        lib.get_setting(UPNP_KNOWN_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
+    }
+
+    /// Change the remembered renderers in one go under the library's lock (two passes at once
+    /// don't lose each other's), then drop the ones not seen for 30 days and keep at most 64 (the
+    /// longest unseen go first); written only when something changed. Returns what is kept.
+    pub(crate) fn edit_known(
+        &self,
+        f: impl FnOnce(&mut std::collections::BTreeMap<String, KnownRenderer>, u64),
+    ) -> std::collections::BTreeMap<String, KnownRenderer> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let lib = self.library.lock().expect("library poisoned");
+        let mut known = Self::read_known(&lib);
+        let before = known.clone();
+        f(&mut known, now);
+        known.retain(|_, k| now.saturating_sub(k.seen) <= 30 * 86_400);
+        while known.len() > 64 {
+            let oldest = known
+                .iter()
+                .min_by_key(|(_, k)| k.seen)
+                .map(|(u, _)| u.clone())
+                .expect("not empty");
+            known.remove(&oldest);
+        }
+        if known != before {
+            let _ = lib.set_setting(
+                UPNP_KNOWN_KEY,
+                &serde_json::to_string(&known).expect("serializes"),
+            );
+        }
+        known
+    }
+
+    /// Remember `udn` at `location`, seen now (a day's precision: no write on every pass).
+    pub(crate) fn remember_upnp(&self, udn: &str, location: &str) {
+        self.edit_known(|known, now| {
+            let k = known.entry(udn.to_string()).or_default();
+            if k.location != location || now.saturating_sub(k.seen) > 86_400 {
+                *k = KnownRenderer {
+                    location: location.to_string(),
+                    seen: now,
+                };
+            }
+        });
+    }
+
+    /// `udn` answered at `location`: seen now, only if it is still remembered there (another pass
+    /// may have just found it somewhere else; that address stands). A day's precision.
+    fn seen_upnp_at(&self, udn: &str, location: &str) {
+        self.edit_known(|known, now| {
+            if let Some(k) = known.get_mut(udn) {
+                if k.location == location && now.saturating_sub(k.seen) > 86_400 {
+                    k.seen = now;
+                }
+            }
+        });
+    }
+
+    /// Remember `udn` at `location` as a restore does: seen now when it is still remembered there, added
+    /// when it isn't remembered at all, and left as it is when another pass has saved it elsewhere.
+    pub(crate) fn remember_upnp_unless_moved(&self, udn: &str, location: &str) {
+        self.edit_known(|known, now| match known.get_mut(udn) {
+            None => {
+                known.insert(
+                    udn.to_string(),
+                    KnownRenderer {
+                        location: location.to_string(),
+                        seen: now,
+                    },
+                );
+            }
+            Some(k) if k.location == location => {
+                if now.saturating_sub(k.seen) > 86_400 {
+                    k.seen = now;
+                }
+            }
+            Some(_) => {}
+        });
+    }
+
+    /// Forget `udn` only if it is still remembered at `location` (another pass may have just
+    /// found it somewhere else).
+    pub(crate) fn forget_upnp_at(&self, udn: &str, location: &str) {
+        self.edit_known(|known, _| {
+            if known.get(udn).is_some_and(|k| k.location == location) {
+                known.remove(udn);
+            }
+        });
+    }
+
+    /// The renderers that had a zone and have none now, described at their last URL (no SSDP,
+    /// 2 s each): a start whose search missed one still gives it its zone. One that doesn't answer
+    /// stays known (it may be off); a URL now answering as another device forgets the old one.
+    /// Off with UPnP discovery. Blocking.
+    pub fn restore_known_upnp(self: &Arc<Self>) -> Vec<OutputId> {
+        if !self.upnp {
+            return Vec::new();
+        }
+        self.restore_known()
+    }
+
+    pub(crate) fn restore_known(self: &Arc<Self>) -> Vec<OutputId> {
+        let mut new = Vec::new();
+        // (the ones long unseen go first: dead ones don't hold every pass)
+        for (udn, k) in self.edit_known(|_, _| {}) {
+            if self
+                .outputs
+                .get(&OutputId::new("upnp", udn.trim_start_matches("uuid:")))
+                .is_some()
+            {
+                continue;
+            }
+            match pm_out_upnp::describe_within(&k.location, std::time::Duration::from_secs(2)) {
+                Ok(Some(r)) => {
+                    // Another device at that address now: the old one is forgotten there (whether or not
+                    // the device answering has its zone already)
+                    if !r
+                        .udn
+                        .trim_start_matches("uuid:")
+                        .eq_ignore_ascii_case(udn.trim_start_matches("uuid:"))
+                    {
+                        tracing::info!(location = %k.location, was = %udn, now = %r.udn, "a known UPnP renderer's address is another device's now");
+                        self.forget_upnp_at(&udn, &k.location);
+                    }
+                    // (not `fresh`: registered meanwhile by another pass, it was remembered where that
+                    // pass found it, and this answer from a remembered address says nothing newer)
+                    new.extend(self.register_found(r, false));
+                }
+                Ok(None) => {}
+                Err(e) => tracing::info!(location = %k.location, "known UPnP renderer not answering: {e}"),
+            }
+        }
+        new
+    }
+
+    /// UPnP renderers get their zones without a rescan: the known ones at once (in the
+    /// background, so the start doesn't wait on one that is off), then a pass `first` after the
+    /// start and one every `every` (SSDP, then the known ones by URL). Only new ones are
+    /// described. Off with UPnP discovery. Call from inside the runtime.
+    pub fn spawn_upnp_watch(self: &Arc<Self>, first: std::time::Duration, every: std::time::Duration) {
+        if !self.upnp {
+            return;
+        }
+        self.spawn_upnp_passes(first, every);
+    }
+
+    pub(crate) fn spawn_upnp_passes(
+        self: &Arc<Self>,
+        first: std::time::Duration,
+        every: std::time::Duration,
+    ) {
+        let st = self.clone();
+        tokio::spawn(async move {
+            let s = st.clone();
+            let back = tokio::task::spawn_blocking(move || s.restore_known())
+                .await
+                .unwrap_or_default();
+            if !back.is_empty() {
+                tracing::info!(count = back.len(), "known UPnP renderers found at their address");
+            }
+            tokio::time::sleep(first).await;
+            loop {
+                let s = st.clone();
+                let new = tokio::task::spawn_blocking(move || {
+                    let mut new = s.discover_upnp(std::time::Duration::from_secs(3));
+                    new.extend(s.restore_known());
+                    new
+                })
+                .await
+                .unwrap_or_default();
+                if !new.is_empty() {
+                    tracing::info!(count = new.len(), "UPnP renderers found after the start");
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
     }
 
     /// Renderers the owner added by address (another subnet, VLAN, or a
@@ -1074,12 +1515,20 @@ impl NodeState {
         if addr.is_empty() {
             return Err("address is required".into());
         }
+        // (our own zone's description is refused before it is fetched)
+        let own = || format!("{addr} is this node's own zone offered as a renderer");
+        if self.is_own_location(&addr) {
+            return Err(own());
+        }
         let found = pm_out_upnp::probe_address(&addr, std::time::Duration::from_secs(2))
             .map_err(|e| e.to_string())?;
         if found.is_empty() {
             return Err(format!(
                 "{addr} answered, but nothing there is a MediaRenderer with AVTransport"
             ));
+        }
+        if found.iter().all(|r| self.is_own_renderer(r)) {
+            return Err(own());
         }
         let mut saved = self.upnp_addresses();
         if !saved.contains(&addr) {
@@ -1134,6 +1583,21 @@ impl NodeState {
         );
     }
 
+    /// A key cell for one endpoint: when one of its outputs reports another device (a phone's
+    /// USB DAC came or went), every owner's controller hears `outputs_changed`. Only for outputs
+    /// the node lists already: a new one is announced once it is registered
+    /// (`add_endpoint_address`), so a controller that fetches the outputs at once finds it.
+    fn endpoint_cell(&self, key: pm_stream::Key) -> pm_out_net::KeyCell {
+        let cell = pm_out_net::KeyCell::new(key);
+        let (events, outputs) = (self.events.clone(), self.outputs.clone());
+        cell.on_device_change(move |id| {
+            if outputs.get(id).is_some() {
+                events.send(ApiEvent::OutputsChanged { output: id.clone() });
+            }
+        });
+        cell
+    }
+
     /// The endpoint keys, loaded on first use; run `f` with them, saving when it says so.
     fn with_endpoint_keys<T>(
         &self,
@@ -1148,7 +1612,7 @@ impl NodeState {
                 .unwrap_or_default();
             stored
                 .into_iter()
-                .filter_map(|(a, k)| Some((a, pm_out_net::KeyCell::new(pm_stream::Key::parse(&k).ok()?))))
+                .filter_map(|(a, k)| Some((a, self.endpoint_cell(pm_stream::Key::parse(&k).ok()?))))
                 .collect()
         });
         let (out, changed) = f(keys);
@@ -1186,7 +1650,7 @@ impl NodeState {
                 (c, Some(old))
             }
             (Some(c), None) => (c, None),
-            (None, Some(k)) => (pm_out_net::KeyCell::new(k.clone()), None),
+            (None, Some(k)) => (self.endpoint_cell(k.clone()), None),
             (None, None) => {
                 return Err("no key stored for it; the app registers it again on its next start".into())
             }
@@ -1222,6 +1686,10 @@ impl NodeState {
                 let name = out.name();
                 self.outputs.register(out.clone());
                 self.create_zone(&name, out.clone());
+                // Its device (a DAC already plugged in) now that GET /v1/outputs lists it
+                if out.device().is_some() {
+                    self.events.send(ApiEvent::OutputsChanged { output: id.clone() });
+                }
             }
             infos.push(out.info());
         }
@@ -1291,18 +1759,24 @@ impl NodeState {
                     .take(32)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(
-                pm_out_cast::CastOutput::new(d.clone(), pull, self.pull_url(&name))
+                pm_out_cast::CastOutput::new(d.clone(), pull.clone(), self.pull_url(&name))
                     .with_describe(self.describe_for_renderers()),
             );
             let id = out.id();
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(device = %d.friendly_name, output = %id, "Cast device");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
+            self.keep_pull(&name, pull);
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1345,14 +1819,17 @@ impl NodeState {
                     .take(40)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(pm_out_mpd::MpdOutput::new(
                 server.clone(),
-                pull,
+                pull.clone(),
                 self.pull_url(&name),
             ));
             let id = out.id();
             if self.outputs.get(&id).is_some() {
+                continue;
+            }
+            if !self.room_for_found_output() {
                 continue;
             }
             match pm_out_mpd::Client::connect(&server) {
@@ -1364,8 +1841,11 @@ impl NodeState {
                     continue;
                 }
             }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
+            self.keep_pull(&name, pull);
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1391,23 +1871,29 @@ impl NodeState {
                     .take(32)
                     .collect::<String>()
             );
-            let pull = self.pull_output(&name);
+            let pull = self.found_pull(&name);
             let out = Arc::new(pm_out_bluos::BluosOutput::new(
                 p.clone(),
-                pull,
+                pull.clone(),
                 self.pull_url(&name),
             ));
             let id = out.id();
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
+            self.keep_pull(&name, pull);
             tracing::info!(player = %p.name, output = %id, "BluOS player");
             self.bluos_players
                 .lock()
                 .expect("bluos lock")
                 .insert(id.clone(), out.clone());
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1433,9 +1919,14 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(receiver = %d.name, output = %id, "AirPlay receiver");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1466,9 +1957,14 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
             tracing::info!(group = %out.name(), output = %id, "Snapcast group");
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let zone_name = out.name();
-            self.outputs.register(out.clone());
             self.create_zone(&zone_name, out);
             new.push(id);
         }
@@ -1481,6 +1977,7 @@ impl NodeState {
     pub fn rescan_outputs(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = self.discover_upnp(std::time::Duration::from_secs(3));
         new.extend(self.restore_upnp_addresses());
+        new.extend(self.restore_known_upnp());
         new.extend(self.restore_endpoint_addresses());
         new.extend(self.discover_cast(std::time::Duration::from_millis(1500)));
         new.extend(self.discover_snapcast());
@@ -1495,8 +1992,13 @@ impl NodeState {
             if self.outputs.get(&id).is_some() {
                 continue;
             }
+            if !self.room_for_found_output() {
+                continue;
+            }
+            if !self.add_found_output(out.clone()) {
+                continue;
+            }
             let name = out.name();
-            self.outputs.register(out.clone());
             new.push(id);
             self.create_zone(&name, out);
         }
@@ -1703,6 +2205,22 @@ impl NodeState {
 
 const CONTACT_KEY: &str = "node.contact";
 
+/// A shorter volume poll for tests (ms; 0 = none), set without touching the environment.
+pub static VOLUME_POLL_MS_FOR_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How often a zone reads its output's level back (`PM_VOLUME_POLL_MS`, or the tests' value).
+fn volume_poll() -> std::time::Duration {
+    let t = VOLUME_POLL_MS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed);
+    if t > 0 {
+        return std::time::Duration::from_millis(t);
+    }
+    std::env::var("PM_VOLUME_POLL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(10))
+}
+
 /// Where a zone's crossfade length (ms) is kept.
 pub fn crossfade_key(zone: &ZoneId) -> String {
     format!("crossfade/{}", zone.0)
@@ -1712,13 +2230,18 @@ fn queue_key(id: &ZoneId) -> String {
     format!("queue.{}", id.0)
 }
 
-/// What survives a restart per zone: the items and the repeat mode.
+/// What survives a restart per zone: the items (in play order), the repeat and shuffle modes,
+/// and with shuffle on the original order as indexes into the items.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedQueue {
     items: Vec<pm_zones::QueueItem>,
     repeat: pm_zones::Repeat,
     #[serde(default)]
     radio: bool,
+    #[serde(default)]
+    shuffle: bool,
+    #[serde(default)]
+    order: Vec<usize>,
 }
 
 /// Library radio: when a zone with `radio` on runs out of queue, add tracks

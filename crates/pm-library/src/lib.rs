@@ -20,6 +20,7 @@ pub mod db;
 pub mod dsd;
 pub mod error;
 pub mod identify;
+pub mod image;
 pub mod import;
 pub mod lyrics;
 pub mod matching;
@@ -40,6 +41,7 @@ pub use db::{
 };
 pub use db::{AlbumEdit, ConfirmChoice, ConfirmReport, Library, LibraryStats, StaleChoice, TrackOverride};
 pub use error::{LibraryError, Result};
+pub use image::{file_image_type, image_extension, image_type};
 pub use import::{ImportFormat, ImportedList, ImportedTrack};
 pub use lyrics::LyricLine;
 pub use posts::MusicPostRow;

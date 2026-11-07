@@ -52,7 +52,7 @@ pub fn global_order(lib: &Library) -> Vec<String> {
     let who = asking();
     let key = match &who {
         Who::Owner => Some("me.prefs".to_string()),
-        Who::Listener(k) => Some(crate::prefs::storage_key_of(k)),
+        Who::Listener(k) | Who::ListenerOnNode(k) => Some(crate::prefs::storage_key_of(k)),
         Who::Nobody => None,
     };
     let personal = key

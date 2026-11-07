@@ -1,0 +1,14 @@
+[package]
+name = "pm-usb-audio"
+description = "USB Audio Class 1/2 descriptors: what a USB DAC takes (the Android app's DAC support)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+# The kernel's usbfs interface (the exclusive USB driver on Android, and Linux)
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = "0.2"
