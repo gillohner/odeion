@@ -27,6 +27,8 @@ struct Gate {
     cv: Condvar,
     /// Engine threads currently blocked in `take`.
     waiting: AtomicU64,
+    /// Calls of `take` so far (for `hang`: opens of `hang:` items).
+    taken: AtomicU64,
 }
 
 impl Gate {
@@ -38,6 +40,7 @@ impl Gate {
     fn take(&self) {
         let mut p = self.permits.lock().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
+        self.taken.fetch_add(1, Ordering::SeqCst);
         self.waiting.fetch_add(1, Ordering::SeqCst);
         while *p == 0 {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -747,6 +750,122 @@ async fn other_commands_during_a_pass_are_served_after_it() {
         r.zone.stop();
         r.zone.wait_stopped().await;
     }
+}
+
+/// The queue changing again and again while the next item's open doesn't return (a listener
+/// adding songs while a silent stream is next) keeps one open ahead in flight, not one per
+/// change: an open given up is waited out before another starts, and one that is still the
+/// next item is kept.
+#[tokio::test]
+async fn queue_changes_keep_one_open_ahead_in_flight() {
+    let r = rig(&[("a", RATE, 2_000)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("hang:first")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    let mut played = 100;
+    for i in 0..6 {
+        // A new next item (the open ahead is given up), then one at the end (it is kept)
+        r.zone
+            .enqueue(vec![QueueItem::new(format!("hang:next{i}"))], Insert::Next);
+        r.zone
+            .enqueue(vec![QueueItem::new(format!("hang:end{i}"))], Insert::End);
+        r.gate.allow(2);
+        played += 200;
+        wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
+        assert_eq!(
+            r.hang.waiting.load(Ordering::SeqCst),
+            1,
+            "round {i}: one open ahead in flight"
+        );
+    }
+    // The given-up open ends: then the next item is opened ahead, still one at a time
+    r.hang.allow(1);
+    r.gate.allow(2);
+    played += 200;
+    wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.hang.allow(100);
+    r.gate.allow(1_000);
+    r.zone.stop();
+    r.zone.wait_stopped().await;
+}
+
+/// An item opened ahead is kept while the queue changes elsewhere (a song added at the end):
+/// it is opened once, and it is what the track's end goes to (here it fails, so it is skipped
+/// and the added song plays).
+#[tokio::test]
+async fn an_open_ahead_still_next_is_kept_when_the_queue_changes() {
+    let mut r = rig(&[("a", RATE, 300), ("b", RATE, 300)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("hang:x")], Insert::End);
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.gate.blocked().await;
+    r.zone.enqueue(vec![QueueItem::new("b")], Insert::End);
+    r.gate.allow(1);
+    wait_for(|| r.rec.samples.lock().unwrap().len() >= 200).await;
+    // The open ahead ends (it fails); the track then ends into it and on to "b"
+    r.hang.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 0).await;
+    r.gate.allow(1_000);
+    let mut w = r.zone.watch();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        w.wait_for(|s| s.queue_index == Some(2) && s.now_playing.is_some()),
+    )
+    .await
+    .expect("the added song plays")
+    .unwrap();
+    assert_eq!(
+        r.hang.taken.load(Ordering::SeqCst),
+        1,
+        "the item opened ahead was kept, not opened again"
+    );
+    let evs = kinds(&drain_events(&mut r.events));
+    assert_eq!(
+        evs.iter().filter(|e| e.starts_with("skip:hang:x")).count(),
+        1,
+        "{evs:?}"
+    );
+    r.zone.stop();
+    r.zone.wait_stopped().await;
+}
+
+/// A track's end while an open given up is still running (a listener chose another next item
+/// while a silent stream was next) opens the next item on a thread of its own, never on the
+/// zone's: Stop is taken while that item is still opening.
+#[tokio::test]
+async fn a_tracks_end_beside_a_given_up_open_still_takes_stop() {
+    let r = rig(&[("a", RATE, 300)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("hang:first")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.gate.blocked().await;
+    // Another next item: the open ahead of "hang:first" is given up, its thread still running
+    r.zone.enqueue(vec![QueueItem::new("hang:second")], Insert::Next);
+    // The track ends: "hang:second" opens beside the given-up one
+    r.gate.allow(10);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 2).await;
+    r.zone.stop();
+    tokio::time::timeout(Duration::from_secs(2), r.zone.wait_stopped())
+        .await
+        .expect("Stop is taken while the next item is still opening");
+    assert_eq!(
+        r.hang.waiting.load(Ordering::SeqCst),
+        2,
+        "both opens are still in progress"
+    );
+    r.hang.allow(2);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 0).await;
 }
 
 /// The next item is opened ahead on its own thread: a next item whose open doesn't return
