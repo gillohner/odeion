@@ -4,7 +4,7 @@
 // node tools/ui-queue-covers.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path');
-const { create, go, track } = require('./ui-fixture');
+const { create, go, track, ORIGIN } = require('./ui-fixture');
 const shots = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '.', 'queue-covers-shots'));
 const COVER = '/v1/library/albums/7/cover';
 const THEIRS = 'https://cdn.example/t.jpg';
@@ -50,17 +50,48 @@ const until = async (f, label) => { const t = Date.now(); while (Date.now() - t 
     fs.mkdirSync(shots, { recursive: true });
     await page.screenshot({ path: path.join(shots, 'dashboard.png') });
     await run.context.close();
+    // The node drops the sign-in from absolute links on its own address too: the dashboard signs
+    // in to such a cover on this page's origin, the same as a relative one
+    const absItem = { ...np.item, image: ORIGIN + COVER };
+    const absZone = { ...zone, queue: [absItem], now_playing: { ...np, item: absItem } };
+    const abs = await create(browser, 1280, { zone: 'z1', fixtures: { ...fixtures, '/zones': { body: [absZone] }, '/zones/z1': { body: absZone } } });
+    const absLoaded = await covers(abs.context);
+    await abs.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [absZone] })); });
+    await go(abs.page, '/now-playing');
+    await until(() => absLoaded.length, 'the dashboard loads an absolute cover on the node');
+    assert.ok(absLoaded.every((q) => q === '?token=fixture-owner'), 'an absolute cover on the node loads with the sign-in: ' + absLoaded.join(' '));
+    console.log('ok   an absolute cover on the node\'s own address loads with the browser\'s sign-in');
+    assert.deepEqual(abs.state.errors, [], 'no page errors');
+    await abs.context.close();
     // A "This browser" queue saved before (localStorage) whose cover already holds a sign-in:
     // the queue page loads it with one sign-in, not two
     const old = await create(browser, 1280, { fixtures: { '/library/albums': { body: [] } } });
     const oldLoaded = await covers(old.context);
-    await old.context.addInitScript((c) => { localStorage.setItem('pm.browserQueue', JSON.stringify([{ id: 1, uri: 'https://radio.example/two', title: 'Old', artist: 'Sefa', image: c + '?token=old-session' }])); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 0 })); }, COVER);
+    await old.context.addInitScript((c) => { localStorage.setItem('pm.browserQueue', JSON.stringify([{ id: 1, uri: 'https://radio.example/two', title: 'Old', artist: 'Sefa', image: c + '?%74oken=old-session&TOKEN=older' }])); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 0 })); }, COVER);
     await go(old.page, '/now-playing');
     await until(() => oldLoaded.length, 'the saved queue shows its cover');
     assert.ok(oldLoaded.every((q) => q === '?token=fixture-owner'), 'one sign-in, this browser\'s: ' + oldLoaded.join(' '));
     console.log('ok   a cover saved with an old sign-in loads with this browser\'s only');
     assert.deepEqual(old.state.errors, [], 'no page errors');
     await old.context.close();
+    // The same saved queue moved to a zone from a page opened under another of the node's names:
+    // the cover goes as the node's own link, relative, without the sign-in it was saved with
+    // (an ordinary output: a zone on the developer Null output is listed only while it is current)
+    const movedZone = { ...zone, output: 'kitchen', queue: [], now_playing: null, transport: 'stopped' };
+    const mv = await create(browser, 1280, { fixtures: { '/library/albums': { body: [] }, '/zones': { body: [movedZone] }, '/zones/z1': { body: movedZone }, '/zones/z1/load': { body: { ...movedZone, queue: [{ id: 9, uri: 'https://radio.example/two', title: 'Old', image: COVER }] } }, '/outputs': { body: [{ id: 'kitchen', name: 'Kitchen', kind: 'alsa', caps: {} }] } } });
+    await mv.context.addInitScript((c) => { localStorage.setItem('pm.browserQueue', JSON.stringify([{ id: 1, uri: 'https://radio.example/two', title: 'Old', artist: 'Sefa', image: c + '?token=old-session' }])); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 0 })); }, ORIGIN + COVER);
+    await mv.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [movedZone] })); });
+    await go(mv.page, '/queue');
+    await mv.page.locator('#zonebtn').click();
+    await mv.page.locator('[data-move="z1"]').click();
+    const moved = await until(() => mv.state.hits.find((h) => h.m === 'POST' && h.v === '/zones/z1/load'), 'the browser queue is moved to the zone');
+    const movedItems = JSON.parse(moved.body || '{}').items || [];
+    assert.equal(movedItems.length, 1, moved.body);
+    assert.equal(movedItems[0].image, COVER, 'the cover goes as the node\'s own relative link, without the saved sign-in: ' + moved.body);
+    assert.doesNotMatch(moved.body || '', /token=/, moved.body);
+    console.log('ok   a saved queue moved to a zone sends the cover as the node\'s own link, without its sign-in');
+    assert.deepEqual(mv.state.errors, [], 'no page errors');
+    await mv.context.close();
     console.log('queue covers: PASS');
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

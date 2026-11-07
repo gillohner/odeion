@@ -241,7 +241,15 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
     // a sign-in (as in every JSON answer)
     let seen = (c.role != crate::accounts::Role::Owner)
         .then(|| (crate::accounts::library_roots(&s), s.node_origins()));
-    let hide = seen.as_ref().map(|(r, o)| (r.as_slice(), o.as_slice()));
+    let known = crate::accounts::KnownTokens::lazy(&s);
+    let known_fn = |t: &str| known.has(t);
+    let hide: Hide<'_> = seen.as_ref().map(|(r, o)| {
+        (
+            r.as_slice(),
+            o.as_slice(),
+            &known_fn as &(dyn Fn(&str) -> bool + Sync),
+        )
+    });
     if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
         return;
     }
@@ -346,9 +354,9 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
     }
 }
 
-/// What one listener's socket may carry, `(library roots, the node's origins)`; `None` for the
-/// owner, who sees everything.
-type Hide<'a> = Option<(&'a [String], &'a [String])>;
+/// What one listener's socket may carry, `(library roots, the node's origins, the node's own
+/// sign-ins)`; `None` for the owner, who sees everything.
+type Hide<'a> = Option<(&'a [String], &'a [String], &'a (dyn Fn(&str) -> bool + Sync))>;
 
 /// [`send_json`] of [`as_seen_by`].
 async fn send_for<T: Serialize>(
@@ -366,8 +374,8 @@ async fn send_for<T: Serialize>(
 /// and the node's links' sign-ins hidden (`accounts::hide_for_listener`).
 fn as_seen_by<T: Serialize>(hide: Hide<'_>, v: &T) -> serde_json::Value {
     let mut j = serde_json::to_value(v).unwrap_or_default();
-    if let Some((roots, origins)) = hide {
-        crate::accounts::hide_for_listener(&mut j, roots, origins);
+    if let Some((roots, origins, known)) = hide {
+        crate::accounts::hide_for_listener(&mut j, roots, origins, known);
     }
     j
 }
@@ -402,7 +410,8 @@ mod tests {
         theirs.image = Some("http://127.0.0.1:7788/v1/library/albums/2/cover?a=1&token=s3cret".into());
         let ev = serde_json::json!({"seq": 1, "event": {"type": "zone", "state": {"queue": [item, theirs]}}});
         let me = ["http://127.0.0.1:7788".to_string()];
-        let seen = as_seen_by(Some((&[], &me)), &ev).to_string();
+        let mine = |t: &str| t == "s3cret";
+        let seen = as_seen_by(Some((&[], &me, &mine)), &ev).to_string();
         assert!(!seen.contains("pmo_abc") && !seen.contains("s3cret"), "{seen}");
         assert!(seen.contains("/v1/library/albums/1/cover\""), "{seen}");
         assert!(
@@ -410,6 +419,18 @@ mod tests {
             "{seen}"
         );
         assert_eq!(as_seen_by(None, &ev), ev, "the owner's socket is as it is");
+        // The node's own sign-in under another of its names (the page opened at localhost) is
+        // hidden too; a token that isn't the node's stays on another host's link
+        let mut named =
+            pm_zones::QueueItem::new("http://localhost:7788/v1/library/tracks/3/file?token=s3cret");
+        named.image = Some("http://localhost:7788/v1/library/albums/3/cover?token=theirs".into());
+        let ev = serde_json::json!({"seq": 2, "event": {"type": "zone", "state": {"queue": [named]}}});
+        let seen = as_seen_by(Some((&[], &me, &mine)), &ev).to_string();
+        assert!(
+            seen.contains("\"http://localhost:7788/v1/library/tracks/3/file\""),
+            "{seen}"
+        );
+        assert!(seen.contains("/v1/library/albums/3/cover?token=theirs"), "{seen}");
     }
 
     #[test]

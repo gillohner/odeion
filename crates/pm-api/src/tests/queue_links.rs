@@ -169,7 +169,8 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
             {"id": 1, "uri": "track:1", "image": format!("/v1/library/albums/1/cover?token={listener}")},
             {"id": 2, "uri": "/v1/library/tracks/2/file?token=s3cret", "image": "/v1/library/albums/2/cover?token=pmo_browser"},
             {"id": 3, "uri": "https://radio.example/live?token=theirs"},
-            {"id": 4, "uri": "https://other-node.example/v1/library/tracks/9/file?token=pmo_browser"}
+            {"id": 4, "uri": "https://other-node.example/v1/library/tracks/9/file?token=pmo_theirs"},
+            {"id": 5, "uri": "track:5", "image": "http://localhost:7788/v1/library/albums/5/cover?token=pmo_phone"}
         ],
         "repeat": "off", "radio": false, "shuffle": false, "order": []
     });
@@ -189,7 +190,7 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
     assert_eq!(
         cleaned,
         accounts::CleanedQueues {
-            items: 2,
+            items: 3,
             owner_sessions_ended: true,
             api_token_found: true,
             listener_tokens_ended: 1,
@@ -217,8 +218,12 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
         "not the node's link: {json}"
     );
     assert!(
-        json.contains("https://other-node.example/v1/library/tracks/9/file?token=pmo_browser"),
+        json.contains("https://other-node.example/v1/library/tracks/9/file?token=pmo_theirs"),
         "another node's link keeps its own token: {json}"
+    );
+    assert!(
+        json.contains("\"http://localhost:7788/v1/library/albums/5/cover\""),
+        "the node under another name loses its own sign-in: {json}"
     );
     assert_eq!(setting("accounts.owner_sessions"), "[]");
     assert_eq!(setting("accounts.device_sessions"), "[]");
@@ -254,7 +259,7 @@ async fn a_foreign_or_unknown_token_in_a_saved_queue_ends_no_session() {
     let key = "queue.somewhere";
     let saved = serde_json::json!({
         "items": [
-            {"id": 1, "uri": "https://other-node.example/v1/library/tracks/1/file?token=pmo_browser"},
+            {"id": 1, "uri": "https://other-node.example/v1/library/tracks/1/file?token=pmo_theirs"},
             {"id": 2, "uri": "track:2", "image": "/v1/library/albums/2/cover?token=pmo_not-ours"}
         ],
         "repeat": "off", "radio": false, "shuffle": false, "order": []
@@ -281,7 +286,7 @@ async fn a_foreign_or_unknown_token_in_a_saved_queue_ends_no_session() {
     );
     let json = lib.get_setting(key).unwrap().unwrap();
     assert!(
-        json.contains("other-node.example/v1/library/tracks/1/file?token=pmo_browser"),
+        json.contains("other-node.example/v1/library/tracks/1/file?token=pmo_theirs"),
         "{json}"
     );
     assert!(!json.contains("pmo_not-ours"), "{json}");
@@ -297,14 +302,129 @@ async fn a_listeners_answer_never_carries_a_node_sign_in() {
     let answer = Json(serde_json::json!({
         "now_playing": {"item": {"image": "/v1/library/albums/1/cover?token=pmo_abc"}},
         "queue": [{"uri": "http://127.0.0.1:7788/v1/library/tracks/1/file?a=1&token=s3cret"},
-                  {"uri": "https://other.example/v1/x?token=theirs"}]
+                  {"uri": "https://other.example/v1/x?token=theirs"},
+                  {"uri": "http://localhost:7788/v1/library/tracks/2/file?token=s3cret"}]
     }))
     .into_response();
-    let resp = accounts::listener_response(answer, &[], &me).await;
+    let mine = |t: &str| t == "s3cret";
+    let resp = accounts::listener_response(answer, &[], &me, &mine).await;
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(!text.contains("pmo_abc") && !text.contains("s3cret"), "{text}");
     assert!(text.contains("/v1/library/albums/1/cover\""), "{text}");
     assert!(text.contains("/v1/library/tracks/1/file?a=1\""), "{text}");
     assert!(text.contains("https://other.example/v1/x?token=theirs"), "{text}");
+    assert!(
+        text.contains("\"http://localhost:7788/v1/library/tracks/2/file\""),
+        "the node's own sign-in under another name: {text}"
+    );
+}
+
+/// A cover link made under another of the node's names (the page opened at `localhost` while
+/// `public_url` says the LAN address, a tunnel name) loses its sign-in like one under
+/// `public_url`: on the way in, by the address the request came to and by the sign-in being the
+/// node's own; a link on another host with a token that isn't the node's stays as it is.
+#[tokio::test]
+async fn a_cover_link_under_another_of_the_nodes_names_loses_its_sign_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    let app = router(s.clone());
+    let (_, zones) = call_as(&app, "s3cret", "/v1/zones").await;
+    let zid = zones[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(s.node_origins(), ["http://127.0.0.1:7788"]);
+    let from_localhost = |method: &'static str, path: String, body: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("host", "localhost:7788")
+                .header("authorization", "Bearer s3cret")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            app.oneshot(req).await.unwrap().status()
+        }
+    };
+    let items = serde_json::json!([
+        {"uri": "https://radio.example/a", "title": "A", "image": "http://localhost:7788/v1/library/albums/1/cover?token=not-known-here"},
+        {"uri": "https://radio.example/b", "title": "B", "image": "https://node.example.ts.net/v1/library/albums/1/cover?token=s3cret"},
+        {"uri": "https://radio.example/c", "title": "C", "image": "https://other-node.example/v1/library/albums/1/cover?token=theirs"}
+    ]);
+    let st = from_localhost(
+        "POST",
+        format!("/v1/zones/{zid}/queue"),
+        serde_json::json!({"items": items, "play": false}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, q) = call_as(&app, "s3cret", &format!("/v1/zones/{zid}/queue")).await;
+    assert_eq!(
+        q[0]["image"], "http://localhost:7788/v1/library/albums/1/cover",
+        "the address the request came to: {q}"
+    );
+    assert_eq!(
+        q[1]["image"], "https://node.example.ts.net/v1/library/albums/1/cover",
+        "the node's own sign-in under any name: {q}"
+    );
+    assert_eq!(
+        q[2]["image"], "https://other-node.example/v1/library/albums/1/cover?token=theirs",
+        "{q}"
+    );
+    // The same on the way in through a move from the browser
+    let st = from_localhost("POST", format!("/v1/zones/{zid}/load"), serde_json::json!({"items": items, "index": null, "position_ms": 0, "transport": "stopped", "repeat": "off", "radio": false})).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, q) = call_as(&app, "s3cret", &format!("/v1/zones/{zid}/queue")).await;
+    assert_eq!(
+        q[0]["image"], "http://localhost:7788/v1/library/albums/1/cover",
+        "{q}"
+    );
+    assert_eq!(
+        q[1]["image"], "https://node.example.ts.net/v1/library/albums/1/cover",
+        "{q}"
+    );
+    assert_eq!(
+        q[2]["image"], "https://other-node.example/v1/library/albums/1/cover?token=theirs",
+        "{q}"
+    );
+}
+
+/// The API token found in a saved queue can only be replaced by hand: Settings and Home's first
+/// steps say so from then on, and Make a new token clears it.
+#[tokio::test]
+async fn an_exposed_api_token_is_said_until_it_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    s.set_token_file(dir.path().join("api-token"));
+    let app = router(s.clone());
+    let (_, ns) = call_as(&app, "s3cret", "/v1/node/settings").await;
+    assert!(ns.get("api_token_exposed_at").is_none(), "{ns}");
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            "queue.somewhere",
+            &serde_json::json!({"items": [{"id": 1, "uri": "track:1", "image": "/v1/library/albums/1/cover?token=s3cret"}],
+                "repeat": "off", "radio": false, "shuffle": false, "order": []})
+            .to_string(),
+        )
+        .unwrap();
+    assert!(accounts::clean_saved_queues(&s).unwrap().api_token_found);
+    let (_, ns) = call_as(&app, "s3cret", "/v1/node/settings").await;
+    assert!(ns["api_token_exposed_at"].as_i64().is_some_and(|t| t > 0), "{ns}");
+    let (_, fs) = call_as(&app, "s3cret", "/v1/me/first-steps").await;
+    assert_eq!(fs["steps"][0]["id"], "token", "{fs}");
+    assert_eq!(fs["show"], true, "{fs}");
+    // A new token: said no more
+    let (st, t) = as_token(&app, "s3cret", "POST", "/v1/node/token", None).await;
+    assert_eq!(st, StatusCode::OK, "{t}");
+    let new: serde_json::Value = serde_json::from_str(&t).unwrap();
+    let new = new["token"].as_str().unwrap().to_string();
+    let (_, ns) = call_as(&app, &new, "/v1/node/settings").await;
+    assert!(ns.get("api_token_exposed_at").is_none(), "{ns}");
+    let (_, fs) = call_as(&app, &new, "/v1/me/first-steps").await;
+    assert!(
+        !fs["steps"].as_array().unwrap().iter().any(|x| x["id"] == "token"),
+        "{fs}"
+    );
 }

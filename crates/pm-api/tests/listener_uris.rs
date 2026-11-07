@@ -285,7 +285,9 @@ async fn a_revoked_listener_loses_its_event_socket() {
 }
 
 /// A listener's event stream shows a queue's node links without the sign-in the owner's browser
-/// put in them: the snapshot and every zone event.
+/// put in them: the snapshot and every zone event. (The queue has dropped the sign-in on the way
+/// in already; the stream's own second look is covered by the `as_seen_by` unit test in
+/// `events.rs`, which feeds it an item that never went through a queue.)
 #[tokio::test]
 async fn a_listeners_event_stream_never_shows_a_sign_in() {
     use futures_util::StreamExt;

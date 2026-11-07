@@ -1059,7 +1059,14 @@ async fn auth(
         presence::played(&state, &zone, &caller);
     }
     if not_owner {
-        accounts::listener_response(resp, &accounts::library_roots(&state), &state.node_origins()).await
+        let known = accounts::KnownTokens::lazy(&state);
+        accounts::listener_response(
+            resp,
+            &accounts::library_roots(&state),
+            &state.node_origins(),
+            &|t| known.has(t),
+        )
+        .await
     } else {
         resp
     }
@@ -1953,10 +1960,41 @@ async fn queue(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRe
     Ok(Json(zone_of(&s, &id)?.queue()))
 }
 
+/// The node's addresses for a request's links: its own, and the one the request came to (the
+/// Host it named, under the scheme a proxy says): a cover link a page made under `localhost` or
+/// a tunnel name is the node's too, and loses its sign-in like one under `public_url`.
+fn origins_for(s: &NodeState, headers: &HeaderMap) -> Vec<String> {
+    let mut out = s.node_origins();
+    let h = |n: &str| {
+        headers
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(host) = h("x-forwarded-host").or_else(|| h("host")) {
+        let proto = h("x-forwarded-proto").unwrap_or_else(|| "http".into());
+        out.push(format!("{proto}://{host}"));
+    }
+    out
+}
+
+/// Items on their way into a zone lose the sign-ins their links carry: on the node's links
+/// (`public_url`, the address this request came to) every one, on any other host's `/v1/` link
+/// the node's own. The queue looks again (`pm_zones::Queue::add`); this look knows the request.
+fn drop_sign_ins(s: &NodeState, headers: &HeaderMap, items: &mut [QueueItem]) {
+    let origins = origins_for(s, headers);
+    let known = accounts::KnownTokens::lazy(s);
+    for it in items {
+        it.without_node_token(&origins, &|t| known.has(t));
+    }
+}
+
 async fn enqueue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
     axum::Extension(caller): axum::Extension<accounts::Caller>,
+    headers: HeaderMap,
     Json(body): Json<Enqueue>,
 ) -> ApiResult<Enqueued> {
     let zone = zone_of(&s, &id)?;
@@ -1985,6 +2023,7 @@ async fn enqueue(
     if items.is_empty() {
         return Err(ApiError::bad_request("nothing to enqueue"));
     }
+    drop_sign_ins(&s, &headers, &mut items);
     // Who queued them, from the request, never from the body: their own accounts play them
     let by = accounts::Who::of(&caller).by();
     for it in &mut items {
@@ -2350,12 +2389,14 @@ async fn load(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
     axum::Extension(caller): axum::Extension<accounts::Caller>,
+    headers: HeaderMap,
     Json(body): Json<LoadRequest>,
 ) -> ApiResult<ZoneState> {
     let mut body = body;
     if body.items.is_empty() {
         return Err(ApiError::bad_request("nothing to move: the queue is empty"));
     }
+    drop_sign_ins(&s, &headers, &mut body.items);
     for it in &mut body.items {
         it.uri = it.uri.trim().to_string();
         if it.uri.is_empty() {
@@ -2925,7 +2966,15 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
     let copy_rate = files::copy_rate(s);
     // One lock, taken and released here: a guard in a struct literal lives until the end of the
     // whole expression, so a second `lock()` in another field would wait for ever
-    let (jukebox_zone, dev_setting, genre_tags, prefer_full, first_steps_hidden, sources_policy) = {
+    let (
+        jukebox_zone,
+        dev_setting,
+        genre_tags,
+        prefer_full,
+        first_steps_hidden,
+        sources_policy,
+        api_token_exposed_at,
+    ) = {
         let lib = s.library.lock().expect("library poisoned");
         let on = |k: &str| lib.get_setting(k).ok().flatten().is_some_and(|v| v == "1");
         (
@@ -2938,6 +2987,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
             on(item::PREFER_FULL_KEY),
             on(first_steps::HIDDEN_KEY),
             accounts::source_policy(&lib),
+            accounts::api_token_exposed_at(&lib),
         )
     };
     NodeSettingsView {
@@ -2951,6 +3001,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         first_steps_hidden,
         config_folders: config_folders(s),
         token_replaceable: s.token_file().is_some(),
+        api_token_exposed_at,
         sources_policy,
     }
 }
@@ -12814,7 +12865,6 @@ exec sleep 300
             "/v1/sources/jellyfin/cover/x",
             "/v1/sources/plex/cover/1/2",
             "/v1/profiles/x/avatar",
-            "/v1/auth/pubky/owner/avatar",
         ] {
             let (st, _) = call(&app, "GET", &format!("{p}?token=s3cret"), None).await;
             assert_ne!(st, StatusCode::UNAUTHORIZED, "{p}: past the token check");

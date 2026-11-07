@@ -524,8 +524,14 @@ impl NodeState {
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
         });
-        // A queue's links on the node lose their sign-in on the way in (pm_zones::node_link_path)
+        // A queue's links on the node lose their sign-in on the way in (pm_zones::node_link_path),
+        // and a link under any other name loses the node's own sign-ins
         node.zones.set_node_origins(node.node_origins());
+        let weak = Arc::downgrade(&node);
+        node.zones.set_token_check(Some(Arc::new(move |t: &str| {
+            weak.upgrade()
+                .is_some_and(|s| crate::accounts::is_node_token_if_free(&s, t))
+        })));
         node
     }
 
