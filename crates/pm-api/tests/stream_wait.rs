@@ -39,12 +39,14 @@ async fn call(
     (status, json)
 }
 
-/// A server that accepts every connection, reads the request and never answers.
-fn silent_server() -> String {
+/// A server that accepts every connection, reads the request and never answers; `opened`
+/// counts the connections.
+fn silent_server(opened: &'static std::sync::atomic::AtomicUsize) -> String {
     let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/live", l.local_addr().unwrap());
     std::thread::spawn(move || {
         for c in l.incoming().flatten() {
+            opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::thread::spawn(move || {
                 use std::io::Read;
                 let mut c = c;
@@ -105,7 +107,10 @@ async fn a_zone_on_a_stream_that_never_answers_takes_stop_and_next() {
     let app = router(s.clone());
     let (_, zones) = call(&app, "GET", "/v1/zones", None).await;
     let zid = zones[0]["id"].as_str().unwrap().to_string();
-    let url = silent_server();
+    static OPENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let opened = || OPENED.load(std::sync::atomic::Ordering::SeqCst);
+    let url = silent_server(&OPENED);
+    let zone = s.zones.get(&pm_zones::ZoneId(zid.clone())).unwrap();
     // Three streams that never answer: each open costs the (test-sized) wait
     let items: Vec<serde_json::Value> = (0..3)
         .map(|i| serde_json::json!({"uri": format!("{url}?{i}"), "title": format!("Dead {i}")}))
@@ -114,60 +119,85 @@ async fn a_zone_on_a_stream_that_never_answers_takes_stop_and_next() {
         &app,
         "POST",
         &format!("/v1/zones/{zid}/queue"),
-        Some(serde_json::json!({"items": items, "play": true})),
+        Some(serde_json::json!({"items": items, "play": false})),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{r}");
-    // Stop while the first open is still waiting: taken before the other two are tried
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // Play, not waiting for it; Stop while the first open waits: no other stream is tried
+    zone.play();
     let t = std::time::Instant::now();
-    let (st, r) = call(
-        &app,
-        "POST",
-        &format!("/v1/zones/{zid}/transport"),
-        Some(serde_json::json!({"action": "stop"})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK, "{r}");
+    while opened() < 1 {
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(3),
+            "the first open starts"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    zone.stop();
     assert!(
         transport_is(&app, &zid, "stopped", std::time::Duration::from_millis(2_500)).await,
         "Stop is taken within one wait, not three"
     );
-    assert!(
-        t.elapsed() < std::time::Duration::from_millis(2_500),
-        "{:?}",
-        t.elapsed()
-    );
-    // Play again (the pass starts over), then Next while the first open waits: the pass ends
+    tokio::time::sleep(std::time::Duration::from_millis(2_500)).await;
+    assert_eq!(opened(), 1, "only the stream being opened when Stop came");
+    // Play again (from the item that failed), then Next while its open waits: the pass ends
     // there and the zone goes on from the next item; nothing answers, so it ends stopped with
     // the reason within a few waits rather than never
-    let (st, _) = call(
-        &app,
-        "POST",
-        &format!("/v1/zones/{zid}/transport"),
-        Some(serde_json::json!({"action": "play"})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let (st, _) = call(
-        &app,
-        "POST",
-        &format!("/v1/zones/{zid}/transport"),
-        Some(serde_json::json!({"action": "next"})),
-    )
-    .await;
-    assert_eq!(st, StatusCode::OK);
-    assert!(
-        transport_is(&app, &zid, "stopped", std::time::Duration::from_secs(6)).await,
-        "the pass ends"
-    );
-    let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
-    assert!(
-        z["error"]
+    zone.play();
+    while opened() < 2 {
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(10),
+            "the second open starts"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    zone.next();
+    // Next skips the item that failed (never one nobody tried) and opens the last; that fails
+    // too, and the zone stops with the reason
+    let t = std::time::Instant::now();
+    loop {
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        if z["error"]
             .as_str()
-            .unwrap_or("")
-            .contains("nothing in the queue could be played"),
-        "{z}"
+            .is_some_and(|e| e.contains("nothing in the queue could be played"))
+        {
+            assert_eq!(z["transport"], "stopped", "{z}");
+            break;
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(6),
+            "the pass ends: {z}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    // The first stream (Stop), the first again (Play), then the other two (Next): each once a pass
+    assert_eq!(opened(), 4, "no stream tried twice in a pass");
+}
+
+/// A stream someone other than the owner queued goes through the guarded client, built with
+/// the same wait (read when it is built). Here, in its own process, so the shortened wait never
+/// reaches another test's client.
+#[test]
+fn a_guarded_stream_that_never_answers_fails_within_the_wait() {
+    static OPENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let url = silent_server(&OPENED);
+    let here = pm_zones::FetchLimit {
+        peer: Some("127.0.0.1".parse().unwrap()),
+        lan: true,
+    };
+    pm_api::sources::STREAM_WAIT_MS_FOR_TESTS.store(400, std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(pm_api::sources::open_http_stream_guarded(&url, here).is_err());
+    });
+    let failed = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("still waiting: no deadline");
+    assert!(failed, "no answer is an error");
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        t.elapsed()
     );
 }

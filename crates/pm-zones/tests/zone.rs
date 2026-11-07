@@ -640,6 +640,115 @@ async fn a_stop_during_a_pass_over_dead_items_is_taken_at_once() {
     assert_eq!(*r.rec.samples.lock().unwrap(), frames(0, 100));
 }
 
+/// A track that ends on its own, followed by items that are slow to fail: the pass to the next
+/// item takes Stop while the next item (opened ahead) is still opening, and while a later one is
+/// opened on the audio thread.
+#[tokio::test]
+async fn a_stop_after_a_natural_end_into_dead_items_is_taken_at_once() {
+    for later in [false, true] {
+        let r = rig(&[("a", RATE, 100)]);
+        r.gate.allow(1000);
+        r.zone.enqueue(
+            std::iter::once(QueueItem::new("a"))
+                .chain((0..5).map(|i| QueueItem::new(format!("hang:{i}"))))
+                .collect(),
+            Insert::End,
+        );
+        r.zone.play();
+        // The next item, opened ahead, waits; with `later` it fails and the one after it waits
+        // on the audio thread
+        wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+        if later {
+            r.hang.allow(1);
+            wait_for(|| *r.hang.permits.lock().unwrap() == 0).await;
+            wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+        }
+        // Let a's one block end the track first
+        wait_for(|| r.rec.samples.lock().unwrap().len() == 100).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        r.zone.stop();
+        if later {
+            r.hang.allow(1);
+        }
+        tokio::time::timeout(Duration::from_secs(2), r.zone.wait_stopped())
+            .await
+            .unwrap_or_else(|_| panic!("Stop is taken during the pass (later: {later})"));
+        // Nothing more was tried
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            r.hang.waiting.load(Ordering::SeqCst),
+            u64::from(!later),
+            "later: {later}"
+        );
+        r.hang.allow(10);
+    }
+}
+
+/// Pause, the toggle, Previous and Play that arrive while a pass skips items slow to fail don't
+/// end the pass: they are served once the next playable track has started, as before.
+#[tokio::test]
+async fn other_commands_during_a_pass_are_served_after_it() {
+    for cmd in ["pause", "toggle", "previous", "play"] {
+        let r = rig(&[("a", RATE, 300)]);
+        r.zone.enqueue(
+            vec![
+                QueueItem::new("hang:0"),
+                QueueItem::new("hang:1"),
+                QueueItem::new("a"),
+            ],
+            Insert::End,
+        );
+        r.zone.play();
+        r.hang.allow(1);
+        wait_for(|| *r.hang.permits.lock().unwrap() == 0).await;
+        wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+        match cmd {
+            "pause" => r.zone.pause(),
+            "toggle" => r.zone.toggle_pause(),
+            "previous" => r.zone.previous(),
+            _ => r.zone.play(),
+        }
+        r.hang.allow(1);
+        r.gate.allow(1);
+        let mut w = r.zone.watch();
+        let st = tokio::time::timeout(
+            Duration::from_secs(3),
+            w.wait_for(|s| s.now_playing.is_some() && s.queue_index == Some(2)),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{cmd}: the pass went on to the playable track"))
+        .unwrap()
+        .clone();
+        match cmd {
+            "pause" | "toggle" => {
+                let st = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    w.wait_for(|s| s.transport == Transport::Paused),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{cmd}: paused on the track"))
+                .unwrap()
+                .clone();
+                assert!(st.now_playing.is_some(), "{cmd}: {st:?}");
+                // ...and Play resumes it
+                r.gate.allow(1000);
+                r.zone.play();
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    w.wait_for(|s| s.transport == Transport::Playing),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{cmd}: Play resumes"))
+                .unwrap();
+            }
+            _ => assert_eq!(st.transport, Transport::Playing, "{cmd}: {st:?}"),
+        }
+        r.gate.allow(1000);
+        r.zone.stop();
+        r.zone.wait_stopped().await;
+    }
+}
+
 /// The next item is opened ahead on its own thread: a next item whose open doesn't return
 /// never holds the audio thread, so Stop is taken while it is still opening.
 #[tokio::test]

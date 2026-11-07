@@ -108,6 +108,9 @@ enum Prefetch {
 /// answers is open long before; one that doesn't answer is not waited for.
 const PREFETCH_SETTLE: Duration = Duration::from_millis(500);
 
+/// How often a track's end, waiting for the next item still opening, looks for a command.
+const PREFETCH_POLL: Duration = Duration::from_millis(50);
+
 impl Prefetched {
     fn abandoned(&self) -> Result<Opened, SourceError> {
         Err(SourceError::Open {
@@ -417,16 +420,21 @@ impl Engine {
         Flow::Continue
     }
 
-    /// Whether a command that changes what plays (Stop, Next, Play, …) has arrived: a pass over
-    /// items that are slow to fail (streams that don't answer) ends there, and the commands
-    /// are served next. Volume, seek and queue edits are kept for after the pass.
+    /// Whether a command that replaces what plays (Stop, Next, Play of a queue item, Shutdown)
+    /// has arrived: a pass over items that are slow to fail (streams that don't answer) ends
+    /// there, and the commands are served next. Every other command (Pause, the toggle,
+    /// Previous, Play, volume, seek, queue edits) is kept and served after the pass, once a track
+    /// plays or the pass has ended, as before.
     fn interrupted(&mut self) -> bool {
         while let Ok(c) = self.cmds.try_recv() {
             self.deferred.push_back(c);
         }
-        self.deferred
-            .iter()
-            .any(|(_, c)| !matches!(c, Command::Volume(_) | Command::QueueChanged | Command::Seek(_)))
+        self.deferred.iter().any(|(_, c)| {
+            matches!(
+                c,
+                Command::Stop | Command::Next | Command::Play(Some(_)) | Command::Shutdown
+            )
+        })
     }
 
     /// Start the queue item at `index` from the top, skipping unopenable
@@ -461,18 +469,15 @@ impl Engine {
                         q.set_current(Some(index));
                         q.after_skip()
                     };
+                    // A command that replaces what plays arrived while that item was failing:
+                    // the pass ends here, the queue's current at the item that failed (Next then
+                    // goes to the one after it, never past an item nobody tried)
+                    if self.interrupted() {
+                        return;
+                    }
                     match next {
                         Some(i) => index = i,
                         None => break,
-                    }
-                    // A command that changes what plays arrived while that item was failing:
-                    // the pass ends here, at the next item (a Play afterwards goes on from it)
-                    if self.interrupted() {
-                        self.queue
-                            .lock()
-                            .expect("queue poisoned")
-                            .set_current(Some(index));
-                        return;
                     }
                 }
             }
@@ -1088,7 +1093,19 @@ impl Engine {
                 break;
             };
             let opened = match self.prefetch.take() {
-                Some(p) if p.index == index && p.item.id == item.id => p.wait(),
+                Some(mut p) if p.index == index && p.item.id == item.id => {
+                    // The next item opened ahead may still be opening (a stream that doesn't
+                    // answer): wait for it, but take Stop, Next or a Play of another item meanwhile
+                    loop {
+                        if p.settle(PREFETCH_POLL) {
+                            break p.wait();
+                        }
+                        if self.interrupted() {
+                            // Dropped: its thread ends by itself, its result unused
+                            return;
+                        }
+                    }
+                }
                 _ => self.open(&item),
             };
             match opened {
@@ -1104,9 +1121,15 @@ impl Engine {
                         item,
                         reason: e.to_string(),
                     });
-                    let mut q = self.queue.lock().expect("queue poisoned");
-                    q.set_current(Some(index));
-                    next = q.after_skip();
+                    {
+                        let mut q = self.queue.lock().expect("queue poisoned");
+                        q.set_current(Some(index));
+                        next = q.after_skip();
+                    }
+                    // As in `start_index`: a Stop, Next or Play of another item ends the pass
+                    if self.interrupted() {
+                        return;
+                    }
                 }
             }
         }

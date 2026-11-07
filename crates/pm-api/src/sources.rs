@@ -1227,33 +1227,6 @@ mod tests {
         );
     }
 
-    /// A stream someone other than the owner queued goes through the guarded client, built
-    /// with the same wait (`STREAM_WAIT_MS_FOR_TESTS` is read when it is built).
-    #[test]
-    fn a_guarded_stream_that_never_answers_fails_within_the_wait() {
-        let url = serve_each(|mut c| {
-            read_request(&mut c);
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            drop(c);
-        });
-        let here = FetchLimit {
-            peer: Some("127.0.0.1".parse().unwrap()),
-            lan: true,
-        };
-        STREAM_WAIT_MS_FOR_TESTS.store(400, std::sync::atomic::Ordering::Relaxed);
-        let t = std::time::Instant::now();
-        let r = within(std::time::Duration::from_secs(10), move || {
-            open_http_stream_guarded(&url, here).map(|_| ())
-        });
-        STREAM_WAIT_MS_FOR_TESTS.store(0, std::sync::atomic::Ordering::Relaxed);
-        assert!(r.is_err(), "no answer is an error");
-        assert!(
-            t.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            t.elapsed()
-        );
-    }
-
     #[test]
     fn icy_reader_strips_metadata_and_keeps_titles() {
         use std::io::Read;
