@@ -159,10 +159,19 @@ impl Processor for Identity {
 struct Factory {
     tracks: BTreeMap<String, (AudioFormat, u64)>,
     gate: Arc<Gate>,
+    /// Opens of `hang:` items wait for a permit here (a stream slow to answer), then fail.
+    hang: Arc<Gate>,
 }
 
 impl SourceFactory for Factory {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
+        if item.uri.starts_with("hang:") {
+            self.hang.take();
+            return Err(SourceError::Open {
+                uri: item.uri.clone(),
+                reason: "no answer".into(),
+            });
+        }
         let (fmt, total) = self.tracks.get(&item.uri).ok_or_else(|| SourceError::Open {
             uri: item.uri.clone(),
             reason: "no such track".into(),
@@ -391,18 +400,21 @@ impl AudioSink for RecSink {
 struct Rig {
     zone: Zone,
     gate: Arc<Gate>,
+    hang: Arc<Gate>,
     rec: Arc<Recorder>,
     events: broadcast::Receiver<ZoneEvent>,
 }
 
 fn rig(tracks: &[(&str, u32, u64)]) -> Rig {
     let gate = Arc::new(Gate::default());
+    let hang = Arc::new(Gate::default());
     let factory = Factory {
         tracks: tracks
             .iter()
             .map(|(u, rate, n)| (u.to_string(), (AudioFormat::pcm(*rate, 16, 1), *n)))
             .collect(),
         gate: gate.clone(),
+        hang: hang.clone(),
     };
     let rec = Arc::new(Recorder::default());
     let output = Arc::new(RecOutput {
@@ -417,6 +429,7 @@ fn rig(tracks: &[(&str, u32, u64)]) -> Rig {
     Rig {
         zone,
         gate,
+        hang,
         rec,
         events,
     }
@@ -582,6 +595,82 @@ async fn unopenable_items_are_skipped() {
     r2.zone.play();
     let st = r2.zone.wait_stopped().await;
     assert!(st.error.as_deref().unwrap_or("").contains("nothing"), "{st:?}");
+}
+
+/// Items that are slow to fail (streams whose server never answers) are skipped one after
+/// another; a Stop that arrives meanwhile is taken at once, not after the whole pass.
+#[tokio::test]
+async fn a_stop_during_a_pass_over_dead_items_is_taken_at_once() {
+    let mut r = rig(&[("a", RATE, 100)]);
+    r.gate.allow(1000);
+    r.zone.enqueue(
+        (0..8)
+            .map(|i| QueueItem::new(format!("hang:{i}")))
+            .chain([QueueItem::new("a")])
+            .collect(),
+        Insert::End,
+    );
+    r.zone.play();
+    // The first two opens end; the third is in progress when Stop arrives
+    r.hang.allow(2);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.zone.stop();
+    r.hang.allow(1);
+    // The Stop is taken (acknowledged) as soon as that open fails, not after the other five
+    tokio::time::timeout(Duration::from_secs(2), r.zone.wait_stopped())
+        .await
+        .expect("Stop is taken between two opens");
+    // No more items were tried, and nothing played
+    assert_eq!(r.hang.waiting.load(Ordering::SeqCst), 0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        *r.hang.permits.lock().unwrap(),
+        0,
+        "the pass went on past the Stop"
+    );
+    assert!(r.rec.samples.lock().unwrap().is_empty());
+    let k = kinds(&drain_events(&mut r.events));
+    assert_eq!(k.iter().filter(|k| k.starts_with("skip:")).count(), 3, "{k:?}");
+    assert!(r.zone.state().error.is_none(), "{:?}", r.zone.state());
+    // Play afterwards runs the pass from the start again (the remaining items fail at once)
+    r.hang.allow(100);
+    r.zone.play();
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(*r.rec.samples.lock().unwrap(), frames(0, 100));
+}
+
+/// The next item is opened ahead on its own thread: a next item whose open doesn't return
+/// never holds the audio thread, so Stop is taken while it is still opening.
+#[tokio::test]
+async fn a_next_item_slow_to_open_does_not_hold_the_zone() {
+    let r = rig(&[("a", RATE, 300)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("hang:next")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    // The prefetch of the next item has started and is waiting
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.gate.blocked().await;
+    r.zone.stop();
+    r.gate.allow(1);
+    let mut w = r.zone.watch();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        w.wait_for(|s| s.transport == Transport::Stopped),
+    )
+    .await
+    .expect("Stop is taken while the next item is still opening")
+    .unwrap();
+    assert_eq!(
+        r.hang.waiting.load(Ordering::SeqCst),
+        1,
+        "the open is still in progress"
+    );
+    r.hang.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 0).await;
 }
 
 #[tokio::test]
@@ -890,6 +979,7 @@ async fn zones_manager_ids_and_lookup() {
     let zones = Zones::new(Arc::new(Factory {
         tracks: BTreeMap::new(),
         gate,
+        hang: Arc::new(Gate::default()),
     }));
     let out: Arc<dyn Output> = Arc::new(NullOutput::new());
     let z1 = zones.create("Living Room", out.clone());
@@ -1157,6 +1247,7 @@ async fn a_panic_stops_the_zone_with_an_error_and_the_zone_plays_again() {
             .into_iter()
             .collect(),
         gate: gate.clone(),
+        hang: Arc::new(Gate::default()),
     };
     let rec = Arc::new(Recorder::default());
     let output = Arc::new(PanicsOnce {
@@ -1504,6 +1595,7 @@ async fn a_level_the_device_announces_during_a_set_stands() {
     let zones = Zones::new(Arc::new(Factory {
         tracks: BTreeMap::new(),
         gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
     }));
     let out = Arc::new(HeldSet {
         inner: NullOutput::with_volume(pm_model::VolumeKind::Percent),

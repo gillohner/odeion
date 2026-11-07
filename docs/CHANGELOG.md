@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-07
 
-- **A stream that doesn't answer ends with an error instead of holding the zone.** A radio or web stream whose server accepts the connection but sends nothing now fails after 20 seconds, like one that stops sending mid-song. A live stream still plays for as long as it sends.
+- **A stream that doesn't answer ends with an error instead of holding the zone.** A radio or web stream whose server accepts the connection but sends nothing now fails after 20 seconds, like one that stops sending mid-song. A live stream still plays for as long as it sends. Stop, Next and Play are taken while such a stream is being skipped, not after every item in the queue was tried, and the next song is opened ahead on its own thread, so a next item slow to answer never holds the zone.
 
 - **Looking for devices no longer adds the node's own zones as speakers, and late speakers find their zone by themselves** (a rescan on the NUC made five `<zone>-2` zones that would have played into the node itself, and a start missed the Linn's UPnP AV side and the TV). The zones the node offers as UPnP/DLNA renderers are recognised by their ID or their address and never taken as outputs, typed addresses included. At start the search asks three times within its window; each UPnP renderer that had a zone is remembered at its description address and found there when the search misses it; and the node looks again 20 s after starting and every 5 minutes, so a TV or a Linn that answers late gets its zone without pressing "Look for devices". A device that answered but couldn't be described now says so in the log.
 
