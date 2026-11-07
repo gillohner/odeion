@@ -51,9 +51,11 @@ A reader trusts an entry only if all of these hold:
 - `data.name` equals the entry's `name`.
 
 Since v2 a client adds a second custom proof to its entry, `signer: {grant, pop}`, made and verified
-exactly like the first (the same grant, the same `iss` and capability rules), with the data
+exactly like the first (the same `iss` and capability rules), with the data
 `{"kind": "pubky.music.vault-signer", "v": 1, "client_key": "<hex X25519 public key>", "ed25519_public": "<hex
-Ed25519 public key>"}`. Its `client_key` must equal the entry's. `ed25519_public` is the key the client signs its
+Ed25519 public key>"}`. Its `client_key` must equal the entry's, and its `grant` must be the entry's
+client-proof `grant`, byte for byte (so its proof is signed by the same grant key): a signer proof under any
+other grant, even another grant of the same person, gives the entry no signing key. `ed25519_public` is the key the client signs its
 blobs with (its signing key): **Ed25519, with the seed `HKDF-SHA-256(salt = none, ikm = the client's X25519 secret, info =
 "pubky.music/vault/v2/sign")`**, so a client keeps no second secret and a backup of its client secret carries
 it. It is re-published with the client proof when the grant is renewed. An entry without a verifying signer
@@ -215,23 +217,31 @@ and a reader takes a blob only from one of the person's devices.
   with the signing key its entry proved), so those sign-ins survive the sign-out under the rotating client's
   signature, and nothing the device writes from then on is taken.
 - **Writing over a blob nobody trusted signed:** a client that holds a sign-in of its own writes it over such
-  a blob with a new data key, the next epoch and a revision above the blob's, so what the blob held is never
-  taken and never comes back as newer. It never rewrites that blob from its content (adding a device, a
+  a blob (a node does so at its next sync) with a new data key, the next epoch and a revision above the
+  blob's, so what the blob held is never taken and never comes back as newer; a blob at the last epoch or
+  revision (2^64 - 1) is refused instead. It never rewrites that blob from its content (adding a device, a
   rotation), and never takes its tokens for a refresh.
-- **Reading an unsigned blob** (a client from before v2): only while the reader has never seen a signed copy
-  of that service (a per-service note in the reader's own record), and, in a node, only when it has no copy
-  of its own. It is never taken over a signed copy. The writer-chosen markers inside the plaintext (`node`,
+- **A blob written where there is none** (and one written over a blob nobody trusted signed) starts at an
+  epoch above the highest the writer has seen for that service and no lower than the current Unix time, with
+  a revision above the highest it has seen: above what another device saw and this one missed.
+- **Reading an unsigned blob** (a client from before v2): only while some trusted entry has no signer proof
+  (a client from before v2 is still listed), the reader has never seen a signed copy of that service (a
+  per-service note in the reader's own record), and, in a node, only when it has no copy of its own. It is
+  never taken over a signed copy. An unsigned blob is never signed by a reader that took it: it isn't
+  shared on to a new device, and a node signs it only when it equals a copy the node had of its own (not
+  one it took from the vault unsigned). The writer-chosen markers inside the plaintext (`node`,
   `created_by`, …) count only on signed blobs.
 - **What a reader remembers** (its own file, beside its record of sign-outs): per service the highest
   `(epoch, revision)` of a signed blob it read or wrote, which services it has seen signed, and the highest
   `signed_out_everywhere_at` it has seen in the device list. A signed blob below the mark is refused as
   stale, so a homeserver that serves an old copy can't take a sign-in back, also where `LOCK` isn't
-  supported; a device list with a lower `signed_out_everywhere_at` doesn't undo a sign-out everywhere. The
-  marks of every blob are forgotten when the marker moves (every sign-in starts over), a service's mark is
-  forgotten when the reader deletes that blob or finds it gone, and a person can tell a node to take the
-  vault's copy by hand (`POST /v1/vault/sync {service, take: "vault"}`), which forgets that one mark: a
-  sign-in made anew on another device after a sign-out and a new sign-in there within one sync interval
-  would otherwise look stale.
+  supported; a device list with a lower `signed_out_everywhere_at` doesn't undo a sign-out everywhere. A
+  `signed_out_everywhere_at` later than the reader's clock plus 10 minutes is no sign-out that happened: it
+  is neither used nor remembered. The marks stay when the marker moves and when a blob is deleted or found
+  gone (an older copy put back is still older; a sign-in written anew starts above them, see above). The only
+  way to forget one is by hand: a person can tell a node to take the vault's copy (`POST /v1/vault/sync
+  {service, take: "vault"}`), which forgets that one mark. A node never takes a vault copy of a sign-in made
+  (by its sign-in id) before the last sign-out everywhere.
 - **Migration window.** The envelope's `version` stays `1`; readers from before v2 keep unknown members, so
   they still open signed blobs and keep `writer` when they rewrite one (then the signature no longer
   matches the content, and updated readers refuse that copy: a client from before v2 that rewrites a signed

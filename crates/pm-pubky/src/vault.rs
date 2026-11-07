@@ -437,8 +437,9 @@ impl<'a> Vault<'a> {
         }
     }
 
-    /// Forget the newest copy seen of `service` (the person takes the vault's copy by hand after
-    /// a sign-in made anew elsewhere, or the blob is gone).
+    /// Forget the newest copy seen of `service`: only when the person takes the vault's copy by
+    /// hand. A blob gone keeps its mark, so an older copy put back later is still refused; a
+    /// sign-in written anew starts above it ([`Vault::write`]).
     pub fn forget_mark(&self, service: &str) -> Result<()> {
         if let Some(p) = self.marks {
             update_marks(p, |m| {
@@ -460,6 +461,14 @@ impl<'a> Vault<'a> {
             })?;
         }
         Ok(())
+    }
+
+    /// The newest copy of `service` seen (`[epoch, revision]`), if any.
+    fn mark_of(&self, service: &str) -> Result<Option<(u64, u64)>> {
+        match self.marks {
+            Some(p) => Ok(read_marks(p)?.blobs.get(service).copied()),
+            None => Ok(None),
+        }
     }
 
     /// Refuse a copy older than the newest seen, or an unsigned one where a signed one was seen.
@@ -485,18 +494,22 @@ impl<'a> Vault<'a> {
 
     /// When the person last signed out everywhere: the device list's marker, or the higher one
     /// this node remembers (a list the homeserver serves from before a sign-out everywhere
-    /// doesn't undo it). A new marker forgets every blob's newest copy: they start over.
+    /// doesn't undo it). A marker later than now (beyond [`MARKER_SKEW`]) is no sign-out that
+    /// happened: it is neither used nor remembered. The blobs' newest copies stay remembered
+    /// across a new marker (a copy from before it, put back, is still older).
     pub fn marker(&self, ix: &Index) -> Result<Option<u64>> {
-        let served = Self::signed_out_everywhere_at(ix);
+        let latest = now().saturating_add(MARKER_SKEW);
+        let possible = |t: Option<u64>| t.filter(|t| *t <= latest);
+        let served = possible(Self::signed_out_everywhere_at(ix));
         let Some(p) = self.marks else {
             return Ok(served);
         };
         update_marks(p, |m| {
-            if served > m.signed_out_everywhere_at {
-                m.signed_out_everywhere_at = served;
-                m.blobs.clear();
+            let kept = possible(m.signed_out_everywhere_at);
+            if served > kept || kept != m.signed_out_everywhere_at {
+                m.signed_out_everywhere_at = kept.max(served);
             }
-            m.signed_out_everywhere_at.max(served)
+            kept.max(served)
         })
         .map_err(Into::into)
     }
@@ -599,11 +612,11 @@ impl<'a> Vault<'a> {
     /// A service's sign-in, decrypted; `None` when there is none.
     /// [`VaultError::NotARecipient`] when this node isn't (yet) one of its clients.
     /// [`VaultStoreError::NotADevice`] when it carries a signature that isn't a trusted device's,
+    /// or none while every trusted device signs (no client from before v2 is left to write it),
     /// [`VaultStoreError::Stale`] when it is older than a copy this node has seen.
     pub async fn read(&self, service: &str) -> Result<Option<Opened>> {
         let path = Self::blob_path(service)?;
         let Some(env) = self.envelope(service).await? else {
-            self.forget_mark(service)?;
             return Ok(None);
         };
         let (data_key, sign_in) = spec::open_sign_in(&self.owner, &path, &env, self.secret)?;
@@ -622,6 +635,14 @@ impl<'a> Vault<'a> {
             None => None,
         };
         self.check_blob(service, env.epoch, sign_in.revision, signed_by.is_some())?;
+        if signed_by.is_none() {
+            // Unsigned is the migration window only: while some trusted device signs nothing
+            let ix = self.index().await?;
+            let trusted = self.trusted(&ix);
+            if !trusted.is_empty() && trusted.iter().all(|t| t.sign_key.is_some()) {
+                return Err(VaultStoreError::NotADevice(service.to_string()));
+            }
+        }
         if signed_by.is_some() {
             self.note_blob(service, env.epoch, sign_in.revision)?;
         }
@@ -636,7 +657,8 @@ impl<'a> Vault<'a> {
 
     /// Write a service's sign-in, wrapped to this node and to `others`. Returns its revision.
     ///
-    /// - A new sign-in starts at epoch 1 with a new data key.
+    /// - A new sign-in starts with a new data key, at an epoch above the newest copy seen and no
+    ///   lower than the current Unix time.
     /// - Rewriting one this node can open keeps its data key and epoch while nobody is dropped.
     ///   When a current recipient is missing from the new set, the key rotates (epoch + 1), so a
     ///   dropped client can't read what is written from now on.
@@ -709,9 +731,24 @@ impl<'a> Vault<'a> {
         if must_exist && existing.is_none() && past_untrusted.is_none() {
             return Err(VaultError::Format("the sign-in was removed meanwhile").into());
         }
+        // A blob written where there is none, or past one nobody trusted wrote, starts above the
+        // newest copy this node has seen (kept when a blob is gone, so an older one put back
+        // stays older) and at the current time at least (above what another node saw and this
+        // one missed)
+        let floor = {
+            let (e, r) = self.mark_of(service)?.unwrap_or((0, 0));
+            (e.saturating_add(1).max(now()), r.saturating_add(1))
+        };
         let (data_key, epoch, revision) = match (&existing, past_untrusted) {
-            (None, Some((epoch, revision))) => (DataKey::generate(), epoch + 1, revision + 1),
-            (None, None) => (DataKey::generate(), 1, 1),
+            (None, Some((epoch, revision))) => {
+                let (Some(e), Some(r)) = (epoch.checked_add(1), revision.checked_add(1)) else {
+                    return Err(
+                        VaultError::Format("the vault's copy is at the last epoch or revision").into(),
+                    );
+                };
+                (DataKey::generate(), e.max(floor.0), r.max(floor.1))
+            }
+            (None, None) => (DataKey::generate(), floor.0, floor.1),
             (Some(o), _) => {
                 let dropped = o.recipients.iter().any(|k| !recipients.contains(k));
                 if dropped {
@@ -1344,9 +1381,9 @@ impl Vault<'_> {
             if !env.has_recipient(&me) {
                 return Ok(false);
             }
-            // A blob the node can't vouch for (nobody trusted signed it, or it is stale) is
-            // not written again under this node's signature
-            if self.read(service).await.is_err() {
+            // A blob the node can't vouch for (unsigned, nobody trusted signed it, or it is
+            // stale) is not written again under this node's signature
+            if !matches!(self.read(service).await, Ok(Some(o)) if o.signed_by.is_some()) {
                 return Ok(false);
             }
             let mut added = false;
@@ -1381,6 +1418,9 @@ const WAIT_FOR_OTHERS: Duration = Duration::from_secs(spec::LOCK_SECONDS + 5);
 const CALL_FOR: Duration = Duration::from_secs(2 * spec::LOCK_SECONDS);
 /// The device list's member saying when the person last signed out everywhere (Unix seconds).
 pub const SIGNED_OUT_EVERYWHERE: &str = "signed_out_everywhere_at";
+/// How far ahead of this node's clock a sign-out everywhere may be dated (another device's clock
+/// running ahead); anything later is ignored.
+pub const MARKER_SKEW: u64 = 10 * 60;
 
 /// The longest the service-side part of a sign-out may hold a sign-in.
 const BEFORE_FOR: Duration = Duration::from_secs(20);
@@ -2058,8 +2098,7 @@ impl Vault<'_> {
         if let Some(lp) = spec::lease_path(service) {
             let _ = storage.delete(lp.as_str()).await;
         }
-        // Gone: a sign-in made anew starts over at epoch 1
-        self.forget_mark(service)?;
+        // Gone, its mark kept: a sign-in made anew starts above it
         Ok(true)
     }
 }

@@ -651,6 +651,36 @@ fn a_signer_proof_gives_the_entrys_signing_key() {
     let mut narrow = entry.clone();
     narrow.signer.as_mut().unwrap().grant = claims(&["/:rw"]).sign(&identity, GRANT_JWS_TYP);
     assert!(signer(&narrow).unwrap_err().contains("doesn't name the vault"));
+    // Another grant of the same person (a signed-out device still holds its own) naming this
+    // entry's key: its proof verifies, but it isn't the entry's grant, so it gives no key
+    let device = Keypair::from_secret(&bytes(0xc0));
+    let mut theirs = claims(&[VAULT_CAPABILITY]);
+    theirs.cnf = device.public_key();
+    theirs.jti = GrantId::parse("othergrant01").unwrap();
+    let their_grant = theirs.sign(&identity, GRANT_JWS_TYP);
+    let their_pop = {
+        let header = URL_SAFE_NO_PAD.encode(json!({"alg": "EdDSA", "typ": CUSTOM_POP_JWS_TYP}).to_string());
+        let data = serde_json::to_value(SignerProofData::new(
+            vault_key,
+            SigningKey::derive(&ClientSecret::from_bytes(bytes(0x33))).public(),
+        ))
+        .unwrap();
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({"gid": "othergrant01", "iat": now - 5, "nonce": "signernonce2", "data": data}).to_string(),
+        );
+        let input = format!("{header}.{payload}");
+        let sig = device.sign(input.as_bytes());
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+    };
+    let mut foreign = entry.clone();
+    foreign.signer = Some(Proof {
+        grant: their_grant,
+        pop: their_pop,
+    });
+    assert_eq!(
+        signer(&foreign),
+        Err("the signer proof's grant isn't the entry's own".into())
+    );
     // No signer proof: a client from before v2
     let mut old = entry.clone();
     old.signer = None;
