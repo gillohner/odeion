@@ -4624,7 +4624,16 @@
   // ---- one row, one tile, one menu (docs/ux/08-item-page.md) ----
   // A node link with this browser's sign-in, for the places that load it (an <img>, MediaSession
   // artwork). Never in data sent to the node: a queue item's image is kept as the page gave it.
-  const imgSrc = (u) => (u && u.startsWith('/v1/') ? u + tokenQ() : u);
+  // A link saved before (a browser queue in localStorage) may already hold a sign-in: any
+  // `token` goes first, so there is one, joined to the link's own query.
+  const imgSrc = (u) => {
+    if (!u || !u.startsWith('/v1/')) return u;
+    const [head, hash = ''] = u.split('#');
+    const [path, query = ''] = head.split('?');
+    const keep = query.split('&').filter((p) => p && p !== 'token' && !p.startsWith('token='));
+    if (state.token) keep.push('token=' + encodeURIComponent(state.token));
+    return path + (keep.length ? '?' + keep.join('&') : '') + (hash ? '#' + hash : '');
+  };
   const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: t.image || fallback.image || null });
   // Library tracks by id, in order and with duplicates: the ones a page already loaded come
   // from the track cache, the rest are read four at a time (not one request per song at once).

@@ -1091,7 +1091,11 @@ pub fn check_listener_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError>
 
 /// A listener's JSON answers show a library file by its name, not by where the owner keeps it
 /// (`file.path` of every track, in lists, albums, search and item pages alike).
-pub async fn listener_response(resp: axum::response::Response, roots: &[String]) -> axum::response::Response {
+pub async fn listener_response(
+    resp: axum::response::Response,
+    roots: &[String],
+    origins: &[String],
+) -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
     // Only application/json answers are rewritten: streams (search's NDJSON, events, audio, covers)
@@ -1111,7 +1115,7 @@ pub async fn listener_response(resp: axum::response::Response, roots: &[String])
     let rewritten = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|mut v| {
-            (hide_file_paths(&mut v) | hide_paths_under(&mut v, roots) | hide_node_tokens(&mut v))
+            hide_for_listener(&mut v, roots, origins)
                 .then(|| serde_json::to_vec(&v).ok())
                 .flatten()
         });
@@ -1125,22 +1129,32 @@ pub async fn listener_response(resp: axum::response::Response, roots: &[String])
     axum::response::Response::from_parts(parts, body)
 }
 
-/// Every link on the node (`/v1/…`) in the answer loses its `token` query parameter: a queue
-/// item's cover or stream link made by a browser never hands that browser's sign-in to whoever
-/// else reads the zone. Queues drop it on the way in (`pm_zones::QueueItem::without_node_token`);
-/// this is the second look, on every answer. Whether anything changed.
-pub fn hide_node_tokens(v: &mut serde_json::Value) -> bool {
+/// What a listener (or party guest) sees of an answer, JSON answers and event messages alike:
+/// file names, not where the owner keeps files ([`hide_file_paths`], [`hide_paths_under`]), and
+/// the node's links without a sign-in ([`hide_node_tokens`]). Whether anything changed.
+pub fn hide_for_listener(v: &mut serde_json::Value, roots: &[String], origins: &[String]) -> bool {
+    hide_file_paths(v) | hide_paths_under(v, roots) | hide_node_tokens(v, origins)
+}
+
+/// Every link on the node (`pm_zones::node_link_path`) in the answer loses its `token` query
+/// parameters: a queue item's cover or stream link made by a browser never hands that browser's
+/// sign-in to whoever else reads the zone. Queues drop them on the way in
+/// (`pm_zones::QueueItem::without_node_token`); this is the second look, on every answer.
+/// Whether anything changed.
+pub fn hide_node_tokens(v: &mut serde_json::Value, origins: &[String]) -> bool {
     use serde_json::Value;
     match v {
-        Value::String(t) => match pm_zones::node_link_without_token(t) {
+        Value::String(t) => match pm_zones::node_link_without_token(t, origins) {
             Some(clean) => {
                 *t = clean;
                 true
             }
             None => false,
         },
-        Value::Object(o) => o.values_mut().fold(false, |c, x| hide_node_tokens(x) | c),
-        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_node_tokens(x) | c),
+        Value::Object(o) => o
+            .values_mut()
+            .fold(false, |c, x| hide_node_tokens(x, origins) | c),
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_node_tokens(x, origins) | c),
         _ => false,
     }
 }
@@ -1160,11 +1174,13 @@ pub struct CleanedQueues {
 }
 
 /// At start, before the zones restore their queues: every saved queue (`queue.*`) loses the
-/// `token` query parameter of its node links, and whatever sign-in was in one ends, since the
-/// queue was readable by everyone who could use the zone. Browsers and apps sign in again by
-/// themselves; the API token is the owner's to replace (Settings).
+/// `token` query parameters of its node links, and a sign-in of this node that was in one ends,
+/// since the queue was readable by everyone who could use the zone: the owner's browser sessions
+/// and device sign-ins (they sign in again by themselves), a listener's token. The API token is
+/// the owner's to replace (Settings): reported. A token this node doesn't know ends nothing.
 pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut out = CleanedQueues::default();
+    let origins = s.node_origins();
     let mut found: Vec<String> = Vec::new();
     let lib = s.library.lock().expect("library poisoned");
     for (key, json) in lib.settings_with_prefix("queue.")? {
@@ -1179,11 +1195,11 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
             let mut carried = false;
             for f in ["uri", "image"] {
                 if let Some(serde_json::Value::String(link)) = it.get_mut(f) {
-                    if let Some(t) = pm_zones::node_link_token(link) {
+                    for t in pm_zones::node_link_tokens(link, &origins) {
                         found.push(t.to_string());
                         carried = true;
                     }
-                    if let Some(clean) = pm_zones::node_link_without_token(link) {
+                    if let Some(clean) = pm_zones::node_link_without_token(link, &origins) {
                         *link = clean;
                     }
                 }
@@ -1199,12 +1215,25 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
         return Ok(out);
     }
     let api = s.token();
+    let owners: Vec<String> = [OWNER_SESSIONS, DEVICE_SESSIONS]
+        .iter()
+        .flat_map(|list| {
+            lib.get_setting(list)
+                .ok()
+                .flatten()
+                .and_then(|j| serde_json::from_str::<Vec<PersonToken>>(&j).ok())
+                .unwrap_or_default()
+        })
+        .map(|t| t.hash)
+        .collect();
     let mut listener_keys = Vec::new();
     for t in &found {
+        let h = hash(t);
         if api.as_deref() == Some(t.as_str()) {
             out.api_token_found = true;
-        }
-        if let Some(h) = t.strip_prefix("pml_").map(|_| hash(t)) {
+        } else if owners.contains(&h) {
+            out.owner_sessions_ended = true;
+        } else if t.starts_with("pml_") {
             let key = update_in(&lib, TOKENS, |all| {
                 let key = all.iter().find(|x| x.hash == h).map(|x| x.key.clone());
                 all.retain(|x| x.hash != h);
@@ -1214,13 +1243,12 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
                 out.listener_tokens_ended += 1;
                 listener_keys.push(key);
             }
-        } else {
-            // An owner's browser session or device sign-in, the API token, or something older:
-            // the owner's sessions end once, as with Make a new token
-            out.owner_sessions_ended = true;
         }
     }
-    if out.owner_sessions_ended {
+    // The owner's sign-ins end once, as with Make a new token: one of them was readable, and
+    // with the API token, every session made under it should be made again too
+    if out.owner_sessions_ended || out.api_token_found {
+        out.owner_sessions_ended = true;
         update_in(&lib, OWNER_SESSIONS, Vec::clear)?;
         update_in(&lib, DEVICE_SESSIONS, Vec::clear)?;
     }
@@ -1473,7 +1501,8 @@ mod tests {
             "now_playing": {"item": {"image": "/v1/library/albums/7/cover?a=1&token=pml_x#f"}},
             "error": "no token here"
         });
-        assert!(hide_node_tokens(&mut v));
+        let me = ["http://127.0.0.1:7788".to_string()];
+        assert!(hide_node_tokens(&mut v, &me));
         let text = v.to_string();
         for t in ["pmo_abc", "s3cret", "pml_x"] {
             assert!(!text.contains(t), "{t}: {text}");
@@ -1488,7 +1517,10 @@ mod tests {
             v["now_playing"]["item"]["image"],
             "/v1/library/albums/7/cover?a=1#f"
         );
-        assert!(!hide_node_tokens(&mut v), "nothing left to hide");
+        assert!(!hide_node_tokens(&mut v, &me), "nothing left to hide");
+        // Another host's `/v1/` link keeps its own token
+        let mut theirs = serde_json::json!(["https://other.example/v1/x?token=theirs"]);
+        assert!(!hide_node_tokens(&mut theirs, &me));
     }
 
     /// A library song's open error names its file only in its text: under the library's folders

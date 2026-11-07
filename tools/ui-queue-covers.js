@@ -9,6 +9,9 @@ const shots = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '.
 const COVER = '/v1/library/albums/7/cover';
 const THEIRS = 'https://cdn.example/t.jpg';
 const fmt = { kind: 'pcm', rate_hz: 44100, bits: 16, channels: 2 };
+// A 1×1 PNG for the cover requests, which are recorded with their query (what the browser loads)
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const covers = async (context) => { const seen = []; await context.route(/\/v1\/library\/albums\/7\/cover/, (r) => { seen.push(new URL(r.request().url()).search); return r.fulfill({ status: 200, contentType: 'image/png', body: PNG }); }); return seen; };
 const until = async (f, label) => { const t = Date.now(); while (Date.now() - t < 7000) { const v = await f(); if (v) return v; await new Promise((r) => setTimeout(r, 100)); } throw new Error('Timed out: ' + label); };
 
 (async () => {
@@ -24,6 +27,7 @@ const until = async (f, label) => { const t = Date.now(); while (Date.now() - t 
     const fixtures = { '/item/album/lib-7': { body: albumPage }, '/item/album/lib-7/extras': { body: { collections: [], related: [], concerts: [], similar: [] } }, '/library/tracks/101': { body: { ...track, id: 101, title: 'Song 1' } }, '/zones': { body: [zone] }, '/zones/z1': { body: zone }, '/zones/z1/queue': { body: [] }, '/outputs': { body: [{ id: 'null', name: 'Kitchen', kind: 'null', caps: {} }] } };
     const run = await create(browser, 1280, { zone: 'z1', fixtures });
     const { page, state } = run;
+    const loaded = await covers(run.context);
     // The event stream's snapshot names the zones; the page keeps the chosen one when it is there
     await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
     await go(page, '/album/lib-7');
@@ -39,13 +43,24 @@ const until = async (f, label) => { const t = Date.now(); while (Date.now() - t 
     console.log('ok   a mixed list played to a zone sends cover links without a sign-in');
     // Where the browser loads the picture, it signs in
     await go(page, '/now-playing');
-    const art = await until(() => page.evaluate((c) => [...document.querySelectorAll('img')].map((i) => i.getAttribute('src')).find((s) => s && s.startsWith(c)), COVER), 'the dashboard shows the playing song\'s art');
-    assert.equal(art, `${COVER}?token=fixture-owner`, 'the art loads with this browser\'s sign-in');
+    await until(() => loaded.length, 'the dashboard loads the playing song\'s art');
+    assert.ok(loaded.every((q) => q === '?token=fixture-owner'), 'the art loads with this browser\'s sign-in: ' + loaded.join(' '));
     console.log('ok   the dashboard loads the cover with the browser\'s sign-in');
     assert.deepEqual(state.errors, [], 'no page errors');
     fs.mkdirSync(shots, { recursive: true });
     await page.screenshot({ path: path.join(shots, 'dashboard.png') });
     await run.context.close();
+    // A "This browser" queue saved before (localStorage) whose cover already holds a sign-in:
+    // the queue page loads it with one sign-in, not two
+    const old = await create(browser, 1280, { fixtures: { '/library/albums': { body: [] } } });
+    const oldLoaded = await covers(old.context);
+    await old.context.addInitScript((c) => { localStorage.setItem('pm.browserQueue', JSON.stringify([{ id: 1, uri: 'https://radio.example/two', title: 'Old', artist: 'Sefa', image: c + '?token=old-session' }])); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 0 })); }, COVER);
+    await go(old.page, '/now-playing');
+    await until(() => oldLoaded.length, 'the saved queue shows its cover');
+    assert.ok(oldLoaded.every((q) => q === '?token=fixture-owner'), 'one sign-in, this browser\'s: ' + oldLoaded.join(' '));
+    console.log('ok   a cover saved with an old sign-in loads with this browser\'s only');
+    assert.deepEqual(old.state.errors, [], 'no page errors');
+    await old.context.close();
     console.log('queue covers: PASS');
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e); process.exit(1); });

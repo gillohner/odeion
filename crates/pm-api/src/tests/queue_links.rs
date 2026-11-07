@@ -111,6 +111,18 @@ async fn queue_links_never_carry_a_sign_in() {
     let mut item = pm_zones::QueueItem::new("https://radio.example/live");
     item.image = Some("/v1/library/albums/1/cover".into());
     assert_eq!(describe(&item).image, Some(s.art_url(1)));
+    item.image = Some("http://127.0.0.1:7788/v1/library/albums/1/cover".into());
+    assert_eq!(
+        describe(&item).image,
+        Some(s.art_url(1)),
+        "an absolute node cover link too"
+    );
+    item.image = Some("https://cdn.example/v1/library/albums/1/cover".into());
+    assert_eq!(
+        describe(&item).image.as_deref(),
+        Some("https://cdn.example/v1/library/albums/1/cover"),
+        "another host's picture is as it was"
+    );
     item.image = Some("/v1/library/tracks/1/file".into());
     assert_eq!(
         describe(&item).image,
@@ -156,7 +168,8 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
         "items": [
             {"id": 1, "uri": "track:1", "image": format!("/v1/library/albums/1/cover?token={listener}")},
             {"id": 2, "uri": "/v1/library/tracks/2/file?token=s3cret", "image": "/v1/library/albums/2/cover?token=pmo_browser"},
-            {"id": 3, "uri": "https://radio.example/live?token=theirs"}
+            {"id": 3, "uri": "https://radio.example/live?token=theirs"},
+            {"id": 4, "uri": "https://other-node.example/v1/library/tracks/9/file?token=pmo_browser"}
         ],
         "repeat": "off", "radio": false, "shuffle": false, "order": []
     });
@@ -191,13 +204,21 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
             .unwrap_or_default()
     };
     let json = setting(&key);
-    for t in ["s3cret", "pmo_browser", listener.as_str()] {
+    for t in ["s3cret", listener.as_str()] {
         assert!(!json.contains(t), "{t}: {json}");
     }
+    assert!(
+        json.contains("\"/v1/library/albums/2/cover\""),
+        "the node's link is cleaned: {json}"
+    );
     assert!(json.contains("/v1/library/albums/1/cover\""), "{json}");
     assert!(
         json.contains("https://radio.example/live?token=theirs"),
         "not the node's link: {json}"
+    );
+    assert!(
+        json.contains("https://other-node.example/v1/library/tracks/9/file?token=pmo_browser"),
+        "another node's link keeps its own token: {json}"
     );
     assert_eq!(setting("accounts.owner_sessions"), "[]");
     assert_eq!(setting("accounts.device_sessions"), "[]");
@@ -222,4 +243,68 @@ async fn a_saved_queue_with_a_sign_in_is_cleaned_at_start() {
     assert_eq!(q[1]["uri"], "/v1/library/tracks/2/file", "{q}");
     assert_eq!(q[2]["uri"], "https://radio.example/live?token=theirs", "{q}");
     assert!(!q.to_string().contains("s3cret"), "{q}");
+}
+
+/// A saved queue whose only sign-ins are another host's `/v1/` link and a token this node never
+/// made: the foreign link is left as it is, the node's is cleaned, and no session ends.
+#[tokio::test]
+async fn a_foreign_or_unknown_token_in_a_saved_queue_ends_no_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    let key = "queue.somewhere";
+    let saved = serde_json::json!({
+        "items": [
+            {"id": 1, "uri": "https://other-node.example/v1/library/tracks/1/file?token=pmo_browser"},
+            {"id": 2, "uri": "track:2", "image": "/v1/library/albums/2/cover?token=pmo_not-ours"}
+        ],
+        "repeat": "off", "radio": false, "shuffle": false, "order": []
+    });
+    let browser = serde_json::json!([{"hash": blake3::hash(b"pmo_browser").to_hex().to_string(), "key": "owner", "created_at": 1}]).to_string();
+    {
+        let lib = s.library.lock().unwrap();
+        lib.set_setting(key, &saved.to_string()).unwrap();
+        lib.set_setting("accounts.owner_sessions", &browser).unwrap();
+    }
+    let cleaned = accounts::clean_saved_queues(&s).unwrap();
+    assert_eq!(
+        cleaned,
+        accounts::CleanedQueues {
+            items: 1,
+            ..Default::default()
+        }
+    );
+    let lib = s.library.lock().unwrap();
+    assert_eq!(
+        lib.get_setting("accounts.owner_sessions").unwrap().unwrap(),
+        browser,
+        "the session stays"
+    );
+    let json = lib.get_setting(key).unwrap().unwrap();
+    assert!(
+        json.contains("other-node.example/v1/library/tracks/1/file?token=pmo_browser"),
+        "{json}"
+    );
+    assert!(!json.contains("pmo_not-ours"), "{json}");
+}
+
+/// The second look behind the queue's own: an answer to a listener that carries a node link
+/// with a sign-in (however it got there, not through a queue) goes out without it; another
+/// host's `/v1/` link keeps its token.
+#[tokio::test]
+async fn a_listeners_answer_never_carries_a_node_sign_in() {
+    use axum::response::IntoResponse;
+    let me = ["http://127.0.0.1:7788".to_string()];
+    let answer = Json(serde_json::json!({
+        "now_playing": {"item": {"image": "/v1/library/albums/1/cover?token=pmo_abc"}},
+        "queue": [{"uri": "http://127.0.0.1:7788/v1/library/tracks/1/file?a=1&token=s3cret"},
+                  {"uri": "https://other.example/v1/x?token=theirs"}]
+    }))
+    .into_response();
+    let resp = accounts::listener_response(answer, &[], &me).await;
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains("pmo_abc") && !text.contains("s3cret"), "{text}");
+    assert!(text.contains("/v1/library/albums/1/cover\""), "{text}");
+    assert!(text.contains("/v1/library/tracks/1/file?a=1\""), "{text}");
+    assert!(text.contains("https://other.example/v1/x?token=theirs"), "{text}");
 }

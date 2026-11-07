@@ -1000,7 +1000,11 @@ async fn auth(
     next: middleware::Next,
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
-    let token = bearer_for(&headers, &query, req.method(), req.uri().path());
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string());
+    let token = bearer_for(&headers, &query, req.method(), route.as_deref());
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
         // (the page keeps it), it works again once the identity is. Log out still ends it, so the
@@ -1055,25 +1059,30 @@ async fn auth(
         presence::played(&state, &zone, &caller);
     }
     if not_owner {
-        accounts::listener_response(resp, &accounts::library_roots(&state)).await
+        accounts::listener_response(resp, &accounts::library_roots(&state), &state.node_origins()).await
     } else {
         resp
     }
 }
 
 /// Where `?token=` stands in for the header: what a browser loads by address and can't set
-/// headers on (the WebSocket; a song's file or download, a cover, a picture, an avatar, a
-/// service stream). Everything else takes the header only, so a token in a link that is shared,
-/// saved or logged opens nothing else.
-fn token_in_query_ok(method: &axum::http::Method, path: &str) -> bool {
-    let path = path.strip_prefix("/v1").unwrap_or(path);
-    if path == "/events" {
+/// headers on. Decided on the matched route (`/library/albums/{id}/cover`), never on the path a
+/// request names, so a parameter called `cover` or `stream` opens nothing: the event stream, and
+/// on GET/HEAD a route whose last fixed segment (before its parameters) is a song's file or
+/// download, a cover, a picture, an avatar or a stream. Everything else takes the header only,
+/// so a token in a link that is shared, saved or logged opens nothing else.
+fn token_in_query_ok(method: &axum::http::Method, route: Option<&str>) -> bool {
+    let Some(route) = route else { return false };
+    let route = route.strip_prefix("/v1").unwrap_or(route);
+    if route == "/events" {
         return true;
     }
+    let last_fixed = route.split('/').rev().find(|seg| !seg.starts_with('{'));
     matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)
-        && path
-            .split('/')
-            .any(|seg| matches!(seg, "file" | "download" | "cover" | "image" | "avatar" | "stream"))
+        && matches!(
+            last_fixed,
+            Some("file" | "download" | "cover" | "image" | "avatar" | "stream")
+        )
 }
 
 /// The request's bearer token, or `?token=` on the routes a browser loads by address
@@ -1082,7 +1091,7 @@ fn bearer_for(
     headers: &HeaderMap,
     query: &std::collections::HashMap<String, String>,
     method: &axum::http::Method,
-    path: &str,
+    route: Option<&str>,
 ) -> Option<String> {
     headers
         .get(header::AUTHORIZATION)
@@ -1093,7 +1102,7 @@ fn bearer_for(
             query
                 .get("token")
                 .cloned()
-                .filter(|_| token_in_query_ok(method, path))
+                .filter(|_| token_in_query_ok(method, route))
         })
 }
 
@@ -12803,11 +12812,22 @@ exec sleep 300
         for p in [
             "/v1/library/artists/1/image",
             "/v1/sources/jellyfin/cover/x",
+            "/v1/sources/plex/cover/1/2",
             "/v1/profiles/x/avatar",
             "/v1/auth/pubky/owner/avatar",
         ] {
             let (st, _) = call(&app, "GET", &format!("{p}?token=s3cret"), None).await;
             assert_ne!(st, StatusCode::UNAUTHORIZED, "{p}: past the token check");
+        }
+        // Decided on the route, not the path: a parameter named like a media route opens nothing
+        for p in [
+            "/v1/item/song/file",
+            "/v1/profiles/avatar",
+            "/v1/discover/tag/stream",
+            "/v1/library/tracks/cover",
+        ] {
+            let (st, _) = call(&app, "GET", &format!("{p}?token=s3cret"), None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}");
         }
         let (st, _) = call(&app, "GET", "/v1/library/albums/1/cover?token=s3cret", None).await;
         assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");

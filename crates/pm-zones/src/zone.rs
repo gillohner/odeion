@@ -533,6 +533,8 @@ impl fmt::Debug for Zone {
 pub struct Zones {
     factory: Arc<dyn SourceFactory>,
     inner: RwLock<BTreeMap<ZoneId, Arc<Zone>>>,
+    /// The node's own addresses, for every zone's queue (`Queue::set_node_origins`).
+    node_origins: RwLock<Vec<String>>,
 }
 
 impl Zones {
@@ -540,7 +542,20 @@ impl Zones {
         Self {
             factory,
             inner: RwLock::new(BTreeMap::new()),
+            node_origins: RwLock::new(Vec::new()),
         }
+    }
+
+    /// The node's own addresses (`http://host:port`): links there are the node's, and lose their
+    /// sign-in on the way into any zone's queue. For zones made from now on and those there are.
+    pub fn set_node_origins(&self, origins: Vec<String>) {
+        for z in self.inner.read().expect("zones poisoned").values() {
+            z.queue
+                .lock()
+                .expect("queue poisoned")
+                .set_node_origins(origins.clone());
+        }
+        *self.node_origins.write().expect("zones poisoned") = origins;
     }
 
     /// Create a zone named `name` on `output`. The id is derived from the
@@ -555,6 +570,11 @@ impl Zones {
             n += 1;
         }
         let zone = Arc::new(Zone::new(id.clone(), name, output, self.factory.clone()));
+        let origins = self.node_origins.read().expect("zones poisoned").clone();
+        zone.queue
+            .lock()
+            .expect("queue poisoned")
+            .set_node_origins(origins);
         map.insert(id, zone.clone());
         zone
     }
