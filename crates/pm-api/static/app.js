@@ -316,8 +316,10 @@
     const entry = { ask: opts.repeat ? null : ask, p: was ? after(prev).then(send) : send() };
     entry.settled = prev.then(() => entry.p.catch(() => {}));
     inFlight.set(line, entry);
-    const drop = () => { if (inFlight.get(line) === entry) inFlight.delete(line); };
-    entry.p.then(drop, drop);
+    // (kept on its line until it and every earlier one there have settled, even when it was cut while
+    // waiting: a later one still goes after the earlier ones; a failed one isn't handed to a new ask)
+    const done = () => { entry.ask = null; }; entry.p.then(done, done);
+    entry.settled.then(() => { if (inFlight.get(line) === entry) inFlight.delete(line); });
     return entry.p;
   };
   const apiSend = async (method, path, body, opts = {}) => {
@@ -2389,7 +2391,9 @@
     const zid = state.zone; const cur = repeatPending.has(zid) ? repeatPending.get(zid).value : zoneRepeat();
     const next = REPEATS[(REPEATS.indexOf(cur) + 1) % REPEATS.length];
     const mine = askMode(repeatPending, zid, next);
-    try { await zoneOp(zid, async (t) => { const ev0 = evOf(zid); const st = await api('PUT', `/zones/${encodeURIComponent(zid)}/repeat`, { repeat: next }, { signal: t.signal }); if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid] && evOf(zid) === ev0) state.zones[zid].repeat = next; }); } catch (e) { toast(e.message, 'error'); } finally { doneMode(repeatPending, zid, mine); }
+    // (a 204 says the node took it: the zone's repeat is that now, whatever event came meanwhile, so
+    // a load after it carries it; a newer change from elsewhere comes with its own event)
+    try { await zoneOp(zid, async (t) => { const ev0 = evOf(zid); const st = await api('PUT', `/zones/${encodeURIComponent(zid)}/repeat`, { repeat: next }, { signal: t.signal }); if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid]) state.zones[zid].repeat = next; }); } catch (e) { toast(e.message, 'error'); } finally { doneMode(repeatPending, zid, mine); }
   };
   // The node's mode, set (a node from before modes answers 404/405: it says to update)
   const setZoneShuffle = async (on, zid = state.zone, signal) => {
@@ -3633,10 +3637,11 @@
     const name = v.label || srcName(srcSvc(v.source));
     b.disabled = true; b.innerHTML = '<span class="spin"></span> Switching…';
     const z0 = playingIt(); const version = z0.queue_version;
-    if (z0.transport === 'playing') startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true);
+    const wait = z0.transport === 'playing' ? startWait('play', zone, `${z0.now_playing.item.title || ''} · from ${name}`, true, true) : null;
     try {
       // (read and loaded in one turn of the zone, so nothing of its queue changes in between)
       const zs = await zoneOp(zone, async (t) => {
+        if (wait) startSending(wait, zone);
         let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
         // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
         if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
@@ -3647,7 +3652,9 @@
         // of the same service (a library file shows its album's); the length comes with the source
         const scheme = (u) => String(u || '').split(':')[0];
         const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
-        return api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', shuffle: !!z.shuffle, radio: !!z.radio }, { signal: t.signal });
+        return api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
+        // (no shuffle: the node would draw the queue again from its play order, songs heard included;
+        // keeping the mode with its order needs a node call that swaps one item's source in place)
       });
       // The zone's answer says whether the new source plays (a paused zone sends no event to wait for)
       if (zs && zs.id) state.zones[zs.id] = zs;
@@ -7047,7 +7054,11 @@
           });
           $$('[data-qdown]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qdown), 'down'));
           $$('[data-qrm]', main).forEach((b) => b.onclick = () => qedit(Number(b.dataset.qrm), 'rm'));
-          const qr = $('#qradio'); if (qr) qr.onclick = async () => { try { await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: !(z && z.radio) }); toast(z && z.radio ? 'Radio off' : 'Radio on: similar music follows the queue'); const zs = await api('GET', `/zones/${encodeURIComponent(state.zone)}`); state.zones[zs.id] = zs; render(); } catch (e) { toast(e.message, 'error'); } };
+          const qr = $('#qradio'); if (qr) qr.onclick = async () => {
+            // (in the zone's turn, like a load, which carries the radio as it is when it goes)
+            const zid = state.zone; const on = !(z && z.radio);
+            try { await zoneOp(zid, async (t) => { await api('PUT', `/zones/${encodeURIComponent(zid)}/radio`, { on }, { signal: t.signal }); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`, undefined, { signal: t.signal }); if (zs && zs.id) state.zones[zs.id] = zs; }); toast(on ? 'Radio on: similar music follows the queue' : 'Radio off'); render(); } catch (e) { toast(e.message, 'error'); }
+          };
           // The same mode as the bar's Shuffle, with its state
           // (the toggle keeps the focus across the page's redraw)
           const qsh = $('#qshuffle'); if (qsh) { qsh.onclick = toggleShuffle; renderModes(); if (hadQsh) qsh.focus(); }

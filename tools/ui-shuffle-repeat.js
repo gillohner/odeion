@@ -90,7 +90,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         // A page with no songs of its own: discovery finds three library songs for it
         fixtures['/discover/play'] = { body: { plays_from: { service: 'library', label: 'Your library' }, track_ids: [1, 2, 3] } };
         fixtures['/item/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'] = { body: { kind: 'album', id: 'mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e', title: 'Found elsewhere', section: 'albums', source: 'musicbrainz', target: { uri: 'https://musicbrainz.org/release-group/1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e' }, uri: 'https://example.com/album', open_on: [{ url: 'https://example.com/album' }], songs: [], releases: [], links: [], also_on: [], tags: [] } };
-        let slowLoad = 0; let refuseShuffle = false;
+        let slowLoad = 0; let refuseShuffle = false; let loadGate = null; // (a load held until the test lets it go)
         const { page, context, state } = await fx.create(browser, w, { mobile: w < 600, fixtures });
         await page.setViewportSize({ width: w, height: w < 600 ? 800 : 900 });
         await page.emulateMedia({ colorScheme: scheme });
@@ -110,7 +110,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
           if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; return r.fulfill({ status: 204, body: '' }); }
           if (/\/queue$/.test(v)) { if (req.method() === 'DELETE') { Z.queue = []; Z.now_playing = null; Z.transport = 'stopped'; return r.fulfill({ status: 204, body: '' }); } return json(r, Z.queue); }
           // (a slow one delays only its answer and event; after a reload they'd be another page's)
-          if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; const asked = sock; if (slowLoad) { const d = slowLoad; slowLoad = 0; await sleep(d); } if (sock === asked) event(); await sleep(50); entry.done = Date.now(); return json(r, Z); }
+          if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; const asked = sock; if (slowLoad) { const d = slowLoad; slowLoad = 0; await sleep(d); } if (loadGate) await loadGate; if (sock === asked) event(); await sleep(50); entry.done = Date.now(); return json(r, Z); }
           return json(r, Z);
         });
         await page.route(/\/v1\/library\/tracks\/\d+\/file/, (r) => r.fulfill({ status: 200, contentType: 'audio/wav', body: WAV }));
@@ -262,12 +262,14 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         check(await pressNow(page, 'shuffle'), `${T} a toggle lands while the songs are found`);
         // (the page's load, going after the press, must not put its "on" back over the press's "off":
         // a third press while that load is on its way turns from the press, not from the load)
-        slowLoad = 900;
+        // (the load is held until the third press has landed: the press is surely while it is on its way)
+        let release; loadGate = new Promise((r) => { release = r; });
         check(await until(async () => sent.slice(n5).some((x) => /\/load$/.test(x.v)), 8000), `${T} the found page's load goes out`);
         // (pressed as soon as the button has its handler: Now playing redraws while the load is on its
         // way, and a click that waits for a settled button would land after it)
         await sleep(150);
         check(await pressNow(page, 'shuffle'), `${T} …a third press lands while that load is on its way`);
+        loadGate = null; release();
         check(await until(async () => sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').length === 3, 8000), `${T} …and the two toggles after it`);
         const dOrder = sent.slice(n5).filter((x) => /\/(load|shuffle)$/.test(x.v) && x.m !== 'GET').map((x) => `${x.v.split('/').pop()}:${x.body.shuffle}`);
         check(dOrder.join() === 'load:true,shuffle:false,shuffle:true', `${T} …the load first, then the toggles off and on again (${dOrder.join(', ')})`);
