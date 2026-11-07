@@ -611,20 +611,22 @@ fn read_playlist_within(
     if resp.content_length().is_some_and(|n| n > PLAYLIST_MAX) {
         return Err("the playlist is too big (over 64 KiB)".into());
     }
-    let started = std::time::Instant::now();
-    let mut body = resp.take(PLAYLIST_MAX);
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        match body.read(&mut chunk).map_err(|e| e.to_string())? {
-            0 => break,
-            n => buf.extend_from_slice(&chunk[..n]),
-        }
-        if started.elapsed() > limit {
-            return Err("the playlist took too long to arrive".into());
-        }
+    // Read on a thread of its own and wait for all of it at most `limit`: a read that sends
+    // nothing, a trickle, or an end that comes late are all given up then. The thread ends with
+    // the stream wait at the latest.
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("playlist-read".into())
+        .spawn(move || {
+            let mut buf = Vec::new();
+            let r = resp.take(PLAYLIST_MAX).read_to_end(&mut buf).map(|_| buf);
+            let _ = tx.send(r.map_err(|e| e.to_string()));
+        })
+        .map_err(|e| e.to_string())?;
+    match rx.recv_timeout(limit) {
+        Ok(r) => Ok(String::from_utf8_lossy(&r?).into_owned()),
+        Err(_) => Err("the playlist took too long to arrive".into()),
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// `limit`: the playlist's stream is a second request, not a redirect: it is checked here too.
@@ -1225,6 +1227,51 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+    }
+
+    /// A playlist whose server sends its headers and then nothing, or all of it but its end only
+    /// after the deadline, is given up at the deadline too (not after the stream wait).
+    #[test]
+    fn a_silent_or_late_ending_playlist_is_given_up_at_the_deadline() {
+        use std::io::Write;
+        let silent = serve_each(|mut c| {
+            read_request(&mut c);
+            let _ = c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let late = serve_each(|mut c| {
+            read_request(&mut c);
+            let body = b"#EXTM3U\nhttp://127.0.0.1:9/a\n";
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\n\r\n",
+                    body.len() + 1
+                )
+                .as_bytes(),
+            );
+            let _ = c.write_all(body).and_then(|_| c.flush());
+            // The last byte (the end) after the deadline
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            let _ = c.write_all(b"\n");
+        });
+        for url in [silent, late] {
+            let client = stream_client_builder(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let resp = client.get(&url).send().unwrap();
+            let t = std::time::Instant::now();
+            let r = within(std::time::Duration::from_secs(10), move || {
+                read_playlist_within(resp, std::time::Duration::from_millis(600))
+            });
+            assert!(r.as_ref().is_err_and(|e| e.contains("too long")), "{url}: {r:?}");
+            assert!(
+                t.elapsed() < std::time::Duration::from_millis(1_400),
+                "{url}: {:?}",
+                t.elapsed()
+            );
+        }
     }
 
     #[test]
