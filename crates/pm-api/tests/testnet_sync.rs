@@ -2365,3 +2365,124 @@ async fn a_comment_is_a_note_with_the_song_as_parent() {
         )
     );
 }
+
+/// A GET with a bearer token: its status, and its body as JSON when it is.
+async fn call_as(app: &axum::Router, uri: &str, token: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .uri(uri)
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or_default())
+}
+
+/// A node with a token, made by the node itself (`made`) or set in its config.
+fn node_with_token(dir: &std::path::Path, name: &str, token: &str, made: bool) -> Arc<NodeState> {
+    let db = dir.join(format!("{name}.sqlite"));
+    let n = NodeState::new(
+        NodeSettings {
+            name: name.into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.join("art"),
+            mirror_dir: dir.join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some(token.into()),
+            subsonic_user: "pubky".into(),
+            pubky: pm_pubky::PmPubkyConfig {
+                network: pm_pubky::config::Network::Testnet,
+                ..Default::default()
+            },
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    if made {
+        let file = dir.join(format!("{name}-api-token"));
+        std::fs::write(&file, token).unwrap();
+        n.set_token_file(file);
+    }
+    n
+}
+
+/// The node record says where the node is, never how to sign in to it (ADR 0008). A record an
+/// older version wrote with the node's API token is rewritten without it, and a token the node
+/// made itself is replaced, so the copy on the homeserver opens nothing. A token set in the
+/// config can't be replaced by the node: Health asks the owner to change it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_node_record_holds_no_token_and_an_old_one_is_retired() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    for made in [true, false] {
+        let (session, _, _) = identity(&pubky, "pm-api-node-record").await;
+        let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+        // A fake token, put together at run time so secret scanners don't read the test as a leak
+        let old = ["older", "node", "credential", if made { "a" } else { "b" }].join("-");
+        // What an older version wrote
+        homeserver
+            .write_object(
+                &session,
+                pm_pubky::homeserver::NODE_RECORD_PATH,
+                &serde_json::json!({"name": "n", "api_url": "http://127.0.0.1:7788", "token": old, "version": "0", "updated_at": 1}),
+            )
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let n = node_with_token(dir.path(), "n", &old, made);
+        let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session));
+        n.set_sync(Some(sync.clone()));
+        sync.publish_node_for(&n).await.unwrap();
+        let stored: serde_json::Value = sync
+            .session()
+            .storage()
+            .get_json(pm_pubky::homeserver::NODE_RECORD_PATH)
+            .await
+            .unwrap();
+        let text = stored.to_string();
+        let now = n.token().unwrap();
+        assert!(
+            !text.contains(&old) && !text.contains(&now) && stored.get("token").is_none(),
+            "{text}"
+        );
+        assert_eq!(stored["api_url"], "http://127.0.0.1:7788");
+        let app = router(n.clone());
+        if made {
+            assert_ne!(now, old, "the published token was replaced");
+            let file = std::fs::read_to_string(n.token_file().unwrap()).unwrap();
+            assert_eq!(file.trim(), now);
+            let (st, _) = call_as(&app, "/v1/info", &old).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "the old token opens nothing");
+        } else {
+            assert_eq!(now, old, "a config token stays until the owner changes it");
+            let (st, health) = call_as(&app, "/v1/health", &old).await;
+            assert_eq!(st, StatusCode::OK);
+            assert!(
+                health
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["id"] == "api-token" && p["state"] == "change"),
+                "{health}"
+            );
+        }
+        // Published again (as after a token change): nothing more is replaced
+        sync.publish_node_for(&n).await.unwrap();
+        assert_eq!(n.token().unwrap(), now);
+    }
+}

@@ -10,6 +10,9 @@ on:
       - crates/pm-endpoint/**
       - crates/pm-stream/**
       - crates/pm-out-net/**
+      # The phone's output (cpal on AAudio) and the USB DACs it describes
+      - crates/pm-out-local/**
+      - crates/pm-usb-audio/**
       # The node's side: registration and keys (pm-api), the zones, the binary
       - crates/pm-api/**
       - crates/pm-zones/**
@@ -35,21 +38,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: 17
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: x86_64-linux-android
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             crates/pm-desktop
             .
           key: android-emulator
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
       # As in release.yml: gen/android is not committed
@@ -84,7 +89,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: the phone as a zone
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
           QEMU_AUDIO_DRV: none
         with:
@@ -95,7 +100,7 @@ jobs:
           disable-animations: true
           script: python3 -I tools/android-endpoint.py app.apk target/debug/pm-node /tmp/ae
       - if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: android-emulator
           path: |

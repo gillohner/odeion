@@ -187,16 +187,16 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         check(await shown('#search') || await shown('[data-bnav="search"]'), `${w}×${h}: search`);
         let vol = await shown('#vol');
         if (!vol && await shown('#volbtn')) {
-          await p.click('#volbtn'); vol = await visible(p, '#qpanel #qpvol', 5000);
-          check(await p.getAttribute('#volbtn', 'aria-expanded') === 'true' && await p.getAttribute('#quality', 'aria-expanded') === 'false', `${w}×${h}: only the volume button says the panel is open`);
+          await p.click('#volbtn'); vol = await visible(p, '#volpop #volpopvol', 5000);
+          check(vol && await p.getAttribute('#volbtn', 'aria-expanded') === 'true' && await p.getAttribute('#quality', 'aria-expanded') === 'false' && await p.$eval('#qpanel', (q) => q.hidden), `${w}×${h}: the volume button opens the volume popover, not the Sound panel`);
+          await p.keyboard.press('Escape'); await p.waitForTimeout(200);
+          check(await p.$eval('#volpop', (v) => v.hidden) && await p.evaluate(() => document.activeElement && document.activeElement.id === 'volbtn'), `${w}×${h}: Esc closes it and focus returns to the button`);
           const off = await p.evaluate(() => { document.body.classList.add('offline'); const d = getComputedStyle(document.querySelector('#volbtn')).display; document.body.classList.remove('offline'); return d; });
           check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
         }
-        // A phone, or a desktop window under 760 px (no volume button there): the sound pill's panel
-        if (!vol && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         // A phone with nothing playing has no sound pill (UX sweep A4): volume is on the zone's card
         // (Zones, one tap), and in Now playing while something plays
-        let where = (await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel';
+        let where = (await shown('#vol')) ? 'slider in the bar' : 'in the volume popover';
         if (!vol && shell === 'phone') { await p.click('[data-bnav="zones"]'); vol = await visible(p, '#main [data-zvol]', 8000); where = 'on the zone card'; }
         check(vol, `${w}×${h}: volume (${where})`);
         check((shell === 'phone') === (w < 600 || layout === 'phone'), `${w}×${h}${layout ? ` (${layout})` : ''}: the ${shell} layout`);
@@ -234,9 +234,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       image_credit: { author: '<b>Jane</b> Doe', licence: 'CC BY 2.0', licence_url: 'javascript:alert(1)', file_page: 'https://commons.wikimedia.org/wiki/File:Credit.jpg', source: 'Wikimedia Commons' } };
     await p.route(/\/v1\/item\/artist\/lib-777(\?.*)?$/, (r) => r.fulfill({ json: credited }));
     await p.goto(BASE + '/artist/lib-777');
-    check(await visible(p, '#iabout .credit'), 'About shows a credit line');
-    const credit = await p.textContent('#iabout .credit').catch(() => '');
-    const links = await p.$$eval('#iabout .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
+    // With an article the credit lines sit in Details at the foot (TASK-item-page-details-to-bottom)
+    await p.evaluate(() => { const d = document.querySelector('#idetails'); if (d) d.open = true; });
+    check(await visible(p, '#idetails .credit'), 'Details shows the credit lines');
+    const credit = await p.textContent('#idetails .credit').catch(() => '');
+    const links = await p.$$eval('#idetails .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
     check(links.some(([t, h]) => t === 'Read more on Wikipedia' && h === 'https://de.wikipedia.org/wiki/Credit_Test') && links.some(([t, h]) => t === 'CC BY-SA 4.0' && /creativecommons/.test(h)), 'the text links its article and CC BY-SA');
     check(/Picture: <b>Jane<\/b> Doe · CC BY 2\.0 · Wikimedia Commons/.test(credit) && links.some(([t, h]) => t === 'Wikimedia Commons' && /File:Credit\.jpg/.test(h)), 'the picture names its author, licence and file page, as text');
     check(links.every(([, h]) => /^https?:/.test(h || '')), 'a credit link is only ever a web link');
@@ -290,13 +292,14 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.route(/\/v1\/sources$/, (r) => r.fulfill({ json: [{ id: 'tidal', name: 'TIDAL', enabled: true, healthy: true }, { id: 'spotify', name: 'Spotify', enabled: true, healthy: false }] }));
     await p.route(/\/v1\/play-order$/, (r) => r.fulfill({ json: { order: ['library', 'tidal', 'spotify'], services: [{ id: 'tidal', connected: true }, { id: 'spotify', connected: false }] } }));
     await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
-    const ab = await p.evaluate(() => { const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#iabout .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout dl dt').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
+    // (the credit lines are in Details at the foot; the facts one line under the blurb)
+    const ab = await p.evaluate(() => { const d = document.querySelector('#idetails'); if (d) d.open = true; const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#idetails .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout .facts-line .fact').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
     check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
     check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
     check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
     await p.click('#iblurbmore');
     check(await p.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true'), 'More shows the whole text');
-    check([...ab.icons].sort().join('|') === 'Open on Spotify (opens a new tab)|Open on TIDAL' && !/also/.test(ab.line), `Also on: one icon per service next to Play, not in the source line (${ab.icons.join(', ')})`);
+    check([...ab.icons].sort().join('|') === 'Open in Spotify (new tab)|Switch to TIDAL' && !/also/.test(ab.line), `Also on switches to TIDAL here, Open in leaves for Spotify's site; neither in the source line (${ab.icons.join(', ')})`);
     await p.click('.also-icons [data-also]'); await p.waitForTimeout(300);
     check(/\/artist\/tidal-77$/.test(await p.evaluate(() => location.pathname)), 'a service the node plays from opens its page here');
     await p.unroute(/\/v1\/item\/artist\/lib-900$/);
@@ -377,7 +380,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await waitText(p, '#quality .qtext', 'Played by this browser'), 'and says the browser plays it');
       await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === 'This browser' && (await p.textContent('#qpanel .qp-src .name')).trim() === 'Your library', 'the panel: the zone and the source');
-      check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpvol').count() === 1, 'no signal path claim for the browser; volume is there');
+      check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpanel input[type="range"]').count() === 0, 'no signal path claim for the browser; no volume in the panel (the bar has the one slider)');
       check(await p.getAttribute('#quality', 'aria-expanded') === 'true', 'the pill says the panel is open');
       check(await p.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement)), 'focus moved into the panel');
       await p.keyboard.press('Escape'); check(await gone(p, '#qpanel:not([hidden])'), 'Escape closes it');
@@ -484,7 +487,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
           await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
-          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#itags', { timeout: 15000 }).catch(() => {}); await p.waitForTimeout(800);
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#main .hero', { timeout: 15000 }).catch(() => {}); await p.waitForTimeout(800);
           check(!(await p.$('#icollections')) && !(await p.$('#icollections-slot')), 'no In collections row while Pinakes doesn’t list them');
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
         } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
@@ -706,6 +709,79 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(errs.length === 0, `${w}: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
       await cc.close();
     }
+    // An item the Internet Archive restricts: the page says so where the songs would be, with a
+    // link to the item, and Play and Shuffle are off (TASK-archive-restricted)
+    {
+      const cc = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      // The page id of a link is `u-` and the link in base64url, as the node makes it
+      const lockedId = 'u-' + Buffer.from('https://archive.org/details/locked-set').toString('base64url');
+      const locked = { kind: 'album', id: lockedId, uri: 'https://archive.org/details/locked-set', target: { uri: 'https://archive.org/details/locked-set' }, title: 'Locked Set', artist: { name: 'Someone', id: null }, album: null, year: 2020, image: null, source: 'Internet Archive', source_id: 'archive', plays_from: null, connect: [], reading: false, pending: false, songs: [], total_ms: 0, albums: [], versions: [], also_on: [], opened_as: null, plays_note: null, unavailable: 'Restricted on the Internet Archive: its recordings can’t be streamed.', song_uri: null, link: 'https://archive.org/details/locked-set', on_pubky: null, about: [], blurb: null, open_on: [], related: [], concerts: [], section: 'home' };
+      await pp.route(new RegExp(`/v1/item/album/${lockedId}$`), (r) => r.fulfill({ json: locked }));
+      await pp.route(/\/v1\/item\/[a-z]+\/[^/]+\/extras$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
+      await pp.goto(`${BASE}/album/${lockedId}`); await pp.waitForSelector('#isongs', { timeout: 20000 });
+      const txt = await pp.textContent('#isongs');
+      check(/Restricted on the Internet Archive/.test(txt) && !/No connected service lists/.test(txt), 'a restricted archive item says so instead of an empty song list');
+      check((await pp.getAttribute('#isongs a[href="https://archive.org/details/locked-set"]', 'target')) === '_blank', 'with a link to the item on the archive');
+      check(await pp.isDisabled('#iplay') && await pp.isDisabled('#ishuffle') && /Restricted/.test(await pp.getAttribute('#iplay', 'title')), 'Play and Shuffle are off, saying why');
+      check(errs.length === 0, `restricted item: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
+    // Identify's bar: one segment per state, as wide as its share, the legend in its colours, no
+    // wider than the text; the key field a field's width (TASK-identify-bar-and-key)
+    // (the owner's numbers at three widths, then a run in progress with songs not checked yet)
+    for (const [w, h, unchecked] of [[390, 844, 0], [820, 1180, 0], [1440, 900, 0], [1440, 900, 3000]]) {
+      const cc = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: w < 1025, isMobile: w < 600 });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      const counts = unchecked ? { total: 19452, identified: 9721, suggested: 4412, unknown: 2319, unchecked, by: { tags: 9000, album: 500, fingerprint: 200, you: 21, title_artist: 0 } } : { total: 19452, identified: 9721, suggested: 7412, unknown: 2319, unchecked: 0, by: { tags: 9000, album: 500, fingerprint: 200, you: 21, title_artist: 0 } };
+      await pp.route(/\/v1\/library\/identify$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, counts, phase: 'needs_review', progress: { running: false, total: 0, done: 0, identified: 0, suggested: 0, unknown: 0, errors: 0 }, acoustid_state: 'ok', acoustid: true, acoustid_own: true } }); });
+      await pp.goto(BASE + '/library/node'); await pp.waitForSelector('#idbox .idbar', { timeout: 20000 });
+      const m = await pp.$eval('#idbox', (box) => {
+        const bar = box.querySelector('.idbar'); const b = bar.getBoundingClientRect();
+        const segs = [...bar.querySelectorAll('.idseg')].map((s) => ({ k: s.className.replace('idseg ', ''), w: s.getBoundingClientRect().width, c: getComputedStyle(s).backgroundColor }));
+        const keys = [...box.querySelectorAll('.idswatch')].map((s) => ({ k: s.className.replace('idswatch ', ''), c: getComputedStyle(s).backgroundColor }));
+        const input = box.querySelector('#acidkey').getBoundingClientRect();
+        return { bar: Math.round(b.width), label: bar.getAttribute('aria-label'), role: bar.getAttribute('role'), segs, keys, input: Math.round(input.width), legend: box.querySelector('.idlegend').textContent, overflow: document.documentElement.scrollWidth > innerWidth + 1 };
+      });
+      const order = m.segs.map((s) => s.k).join(',');
+      const share = (k) => counts[k] / counts.total * (m.bar - 2 * (m.segs.length - 1));
+      const widthsOk = m.segs.every((s) => Math.abs(s.w - share(s.k)) <= 1.5);
+      const want = unchecked ? 'identified,suggested,unknown,unchecked' : 'identified,suggested,unknown';
+      check(order === want && widthsOk, `${w}${unchecked ? ' (a run under way)' : ''}: ${unchecked ? 'four' : 'three'} segments in order, each its share of the bar (${m.segs.map((s) => `${s.k} ${Math.round(s.w)}`).join(', ')} of ${m.bar}${unchecked ? '' : '; not checked has none'})`);
+      const said = m.label.replace(/\u202f|\u00a0/g, ' ');
+      check(m.role === 'img' && (unchecked ? /19.452 songs: 9.721 identified, 4.412 unsure, 2.319 not found, 3.000 not checked yet/.test(said) : /19.452 songs: 9.721 identified, 7.412 unsure, 2.319 not found/.test(said)), `${w}: the bar is an image that spells the counts (${m.label})`);
+      check(m.keys.length === m.segs.length && m.keys.every((kk) => m.segs.find((s) => s.k === kk.k && s.c === kk.c)) && /unsure/.test(m.legend) && (m.legend.match(/identified/g) || []).length === 1 && / 2.319 not found/.test(m.legend.replace(/\u202f|\u00a0/g, ' ')), `${w}: the legend's swatches match the segments' colours, each state named once (${m.legend.replace(/\s+/g, ' ').trim().slice(0, 90)})`);
+      if (w === 1440) {
+        // (the field is taller than the small buttons: their centres share a line, not their tops)
+        const row = await pp.$$eval('#acidform input, #acidform button', (es) => es.filter((e) => e.offsetParent).map((e) => { const r = e.getBoundingClientRect(); return r.top + r.height / 2; }));
+        const oneLine = row.length >= 3 && Math.max(...row) - Math.min(...row) <= 8;
+        check(m.bar <= 520 && m.input <= 320 && oneLine, `${w}: the bar (${m.bar}) and the key field (${m.input}) keep to their widths, the field and its ${row.length - 1} buttons on one row`);
+      }
+      if (w === 390) check(m.bar >= 300 && !m.overflow, `${w}: full width on a phone (${m.bar}), no overflow`);
+      check(errs.length === 0, `${w}: Identify: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
+    // Play to › Sleep timer (and Who sees what you play): the menu has its own Back step, so Back
+    // closes it and the page stays where it was
+    {
+      const cc = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      await pp.goto(BASE + '/albums'); await pp.waitForSelector('#zonebtn'); await pp.goto(BASE + '/tracks'); await pp.waitForSelector('.track', { timeout: 20000 });
+      for (const [btn, title] of [['#zpsleep', 'Sleep timer'], ['#zpvisible', 'Who sees what you play']]) {
+        if (!(await pp.$('#zonepop[hidden]'))) await pp.keyboard.press('Escape');
+        await pp.click('#zonebtn'); await pp.waitForSelector(`#zonepop:not([hidden]) ${btn}`, { timeout: 5000 }).catch(() => {});
+        if (!(await pp.$(btn))) continue;
+        await pp.click(btn); await pp.waitForSelector('.popover.menu:not([hidden]) .pop-title', { timeout: 5000 });
+        const t = (await pp.textContent('.popover.menu:not([hidden]) .pop-title')).trim();
+        await pp.goBack(); await pp.waitForTimeout(500);
+        check(t === title && await pp.$eval('.popover.menu', (m) => m.hidden) && new URL(pp.url()).pathname === '/tracks', `Play to › ${title}: Back closes the menu and the page stays (${new URL(pp.url()).pathname})`);
+      }
+      check(errs.length === 0, `Play to menus: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
     // The kiosk dashboard fills the screen without a scroll; a playlist whose sources can't be
     // found says so, with Try again, and drops "Still finding…"
     {
@@ -865,6 +941,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await p.evaluate(() => { const b = document.querySelector('[data-alongjoin="0"]'); return !!b && !b.disabled && /Listen along with Alice/.test(b.getAttribute('aria-label')); }), 'after a refusal the button is back, named again');
       // and now it works: the page switches to the group and the row says you listen along
       alongStatus = 200;
+      // (after the refusal the page may already offer the other free speakers in a menu: closed first)
+      await p.keyboard.press('Escape'); await p.waitForTimeout(250);
       await p.click('[data-alongjoin="0"]'); await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
       const ok = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Listening along with Alice/.test(v || '')) return true; if (Date.now() > end) return false; await p.waitForTimeout(150); } })();
       check(ok && (await p.textContent('#zonename')).trim() === GROUP.name, `joined: a toast and the group zone in use (${(await p.textContent('#zonename')).trim()})`);

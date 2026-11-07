@@ -24,7 +24,17 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const TOKENS: &str = "accounts.tokens";
-const OWNER_SESSIONS: &str = "accounts.owner_sessions";
+pub(crate) const OWNER_SESSIONS: &str = "accounts.owner_sessions";
+/// The owner's devices (the desktop and Android app), signed in with Pubky Ring: tokens with the
+/// same `pmo_` start as browser sessions, kept apart so a browser's Log out and the browsers' cap
+/// leave them. Make a new token and a change of the node's identity end them too.
+pub(crate) const DEVICE_SESSIONS: &str = "accounts.device_sessions";
+/// Browser sessions of the owner kept at once; the oldest goes first.
+const OWNER_SESSIONS_CAP: usize = 20;
+/// Devices of the owner kept at once (an app signing in again and again, say reinstalled).
+const DEVICE_SESSIONS_CAP: usize = 50;
+// Room for more devices than browsers: a device signs in once and stays
+const _: () = assert!(DEVICE_SESSIONS_CAP > OWNER_SESSIONS_CAP);
 /// A hash of the API token the owner's browser sessions were made under: one changed in the config
 /// ends them at the next start, as Make a new token does.
 /// Never in a backup (`backup::NODE_OWN`).
@@ -58,6 +68,11 @@ pub enum Who {
     Owner,
     /// A listener (their z32 key): their own sign-ins, under `person.<key>.<setting>`.
     Listener(String),
+    /// A listener playing through the node's sign-ins (the admin's source policy, [`source_policy`]):
+    /// the same person for everything of their own (play order, preferences, who queued what), but
+    /// their TIDAL, Qobuz and Spotify are the node's ([`SIGNIN_KEYS`]). Only the paths that *use* an
+    /// account get this ([`Who::resolved`]); signing in and out always act on their own.
+    ListenerOnNode(String),
     /// No one with sign-ins: a party guest, a LAN controller, an item queued by someone the node
     /// can't name. Nothing that needs a sign-in plays for them.
     Nobody,
@@ -66,13 +81,89 @@ pub enum Who {
 /// Where listeners' own settings start: `person.<key>.<setting>`.
 pub const PERSON_PREFIX: &str = "person.";
 
+/// The node admin's choice of whose streaming sign-ins listeners play with (owner, 2026-11-03: "can we
+/// have both and node admin can set if user use node or own sources").
+pub const SOURCE_POLICY_KEY: &str = "sources.policy";
+/// A listener's own choice under [`SourcePolicy::Choice`]: `node` (the default) or `own`.
+pub const SOURCE_USE_KEY: &str = "sources.use";
+
+/// Whose sign-ins listeners play TIDAL, Qobuz and Spotify with. The owner always plays with the
+/// node's: theirs are the node's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePolicy {
+    /// Everyone plays through the node's sign-ins; listeners can't sign in to their own.
+    Node,
+    /// Each person signs in to their own (how it was since per-person accounts, the default).
+    #[default]
+    Own,
+    /// The node's by default; each listener may switch to their own.
+    Choice,
+}
+
+impl SourcePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SourcePolicy::Node => "node",
+            SourcePolicy::Own => "own",
+            SourcePolicy::Choice => "choice",
+        }
+    }
+    pub fn parse(s: &str) -> Option<SourcePolicy> {
+        match s {
+            "node" => Some(SourcePolicy::Node),
+            "own" => Some(SourcePolicy::Own),
+            "choice" => Some(SourcePolicy::Choice),
+            _ => None,
+        }
+    }
+}
+
+/// The node's source policy. A node that never set one keeps playing as it did: [`SourcePolicy::Own`].
+pub fn source_policy(lib: &pm_library::Library) -> SourcePolicy {
+    lib.get_setting(SOURCE_POLICY_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| SourcePolicy::parse(&v))
+        .unwrap_or(SourcePolicy::Own)
+}
+
+/// A listener's own choice, as saved (the default `node` when they never chose).
+pub fn listener_use(lib: &pm_library::Library, key: &str) -> &'static str {
+    match Who::Listener(key.to_string()).get(lib, SOURCE_USE_KEY).as_deref() {
+        Some("own") => "own",
+        _ => "node",
+    }
+}
+
+/// Whether a listener plays through the node's sign-ins now.
+pub fn plays_on_node(lib: &pm_library::Library, key: &str) -> bool {
+    match source_policy(lib) {
+        SourcePolicy::Node => true,
+        SourcePolicy::Own => false,
+        SourcePolicy::Choice => listener_use(lib, key) == "node",
+    }
+}
+
+/// The settings that hold a streaming sign-in for TIDAL, Qobuz and Spotify (and the sign-in way
+/// picked): what [`Who::ListenerOnNode`] reads and refreshes at the node's keys.
+pub const SIGNIN_KEYS: &[&str] = &[
+    "tidal.user",
+    "tidal.unofficial",
+    "qobuz.unofficial",
+    "spotify.user",
+    "tidal.signin_way",
+    "qobuz.signin_way",
+    "spotify.signin_way",
+];
+
 tokio::task_local! {
     /// Who the request being answered is from (set around every handler by the middleware).
     pub static ASKING: Who;
 }
 
 /// Who is asking, for catalogue reads that use a streaming sign-in (search, item pages): the
-/// request's person. Outside a request it fails closed: nobody's account (the services' own app
+/// request's person, resolved for the node's source policy ([`Who::resolved`]). Outside a request it fails closed: nobody's account (the services' own app
 /// tokens at most), so a task that lost its request never borrows the owner's; work done for the
 /// owner in the background says so ([`as_owner`]). Plays and sign-ins never use this: they take
 /// their person explicitly.
@@ -181,14 +272,33 @@ impl Who {
     pub fn of_item_in(it: &pm_zones::QueueItem, lib: &pm_library::Library) -> Who {
         match Who::of_item(it) {
             Who::Listener(k) if !crate::people::listed_for_music(lib, &k) => Who::Nobody,
+            w => w.resolved(lib),
+        }
+    }
+
+    /// The person whose account a play, a stream or a catalogue read uses, under the node's source
+    /// policy: a listener who plays through the node's sign-ins becomes [`Who::ListenerOnNode`];
+    /// everyone else is unchanged. Signing in, out and a person's own status never resolve: they
+    /// act on the caller's own sign-ins.
+    pub fn resolved(self, lib: &pm_library::Library) -> Who {
+        match self {
+            Who::Listener(k) if plays_on_node(lib, &k) => Who::ListenerOnNode(k),
             w => w,
+        }
+    }
+
+    /// The person themselves, for their own sign-ins and settings: undoes [`Who::resolved`].
+    pub fn own(&self) -> Who {
+        match self {
+            Who::ListenerOnNode(k) => Who::Listener(k.clone()),
+            w => w.clone(),
         }
     }
 
     /// What a queue item records about who queued it.
     pub fn by(&self) -> Option<String> {
         match self {
-            Who::Listener(k) => Some(k.clone()),
+            Who::Listener(k) | Who::ListenerOnNode(k) => Some(k.clone()),
             _ => None,
         }
     }
@@ -197,21 +307,28 @@ impl Who {
         *self == Who::Owner
     }
 
-    /// A name for this person in cache keys: `owner`, a listener's key, or `nobody`.
-    pub fn tag(&self) -> &str {
+    /// A name for this person in cache keys: `owner`, a listener's key, `node:<key>` for a listener
+    /// on the node's sign-ins, or `nobody`. The caches keyed by it hold what an account answered
+    /// (search, item pages, Home, streams), so a listener on the node's sign-ins and the same
+    /// listener on their own never share an entry: a switch never shows one account's answers as
+    /// the other's.
+    pub fn tag(&self) -> String {
         match self {
-            Who::Owner => "owner",
-            Who::Listener(k) => k,
-            Who::Nobody => "nobody",
+            Who::Owner => "owner".into(),
+            Who::Listener(k) => k.clone(),
+            Who::ListenerOnNode(k) => format!("node:{k}"),
+            Who::Nobody => "nobody".into(),
         }
     }
 
     /// This person's copy of a setting: the owner's is `base` itself, a listener's
-    /// `person.<key>.<base>`; none for [`Who::Nobody`].
+    /// `person.<key>.<base>`; a listener on the node's sign-ins reads and refreshes those at the
+    /// node's keys and everything else at their own; none for [`Who::Nobody`].
     pub fn setting(&self, base: &str) -> Option<String> {
         match self {
             Who::Owner => Some(base.to_string()),
-            Who::Listener(k) => Some(format!("{PERSON_PREFIX}{k}.{base}")),
+            Who::ListenerOnNode(_) if SIGNIN_KEYS.contains(&base) => Some(base.to_string()),
+            Who::Listener(k) | Who::ListenerOnNode(k) => Some(format!("{PERSON_PREFIX}{k}.{base}")),
             Who::Nobody => None,
         }
     }
@@ -233,7 +350,7 @@ impl Who {
                 "sign in to the node first: sign-ins are kept per person",
             ));
         };
-        if let (Who::Listener(k), Some(_)) = (self, value) {
+        if let (Who::Listener(k) | Who::ListenerOnNode(k), Some(_)) = (self, value) {
             if !crate::people::listed_for_music(lib, k) {
                 return Err(ApiError::new(
                     StatusCode::FORBIDDEN,
@@ -350,32 +467,50 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 }
 
 /// A new browser session for the owner (key `key`), from a Pubky Ring sign-in: returned once,
-/// the node keeps its hash. At most 20; the oldest goes first.
+/// the node keeps its hash. At most `OWNER_SESSIONS_CAP`; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
+    mint_owners(s, key, OWNER_SESSIONS, OWNER_SESSIONS_CAP)
+}
+
+/// A sign-in for one of the owner's devices (the app), from a Pubky Ring sign-in the owner
+/// approved: as [`mint_owner`], in the devices' own list (`DEVICE_SESSIONS`).
+pub fn mint_device(s: &NodeState, key: &str) -> Result<String, ApiError> {
+    mint_owners(s, key, DEVICE_SESSIONS, DEVICE_SESSIONS_CAP)
+}
+
+/// `token`, `key`'s, into `all`, within `cap` (the oldest goes first); whether one went.
+fn remember(all: &mut Vec<PersonToken>, key: &str, token: &str, cap: usize) -> bool {
+    let mut evicted = false;
+    while all.len() >= cap {
+        all.remove(0);
+        evicted = true;
+    }
+    all.push(PersonToken {
+        hash: hash(token),
+        key: key.to_string(),
+        created_at: now(),
+    });
+    evicted
+}
+
+fn mint_owners(s: &NodeState, key: &str, list: &str, cap: usize) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
     let key = key.trim_start_matches("pubky").to_string();
     let lib = s.library.lock().expect("library poisoned");
     let mut evicted = false;
-    let made = update_in(&lib, OWNER_SESSIONS, |all| {
+    let made = update_in(&lib, list, |all| {
         // Still the node's identity, checked under the same hold as the cleanup when it takes on
         // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
         let current = s
             .sync_handle()
             .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
         if current {
-            if all.len() >= 20 {
-                all.remove(0);
-                evicted = true;
-            }
-            all.push(PersonToken {
-                hash: hash(&token),
-                key: key.clone(),
-                created_at: now(),
-            });
+            evicted = remember(all, &key, &token, cap);
         }
         current
     });
-    // The oldest session ended: its usage insights end too, also when a write failed after
+    // The oldest browser session or device sign-in ended: its usage insights end too, also when
+    // a write failed after
     if evicted {
         s.usage.revoke_owner();
     }
@@ -397,33 +532,43 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
 /// the 401 that makes the page log in again: the session works again once the identity is).
 pub const IDENTITY_NOT_LOADED: &str = "this node couldn't load its Pubky identity (its homeserver didn't answer when it started), and browser sessions wait for it: restart the node once the homeserver answers. Until then the node's API token logs in";
 
-/// An owner's browser session that is still open, for `owner`: the identity the node has loaded
-/// now (a node signed in as someone else no longer lets the old owner's browsers in).
+/// An owner's browser session or device sign-in that is still open, for `owner`: the identity the
+/// node has loaded now (a node signed in as someone else no longer lets the old owner's in).
 fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
     let h = hash(token);
-    load(s, OWNER_SESSIONS)
+    [OWNER_SESSIONS, DEVICE_SESSIONS]
         .iter()
-        .any(|t| t.hash == h && t.key == owner)
+        .any(|list| load(s, list).iter().any(|t| t.hash == h && t.key == owner))
 }
 
 /// The node took on the identity `owner` (restored at start, or a log in renewed or changed it):
-/// browser sessions of any other identity end, so none can come back later.
+/// browser sessions and device sign-ins of any other identity end, so none can come back later.
 pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
     let owner = owner.trim_start_matches("pubky");
     let mut ended = false;
-    let done = update(s, OWNER_SESSIONS, |all| {
+    let browsers = update(s, OWNER_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.key == owner);
-        ended = all.len() < before;
+        ended |= all.len() < before;
     });
+    let devices = update(s, DEVICE_SESSIONS, |all| {
+        let before = all.len();
+        all.retain(|t| t.key == owner);
+        ended |= all.len() < before;
+    });
+    // A browser session or a device sign-in ended: its usage insights end too, also when a write
+    // failed after
     if ended {
         s.usage.revoke_owner();
     }
-    done
+    browsers?;
+    devices
 }
 
 /// Ends one owner's browser session (Log out); whether it was open. Also while the node has no
-/// identity loaded, when the session is otherwise refused: Log out must still work then.
+/// identity loaded, when the session is otherwise refused: Log out must still work then. A
+/// device's sign-in is not a browser session: the page in the app forgets it, the app keeps it
+/// (as with the API token), and `false` says so.
 pub fn end_owner_session(s: &NodeState, token: &str) -> Result<bool, ApiError> {
     let h = hash(token);
     let mut ended = false;
@@ -448,11 +593,19 @@ pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
     let mark = token_mark(s);
     let was = lib.get_setting(OWNER_SESSIONS_TOKEN).ok().flatten();
     let ended = match was.as_deref() {
-        Some(w) if w != mark => update_in(&lib, OWNER_SESSIONS, |all| {
-            let any = !all.is_empty();
-            all.clear();
-            any
-        })?,
+        Some(w) if w != mark => {
+            let browsers = update_in(&lib, OWNER_SESSIONS, |all| {
+                let any = !all.is_empty();
+                all.clear();
+                any
+            })?;
+            let devices = update_in(&lib, DEVICE_SESSIONS, |all| {
+                let any = !all.is_empty();
+                all.clear();
+                any
+            })?;
+            browsers || devices
+        }
         _ => false,
     };
     if was.as_deref() != Some(mark.as_str()) {
@@ -465,11 +618,14 @@ pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
     Ok(ended)
 }
 
-/// Ends every browser session of the owner (a new API token: the answer to a leak).
+/// Ends every browser session and device sign-in of the owner (a new API token: the answer to a
+/// leak). The app signs in again by itself, with one approval in Pubky Ring.
 pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
-    let done = update(s, OWNER_SESSIONS, Vec::clear);
+    let browsers = update(s, OWNER_SESSIONS, Vec::clear);
+    let devices = update(s, DEVICE_SESSIONS, Vec::clear);
     s.usage.revoke_owner();
-    done
+    browsers?;
+    devices
 }
 
 /// Whose token this is, when it is a listener's that still has music access.
@@ -580,6 +736,36 @@ const LISTENER_OWN: &[&str] = &[
     "/sources/spotify/play",
 ];
 
+/// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
+const LISTENER_OWN_ALWAYS: &[&str] = &[
+    // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
+    // whatever plays through whose sign-ins (usage.rs checks the person)
+    "/usage",
+    "/play-order",
+    "/sources/tidal/stream",
+    "/sources/qobuz/stream",
+    "/sources/spotify/devices",
+    "/sources/spotify/play",
+];
+
+/// Inside [`LISTENER_OWN`], a listener's own sign-in state, which they may still read (GET) when the
+/// node plays through its own sign-ins.
+const LISTENER_OWN_STATUS: &[&str] = &[
+    "/sources/tidal/signin",
+    "/sources/qobuz/signin",
+    "/sources/spotify/signin",
+    "/sources/tidal/status",
+    "/sources/spotify/status",
+    "/sources/tidal/session",
+    "/sources/spotify/session",
+    "/sources/tidal/unofficial",
+    "/sources/qobuz/unofficial",
+];
+
+/// Why a listener can't sign in to their own service under [`SourcePolicy::Node`].
+pub const NODE_SOURCES_ONLY: &str =
+    "this node plays everyone's music through its own sign-ins (its owner chose so in Settings)";
+
 /// Inside [`LISTENER_OWN`], still the owner's: checking the node's TIDAL device client and Qobuz app.
 const LISTENER_OWN_EXCEPTIONS: &[&str] = &[
     "/sources/tidal/unofficial/client",
@@ -631,7 +817,20 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     }
     // Their own streaming accounts
     if under(path, LISTENER_OWN) {
-        return under(path, LISTENER_OWN_EXCEPTIONS).then_some("that is the owner's");
+        if under(path, LISTENER_OWN_EXCEPTIONS) {
+            return Some("that is the owner's");
+        }
+        // The node plays through its own sign-ins: a listener can't sign in to their own (what
+        // they had stays; reads of their own status, plays and streams go on)
+        if !under(path, LISTENER_OWN_ALWAYS)
+            && !(*method == Method::GET && LISTENER_OWN_STATUS.contains(&path))
+            // Signing out of their own stays possible
+            && !(*method == Method::DELETE && LISTENER_OWN_STATUS.contains(&path))
+            && source_policy(&s.library.lock().expect("library poisoned")) == SourcePolicy::Node
+        {
+            return Some(NODE_SOURCES_ONLY);
+        }
+        return None;
     }
     // Their own collections, on their own homeserver (personal_collections.rs answers each
     // person's); the rest of /collections and /playlists stays the owner's
@@ -758,7 +957,8 @@ pub(crate) async fn sign_out(
             done?;
         }
         Role::Owner if token.starts_with(OWNER_PREFIX) => {
-            end_owner_session(&s, &token)?;
+            let ended = end_owner_session(&s, &token)?;
+            return Ok(Json(serde_json::json!({"signed_out": true, "ended": ended})));
         }
         _ => return Ok(Json(serde_json::json!({"signed_out": true, "ended": false}))),
     }
@@ -828,13 +1028,20 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
         }
         lib.delete_setting(&crate::prefs::storage_key_of(key))?;
         lib.delete_setting(&crate::presence::visible_key(key))?;
-        for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(key))? {
-            lib.delete_setting(&k)?;
+        // What they read with their own sign-ins, and with the node's ([`Who::tag`])
+        let on_node = Who::ListenerOnNode(key.to_string()).tag();
+        for tag in [key, on_node.as_str()] {
+            for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(tag))? {
+                lib.delete_setting(&k)?;
+            }
         }
     }
     crate::personal::forget(s, key);
+    let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
+    crate::tidal::forget_streams_of(&on_node);
     crate::search::forget_answers_of(s, key);
+    crate::search::forget_answers_of(s, &on_node);
     crate::devices::forget_all_of(s, key);
     Ok(())
 }
@@ -1076,6 +1283,87 @@ fn replace_paths(v: &mut serde_json::Value, paths: &[String]) -> bool {
     }
 }
 
+/// Whose sign-ins a person plays TIDAL, Qobuz and Spotify with (`GET/PUT /v1/me/sources`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MySources {
+    /// The node's policy: `node`, `own` or `choice`.
+    pub policy: SourcePolicy,
+    /// The person's own choice (`node` or `own`), kept whatever the policy.
+    #[serde(rename = "use")]
+    pub choice: String,
+    /// Whose sign-ins plays use now: `node` or `own`.
+    pub plays_with: String,
+    /// Whether the person may switch (a listener, under `choice`).
+    pub may_choose: bool,
+}
+
+/// What a person may change: their own choice.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MySourcesUpdate {
+    #[serde(rename = "use")]
+    pub choice: String,
+}
+
+fn my_sources_view(lib: &pm_library::Library, who: &Who) -> MySources {
+    let policy = source_policy(lib);
+    match who {
+        Who::Listener(k) | Who::ListenerOnNode(k) => MySources {
+            policy,
+            choice: listener_use(lib, k).into(),
+            plays_with: if plays_on_node(lib, k) { "node" } else { "own" }.into(),
+            may_choose: policy == SourcePolicy::Choice,
+        },
+        // The owner's sign-ins are the node's
+        Who::Owner => MySources {
+            policy,
+            choice: "node".into(),
+            plays_with: "node".into(),
+            may_choose: false,
+        },
+        // A party guest or a LAN controller plays with no one's
+        Who::Nobody => MySources {
+            policy,
+            choice: "node".into(),
+            plays_with: "none".into(),
+            may_choose: false,
+        },
+    }
+}
+
+/// `GET /v1/me/sources`.
+pub(crate) async fn my_sources(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+) -> ApiResult<MySources> {
+    let lib = s.library.lock().expect("library poisoned");
+    Ok(Json(my_sources_view(&lib, &Who::of(&c))))
+}
+
+/// `PUT /v1/me/sources {use: "node"|"own"}`: a listener's choice, under the `choice` policy. Their own
+/// sign-ins and the node's both stay as they are; only which one plays changes.
+pub(crate) async fn set_my_sources(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(c): axum::Extension<Caller>,
+    Json(b): Json<MySourcesUpdate>,
+) -> ApiResult<MySources> {
+    let who = Who::of(&c);
+    let Who::Listener(_) = &who else {
+        return Err(ApiError::bad_request("the owner's sign-ins are the node's"));
+    };
+    if !matches!(b.choice.as_str(), "node" | "own") {
+        return Err(ApiError::bad_request("use is `node` or `own`"));
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    if source_policy(&lib) != SourcePolicy::Choice {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this node's owner decides whose sign-ins everyone plays with",
+        ));
+    }
+    who.put(&lib, SOURCE_USE_KEY, Some(&b.choice))?;
+    Ok(Json(my_sources_view(&lib, &who)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1144,5 +1432,16 @@ mod tests {
             uris,
             ["x.flac", "y.flac", "track:4", "https://radio.example.org/s.mp3"]
         );
+    }
+
+    /// Sessions are kept within their cap, the oldest going first; devices have a cap of their own.
+    #[test]
+    fn sessions_stay_within_their_cap_oldest_first() {
+        let mut all = Vec::new();
+        for i in 0..OWNER_SESSIONS_CAP + 3 {
+            remember(&mut all, "k", &format!("pmo_{i}"), OWNER_SESSIONS_CAP);
+        }
+        assert_eq!(all.len(), OWNER_SESSIONS_CAP);
+        assert_eq!(all[0].hash, hash("pmo_3"), "the three oldest went");
     }
 }

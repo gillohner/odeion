@@ -1065,7 +1065,10 @@ impl NodeClient {
 
 /// Find the user's node through their homeserver (ADR 0008): restore the
 /// session from an exported secret, read the private node record, and
-/// return a client for it.
+/// return a client for its address. The record holds no credential: sign in
+/// to the node itself (Pubky Ring, `/v1/auth/pubky/start`) and pass the token
+/// that gives to [`NodeClient::new`]. A token an older node left in the record
+/// is never used.
 pub async fn connect_via_pubky(
     network: pm_pubky::Network,
     session_secret: &str,
@@ -1092,10 +1095,7 @@ pub async fn connect_via_pubky(
                 "no node has published its address for this pubky yet (start `odeiond serve` with a session)"
                     .into(),
         })?;
-    let client = NodeClient::new(
-        &record.api_url,
-        (!record.token.is_empty()).then(|| record.token.clone()),
-    )?;
+    let client = NodeClient::new(&record.api_url, None)?;
     Ok((client, record))
 }
 

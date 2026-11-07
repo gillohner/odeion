@@ -195,7 +195,7 @@ impl Stop {
     }
 
     /// Why the sign-in stops now, if it does.
-    fn reason(&self) -> Option<&'static str> {
+    pub(crate) fn reason(&self) -> Option<&'static str> {
         if CANCELLED_SIGNIN.load(Ordering::Acquire) == self.id {
             Some(CANCELLED)
         } else if tokio::time::Instant::now() >= self.deadline {
