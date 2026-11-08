@@ -539,9 +539,17 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
     let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
     let homeserver = NodeHomeserver::new(network()).unwrap();
-    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (n1, n2) = (node(d1.path()), node(d2.path()));
-    for (n, id) in [(&n1, "living-room.pubky.music"), (&n2, "kitchen.pubky.music")] {
+    let (d1, d2, d3) = (
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+        tempfile::tempdir().unwrap(),
+    );
+    let (n1, n2, n3) = (node(d1.path()), node(d2.path()), node(d3.path()));
+    for (n, id) in [
+        (&n1, "living-room.pubky.music"),
+        (&n2, "kitchen.pubky.music"),
+        (&n3, "bedroom.pubky.music"),
+    ] {
         let flow = homeserver.start_login(id).unwrap();
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
@@ -550,7 +558,7 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
             session,
         )));
     }
-    let (a1, a2) = (router(n1.clone()), router(n2.clone()));
+    let (a1, a2, a3) = (router(n1.clone()), router(n2.clone()), router(n3.clone()));
     let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
     set(
         &n1,
@@ -571,6 +579,7 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
     // person's, or one whose grant ended since): node 1 writes its own over it
     let path = blob_path("tidal").unwrap();
     let mine = v1.read("tidal").await.unwrap().unwrap();
+    let before = v1.envelope("tidal").await.unwrap().unwrap();
     let stranger = ClientSecret::generate();
     let mut forged = seal(
         &owner,
@@ -605,9 +614,27 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
     assert_eq!(back.writer.map(|w| w.client_key), Some(k1.public()));
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(r["pushed"], json!([]), "once: {r}");
+    // An older copy put back (the one from before node 1's write) is written over as well, and
+    // not reported as failed on every pass
+    s1.session()
+        .storage()
+        .put(path.as_str(), serde_json::to_vec(&before).unwrap())
+        .await
+        .unwrap();
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(
+        (r["pushed"].clone(), r["failed"].clone()),
+        (json!(["tidal"]), json!([])),
+        "{r}"
+    );
+    assert!(v1.read("tidal").await.unwrap().unwrap().epoch > before.epoch);
 
     // The migration window: node 1's entry from before v2 (no signer proof), an unsigned copy
-    // of Jamendo in the vault, node 2 with none of its own: node 2 takes it, and never signs it
+    // of Jamendo in the vault, node 3 with none of its own and no record of node 1 ever signing:
+    // node 3 takes it, and never signs it. Node 2 has seen node 1's proof verify, so for it the
+    // entry without its proof is still a client that signs: it refuses the unsigned copy
+    call(&a3, "POST", "/v1/vault/register").await;
+    let (_, k3) = node_vault_parts(&n3);
     set(
         &n1,
         "jamendo.user",
@@ -634,7 +661,7 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
         j.epoch,
         &DataKey::generate(),
         &serde_json::to_vec(&j.sign_in).unwrap(),
-        &[k1.public(), k2.public()],
+        &[k1.public(), k2.public(), k3.public()],
     )
     .unwrap();
     s1.session()
@@ -643,12 +670,19 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
         .await
         .unwrap();
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
-    assert_eq!(r["pulled"], json!(["jamendo"]), "{r}");
-    let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
+    assert!(
+        r["pulled"] == json!([]) && r["not_usable"].as_array().unwrap().contains(&json!("jamendo")),
+        "a proof dropped from the list doesn't reopen unsigned reads: {r}"
+    );
+    // (node 2's pass wrote its own signed TIDAL over the copy whose writer lost its proof, so
+    // node 3 takes that one as well)
+    let (_, r) = call(&a3, "POST", "/v1/vault/sync").await;
+    assert!(r["pulled"].as_array().unwrap().contains(&json!("jamendo")), "{r}");
+    let (_, r) = call(&a3, "POST", "/v1/vault/sync").await;
     assert_eq!(
         r["signed"],
         json!([]),
-        "node 2 doesn't vouch for what it took unsigned: {r}"
+        "node 3 doesn't vouch for what it took unsigned: {r}"
     );
     assert!(v1.envelope("jamendo").await.unwrap().unwrap().writer.is_none());
     s1.session()

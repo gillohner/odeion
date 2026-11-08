@@ -346,7 +346,8 @@ pub struct Detail {
     /// `other_account` (two different accounts), `other_app` (made with an app this node doesn't
     /// have), `other_client` (written by a client that isn't a node), `both_changed` (one account,
     /// two new sign-ins), `unsigned` (no device of the person's signed it), `signed_out` (a
-    /// sign-in made before the person last signed out everywhere).
+    /// sign-in made before the person last signed out everywhere), `stale` (older than a copy
+    /// this node has seen).
     pub reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<CopyInfo>,
@@ -989,9 +990,11 @@ pub(crate) async fn sync_held(
                 tracing::warn!(service = b.service, "vault: the node's record wasn't reset: {e}");
             }
         }
-        // A copy signed by nobody the person trusts (an older client, a device signed out since)
+        // A copy signed by nobody the person trusts (an older client, a device signed out since),
+        // or one older than a copy this node has seen (put back, or unsigned after a signed one),
         // is there but not taken: never as "gone", which would sign the node out
         let mut untrusted_there = false;
+        let mut stale_there = false;
         let theirs: Option<Opened> = match vault.read(b.service).await {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
@@ -1000,6 +1003,10 @@ pub(crate) async fn sync_held(
             }
             Err(VaultStoreError::NotADevice(_)) => {
                 untrusted_there = true;
+                None
+            }
+            Err(VaultStoreError::Stale { .. }) => {
+                stale_there = true;
                 None
             }
             Err(e) => {
@@ -1052,9 +1059,9 @@ pub(crate) async fn sync_held(
         let app = app_for(b, mine.as_ref(), my_app.clone());
         let my_side = mine.as_ref().map(|m| side_of(b, m, lineage.clone()));
         let seen_signed = vault.seen_signed(b.service).unwrap_or(true);
-        let untrusted_side = untrusted_there.then(|| VaultSide {
+        let untrusted_side = (untrusted_there || stale_there).then(|| VaultSide {
             side: Side {
-                hash: "untrusted".into(),
+                hash: if stale_there { "stale" } else { "untrusted" }.into(),
                 ..Side::default()
             },
             from_a_node: false,
@@ -1086,9 +1093,10 @@ pub(crate) async fn sync_held(
             since_seen: marker.is_some() && seen.as_ref().is_some_and(|x| x.marker != marker),
         };
         let mut what = decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref(), &wipe);
-        // A copy nobody the person trusts signed (a device whose grant ended, a stranger) is
-        // written over by this node's own: sync goes on instead of stalling on it
-        if what == Do::NotUsable && untrusted_there && mine.is_some() {
+        // A copy nobody the person trusts signed (a device whose grant ended, a stranger), or one
+        // older than a copy this node has seen, is written over by this node's own: sync goes on
+        // instead of stalling on it
+        if what == Do::NotUsable && (untrusted_there || stale_there) && mine.is_some() {
             what = Do::Push;
         }
         // Lost here because the node's app changed, not signed out: the vault keeps it
@@ -1114,6 +1122,7 @@ pub(crate) async fn sync_held(
         };
         let reason = |t: Option<&VaultSide>| -> &'static str {
             match t {
+                Some(t) if t.side.hash == "stale" => "stale",
                 Some(t) if !t.vouched => "unsigned",
                 Some(t) if wipe.signed_out(t) => "signed_out",
                 Some(t) if !t.from_a_node => "other_client",
@@ -1146,6 +1155,7 @@ pub(crate) async fn sync_held(
                         Take::Node => "this node has no sign-in for it",
                         Take::Vault => match reason(their_side.as_ref()) {
                             "unsigned" => "the vault's copy wasn't signed by one of your devices (an older client wrote it); sign in on this node instead",
+                            "stale" => "the vault's copy is older than one this node has seen; sign in on this node instead",
                             "signed_out" => "the vault's copy is of a sign-in made before you signed out everywhere; sign in on this node instead",
                             "other_client" => "the vault's copy was written by a client that isn't a node",
                             "other_app" => {

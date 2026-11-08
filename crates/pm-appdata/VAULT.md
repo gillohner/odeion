@@ -221,19 +221,22 @@ and a reader takes a blob only from one of the person's devices.
   blob's, so what the blob held is never taken and never comes back as newer; a blob at the last epoch or
   revision (2^64 - 1) is refused instead. It never rewrites that blob from its content (adding a device, a
   rotation), and never takes its tokens for a refresh.
-- **A blob written where there is none** (and one written over a blob nobody trusted signed) starts at an
-  epoch above the highest the writer has seen for that service and no lower than the current Unix time, with
+- **A blob written where there is none** (and one written over a blob nobody trusted signed, or over one
+  older than a copy the writer has seen) starts at an epoch above the highest the writer has seen for that service and no lower than the current Unix time, with
   a revision above the highest it has seen: above what another device saw and this one missed.
 - **Reading an unsigned blob** (a client from before v2): only while some trusted entry has no signer proof
-  (a client from before v2 is still listed), the reader has never seen a signed copy of that service (a
+  (a client from before v2 is still listed) and the reader has never seen that entry's key with a verifying
+  proof (a proof dropped from the list by someone who can write it doesn't make its client one from before
+  v2), the reader has never seen a signed copy of that service (a
   per-service note in the reader's own record), and, in a node, only when it has no copy of its own. It is
   never taken over a signed copy. An unsigned blob is never signed by a reader that took it: it isn't
   shared on to a new device, and a node signs it only when it equals a copy the node had of its own (not
   one it took from the vault unsigned). The writer-chosen markers inside the plaintext (`node`,
   `created_by`, …) count only on signed blobs.
 - **What a reader remembers** (its own file, beside its record of sign-outs): per service the highest
-  `(epoch, revision)` of a signed blob it read or wrote, which services it has seen signed, and the highest
-  `signed_out_everywhere_at` it has seen in the device list. A signed blob below the mark is refused as
+  `(epoch, revision)` of a signed blob it read or wrote, which services it has seen signed, which client keys
+  it has seen with a verifying signer proof, and the highest `signed_out_everywhere_at` it has seen in the
+  device list. A signed blob below the mark is refused as
   stale, so a homeserver that serves an old copy can't take a sign-in back, also where `LOCK` isn't
   supported; a device list with a lower `signed_out_everywhere_at` doesn't undo a sign-out everywhere. A
   `signed_out_everywhere_at` later than the reader's clock plus 10 minutes is no sign-out that happened: it

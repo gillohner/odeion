@@ -29,9 +29,10 @@ renewed, so a blob signed that way would stop verifying though nothing about it 
   recipients and the ciphertext (which covers the revision and the plaintext). Every rewrite re-signs.
 - **A reader takes a signed blob only from a device trusted today** (a verifying entry, not signed out, with
   a signer proof under the entry's own grant), and an unsigned blob only while a client from before v2 is
-  still listed, it has seen no signed copy of that service and, in a node, has no copy of its own; it never
-  signs an unsigned blob it took. A blob nobody trusted signed is written over by the node's own copy (a new
-  key, the next epoch), never rewritten from its content; signing a device out still rotates what that
+  still listed (an entry whose proof the reader has once seen verify counts as signing without it), it has
+  seen no signed copy of that service and, in a node, has no copy of its own; it never signs an unsigned
+  blob it took. A blob nobody trusted signed, or one older than a copy the node has seen, is written over by
+  the node's own copy (a new key, the next epoch), never rewritten from its content; signing a device out still rotates what that
   device wrote while trusted, since the rotation runs under the blob's lock right after the list says it
   is out.
 - **Rollback guard:** each reader keeps the highest `(epoch, revision)` seen per blob and the highest

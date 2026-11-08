@@ -1052,7 +1052,18 @@ async fn a_sign_in_is_taken_only_from_a_device_that_signed_it() {
         }
     };
     put_index(&with_old).await;
-    let c_sees = v[2].read("tidal").await.unwrap().unwrap();
+    // C has seen B's proof verify (its record says so), so B's entry without it is still a
+    // client that signs: dropping a proof from the list doesn't reopen unsigned reads
+    assert!(
+        matches!(v[2].read("tidal").await, Err(VaultStoreError::NotADevice(_))),
+        "a proof dropped from the list"
+    );
+    // A reader that never saw B sign (a fresh record) is in the migration window
+    let fresh_marks = dir.path().join("marks-fresh.json");
+    let fresh = Vault::new(&sessions[2], &keys[2])
+        .device("node")
+        .keep_marks(&fresh_marks);
+    let c_sees = fresh.read("tidal").await.unwrap().unwrap();
     assert_eq!(
         (c_sees.signed_by, c_sees.sign_in.tokens["access_token"].as_str()),
         (None, Some("old-client"))
@@ -1072,8 +1083,16 @@ async fn a_sign_in_is_taken_only_from_a_device_that_signed_it() {
             "an older copy"
         );
     }
-    // ...and nothing is written over it either (a write reads first): the newest copy back
-    assert!(v[0].write_shared("tidal", &sign_in("s3")).await.is_err());
+    // ...and A's own write goes past it (above the newest copy A has seen), so sync never
+    // stalls on it; the older copy served again afterwards is still older
+    let past = v[0].write_shared("tidal", &sign_in("s3")).await.unwrap();
+    assert!(past > 2, "{past}");
+    assert!(v[0].read("tidal").await.unwrap().unwrap().epoch > second.epoch);
+    put(raw(&first)).await;
+    assert!(matches!(
+        v[1].read("tidal").await,
+        Err(VaultStoreError::Stale { .. })
+    ));
     put(raw(&second)).await;
     // A signed blob changed after signing (a recipient dropped) is refused
     let current = {
@@ -1113,12 +1132,7 @@ async fn a_sign_in_is_taken_only_from_a_device_that_signed_it() {
     // time at least (not first.epoch + 1 once a second has passed)
     let after = v[0].read("tidal").await.unwrap().unwrap();
     assert_eq!(after.signed_by, Some(v[0].client_key()));
-    assert!(
-        after.epoch > by_b.epoch && by_b.epoch == first.epoch,
-        "{} > {}",
-        after.epoch,
-        by_b.epoch
-    );
+    assert!(after.epoch > by_b.epoch, "{} > {}", after.epoch, by_b.epoch);
     put(raw(&by_b)).await;
     assert!(v[0].read("tidal").await.is_err(), "B's blob after B's sign-out");
     // A blob signed by a key the list never held is not rotated from its content: A's own
@@ -1313,8 +1327,42 @@ async fn a_blob_deleted_and_put_back_older_is_still_stale() {
     assert!(anew.epoch > newer.epoch, "{} > {}", anew.epoch, newer.epoch);
     assert_eq!(anew.sign_in.tokens["access_token"], "anew");
 
-    // A blob nobody trusted signed, at the last epoch: A's write past it is refused, not wrapped
+    // A blob nobody trusted signed, one below the last revision: A's write past it lands at the
+    // last one, and A's next rewrite is refused, not wrapped around to 0
     let stranger = ClientSecret::generate();
+    let mut evil = sign_in("evil");
+    evil.revision = u64::MAX - 1;
+    let mut near = seal(
+        va.owner(),
+        &path,
+        anew.epoch + 1,
+        &DataKey::generate(),
+        &serde_json::to_vec(&evil).unwrap(),
+        &[va.client_key()],
+    )
+    .unwrap();
+    sign_envelope(
+        va.owner(),
+        &path,
+        &mut near,
+        stranger.public(),
+        &SigningKey::derive(&stranger),
+    )
+    .unwrap();
+    put(serde_json::to_vec(&near).unwrap()).await;
+    assert_eq!(
+        va.write_shared("tidal", &sign_in("mine")).await.unwrap(),
+        u64::MAX
+    );
+    assert_eq!(
+        va.read("tidal").await.unwrap().unwrap().sign_in.revision,
+        u64::MAX
+    );
+    assert!(
+        va.write_shared("tidal", &sign_in("mine-2")).await.is_err(),
+        "the last revision"
+    );
+    // ...and at the last epoch: A's write past it is refused too
     let mut last = seal(
         va.owner(),
         &path,
