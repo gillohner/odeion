@@ -378,14 +378,14 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
       check(await visible(p, '#quality .qsrc svg'), 'the pill carries the provider’s mark');
       check(await waitText(p, '#quality .qtext', 'Played by this browser'), 'and says the browser plays it');
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === 'This browser' && (await p.textContent('#qpanel .qp-src .name')).trim() === 'Your library', 'the panel: the zone and the source');
       check(/decodes the file itself/.test(await p.textContent('#qpanel')) && await p.locator('#qpanel input[type="range"]').count() === 0, 'no signal path claim for the browser; no volume in the panel (the bar has the one slider)');
       check(await p.getAttribute('#quality', 'aria-expanded') === 'true', 'the pill says the panel is open');
       check(await p.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement)), 'focus moved into the panel');
       await p.keyboard.press('Escape'); check(await gone(p, '#qpanel:not([hidden])'), 'Escape closes it');
       check(await p.evaluate(() => document.activeElement && document.activeElement.id === 'quality'), 'and focus is back on the pill');
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) .qp-zone');
       await p.click('#scrim'); check(await gone(p, '#qpanel:not([hidden])'), 'the scrim closes it too');
       // On a node zone (paused there, moved from the browser): the path in short, the panel in full
       await p.evaluate(() => document.querySelector('audio').pause()); await p.waitForTimeout(300);
@@ -398,7 +398,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(/^FLAC \d+\/[\d.]+ → \d+\/[\d.]+ · Bit-perfect$/.test(pl.text) && /q-bit_perfect/.test(pl.cls), `the pill: format and rate in, out, and the verdict (${pl.text})`);
       check(pl.src && !pl.dsp, 'the provider’s mark, and no DSP badge while no DSP stage is in the path');
       check(pl.dev === nz.name && /^\d+\/[\d.]+$/.test(pl.badge || ''), `the phone form is ready: the device and a quality badge (${pl.dev} · ${pl.badge})`);
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp]');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp]');
       check((await p.textContent('#qpanel .qp-zone .name')).trim() === nz.name && (await p.textContent('#qpanel .qp-zone .sub')).startsWith('Null output'), 'the panel: zone and device in words');
       check(await p.locator('#qpanel .path-row').count() >= 2, 'the full signal path, stage by stage');
       check(await p.locator('#qpanel [data-dsp]').count() === 4 && await p.locator('#qpanel [data-dsp="eq"]').isDisabled() && !(await p.locator('#qpanel [data-dsp="loudness"]').isDisabled()), 'four DSP switches; EQ is off-limits with no bands set');
@@ -505,7 +505,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.unroute(/\/v1\/zones\/[^/]+\/transport$/);
       // The DSP switches keep what was set: EQ's switched-off band, crossfeed's values
       await api('PUT', `/zones/${encodeURIComponent(nz.id)}/dsp`, { dither: true, resample: true, dsd_mode: 'auto', loudness: 'off', eq: [{ kind: 'peaking', freq_hz: 100, gain_db: 2, q: 1, enabled: true }, { kind: 'peaking', freq_hz: 1000, gain_db: -2, q: 1, enabled: false }], crossfeed: { level_db: -9, cutoff_hz: 650, delay_us: 280, enabled: true } });
-      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
+      await p.$eval('#quality', (q) => q.click()); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
       const flip = async (k) => { await p.locator(`#qpanel [data-dsp="${k}"]`).click({ force: true }); await p.waitForSelector(`#qpanel [data-dsp="${k}"]:not([disabled])`); await p.waitForTimeout(200); };
       await flip('eq'); await flip('eq');
       const dsp = await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`);

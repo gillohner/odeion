@@ -30,7 +30,7 @@ async function setup(browser,width,mode='mixed',duplicate=false,token='fixture-o
   if(run.failFiles&&u.pathname.includes('/library/'))return r.fulfill({status:503,contentType:'text/html',body:'Unavailable'});
   return r.fulfill({status:match?206:200,contentType:'audio/wav',headers:{'accept-ranges':'bytes','content-length':String(end-start+1),...(match?{'content-range':`bytes ${start}-${end}/${audio.length}`}:{})},body:audio.subarray(start,end+1)});
  });
- await go(run.page,'/playlist/c1');await run.page.locator('#plsongs [data-splay]').first().waitFor();
+ await go(run.page,'/playlist/c1');await run.page.locator('#plsongs .srow').first().waitFor();
  run.expected=ps.filter(p=>p.plays_from).map(p=>p.track_id!=null?`track:${p.track_id}`:p.stream_uri);
  return run;
 }
@@ -41,7 +41,7 @@ async function starts(run,id){await until(async()=>{const p=await run.page.evalu
  for(const width of [1280,390]){
   for(const action of (process.env.ACTION?[process.env.ACTION]:['direct-first','direct-middle','play','shuffle','list-play'])){
    const run=await setup(browser,width);const {page,state}=run;
-   if(action==='list-play'){await go(page,'/playlists');await page.locator('[data-plplay="c1"]').click();}else if(action==='play')await page.locator('#plplay').click();else if(action==='shuffle')await page.locator('#plshuffle').click();else await page.locator(`#plsongs [data-splay="${action==='direct-middle'?5:0}"]`).click();
+   if(action==='list-play'){await go(page,'/playlists');await page.locator('[data-plplay="c1"]').click();}else if(action==='play')await page.locator('#plplay').click();else if(action==='shuffle')await page.locator('#plshuffle').click();else await page.locator(`#plsongs [data-srow="${action==='direct-middle'?5:0}"]`).evaluate((r)=>{const b=r.querySelector('[data-splay]');(b&&b.offsetParent?b:r).click();}); // (a phone's row is its play button)
    if(action==='shuffle'){
     await until(async()=>{const p=await page.evaluate(()=>pmPlayer.now());return p.time>0&&!p.paused;},'Shuffle decodes first audio');
     const q=await queue(page);assert.deepEqual(q.map(x=>x.uri).sort(),[...run.expected].sort(),'Shuffle retains every playable item');

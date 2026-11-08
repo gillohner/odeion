@@ -1,21 +1,16 @@
-// Now playing on a phone is one screen (TASK-phone-nowplaying-integrated-1105; owner, 2026-11-05:
-// "bottom spacing and the detail page of a song on android look shit with bad submenu navigation
-// … could be more integrated everything"). Real candidate assets on the fixture origin
+// Now playing on a phone (TASK-phone-nowplaying-integrated-1105, revised by TASK-phone-ui-simplify-1108;
+// owner, 2026-11-08: the one long scroll "feels weird"). Real candidate assets on the fixture origin
 // (tools/ui-fixture.js) with a phone's viewport rules and the app's bridge, a Linn playing with a
 // queue, at 360x800, 390x844 and 412x915, dark and light:
 //   * Now playing takes the whole screen: the app's tabs and the mini player are hidden, nothing of
 //     it sits under another bar, and the page is the screen's width;
-//   * the first screen is the player: cover, title, seek, transport and volume all on it, at least
-//     12 px under the top bar, and one 16 px side inset for the cover, title, seek and chips;
-//   * under it Up next, Lyrics, Details, Sources and Tags as sections in the same scroll, with one
-//     row of chips (buttons) that stays at the top with the song and Play once the transport scrolls
-//     away; a chip scrolls its section to just under the row and marks itself current;
-//   * no second row of tabs, no sheet mode and no close button of its own;
-//   * synced lyrics scroll their own box, never the page; a redraw while reading further down keeps
-//     the place and the focus; scrolling by hand moves the current chip; the chips row is as tall
-//     stuck as not;
-//   * a swipe down closes it from the player, not from a scrolled section; focus goes back to the
-//     mini player;
+//   * the player is one screen that doesn't scroll: cover, title, seek, transport, volume and three
+//     buttons (Up next, Lyrics, More), one 16 px side inset for the cover, title and seek;
+//   * no five-tab row, side sheet, close button or long scroll of sections;
+//   * Lyrics opens as a sheet; synced lyrics scroll their own box; a redraw keeps the sheet, its
+//     place and the focus;
+//   * a swipe down inside the sheet's list doesn't close it, on its head it does; a swipe down from
+//     the player closes Now playing and focus goes back to the mini player;
 //   * on the library page the mini player and the tabs share an edge (one surface), the tabs reach
 //     the screen's bottom, and the filter row and the quality chips are at least 12 px apart.
 //   node tools/ui-nowplaying-phone.js [repo] [shots]
@@ -63,54 +58,41 @@ const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { bod
       const top = await page.evaluate(() => {
         const ov = document.querySelector('#nowplaying'); const o = ov.getBoundingClientRect(); const r = (s) => { const e = ov.querySelector(s); return e ? e.getBoundingClientRect() : null; };
         const vis = (s) => { const e = document.querySelector(s); return !!e && getComputedStyle(e).display !== 'none' && e.getClientRects().length > 0; };
-        return { o: { top: o.top, bottom: o.bottom, left: o.left, right: o.right }, vh: innerHeight, vw: document.documentElement.clientWidth, sw: document.documentElement.scrollWidth, iw: innerWidth, nav: vis('.bottomnav'), player: vis('.player'), npTop: r('.np-top'), big: r('.np-big'), title: r('.np-titles h1'), seek: r('#npseek'), transport: r('.np-transport'), vol: r('.np-vol'), chipsRow: r('.np-jump'), oldTabs: vis('#nowplaying .np-tabs'), sheet: vis('#nowplaying .np-sheet'), close: vis('#npsheetclose'), sections: [...ov.querySelectorAll('.np-sec')].map((s) => s.id), chips: [...ov.querySelectorAll('[data-npjump]')].map((c) => ({ k: c.dataset.npjump, tag: c.tagName })) };
+        const pg = ov.querySelector('.np-page');
+        return { o: { top: o.top, bottom: o.bottom, left: o.left, right: o.right }, vh: innerHeight, vw: document.documentElement.clientWidth, sw: document.documentElement.scrollWidth, iw: innerWidth, nav: vis('.bottomnav'), player: vis('.player'), npTop: r('.np-top'), big: r('.np-big'), title: r('.np-titles h1'), seek: r('#npseek'), transport: r('.np-transport'), vol: r('.np-vol'), dock: r('.np-dock'), over: Math.max(ov.scrollHeight - ov.clientHeight, pg.scrollHeight - pg.clientHeight), oldTabs: vis('#nowplaying .np-tabs'), sideSheet: vis('#nowplaying .np-sheet'), sheet: vis('#nowplaying .np-bsheet'), close: vis('#npsheetclose'), sections: ov.querySelectorAll('.np-sec, .np-jump').length, dockBtns: [...ov.querySelectorAll('.np-dock [data-npsheet]')].map((c) => `${c.tagName}:${c.textContent.trim()}`) };
       });
       check(!top.nav && !top.player && top.o.top === 0 && Math.abs(top.o.bottom - top.vh) <= 0.5 && top.iw === top.vw && top.sw <= top.vw, `${at}: Now playing takes the whole screen (tabs ${top.nav ? 'shown' : 'hidden'}, mini player ${top.player ? 'shown' : 'hidden'}, ${top.o.top}..${Math.round(top.o.bottom)} of ${top.vh}, width ${top.sw} of ${top.vw})`);
-      check(top.transport && top.vol && top.vol.bottom <= top.vh && top.big.top - top.npTop.bottom >= 12, `${at}: the player is the first screen (volume ends at ${top.vol && Math.round(top.vol.bottom)} of ${top.vh}; ${Math.round(top.big.top - top.npTop.bottom)} px under the top bar)`);
+      check(top.transport && top.vol && top.dock && top.dock.bottom <= top.vh && top.over <= 1 && top.big.top - top.npTop.bottom >= 4, `${at}: the player is one screen that doesn't scroll (buttons end at ${top.dock && Math.round(top.dock.bottom)} of ${top.vh}, overflow ${top.over} px)`);
       const lefts = [top.big.left, top.title.left, top.seek.left].map(Math.round);
       check(lefts.every((l) => l === 16) && Math.round(top.big.right) === w - 16, `${at}: one 16 px side inset for the cover, title and seek (${lefts.join(', ')}; cover ends ${Math.round(top.big.right)})`);
-      check(!top.oldTabs && !top.sheet && !top.close, `${at}: no second row of tabs, sheet or close button of its own`);
-      check(top.sections.join(',') === 'npsec-queue,npsec-lyrics,npsec-details,npsec-sources,npsec-tags' && top.chips.every((c) => c.tag === 'BUTTON') && top.chips.length === 5, `${at}: Up next, Lyrics, Details, Sources and Tags in the same scroll, with five chip buttons (${top.sections.join(' ')})`);
+      check(!top.oldTabs && !top.sideSheet && !top.sheet && !top.close && !top.sections, `${at}: no five-tab row, side sheet, close button or long scroll of sections on the first screen`);
+      check(top.dockBtns.join(',') === 'BUTTON:Up next,BUTTON:Lyrics,BUTTON:More', `${at}: Up next, Lyrics and More as three buttons under the player (${top.dockBtns.join(' ')})`);
       if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-${w}.png`) });
-      await sleep(1600);
-      const ly = await page.evaluate(() => { const box = document.querySelector('#nplyrics .lyric-lines'); const on = document.querySelector('#nplyrics .lyric-line.on'); const b = box && box.getBoundingClientRect(); const o = on && on.getBoundingClientRect(); return { top: document.querySelector('#nowplaying').scrollTop, lines: !!on, boxTop: box ? box.scrollTop : 0, inBox: !!(b && o && o.top >= b.top - 1 && o.bottom <= b.bottom + 1), barH: document.querySelector('.np-jump').getBoundingClientRect().height }; });
-      check(ly.top === 0 && ly.lines && ly.boxTop > 0 && ly.inBox, `${at}: synced lyrics follow in their own box (scrolled ${ly.boxTop}, the current line in view ${ly.inBox}) and the page stays on the player (at ${ly.top})`);
-      // A chip: its section just under the chips row, the row stuck with the song and Play
-      await page.click('[data-npjump="details"]'); await sleep(900);
-      const jumped = await page.evaluate(() => {
-        const ov = document.querySelector('#nowplaying'); const bar = ov.querySelector('.np-jump').getBoundingClientRect(); const sec = ov.querySelector('#npsec-details').getBoundingClientRect();
-        const strip = ov.querySelector('.np-jump-strip'); const play = ov.querySelector('.np-jump-play');
-        return { end: ov.scrollTop + ov.clientHeight >= ov.scrollHeight - 2, barTop: Math.round(bar.top), barBottom: Math.round(bar.bottom), secTop: Math.round(sec.top), stuck: ov.querySelector('.np-jump').classList.contains('stuck'), strip: getComputedStyle(strip).display !== 'none', play: getComputedStyle(play).display !== 'none', cur: ov.querySelector('[data-npjump][aria-current="true"]')?.dataset.npjump, scroll: ov.scrollTop, focus: document.activeElement && document.activeElement.id };
-      });
-      check(jumped.barTop === 0 && jumped.stuck && jumped.strip && jumped.play, `${at}: the chips row stays at the top with the song and Play (${jumped.barTop}, stuck ${jumped.stuck})`);
-      // (where the page ends first, as far as it goes: the part is then below the row, not under it)
-      check(jumped.secTop >= jumped.barBottom && (jumped.end || jumped.secTop - jumped.barBottom <= 24), `${at}: Details scrolls to just under the chips row (${jumped.secTop - jumped.barBottom} px under it${jumped.end ? ', the page ends there' : ''})`);
-      check(jumped.cur === 'details' && jumped.focus === 'npsech-details', `${at}: the Details chip is current and its heading has the focus (${jumped.cur}, ${jumped.focus})`);
-      if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-details-${w}.png`) });
-      const stuckH = await page.evaluate(() => document.querySelector('.np-jump').getBoundingClientRect().height);
-      check(Math.abs(stuckH - ly.barH) <= 0.5, `${at}: the chips row is as tall stuck as not (${ly.barH} → ${stuckH})`);
-      // Further down, Play in the chips row: the redraw after it keeps the place and the focus there
-      await page.click('[data-npjump="tags"]'); await sleep(900);
-      const before = await page.evaluate(() => document.querySelector('#nowplaying').scrollTop);
-      await page.click('.np-jump-play'); await sleep(900);
-      const after = await page.evaluate(() => ({ top: document.querySelector('#nowplaying').scrollTop, focus: !!document.activeElement && document.activeElement.matches('.np-jump [data-npt="toggle"]') }));
-      check(Math.abs(after.top - before) <= 4 && after.focus, `${at}: a redraw further down keeps the place and the focus on the row's Play (${before} → ${after.top}, focus ${after.focus})`);
-      // Scrolling by hand: the part at the top is the current chip
-      await page.mouse.move(w / 2, h / 2); await page.mouse.wheel(0, -1);
-      await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const sec = ov.querySelector('#npsec-lyrics'); ov.scrollTop = sec.offsetTop + 4 - ov.querySelector('.np-jump').offsetHeight; ov.dispatchEvent(new Event('scroll')); }); await sleep(400);
-      const hand = await page.evaluate(() => document.querySelector('[data-npjump][aria-current="true"]')?.dataset.npjump);
-      check(hand === 'lyrics', `${at}: scrolling by hand to Lyrics makes it the current chip (${hand})`);
-      // A swipe down on a scrolled section doesn't close it; from the player it does, and focus goes back
-      const swipe = (sel) => page.$eval(sel, (el) => {
-        const b = el.getBoundingClientRect(); const x = b.left + b.width / 2; const y = Math.max(b.top + 20, 40);
-        const t = (yy) => new Touch({ identifier: 1, target: el, clientX: x, clientY: yy });
-        el.dispatchEvent(new TouchEvent('touchstart', { touches: [t(y)], changedTouches: [t(y)], bubbles: true, cancelable: true }));
-        el.dispatchEvent(new TouchEvent('touchend', { touches: [], changedTouches: [t(y + 200)], bubbles: true, cancelable: true }));
-      });
-      await swipe('#npsec-details'); await sleep(300);
-      check(!(await page.$eval('#nowplaying', (e) => e.hidden)), `${at}: a swipe down on a scrolled section leaves Now playing open`);
-      await page.$eval('#nowplaying', (ov) => { ov.scrollTop = 0; }); await sleep(300);
-      await swipe('.np-big'); await sleep(400);
+      // Lyrics: a sheet; synced lines follow in their own box
+      await page.click('.np-dock [data-npsheet="lyrics"]'); await page.waitForSelector('.np-bsheet:not([hidden]) .lyric-lines'); await sleep(1600);
+      const ly = await page.evaluate(() => { const box = document.querySelector('#nplyrics .lyric-lines'); const on = document.querySelector('#nplyrics .lyric-line.on'); const b = box && box.getBoundingClientRect(); const o = on && on.getBoundingClientRect(); const body = document.querySelector('.np-bsheet .np-sheet-body'); return { lines: !!on, boxTop: box ? box.scrollTop : 0, inBox: !!(b && o && o.top >= b.top - 1 && o.bottom <= b.bottom + 1), body: body.scrollTop, tab: document.querySelector('.np-stabs [aria-selected="true"]')?.textContent.trim() }; });
+      check(ly.lines && ly.boxTop > 0 && ly.inBox && ly.tab === 'Lyrics', `${at}: Lyrics opens as a sheet and synced lines follow in their own box (scrolled ${ly.boxTop}, the current line in view ${ly.inBox})`);
+      if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-lyrics-${w}.png`) });
+      // More: Details first; a redraw keeps the sheet's place and the focus on its Play
+      await page.click('.np-stabs [data-npsheet="more"]'); await page.waitForSelector('.np-bsheet[data-tab="more"] #nppart-details'); await sleep(500);
+      await page.$eval('.np-bsheet .np-sheet-body', (b) => { b.scrollTop = 120; });
+      const before = await page.$eval('.np-bsheet .np-sheet-body', (b) => b.scrollTop);
+      await page.click('.np-bsheet .np-strip [data-npt="toggle"]'); await sleep(900);
+      const after = await page.evaluate(() => ({ top: document.querySelector('.np-bsheet .np-sheet-body').scrollTop, focus: !!document.activeElement && document.activeElement.matches('.np-strip [data-npt="toggle"]'), tab: document.querySelector('.np-bsheet').dataset.tab }));
+      check(after.tab === 'more' && Math.abs(after.top - before) <= 4 && after.focus, `${at}: a redraw keeps the sheet, its place and the focus on its Play (${before} → ${after.top}, focus ${after.focus})`);
+      if (theme === 'dark') await page.screenshot({ path: path.join(SHOTS, `nowplaying-more-${w}.png`) });
+      // A finger's swipe (Pointer Events): down on the sheet's head closes it, down on the player closes Now playing
+      const swipe = (sel, dy) => page.$eval(sel, (el, d) => {
+        const b = el.getBoundingClientRect(); const x = b.left + b.width / 2; const y = b.top + Math.min(20, b.height / 2);
+        const t = document.elementFromPoint(x, y) || el;
+        const ev = (type, yy) => t.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 3, pointerType: 'touch', isPrimary: true, clientX: x, clientY: yy }));
+        ev('pointerdown', y); for (let i = 1; i <= 5; i++) ev('pointermove', y + (d * i) / 5); ev('pointerup', y + d);
+      }, dy);
+      await swipe('.np-bsheet .np-sheet-body', 200); await sleep(300);
+      check(!(await page.$eval('.np-bsheet', (e) => e.hidden)), `${at}: a swipe down inside the sheet's list leaves it open (it scrolls)`);
+      await swipe('.np-bsheet .np-sheet-head', 200); await sleep(400);
+      check(await page.$eval('.np-bsheet', (e) => e.hidden) && !(await page.$eval('#nowplaying', (e) => e.hidden)), `${at}: a swipe down on the sheet's head closes it, Now playing stays`);
+      await swipe('.np-big', 200); await sleep(400);
       const closed = await page.evaluate(() => ({ hidden: document.querySelector('#nowplaying').hidden, focus: document.activeElement && document.activeElement.id, nav: getComputedStyle(document.querySelector('.bottomnav')).display }));
       check(closed.hidden && closed.focus === 'np' && closed.nav !== 'none', `${at}: a swipe down from the player closes it, the tabs come back and focus is on the mini player (${closed.focus})`);
       check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join('; ') : ''}`);
@@ -125,7 +107,7 @@ const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { bod
     await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
     await fx.go(page, '/albums'); await page.waitForSelector('#np'); await sleep(600);
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-player', { timeout: 5000 });
-    const t = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const p = ov.querySelector('.np-player').getBoundingClientRect(); const sh = ov.querySelector('.np-sheet:not([hidden])'); const r = sh && sh.getBoundingClientRect(); return { open: !ov.hidden, sheet: !!r && r.width > 0, beside: !!r && p.right <= r.left + 1 && r.top < p.bottom, one: !!ov.querySelector('.np-jump') }; });
+    const t = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const p = ov.querySelector('.np-player').getBoundingClientRect(); const sh = ov.querySelector('.np-sheet:not([hidden])'); const r = sh && sh.getBoundingClientRect(); return { open: !ov.hidden, sheet: !!r && r.width > 0, beside: !!r && p.right <= r.left + 1 && r.top < p.bottom, one: !!ov.querySelector('.np-dock, .np-bsheet') }; });
     check(t.open && t.sheet && t.beside && !t.one, `1024: a tablet keeps the player beside the open sheet (open ${t.open}, sheet ${t.sheet}, beside ${t.beside}, one screen ${t.one})`);
     await context.close();
   }

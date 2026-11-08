@@ -178,7 +178,8 @@ the phone: the WebView itself, the keyboard, the first frames of a cold start.
 2. With the status chip showing (the API token warning), swipe sideways on Home, Search, Zones,
    Settings, Now playing and its panels: nothing moves sideways and no left edge is cut off
    ("earch music", "ome On" before). Pinch: the page doesn't zoom out.
-3. Tap the zone button: Play to is a sheet from the bottom, the full width, with a handle. Swipe it
+3. Open Now playing and tap the zone's name at its top (the mini player has no zone button since
+   2026-11-08): Play to is a sheet from the bottom, the full width, with a handle. Swipe it
    down: it closes. Open it again, tap Sleep timer: a sheet; Back closes it and the page stays.
 4. Tap the chip: it says "Change the API token" (not "not answering"); its sheet is "External
    resources".
@@ -187,6 +188,41 @@ the phone: the WebView itself, the keyboard, the first frames of a cold start.
 6. Tap Search in the bottom bar, then the field: the keyboard opens, and the field and first
    results stay above it.
 7. Report the phone's model and Android version, and a screen recording of 1 to 6.
+```
+
+## The phone UI: mini player, Now playing, lists and swipes (the owner's recording, 2026-11-08)
+
+Checked here with a phone's viewport rules in Chromium (tools/ui-phone-simplify.js and
+tools/ui-nowplaying-phone.js at 360, 390 and 412 px, swipes as a finger's Pointer Events) and in the
+Android emulator (the android-emulator job's screenshots). Not checked without the phone: how the
+swipes feel under a real finger (speed, the 40 px threshold), the keyboard over the tag field, and
+Back from the system's gesture navigation.
+
+```
+1. Library or an album with a song playing. The mini player: the cover, the title and artist on
+   the whole width, one play/pause on the right, a thin line on top that moves with the song.
+   Nothing else in it. Swipe it left: the next song slides in; right: the previous one. Swipe it
+   down: nothing happens. Scroll the album's list up and down over it: the song doesn't change.
+2. Swipe the mini player up (or tap it): Now playing, one screen with nothing to scroll: the zone's
+   name at the top, the cover, title, quality, seek, the five transport buttons, volume, and Up
+   next · Lyrics · More at the bottom. Swipe the cover left and right: next and previous.
+3. Swipe up on the title: Up next as a sheet over the player, with a handle, the song and its
+   pause, and the tabs Up next | Lyrics | More. Swipe sideways on it: the tabs change. Swipe down on
+   the handle: it closes. Open Lyrics, press Back: the sheet closes, Now playing stays; Back again:
+   Now playing closes.
+4. More › Tags: tap Add a tag. The keyboard opens and the field stays in view above it, no black
+   space. Add one: the message shows at the bottom, above the keyboard or the bars, not mid-screen.
+5. An album not matched yet: the header is compact (cover beside the title), Play, Shuffle, then
+   heart, Play to and ⋯ as plain icons; "Not matched to MusicBrainz · Match" is one small line under
+   them. At least two songs show before the mini player. The playing song has a small equaliser
+   and the accent colour. "✓ Select": the check and the word on one line. Long-press a song: it is
+   selected (with the bar of actions), no menu.
+6. Confirm matches (Match on that album, or from Identify in Settings): the title, Skip all unsure and
+   "How confirming works" show at once with grey rows under them, and nothing jumps when the list
+   comes; a long file name is one line, a tap shows all of it.
+7. Anything loading (Starting on…, Saving…, the top line while a page loads): one round spinner,
+   turning, centred, never a dash.
+8. Report the phone's model and Android version, and a screen recording of 1 to 7.
 ```
 
 ## USB DAC (FiiO KA17) on Android
