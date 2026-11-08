@@ -178,11 +178,13 @@
   // phone's Now playing sheet and the toast; a field focused in the sheet scrolls into view above it
   if (window.visualViewport) {
     const vv = window.visualViewport;
+    let kbWas = 0;
     const kbMove = () => {
       const h = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
       document.documentElement.style.setProperty('--kb', `${h}px`);
       const a = document.activeElement;
-      if (a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) requestAnimationFrame(() => a.scrollIntoView({ block: 'center' }));
+      if (h !== kbWas && a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) requestAnimationFrame(() => a.scrollIntoView({ block: 'center' }));
+      kbWas = h;
       const t = document.getElementById('toast'); if (t && t.classList.contains('show')) placeToast(t);
     };
     vv.addEventListener('resize', kbMove); vv.addEventListener('scroll', kbMove);
@@ -2748,7 +2750,7 @@
     const open = transients.filter((t) => t.open()); if (!open.length) return;
     // A layer over another (a phone's Now playing sheet) closes alone: the next back closes what is under it
     const top = open[open.length - 1];
-    if (top.layer && open.length > 1) { top.close(true); pushTransient(); popHandled = true; return; }
+    if (top.layer && open.length > 1 && open.slice(0, -1).every((t) => t === npTr)) { top.close(true); pushTransient(); popHandled = true; return; }
     open.forEach((t) => t.close(true)); popHandled = true;
   });
 
@@ -3250,14 +3252,23 @@
   const swipeable = (el, o) => {
     let s = null;
     const reset = () => { if (s && s.move) { s.move.classList.remove('dragging'); s.move.style.transform = ''; s.move.style.opacity = ''; } s = null; };
+    // (a second finger is ignored while the first one swipes)
     el.addEventListener('pointerdown', (e) => {
-      if (e.pointerType === 'mouse' || !e.isPrimary || (o.when && !o.when(e)) || e.target.closest('input, textarea, select, [data-noswipe]')) { s = null; return; }
+      if (e.pointerType === 'mouse' || !e.isPrimary) return;
+      if (s && s.id !== e.pointerId) return;
+      if ((o.when && !o.when(e)) || e.target.closest('input, textarea, select, [data-noswipe]')) { reset(); return; }
       s = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, dir: null, move: o.move ? o.move(e) : null, xok: o.x ? o.x(e) : true };
     });
     el.addEventListener('pointermove', (e) => {
       if (!s || e.pointerId !== s.id) return;
       const dx = e.clientX - s.x; const dy = e.clientY - s.y;
-      if (!s.dir && Math.hypot(dx, dy) > 10) s.dir = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'x' : 'y';
+      if (!s.dir && Math.hypot(dx, dy) > 10) {
+        s.dir = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'x' : 'y';
+        // The rest of the gesture comes here even when a redraw replaces what the finger pressed
+        // (the mini player redraws several times a second while it plays); not on the press, or a
+        // tap on a button in it would land here instead
+        try { el.setPointerCapture(e.pointerId); } catch { /* not a live pointer (a test's) */ }
+      }
       if (s.dir === 'x' && s.xok && s.move && (o.left || o.right) && !calmMotion()) { s.move.classList.add('dragging'); s.move.classList.remove('snap'); s.move.style.transform = `translateX(${dx}px)`; s.move.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / 320)); }
     });
     el.addEventListener('pointerup', (e) => {
@@ -3279,7 +3290,9 @@
       } else if (m) { m.classList.remove('dragging'); m.style.transform = ''; m.style.opacity = ''; }
       if (run) run();
     });
-    el.addEventListener('pointercancel', reset);
+    el.addEventListener('pointercancel', (e) => { if (s && e.pointerId === s.id) reset(); });
+    // (its own capture only: taking it makes the pressed child lose its implicit one, which bubbles here)
+    el.addEventListener('lostpointercapture', (e) => { if (e.target === el && s && e.pointerId === s.id) reset(); });
     // (the click a swipe ends with is not a tap)
     // (only a real one: the swipe's own action may press a button in it)
     el.addEventListener('click', (e) => { if (e.isTrusted && Date.now() - Number(el.dataset.swiped || 0) < 400) { e.preventDefault(); e.stopPropagation(); } }, true);
@@ -3331,8 +3344,8 @@
     const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1);
     if (!state.npSheet) return;
     const was = state.npSheet; const sh = $('.np-bsheet', overlay);
-    const done = () => { if (state.npSheet !== was) return; state.npSheet = null; renderNowPlaying(); const b = $(`.np-dock [data-npsheet="${was}"]`, overlay); if (b && fromBack !== 'quiet') b.focus({ preventScroll: true }); };
-    if (sh && !calmMotion()) { sh.classList.add('closing'); setTimeout(done, 190); } else done();
+    const done = () => { state.npSheetClosing = null; if (state.npSheet !== was) return; state.npSheet = null; renderNowPlaying(); const b = $(`.np-dock [data-npsheet="${was}"]`, overlay); if (b && fromBack !== 'quiet') b.focus({ preventScroll: true }); };
+    if (sh && !calmMotion()) { sh.classList.add('closing'); state.npSheetClosing = was; setTimeout(done, 190); } else done();
   };
   const renderNowPlaying = () => {
     const keep = npKeep(); npGen += 1; const gen = npGen;
@@ -3341,9 +3354,13 @@
     const z = currentZone(); const np = z && z.now_playing;
     if (!np) {
       setTimeout(setArtTint, 0); // no cover: no tint
-      overlay.innerHTML = `<div class="np-page np2"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
+      // (the phone's bar has no zone button or sound pill: both are here, also with nothing playing)
+      overlay.innerHTML = `<div class="np-page np2${npCompact() ? ' compact np-idle' : ''}"><div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z ? z.name : 'this zone')}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z ? z.name : 'Zone')}</span></button><span class="spacer"></span>${shellMode() === 'phone' ? `<button class="icon-btn" id="npsound" aria-label="Sound" title="Sound">${icon('volume')}</button>` : ''}<button class="btn ghost" id="npq">${icon('queue')} Queue</button></div><div class="empty">${icon('notes')}<h3>Nothing playing on ${esc(z ? z.name : 'this zone')}</h3><p>Pick an album or a track and press play.</p></div></div>`;
       $('#npclose').onclick = () => toggleNowPlaying();
       $('#npq').onclick = () => setView('queue');
+      $('#npzone').onclick = () => $('#zonebtn').click();
+      { const sb = $('#npsound'); if (sb) sb.onclick = () => openQPanel('#npsound'); }
+      { const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1); }
       return;
     }
     const it = np.item;
@@ -3380,18 +3397,19 @@
     // Phones: three buttons under the player, and the sheet they open (a handle, the song with Play,
     // one tab bar)
     const ctab = ([k, l]) => `<button class="np-stab ${sheet === k ? 'on' : ''}" data-npsheet="${k}" role="tab" id="nptab-${k}" aria-controls="npsheetpanel" aria-selected="${sheet === k}" tabindex="${sheet === k ? 0 : -1}">${l}</button>`;
-    const dockHtml = () => `<nav class="np-dock" aria-label="More about this song">${NP_COMPACT.map(([k, l, ic]) => `<button class="np-dockbtn" data-npsheet="${k}" aria-expanded="${sheet === k}" aria-controls="npbsheet">${icon(ic)}<span>${l}</span></button>`).join('')}</nav>`;
-    const bsheetHtml = () => `<section class="np-bsheet${sheet && !keep.sheet ? ' opening' : ''}" id="npbsheet" role="dialog" aria-label="${sheet ? esc(NP_COMPACT.find(([k]) => k === sheet)[1]) : ''}" data-tab="${sheet || ''}" ${sheet ? '' : 'hidden'}>
+    const dockHtml = () => `<nav class="np-dock" aria-label="More about this song"${under}>${NP_COMPACT.map(([k, l, ic]) => `<button class="np-dockbtn" data-npsheet="${k}" aria-expanded="${sheet === k}" aria-controls="npbsheet">${icon(ic)}<span>${l}</span></button>`).join('')}</nav>`;
+    const bsheetHtml = () => `<section class="np-bsheet${sheet && !keep.sheet ? ' opening' : ''}${sheet && state.npSheetClosing === sheet ? ' closing' : ''}" id="npbsheet" role="dialog" aria-modal="true" aria-label="${sheet ? esc(NP_COMPACT.find(([k]) => k === sheet)[1]) : ''}" data-tab="${sheet || ''}" ${sheet ? '' : 'hidden'}>
             <div class="np-sheet-head"><button class="np-grab" id="npgrab" aria-label="Close the sheet" title="Close (swipe down)"><span aria-hidden="true"></span></button>
               <div class="np-strip"><div class="np-strip-art">${itemArt(it, '', npSvc(np))}</div><div class="np-strip-text"><div class="name">${np.stream_title ? esc(np.stream_title) : esc(it.title || '')}</div><div class="sub">${esc(it.artist || '')}</div></div><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button></div>
               <div class="np-sheet-tabs np-stabs" role="tablist" aria-label="More about this song">${NP_COMPACT.map(ctab).join('')}</div></div>
             <div class="np-sheet-body" role="tabpanel" id="npsheetpanel" ${sheet ? `aria-labelledby="nptab-${sheet}"` : ''} tabindex="-1">${sheet ? sheetBody(sheet) : ''}</div>
           </section>`;
     const artist = np.stream_title ? esc(it.artist || '') : links.artistsHtml;
+    const under = one && sheet ? ' inert' : ''; // (what the phone's sheet covers)
     overlay.innerHTML = `
       <div class="np-page np2${sheet && !one ? ' has-sheet' : ''}${one ? ' compact' : ''}">
-        <div class="np-top"><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
-        <div class="np-body">
+        <div class="np-top"${under}><button class="icon-btn" id="npclose" aria-label="Close Now playing" title="Close (swipe down)">${icon('chevron')}</button><span class="spacer"></span><button class="chip np-zone" id="npzone" aria-label="Playing on ${esc(z.name)}: choose another zone">${icon('zone')}<span class="np-zone-name">${esc(z.name)}</span></button><span class="spacer"></span><button class="icon-btn" id="npmore" aria-label="More: dashboard, sleep timer${isBrowser() ? '' : ', DSP'}" title="More">${icon('more')}</button></div>
+        <div class="np-body"${under}>
           <section class="np-player" aria-label="Now playing">
             <div class="np-big">${itemArt(it, '', npSvc(np))}</div>
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
@@ -3449,7 +3467,6 @@
     $('#npzone').onclick = () => $('#zonebtn').click();
     const openSheet = (k) => {
       state.npSheet = k; renderNowPlaying();
-      if (one && !transients.includes(npSheetTr)) transients.push(npSheetTr);
       const f = $(`.np-sheet-tabs [data-npsheet="${npSheetNow()}"]`, overlay); if (f) f.focus({ preventScroll: true });
     };
     $$('[data-npsheet]', overlay).forEach((b) => b.onclick = () => openSheet(b.dataset.npsheet));
@@ -3492,7 +3509,7 @@
     }
     $('#npmore').onclick = (e) => { const b = e.currentTarget; showMenu(b, [
       // (a phone's bar has no sound pill: its panel opens from here)
-      ...(shellMode() === 'phone' ? [{ label: 'Sound', note: 'Where it plays from, how it gets to you, DSP', icon: 'volume', run: () => setTimeout(() => $('#quality').click(), 0) }] : []),
+      ...(shellMode() === 'phone' ? [{ label: 'Sound', note: 'Where it plays from, how it gets to you, DSP', icon: 'volume', run: () => setTimeout(() => openQPanel('#npmore'), 0) }] : []),
       { label: 'Dashboard', note: 'Full screen, for a TV or tablet', icon: 'external', run: () => window.open(`/now-playing?zone=${encodeURIComponent(state.zone)}`, '_blank', 'noopener') },
       { label: sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel(), icon: 'moon', run: () => setTimeout(() => showMenu(b, [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]), 0) },
       ...(isBrowser() ? [] : [{ label: 'DSP', note: 'Equaliser, crossfeed, room correction', icon: 'settings', run: () => { state.dspOpen = state.zone; setView('settings', 'playback'); } }]),
@@ -3505,6 +3522,9 @@
     state.npWant = { gen, at: Date.now(), scroll: sheet && keep.sheet === sheet ? keep.scroll : null, lyric: sheet === 'lyrics' && keep.sheet === 'lyrics' ? keep.lyric : null, focus: keep.focus };
     npRestore();
     if ((sheet === 'sources' || (one && sheet === 'more')) && songPage) fillNpSources(songPage, gen);
+    // Back closes an open sheet first: its layer is registered whenever one shows (a resize into the
+    // phone arrangement with a sheet chosen shows one too), and dropped when none does
+    { const k = transients.indexOf(npSheetTr); if (one && sheet) { if (k < 0) transients.push(npSheetTr); } else if (k >= 0) transients.splice(k, 1); }
     fillNpPubky(it, gen);
     loadLyrics(it);
     setArtTint();
@@ -4026,7 +4046,14 @@
 
   document.addEventListener('keydown', (e) => {
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
-    if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
+    // Escape closes what is on top: a panel or menu, else the phone's sheet, else Now playing
+    if (e.key === 'Escape') {
+      const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden;
+      if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
+      if (npSheetTr.open()) { closeNpSheet(); return; }
+      if (!overlay.hidden) toggleNowPlaying();
+      return;
+    }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
@@ -4376,7 +4403,8 @@
     if (shellMode() !== 'phone' || !matchMedia('(pointer: coarse)').matches || !row.matches('.srow[data-srow]')) return false;
     const sec = row.closest('.section'); const b = sec && $('.section-head [data-selstart]', sec); if (!b) return false;
     if (!sec.classList.contains('selecting')) b.click();
-    const c = $('.selbox input', row); if (c && !c.checked) c.click();
+    // (the box is ticked directly: a click now would be taken for the long press's own release)
+    const c = $('.selbox input', row); if (c && !c.checked) { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); }
     return !!c;
   };
   document.addEventListener('contextmenu', (e) => { const row = e.target.closest && e.target.closest('.srow, .track, [data-srow]'); const more = row && row.querySelector('[data-smore], [data-act="more"]'); if (!more || e.target.closest('input, textarea, a[href]')) return; e.preventDefault(); if (longPressSelect(row)) return; more.click(); });
@@ -4389,7 +4417,7 @@
     // the click a long press leaves on release (iOS) must not play the row
     document.addEventListener('click', (e) => {
       // the click iOS sends on releasing a long press: whatever is under the finger then (a row, the menu sheet)
-      if (Date.now() - longEnd < 400 || (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]'))) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; longEnd = 0; }
+      if (e.isTrusted && (Date.now() - longEnd < 400 || (Date.now() - lastLong < 1500 && e.target.closest && e.target.closest('.srow, .track, [data-srow]') && !e.target.closest('[data-smore], [data-act="more"]')))) { e.preventDefault(); e.stopImmediatePropagation(); lastLong = 0; longEnd = 0; }
     }, true);
     const ROWS = '.srow, .track, [data-srow]';
     const moreOf = (row) => row.querySelector('[data-smore], [data-act="more"]');
@@ -4866,7 +4894,7 @@
   // (`data-np`: what the row plays, so the playing one is marked; `opts.oneArtist`: the album's songs
   // are all by its artist, said once in the header and not on every row)
   const songNpKey = (t) => (t.track_id != null ? `track:${t.track_id}` : t.uri || '');
-  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
+  const songRows = (songs, opts = {}) => `<div class="list${opts.listClass ? ' ' + opts.listClass : ''}">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}${songNpKey(t) && songNpKey(t) === npUri() ? ' cur" aria-current="true' : ''}" data-srow="${k}"${songNpKey(t) ? ` data-np="${esc(songNpKey(t))}"` : ''}><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div>${subLine([(t.artist || t.artists) && !opts.oneArtist ? artistLinksHtml(t) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · '), versionMark(t, k))}</div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
   let selBar = null;
@@ -5776,7 +5804,9 @@
           };
           let idNote = ''; // a note at the top of the list (the album asked for is not among these)
           const draw = () => {
-            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `${idHow(files, true)}${idNote ? `<p class="notice small idnote" role="status">${esc(idNote)}</p>` : ''}${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
+            // (the note is for the draw it came with: a later one, after Show more or Skip all, leaves it out)
+            const note = idNote ? `<p class="notice small idnote" role="status">${esc(idNote)}</p>` : ''; idNote = '';
+            main.innerHTML = pageHead('Confirm matches', page.songs, page.songs ? '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is">Skip all unsure</button>' : '') + (albums.some((a) => a.songs.length) || next != null ? `${idHow(files, true)}${note}${albums.map(albumHtml).join('')}${next != null ? '<div class="actions"><button class="btn" type="button" id="idmore">Show more albums</button></div>' : ''}` : note + emptyState('search', 'Nothing to confirm', 'Unsure matches from Identify library show up here.', { view: 'settings', label: 'Open Settings' }));
             $$('[data-album]', main).forEach(wire);
             const ska = $('#idskipall'); if (ska) ska.onclick = (ev) => { if (locked.size) return undefined; hold('all', ska); return busy(ska, async () => { let r; try { r = await api('POST', '/library/suggestions/skip', { all: true }); } catch (e) { hold('all', null); throw noRoute(e); } const ub = toast(`${countOf(r.skipped, 'songs')} left as they are`, '', { label: undoLabel(r), run: undoSkip({ all: true }) }); if (!live()) return; listGen++; albums.forEach((a) => { a.songs = []; }); page.songs = 0; next = null; hold('all', null); draw(); focusUndo(ub); }, ev); };
             // (a "Show more" answer that comes after Skip all is for a list that is gone)
@@ -6816,7 +6846,7 @@
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
-            + `<div class="hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
+            + `<div class="hero item-hero">${pg.image ? `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(pg.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove">${heroBadge}</div>` : `<div class="art placeholder monogram" style="background:linear-gradient(135deg, hsl(${hue(state.itemTitle)} 35% 34%), hsl(${hue(state.itemTitle)} 35% 20%));border-radius:${kind === 'artist' ? '50%' : '12px'}"><span aria-hidden="true">${esc(initials(state.itemTitle))}</span>${heroBadge}</div>`}<div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(state.itemTitle)}</h1><p class="sub">${by}</p>${alsoLine}${tagGroups.length || ht.note ? `<div class="htags" id="htags" data-for="${esc(htKey)}"></div>` : ''}
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="iplay">${icon('play')} Play</button>${kind !== 'song' ? `<button class="btn" id="ishuffle">${icon('shuffle')} Shuffle</button>` : ''}<button class="btn hero-zone" id="izone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button><button class="btn icon-only ${fav ? 'on' : ''}" id="ifav" title="${fav ? 'Remove from favourites' : 'Add to favourites'}" ${favKey || target.track_id || target.album_id || target.artist_id ? '' : 'disabled'}>${icon(fav ? 'heart-fill' : 'heart')}</button><button class="btn ghost" id="imore" title="More">${icon('more')}</button>${alsoIcons}</div>
               <div class="hmatch-slot" id="hmatch"></div>
               </div></div>`

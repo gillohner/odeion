@@ -17,7 +17,12 @@
 //   * the loader: one ring, centred in the mini player's cover square while a zone starts, turning (or
 //     pulsing with reduced motion);
 //   * Confirm matches: the header in the first frame, rows (not a grid of covers) while it loads, the
-//     header where it was once the list comes, the file's name on one line.
+//     header where it was once the list comes, the file's name on one line;
+//   * with the browser's own touch input (CDP): a swipe on the mini player while it redraws, a finger
+//     held on a row, a sideways swipe on the sheet's list; the sheet's cover is inert; Escape closes
+//     the sheet first; Sound from ··· gives the focus back; a playlist's header is not the album's;
+//   * a desktop window 700 px wide (the phone arrangement above the player bar), and a tablet's open
+//     Lyrics made narrow (Back closes the sheet first).
 //   node tools/ui-phone-simplify.js [repo] [shots]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
@@ -211,6 +216,93 @@ const overflow = (page) => page.evaluate(() => {
     const ov3 = await overflow(page);
     check(ov3.sw <= ov3.vw && !ov3.out.length, `${at}: nothing on Confirm matches is wider than the screen${ov3.out.length ? ': ' + ov3.out.join(', ') : ''}`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
+    await context.close();
+  }
+  // ---- real touch input (the browser's own touch handling: touch-action, implicit capture) ----
+  {
+    const w = 390; const h = 844; const at = `${w}x${h} touch`;
+    const { page, context, state } = await fx.create(browser, w, { mobile: true, fixtures });
+    await page.setViewportSize({ width: w, height: h });
+    await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+    await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); localStorage.setItem('pm.theme', 'dark'); window.pmDesktop = { platform: 'android', version: '0.0.0' }; });
+    const cdp = await context.newCDPSession(page);
+    const touch = async (pts, opts = {}) => {
+      const [x0, y0] = pts[0];
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: x0, y: y0 }] });
+      if (opts.hold) await sleep(opts.hold);
+      for (let i = 1; i < pts.length; i++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: pts[i][0], y: pts[i][1] }] }); await sleep(16); if (i === 2 && opts.mid) await page.evaluate(opts.mid); }
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    const line = (x0, y0, dx, dy, n = 8) => Array.from({ length: n + 1 }, (_, i) => [x0 + (dx * i) / n, y0 + (dy * i) / n]);
+    const mid = (sel) => page.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; });
+    await fx.go(page, '/album/lib-7'); await page.waitForSelector('#isongs .srow'); await sleep(600);
+    // a sideways swipe on the mini player while it redraws (as it does several times a second while playing)
+    const n0 = sent(state, 'next');
+    const [mx, my] = await mid('#np .np-text');
+    await touch(line(mx + 60, my, -170, 0), { mid: () => { const np = document.querySelector('#np'); np.innerHTML = np.innerHTML; } }); await sleep(700);
+    const after = await page.evaluate(() => ({ t: document.querySelector('#np').style.transform, cls: document.querySelector('#np').className }));
+    check(sent(state, 'next') === n0 + 1 && !after.t && !/dragging/.test(after.cls), `${at}: a finger's swipe left on the mini player is the next song, also when the bar redraws during it (${sent(state, 'next') - n0}, transform "${after.t}")`);
+    // a finger held on a row: selection with that row ticked
+    const [rx, ry] = await mid('#isongs .srow:nth-child(2) .grow');
+    await touch([[rx, ry], [rx, ry]], { hold: 900 }); await sleep(300);
+    const sel = await page.evaluate(() => ({ on: document.querySelector('#isongs').classList.contains('selecting'), ticked: [...document.querySelectorAll('#isongs .selbox input')].map((c) => c.checked) }));
+    check(sel.on && sel.ticked[1] && sel.ticked.filter(Boolean).length === 1, `${at}: a finger held on a song selects it (${sel.on}, ${sel.ticked.filter(Boolean).length} ticked)`);
+    await page.evaluate(() => { const c = document.querySelector('.selbar [data-sel="cancel"]'); if (c) c.click(); }); await sleep(200);
+    // the sheet: a finger's sideways swipe on its list changes the tab; Escape closes the sheet first
+    await page.click('#np'); await page.waitForSelector('#nowplaying:not([hidden]) .np-dock'); await sleep(300);
+    await page.click('.np-dock [data-npsheet="queue"]'); await page.waitForSelector('.np-bsheet:not([hidden])'); await sleep(400);
+    const [bx, by] = await mid('.np-bsheet .np-sheet-body');
+    await touch(line(bx + 120, by, -240, 6)); await sleep(800);
+    check(await page.$eval('.np-bsheet', (s) => s.dataset.tab) === 'lyrics', `${at}: a finger's sideways swipe on the sheet's list moves to Lyrics`);
+    const inert = await page.evaluate(() => ['.np-top', '.np-body', '.np-dock'].every((s) => document.querySelector(`#nowplaying ${s}`).inert));
+    check(inert, `${at}: what the sheet covers is out of reach (inert) while it shows`);
+    await page.keyboard.press('Escape'); await sleep(400);
+    check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `${at}: Escape closes the sheet first`);
+    // Sound from ···: the panel, and the focus back on ··· after it
+    await page.click('#npmore'); await page.click('.popover.menu:not([hidden]) >> text=Sound'); await page.waitForSelector('#qpanel:not([hidden])');
+    await page.keyboard.press('Escape'); await sleep(300);
+    check(await page.evaluate(() => document.querySelector('#qpanel').hidden && document.activeElement && document.activeElement.id === 'npmore'), `${at}: Sound opens from Now playing's ···, and the focus comes back to ···`);
+    await page.keyboard.press('Escape'); await sleep(300);
+    check(await page.evaluate(() => document.querySelector('#nowplaying').hidden), `${at}: Escape again closes Now playing`);
+    // a playlist page keeps its own header (the album layout is for the item pages)
+    await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await sleep(400);
+    const pl = await page.evaluate(() => { const hero = document.querySelector('#main > .hero'); const kids = [...hero.querySelectorAll(':scope > div:not(.art) > *')].map((e) => Math.round(e.getBoundingClientRect().width)); return { item: hero.classList.contains('item-hero'), min: Math.min(...kids.filter((x) => x > 0)), sw: document.documentElement.scrollWidth, vw: innerWidth }; });
+    check(!pl.item && pl.min > 150 && pl.sw <= pl.vw, `${at}: a playlist's header is laid out as before (narrowest part ${pl.min} px, page ${pl.sw} of ${pl.vw})`);
+    check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
+    await context.close();
+  }
+  // ---- a desktop window 700 px wide: the phone arrangement above the player bar ----
+  {
+    const { page, context, state } = await fx.create(browser, 700, { fixtures });
+    await page.setViewportSize({ width: 700, height: 900 });
+    await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+    await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); localStorage.setItem('pm.theme', 'dark'); });
+    await fx.go(page, '/albums'); await page.waitForSelector('#npart'); await sleep(500);
+    await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-dock'); await sleep(400);
+    const d = await page.evaluate(() => { const bar = document.querySelector('.player').getBoundingClientRect().top; const dock = document.querySelector('.np-dock').getBoundingClientRect().bottom; const pg = document.querySelector('.np-page'); return { shell: document.documentElement.dataset.shell, bar, dock, over: pg.scrollHeight - pg.clientHeight }; });
+    check(d.shell === 'desktop' && d.dock <= d.bar + 0.5 && d.over <= 1, `700x900 desktop: Now playing's first screen ends above the player bar (buttons end at ${Math.round(d.dock)}, the bar at ${Math.round(d.bar)}, overflow ${d.over})`);
+    await page.click('.np-dock [data-npsheet="lyrics"]'); await page.waitForSelector('.np-bsheet:not([hidden])'); await sleep(400);
+    const sb = await page.evaluate(() => ({ s: document.querySelector('.np-bsheet').getBoundingClientRect().bottom, bar: document.querySelector('.player').getBoundingClientRect().top }));
+    check(sb.s <= sb.bar + 0.5, `700x900 desktop: the sheet ends above the player bar (${Math.round(sb.s)} / ${Math.round(sb.bar)})`);
+    await page.goBack(); await sleep(400);
+    check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), '700x900 desktop: Back closes the sheet first');
+    check(!state.errors.length, `700x900 desktop: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
+    await context.close();
+  }
+  // ---- a tablet's open Lyrics, then the window made narrow: Back still closes the sheet first ----
+  {
+    const { page, context, state } = await fx.create(browser, 1024, { fixtures });
+    await page.setViewportSize({ width: 1024, height: 800 });
+    await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
+    await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); });
+    await fx.go(page, '/albums'); await page.waitForSelector('#npart'); await sleep(500);
+    await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-sheet-tabs'); await sleep(300);
+    await page.click('.np-sheet-tabs [data-npsheet="lyrics"]'); await sleep(300);
+    await page.setViewportSize({ width: 680, height: 800 }); await sleep(700);
+    const shown = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); return s && !s.hidden ? s.dataset.tab : null; });
+    await page.goBack(); await sleep(400);
+    check(shown === 'lyrics' && await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `1024 → 680: the open Lyrics becomes the phone's sheet (${shown}) and Back closes it first`);
+    check(!state.errors.length, `1024 → 680: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     await context.close();
   }
   await browser.close();

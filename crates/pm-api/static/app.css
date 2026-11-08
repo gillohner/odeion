@@ -2098,7 +2098,9 @@ html[data-shell="phone"] .player .np-art-wait .spin { width: 20px; height: 20px;
 .lyric-head { display: flex; align-items: center; gap: 8px; min-height: 48px; margin-bottom: 4px; }
 .lyric-how { flex: 1; min-width: 0; }
 .lyric-head .lyric-nudge { margin-left: auto; gap: 0; }
-.lyric-head .lyric-nudge .icon-btn { width: 48px; height: 48px; font-size: var(--fs-lg); color: var(--fg-2); }
+.lyric-head .lyric-nudge .icon-btn { font-size: var(--fs-lg); color: var(--fg-2); }
+html[data-shell="phone"] .lyric-head .lyric-nudge .icon-btn { width: 48px; height: 48px; }
+@media (pointer: coarse) { .lyric-head .lyric-nudge .icon-btn { width: 48px; height: 48px; } }
 .lyric-off { min-width: 3.5em; text-align: right; }
 /* More: Details, Sources, Tags as plain parts, one heading each; the status is a line of text */
 .np-part + .np-part { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
@@ -2128,7 +2130,7 @@ html[data-shell="phone"] .srow > .muted.small { flex: none; font-variant-numeric
 html[data-shell="phone"] .list.nums .srow .num { display: block; width: 20px; margin-right: -4px; }
 html[data-shell="phone"] .list:has(> .srow) { border-left: 0; border-right: 0; border-radius: 0; }
 .srow .grow { min-width: 0; }
-.srow .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+html[data-shell="phone"] .srow .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .srow.cur .name, .srow.cur .name .lnk { color: var(--accent-strong); }
 .srow.cur .name::before, .track.cur .title::before { content: ''; display: inline-block; width: 12px; height: 11px; margin-right: 6px; vertical-align: -1px;
   background: linear-gradient(var(--accent), var(--accent)) 0 100% / 3px 55% no-repeat, linear-gradient(var(--accent), var(--accent)) 4.5px 100% / 3px 100% no-repeat, linear-gradient(var(--accent), var(--accent)) 9px 100% / 3px 35% no-repeat; }
@@ -2142,22 +2144,22 @@ html[data-shell="phone"] .section-head > .btn.selstart { line-height: 48px; padd
 
 /* Album page (phones): a compact header (the cover beside the title, artist and source), Play and
    Shuffle, then three icon buttons of one kind; "Not matched · Match" as one small row under them */
-html[data-shell="phone"] #main > .hero { grid-template-columns: 112px minmax(0, 1fr); gap: 4px 16px; align-items: start; }
-html[data-shell="phone"] #main > .hero > .art { width: 112px; grid-row: 1 / span 5; align-self: start; }
-html[data-shell="phone"] #main > .hero > div:not(.art) { display: contents; }
-html[data-shell="phone"] #main > .hero > div:not(.art) > :is(.eyebrow, h1, .sub, .srcline) { grid-column: 2; margin: 0; min-width: 0; }
-html[data-shell="phone"] #main > .hero h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
-html[data-shell="phone"] #main > .hero .sub { font-size: var(--fs-md); }
-html[data-shell="phone"] #main > .hero .eyebrow { font-size: var(--fs-2xs); }
-html[data-shell="phone"] #main > .hero > div:not(.art) > :is(.htags, .actions, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
-html[data-shell="phone"] #main > .hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: nowrap; }
-html[data-shell="phone"] #main > .hero .actions > :is(#iplay, #ishuffle) { min-height: 48px; }
-html[data-shell="phone"] #main > .hero .actions > :is(#izone, #ifav, #imore) { width: 48px; height: 48px; min-width: 48px; padding: 0; justify-content: center; border: 0; background: none; color: var(--fg-2); border-radius: 50%; }
-html[data-shell="phone"] #main > .hero .actions > :is(#izone, #ifav, #imore) .ic { width: 24px; height: 24px; }
-html[data-shell="phone"] #main > .hero .actions > #ifav { order: 1; margin-left: auto; }
-html[data-shell="phone"] #main > .hero .actions > #izone { order: 2; }
-html[data-shell="phone"] #main > .hero .actions > #imore { order: 3; }
-html[data-shell="phone"] #main > .hero .actions > #ifav.on { color: var(--accent-strong); }
+html[data-shell="phone"] #main > .hero.item-hero { grid-template-columns: 112px minmax(0, 1fr); gap: 4px 16px; align-items: start; }
+html[data-shell="phone"] #main > .hero.item-hero > .art { width: 112px; grid-row: 1 / span 5; align-self: start; }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) { display: contents; }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.eyebrow, h1, .sub, .srcline) { grid-column: 2; margin: 0; min-width: 0; }
+html[data-shell="phone"] #main > .hero.item-hero h1 { font-size: var(--fs-xl); line-height: 1.2; overflow-wrap: anywhere; }
+html[data-shell="phone"] #main > .hero.item-hero .sub { font-size: var(--fs-md); }
+html[data-shell="phone"] #main > .hero.item-hero .eyebrow { font-size: var(--fs-2xs); }
+html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
+html[data-shell="phone"] #main > .hero.item-hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: nowrap; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#iplay, #ishuffle) { min-height: 48px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#izone, #ifav, #imore) { width: 48px; height: 48px; min-width: 48px; padding: 0; justify-content: center; border: 0; background: none; color: var(--fg-2); border-radius: 50%; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#izone, #ifav, #imore) .ic { width: 24px; height: 24px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #ifav { order: 1; margin-left: auto; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #izone { order: 2; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #imore { order: 3; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #ifav.on { color: var(--accent-strong); }
 .htags:not(:has(> :not(datalist))) { display: none; }
 .hmatch-slot:empty { display: none; }
 .hmatch { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; }
@@ -2184,12 +2186,25 @@ html[data-shell="phone"] .hmatch-btn { min-height: 48px; }
   .idopt { background: none; border-radius: 0; padding: 8px 0; border-top: 1px solid var(--line); }
   .idrow { padding: 12px; }
 }
-html[data-shell="phone"] #main > .hero .actions { gap: 4px; }
-html[data-shell="phone"] #main > .hero .actions > #iplay { padding: 0 18px 0 14px; }
-html[data-shell="phone"] #main > .hero .actions > #ishuffle { padding: 0 14px; margin-left: 4px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions { gap: 4px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #iplay { padding: 0 18px 0 14px; }
+html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle { padding: 0 14px; margin-left: 4px; }
 /* (the narrowest phones: Shuffle is its word, so the three icons keep their 48 px) */
-@media (max-width: 379px) { html[data-shell="phone"] #main > .hero .actions > #ishuffle > .ic { display: none; } }
+@media (max-width: 379px) { html[data-shell="phone"] #main > .hero.item-hero .actions > #ishuffle > .ic { display: none; } }
 html[data-shell="phone"] .sk-srow > .icon-btn { display: none; }
 /* (a song row is one tap target on a phone: it plays; its song, artist and album pages are in its ⋯) */
 html[data-shell="phone"] .srow:not(.card-row) :is(.name, .sub) .lnk:not(.vmark) { pointer-events: none; }
 @media (pointer: coarse) { .section-head > .btn.selstart { line-height: 40px; margin-top: -4px; margin-bottom: -4px; } }
+
+/* (review round 1) A desktop window up to 720 px wide: the old one-screen minimum height goes, and the
+   sheet ends above the player bar */
+html:not([data-shell="phone"]) .np2.compact .np-player { min-height: 0; }
+html:not([data-shell="phone"]) .np-bsheet { bottom: max(var(--kb, 0px), var(--player)); }
+/* The sheet's own scroll keeps vertical panning for the browser and leaves sideways drags to the page
+   (a scroller allows both by itself, and a sideways drag was taken as a pan and cancelled) */
+.np-bsheet .np-sheet-body, .np-bsheet .lyric-lines { touch-action: pan-y; }
+/* A short screen (split screen, a large system font): the first screen scrolls rather than cut off */
+@media (max-height: 540px) { .np2.compact { overflow-y: auto; touch-action: pan-y; } .np2.compact .np-body { flex: none; } }
+/* Nothing playing on a phone: the top bar and the message */
+.np2.compact.np-idle { justify-content: flex-start; }
+.np2.compact.np-idle .empty { margin: auto 0; }

@@ -89,7 +89,7 @@ const fixtures = { '/library/tracks/1/lyrics': { body: lyrics }, '/zones': { bod
         ev('pointerdown', y); for (let i = 1; i <= 5; i++) ev('pointermove', y + (d * i) / 5); ev('pointerup', y + d);
       }, dy);
       await swipe('.np-bsheet .np-sheet-body', 200); await sleep(300);
-      check(!(await page.$eval('.np-bsheet', (e) => e.hidden)), `${at}: a swipe down inside the sheet's list leaves it open (it scrolls)`);
+      check(!(await page.$eval('.np-bsheet', (e) => e.hidden)), `${at}: a swipe down inside the sheet's list doesn't close it (only its head does)`);
       await swipe('.np-bsheet .np-sheet-head', 200); await sleep(400);
       check(await page.$eval('.np-bsheet', (e) => e.hidden) && !(await page.$eval('#nowplaying', (e) => e.hidden)), `${at}: a swipe down on the sheet's head closes it, Now playing stays`);
       await swipe('.np-big', 200); await sleep(400);
