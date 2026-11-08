@@ -501,6 +501,20 @@ def run(node):
         until("the player service after a restart", lambda: "player service started" in logcat(), timeout=90)
         shot("4-restarted")
         log("restarted: reconnected to the saved node, player service started")
+        if os.environ.get("PM_UI_TOUR"):
+            # The phone UI with a finger: swipes, sheets, Back (tools/android-ui-tour.py)
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("android_ui_tour", Path(__file__).with_name("android-ui-tour.py"))
+            tour = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(tour)
+            # (it reports; PM_UI_TOUR=strict fails the job on it: it taps Play to where CI's emulator
+            # screen has it, so another screen may need its own place)
+            try:
+                tour.run({"adb": adb, "api": api, "shot": shot, "ui_nodes": ui_nodes, "tap": tap, "center": center, "until": until, "log": log, "out": out})
+            except Exception as e:  # noqa: BLE001
+                if os.environ.get("PM_UI_TOUR") == "strict":
+                    raise
+                log(f"UI tour did not complete (reported, not failing the job): {e!r}")
 
         # A crash: the next launch shows the report, and Continue carries on
         crashed = subprocess.run(["adb", "shell", "am", "crash", PKG], capture_output=True, text=True, timeout=60)

@@ -115,7 +115,7 @@ jobs:
             if [ "$all" = true ]; then echo true; return; fi
             if printf '%s\n' "$files" | grep -Eq "^(\.github/workflows/android\.yml$|$1)"; then echo true; else echo false; fi
           }
-          zone=$(covers 'crates/(pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-endpoint\.py$|tools/release/android-patch\.py$|tools/release/android/')
+          zone=$(covers 'crates/(pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-endpoint\.py$|tools/android-ui-tour\.py$|tools/release/android-patch\.py$|tools/release/android/')
           ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
           update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
           background=$(covers 'crates/pm-desktop/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
@@ -372,6 +372,9 @@ jobs:
         env:
           # No sound card on the runner: the emulator's audio is consumed in real time and dropped.
           QEMU_AUDIO_DRV: none
+          # Then the phone UI with a finger (tools/android-ui-tour.py): swipes, sheets, Back, with
+          # screenshots and a recording; it reports (strict would fail the job on it)
+          PM_UI_TOUR: '1'
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64
@@ -392,6 +395,7 @@ jobs:
             /tmp/ae/*.png
             /tmp/ae/*.txt
             /tmp/ae/*.log
+            /tmp/ae/*.mp4
           if-no-files-found: ignore
 
   ring-transport:
