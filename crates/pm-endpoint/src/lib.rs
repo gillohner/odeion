@@ -405,6 +405,21 @@ impl Endpoint {
                     };
                     write_frame(w, &reply)?;
                 }
+                // The level now: a phone's media volume, its DAC's own (the node's read-back)
+                Frame::GetVolume { output } => {
+                    let reply = match self.outputs.get(&OutputId(output.clone())) {
+                        Some(o) => match block_on(o.volume()) {
+                            Ok(volume) => Frame::Level { volume },
+                            Err(e) => Frame::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        None => Frame::Error {
+                            message: format!("no output {output}"),
+                        },
+                    };
+                    write_frame(w, &reply)?;
+                }
                 Frame::Configure { output, settings } => {
                     let reply = match self.outputs.get(&OutputId(output.clone())) {
                         Some(o) => match block_on(o.configure_device(settings)) {

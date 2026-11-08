@@ -1561,8 +1561,18 @@
   // Every slider for a zone reads the same thing: the level the node read back from the output
   // (`z.volume`, dB or percent on the output's own scale, with its mute), This browser its own
   // audio element. `value` is null while the node hasn't read it: nothing is made up.
+  // In the Android app the page's own player has no gain of its own (audio.volume stays 1): its
+  // slider is Android's media volume, which the phone's volume keys move too. The app says it
+  // (`window.pmDesktop.mediaVolume`, `pmdesktop:mediavolume`) and sets it
+  // (`OdeionAndroid.setMediaVolume`), and learns which zone the page controls for the system's
+  // media controls (`OdeionAndroid.controlling`).
+  const appVolume = () => !!(window.pmDesktop && window.OdeionAndroid);
+  const appMediaVolume = () => (appVolume() && typeof window.pmDesktop.mediaVolume === 'number' ? window.pmDesktop.mediaVolume : null);
+  let appZoneSaid = null;
+  const tellAppZone = (id) => { if (!window.OdeionAndroid || id === appZoneSaid) return; appZoneSaid = id; try { window.OdeionAndroid.controlling(id); } catch { /* the app's side is gone */ } };
   const zoneVolume = (z) => {
     if (!z) return null;
+    if (z.id === BROWSER && appVolume()) return { kind: 'percent', min: 0, max: 100, step: 1, value: appMediaVolume(), muted: !!audio.muted };
     if (z.id === BROWSER) return { kind: 'db', min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))), muted: !!audio.muted };
     const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume; const hk = typeof hv === 'string' ? hv : hv && hv.kind;
     const v = z.volume || null;
@@ -1588,6 +1598,7 @@
   const volSliders = (z) => { const els = new Set(); if (z.id === state.zone) for (const el of [$('#vol'), $('#npvol'), $('#volpopvol')]) if (el) els.add(el); for (const el of $$(`[data-zvol="${cssStr(z.id)}"]`)) els.add(el); return [...els]; };
   const syncVolumeSliders = (z, except) => {
     if (!z) return;
+    if (z.id === state.zone) tellAppZone(z.id);
     // The owner's output list says the scale (and whether there is a volume at all); asked once
     if (z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; for (const cur of Object.values(state.zones || {})) syncVolumeSliders(cur); if (!volPop().hidden && volPop().dataset.drawn !== volPopKey()) drawVolPop(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     const r = zoneVolume(z);
@@ -1600,6 +1611,7 @@
   const setZoneVol = async (z, value, from) => {
     const r = zoneVolume(z); if (!r) return;
     const num = Number(value);
+    if (z.id === BROWSER && appVolume()) { const p = Math.round(num); audio.volume = 1; window.pmDesktop.mediaVolume = p; try { window.OdeionAndroid.setMediaVolume(p); } catch { /* the app's side is gone */ } syncVolumeSliders(z, from); return; }
     if (z.id === BROWSER) { audio.volume = Math.pow(10, num / 20); syncVolumeSliders(z, from); return; }
     const body = r.kind === 'percent' ? { percent: Math.round(num) } : { db: num };
     // Shown as set until the node's read-back arrives (its zone event syncs every slider); a
@@ -1617,6 +1629,9 @@
     syncVolumeSliders(z);
     try { await api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { mute: m } }); } catch (e) { z.volume = was; syncVolumeSliders(z); toast(e.message, 'error'); }
   };
+  // Android's media volume changed (a key, the panel, the slider): every slider of the page's own
+  // player follows; it never keeps a gain of its own
+  window.addEventListener('pmdesktop:mediavolume', () => { if (audio.volume !== 1) audio.volume = 1; syncVolumeSliders(browserState()); });
   const bindVolSlider = (el, zoneOf) => {
     if (!el) return;
     const done = () => { delete el.dataset.dragging; };
@@ -2419,7 +2434,22 @@
       .finally(() => { outputsLoad.inflight = null; if (outputsLoad.again) { outputsLoad.again = false; refreshOutputs(); } });
     return outputsLoad.inflight;
   };
-  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
+  // A USB DAC on the phone (the Android app): "this phone" plays through the phone's own zone, the
+  // path that reaches the DAC unchanged (Exclusive USB, else bit-perfect); the page's own player
+  // always goes through Android's mixer. Once per DAC, and never while the page's player plays.
+  let dacZoneFor = null;
+  const preferPhoneZone = () => {
+    const o = appOutput();
+    if (!o || appPlatform() !== 'android') { dacZoneFor = null; return; }
+    const key = `${o.id}|${o.device.name}`; if (dacZoneFor === key) return;
+    const z = Object.values(state.zones || {}).find((x) => x.output === o.id); if (!z) return;
+    dacZoneFor = key;
+    if (state.zone !== BROWSER || !audio.paused) return;
+    state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* storage unavailable */ }
+    renderZoneName(); renderBar();
+    toast(`${o.device.name}: this phone plays through ${z.name}, straight to the DAC`);
+  };
+  const refreshOutputs = () => { if (isOwner()) loadOutputs().then(() => { preferPhoneZone(); renderBar(); if (!zonePop.hidden) renderZonePop(); if (state.view === 'settings' && state.dacDrawn !== undefined && appDevice() !== state.dacDrawn) render(); }).catch(() => {}); };
   window.addEventListener('pmdesktop:output', refreshOutputs);
   const deviceWords = (z) => {
     if (z.id === BROWSER) return appPlatform() ? 'The app plays the files itself' : 'Streams the files to this browser';

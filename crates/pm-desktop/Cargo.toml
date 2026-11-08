@@ -63,7 +63,11 @@ rustls-platform-verifier = "0.7"
 sha2 = "0.10"
 # The Ring transport probe (feature `ring-transport-probe`, src/ring_probe.rs).
 pubky = { version = "0.16", optional = true }
-futures-util = { version = "0.3", optional = true }
+# The media controls follow the node's zones on its /v1/events WebSocket (src/media_live.rs);
+# plain ws:// only (the LAN, the tunnel), so no TLS of its own.
+futures-util = "0.3"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+pm-zones = { path = "../pm-zones" }
 pm-stream = { path = "../pm-stream" }
 pm-endpoint = { path = "../pm-endpoint", features = ["cpal"] }
 # USB DACs: the report UsbAudio.kt hands over, parsed and kept for the phone's output (src/android.rs).
@@ -75,7 +79,7 @@ sha2 = "0.10"
 [features]
 # Android emulator CI only (.github/workflows/android-ring-transport.yml): the app routes a
 # fixture Pubky Ring grant exchange once at start and logs where it went. Never in releases.
-ring-transport-probe = ["dep:pubky", "dep:futures-util"]
+ring-transport-probe = ["dep:pubky"]
 # Android emulator CI only (.github/workflows/android-update.yml): the build reads its update feed
 # from ODEION_UPDATE_FEED (plain http allowed) and logs a marker kept in the app's data. Never in releases.
 update-feed-fixture = []

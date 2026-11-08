@@ -23,6 +23,14 @@ Then, as a phone does on later days:
 - the app is made to crash (`am crash`): on the next launch it shows the crash report
   ("closed unexpectedly", tools/release/android/CrashReport.kt), and Continue carries on.
 
+While the phone's zone plays, the system's media controls (tools/release/android/MediaControl.kt,
+crates/pm-desktop/src/media.rs): `dumpsys media_session` shows the app's session active with the
+track's title and PLAYING; KEYCODE_MEDIA_NEXT moves the node's queue; one volume: Android's media
+volume is the zone's (set at 0, KEYCODE_VOLUME_UP raises it one step and the node reads it back,
+the node's set moves it back to 0); a network zone (the node's null output with a percent volume)
+chosen in the page gets the volume keys as its own volume, Android's media volume untouched.
+Screenshots of the media notification and the lock screen. Volumes stay at 0-5 %.
+
 Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
 """
 import json
@@ -178,6 +186,112 @@ def zone_state(zid):
     return api("GET", f"/v1/zones/{zid}")
 
 
+def stream_music():
+    """Android's media volume as (index, max), from `cmd media_session` (or the older `media`)."""
+    for cmd in (["cmd", "media_session", "volume", "--stream", "3", "--get"], ["media", "volume", "--stream", "3", "--get"]):
+        r = subprocess.run(["adb", "shell", *cmd], capture_output=True, text=True, timeout=30)
+        m = re.search(r"volume is (\d+) in range \[(\d+)\.\.(\d+)\]", r.stdout + r.stderr)
+        if m:
+            return int(m.group(1)), int(m.group(3))
+    return None
+
+
+def set_stream_music(index):
+    for cmd in (["cmd", "media_session", "volume", "--stream", "3", "--set", str(index)], ["media", "volume", "--stream", "3", "--set", str(index)]):
+        subprocess.run(["adb", "shell", *cmd], capture_output=True, text=True, timeout=30)
+        s = stream_music()
+        if s and s[0] == index:
+            return s
+    raise AssertionError(f"cannot set Android's media volume to {index} (now {stream_music()})")
+
+
+def percent_of(index, top):
+    """pm-out-local's media_volume::percent_of: 100 only at the top index."""
+    return 100 if index >= top else min(99, (index * 100 + top // 2) // top)
+
+
+def our_session():
+    """The app's block in `dumpsys media_session` (kept in the artifact), or ""."""
+    text = adb("shell", "dumpsys", "media_session")
+    (out / "media_session.txt").write_text(text)
+    at = text.find(f"package={PKG}")
+    if at < 0:
+        return ""
+    return "\n".join(text[at:].splitlines()[:30])
+
+
+def zone_percent(zid):
+    return (zone_state(zid).get("volume") or {}).get("percent")
+
+
+def media_controls(zid, track):
+    """The system's media controls while the phone's zone plays (see the module's doc)."""
+    title = track.get("title") or ""
+    def playing():
+        s = our_session()
+        on = re.search(r"state=PlaybackState \{state=(?:3\b|PLAYING)", s)
+        return s if ("active=true" in s and on and (not title or title in s)) else None
+    s = until("the app's media session, active and playing, with the track's title", playing, timeout=30)
+    log("media session: " + " | ".join(l.strip() for l in s.splitlines() if "state=" in l or "metadata" in l or "active=" in l))
+
+    # One volume: Android's media volume is the zone's (0-5 % only)
+    _, top = set_stream_music(0)
+    until("the zone's level at 0 %", lambda: zone_percent(zid) == 0, timeout=20)
+    adb("shell", "input", "keyevent", "KEYCODE_VOLUME_UP")
+    until("KEYCODE_VOLUME_UP: Android's media volume one step up", lambda: (stream_music() or (None,))[0] == 1, timeout=10)
+    want = percent_of(1, top)
+    until(f"the zone's level read back at {want} %", lambda: zone_percent(zid) == want, timeout=20)
+    log(f"volume key: Android's media volume 1 of {top}, the zone reads {want} %")
+    api("POST", f"/v1/zones/{zid}/volume", {"volume": {"percent": 0}})
+    until("the node's set: Android's media volume back at 0", lambda: (stream_music() or (None,))[0] == 0, timeout=15)
+    log("the zone's volume set from the node moves Android's media volume")
+
+    # The notification and the lock screen (Android 13+: notifications were refused above, as a
+    # cautious owner would; allowed now so the media notification shows)
+    adb("shell", "pm", "grant", PKG, "android.permission.POST_NOTIFICATIONS", check=False)
+    time.sleep(2)
+    adb("shell", "cmd", "statusbar", "expand-notifications", check=False)
+    time.sleep(3)
+    shot("6-media-notification")
+    adb("shell", "cmd", "statusbar", "collapse", check=False)
+    adb("shell", "input", "keyevent", "KEYCODE_SLEEP", check=False)
+    time.sleep(2)
+    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+    time.sleep(3)
+    shot("7-lock-screen")
+    adb("shell", "wm", "dismiss-keyguard", check=False)
+    adb("shell", "input", "keyevent", "82", check=False)
+    time.sleep(2)
+
+    # A media button: the node's queue moves on
+    at = zone_state(zid).get("queue_index") or 0
+    adb("shell", "input", "keyevent", "KEYCODE_MEDIA_NEXT")
+    until("KEYCODE_MEDIA_NEXT: the node's queue moves on", lambda: (zone_state(zid).get("queue_index") or 0) == at + 1, timeout=20)
+    log("KEYCODE_MEDIA_NEXT reached the node")
+
+    # A network zone chosen in the page: the volume keys are its own volume
+    nz = next((z for z in api("GET", "/v1/zones") if z["output"] == "null:percent"), None)
+    assert nz, "no zone on the null output with a percent volume (PM_DEV_OUTPUTS)"
+    api("POST", f"/v1/zones/{nz['id']}/volume", {"volume": {"percent": 3}})
+    api("POST", f"/v1/zones/{nz['id']}/queue", {"track_ids": [track["id"]], "replace": True, "play": False})
+    tap(lambda n: "choose where to play" in n, "the zone button")
+    tap(lambda n: "Null output (% volume)" in n, "the null output's zone")
+    def remote():
+        s = our_session()
+        return s if "volumeType=2" in s else None
+    until("the session on the network zone, with its own volume (remote)", remote, timeout=20)
+    before = stream_music()
+    adb("shell", "input", "keyevent", "KEYCODE_VOLUME_UP")
+    until("KEYCODE_VOLUME_UP: the network zone at 4 %", lambda: zone_percent(nz["id"]) == 4, timeout=20)
+    assert stream_music() == before, f"Android's media volume moved too: {before} -> {stream_music()}"
+    log("volume key on the network zone: its own volume 3 -> 4 %, Android's media volume untouched")
+    shot("8-network-zone")
+    # Back to the phone's zone in the page
+    tap(lambda n: "choose where to play" in n, "the zone button")
+    name = zone_state(zid)["name"]
+    tap(lambda n: name[:20] in n, "the phone's zone")
+
+
 def position(zid):
     z = zone_state(zid)
     if z.get("error"):
@@ -284,8 +398,11 @@ slimproto_port = 0
 [remote]
 enabled = false
 """)
+    # The developer outputs (a null output with a percent volume: a network zone for the volume
+    # keys), and the volume read back every second
+    env = {**os.environ, "PM_DEV_OUTPUTS": "1", "PM_VOLUME_POLL_MS": "1000"}
     node = subprocess.Popen([node_bin, "--config", str(out / "node.toml"), "serve"],
-                            stdout=open(out / "node.log", "w"), stderr=subprocess.STDOUT)
+                            stdout=open(out / "node.log", "w"), stderr=subprocess.STDOUT, env=env)
     try:
         run(node)
     finally:
@@ -302,6 +419,8 @@ def run(node):
 
     track = until("the scan", tracks)[0]
     log(f"node up, track {track['id']}")
+    # The page lists the developer outputs (the network zone the volume keys are tried on)
+    api("PUT", "/v1/node/settings", {"dev_outputs": True})
 
     sdk = int(adb("shell", "getprop", "ro.build.version.sdk").strip() or 0)
     log(f"Android API {sdk}")
@@ -417,7 +536,8 @@ def run(node):
             assert phone, f"no output named like {want!r}"
             zone = until("the phone's zone", lambda: next((z for z in api("GET", "/v1/zones") if z["output"] == phone["id"]), None))
             zid = zone["id"]
-            api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
+            # Twice: KEYCODE_MEDIA_NEXT has somewhere to go
+            api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"], track["id"]], "replace": True, "play": True})
             until("playback", lambda: position(zid)[1], timeout=30)
             z = zone_state(zid)
             np = z["now_playing"]
@@ -425,6 +545,7 @@ def run(node):
 
             rate, tr = rate_over(zid, 10)
             assert tr == "playing" and 0.8 < rate < 1.2, f"foreground: {rate:.2f}x ({tr})"
+            media_controls(zid, track)
 
             adb("shell", "input", "keyevent", "3")  # HOME: the app goes to the background
             log("app in the background")

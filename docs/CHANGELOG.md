@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-08
+
+- **The Android app works with the phone's media controls, its volume keys and a USB DAC by itself** (owner: "connect to android media player thing and audio volume control … if direct usb device is available and connected take full control"). The notification, the lock screen, the quick-settings panel and headset or Bluetooth buttons show and drive the zone the app has chosen (any zone: the phone's own, This phone, a Linn). One volume: on a network zone the volume keys and Android's panel set the zone's own volume; on the phone's zones the slider is Android's media volume, which the keys move too, with no second volume in the app; the node reads the phone's level back, so every controller shows a key press. With a USB DAC, Auto now asks Android's permission once and plays Exclusive USB first (the DAC's own volume is the zone's), then bit-perfect, then shared; "this phone" then plays through the phone's own zone. A call pauses the phone's zone and it plays on afterwards; unplugging the DAC leaves the speaker at a quarter of Android's volume at most.
+
 ### 2026-11-07
 
 - **A stream that doesn't answer ends with an error instead of holding the zone.** A radio or web stream whose server accepts the connection but sends nothing now fails after 20 seconds, like one that stops sending mid-song. A live stream still plays for as long as it sends. Stop, Next and Play are taken while such a stream is being skipped, not after every item in the queue was tried, and the next song is opened ahead on its own thread, so a next item slow to answer never holds the zone.

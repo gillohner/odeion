@@ -6,6 +6,10 @@
 // leaving the app, and the node's stream to this phone stops. Started by the
 // Rust side (src/android.rs) once the app reaches a node or opens its offline page; it
 // must start while the app is on screen (Android 12+ refuses otherwise).
+//
+// Its notification is the media notification while the app's media session (MediaControl.kt) is
+// active: title, artist, cover and the buttons of the zone the app controls, also on the lock
+// screen and in the quick-settings panel; otherwise it says what the service is for.
 package to.synonym.pubkymusic
 
 import android.app.Activity
@@ -66,30 +70,14 @@ class PlayerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         lastStart = startId
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(
-            NotificationChannel(CHANNEL, "Player", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Shown while the app plays, or while this phone is a zone of your node"
-            }
-        )
-        val launch = packageManager.getLaunchIntentForPackage(packageName)
-        val open = PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_IMMUTABLE)
-        val text = intent?.getStringExtra(EXTRA_TEXT) ?: "This phone is a zone"
+        text = intent?.getStringExtra(EXTRA_TEXT) ?: "This phone is a zone"
         zone = intent?.getBooleanExtra(EXTRA_ZONE, true) ?: true
-        val n = Notification.Builder(this, CHANNEL)
-            // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
-            // phones refuse as a small icon ("Bad notification for startForeground", a crash).
-            .setSmallIcon(R.drawable.ic_stat_pubky_music)
-            .setContentTitle("Odeion")
-            .setContentText(text)
-            .setContentIntent(open)
-            .setOngoing(true)
-            .build()
+        val n = build(this, true)
         try {
             if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
             } else {
-                startForeground(1, n)
+                startForeground(ID, n)
             }
         } catch (e: Exception) {
             // Refused (a missing permission, a background start, a system that wants more):
@@ -104,6 +92,7 @@ class PlayerService : Service() {
             return START_NOT_STICKY
         }
         hold()
+        running = true
         idleMs = 0L
         tick.removeCallbacks(watch)
         if (!zone) tick.postDelayed(watch, WATCH_MS)
@@ -145,9 +134,12 @@ class PlayerService : Service() {
     }
 
     override fun onDestroy() {
+        running = false
         tick.removeCallbacks(watch)
         release()
         super.onDestroy()
+        // The media session outlives the service (the app on screen): its notification stays
+        refresh(applicationContext)
     }
 
     companion object {
@@ -162,6 +154,40 @@ class PlayerService : Service() {
         fun backgroundRefusal(e: Exception): Boolean =
             Build.VERSION.SDK_INT >= 31 && e.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
         private const val NOTIFY = "android.permission.POST_NOTIFICATIONS"
+        /// The notification's id (the service's foreground one, and the media one).
+        const val ID = 1
+        @Volatile private var running = false
+        @Volatile private var text = "This phone is a zone"
+
+        /// The notification as it should be now: the media one while the session is active, else
+        /// what the service is for. `service`: for startForeground (always ongoing).
+        fun build(c: Context, service: Boolean): Notification {
+            MediaControl.channel(c)
+            val launch = c.packageManager.getLaunchIntentForPackage(c.packageName)
+            val open = PendingIntent.getActivity(c, 0, launch, PendingIntent.FLAG_IMMUTABLE)
+            val b = Notification.Builder(c, CHANNEL)
+                // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
+                // phones refuse as a small icon ("Bad notification for startForeground", a crash).
+                .setSmallIcon(R.drawable.ic_stat_pubky_music)
+                .setContentIntent(open)
+                .setOnlyAlertOnce(true)
+                .setOngoing(service || running)
+            if (!MediaControl.styled(c, b)) {
+                b.setContentTitle("Odeion").setContentText(text)
+            }
+            return b.build()
+        }
+
+        /// The session changed (MediaControl.kt): the notification follows. Without the service,
+        /// the media notification alone (gone with the session).
+        fun refresh(c: Context) {
+            val nm = c.getSystemService(NotificationManager::class.java) ?: return
+            try {
+                if (running || MediaControl.active()) nm.notify(ID, build(c, false)) else nm.cancel(ID)
+            } catch (e: Exception) {
+                android.util.Log.w("pubky-music", "player notification: $e")
+            }
+        }
 
         /// Whether Android took the start (false: refused, for example from the background).
         @JvmStatic

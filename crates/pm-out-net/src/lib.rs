@@ -391,6 +391,27 @@ impl Output for NetOutput {
         })
         .await
     }
+
+    /// The level the endpoint's output reports now (a phone's media volume, its USB DAC's own),
+    /// so a change made on the phone (its volume keys) shows on every controller. An app from
+    /// before `GetVolume` ends the session instead of answering: the level is unknown then.
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        if self.live_caps().hw_volume.is_none() {
+            return Ok(None);
+        }
+        let (addr, key, remote) = (self.addr, self.key.clone(), self.remote.id.0.clone());
+        blocking(move || {
+            let (mut c, _) = key.session(addr)?;
+            write_frame(&mut c.w, &Frame::GetVolume { output: remote }).map_err(io_err)?;
+            match answer_within(&mut c.r, HANDSHAKE_TIMEOUT) {
+                Ok(Frame::Level { volume }) => Ok(volume),
+                Ok(other) => Err(SinkError::Device(format!("unexpected {other:?}"))),
+                // An older app: it can't say
+                Err(_) => Ok(None),
+            }
+        })
+        .await
+    }
 }
 
 /// Run blocking socket work off the async workers when there is a runtime (an API handler); in

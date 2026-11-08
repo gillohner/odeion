@@ -379,7 +379,14 @@ pub fn live_caps(
         pcm_bits: bits,
         max_channels: 2,
         dsd: None,
-        hw_volume: None,
+        // At full media volume the zone's volume stays Android's (turning it down plays shared at
+        // once: one volume, never louder); below full, by the listener's agreement, there is none
+        // here: Android's volume doesn't apply, the DAC or amplifier sets the level
+        hw_volume: if media_percent == Some(100) {
+            shared.hw_volume
+        } else {
+            None
+        },
         quality_ceiling: QualityCeiling::BitPerfect,
         ..shared.clone()
     }

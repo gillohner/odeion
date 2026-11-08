@@ -70,6 +70,8 @@ class UsbExclusive private constructor() {
                                     while (detachedLog.size > 64) detachedLog.removeAt(0)
                                 }
                                 if (gone != null && device?.deviceName == gone.deviceName) {
+                                    // Unplugged while the app held it: the speaker never comes on loud
+                                    MediaControl.safeAfterUnplug()
                                     runCatching { conn?.close() }
                                     conn = null
                                     device = null
@@ -116,7 +118,22 @@ class UsbExclusive private constructor() {
             return runCatching { usb()?.hasPermission(d) ?: false }.getOrDefault(false)
         }
 
-        /// Android's dialog for the DAC: only when the listener chose Exclusive USB.
+        /// Auto's own ask (Exclusive USB is its first path): Android's dialog for this DAC once, and
+        /// only while the app is on screen (Android shows it over the app). Someone who said no is
+        /// not asked again; choosing Exclusive USB in Settings asks again (requestPermission).
+        @JvmStatic
+        fun requestPermissionOnce(vendor: Int, product: Int) {
+            val me = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(me)
+            if (me.importance != android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) return
+            val p = prefs() ?: return
+            val key = "auto-asked-$vendor:$product"
+            if (p.getBoolean(key, false)) return
+            p.edit().putBoolean(key, true).apply()
+            requestPermission(vendor, product)
+        }
+
+        /// Android's dialog for the DAC: when the listener chose Exclusive USB, or Auto's one ask.
         @JvmStatic
         fun requestPermission(vendor: Int, product: Int) {
             val c = context ?: return
