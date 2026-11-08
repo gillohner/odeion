@@ -939,7 +939,7 @@ pub fn run() {
                         android::resume_player_service(app);
                         // The media controls look again (Android's volume, Auto's USB permission)
                         if let Some(m) = media_live::get() {
-                            tauri::async_runtime::spawn(m.handle(media::Event::Resumed));
+                            m.send(media::Event::Resumed);
                         }
                     }
                     _ => {}

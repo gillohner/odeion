@@ -254,7 +254,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/zones/{id}/transport", post(transport))
         .route("/zones/{id}/announce", post(announce::announce))
-        .route("/zones/{id}/volume", post(volume))
+        .route("/zones/{id}/volume", post(volume).get(read_volume))
         .route("/zones/{id}/repeat", axum::routing::put(repeat))
         .route("/zones/{id}/radio", axum::routing::put(radio))
         .route("/zones/{id}/crossfade", axum::routing::put(crossfade))
@@ -2130,6 +2130,19 @@ async fn volume(
         .await?;
     announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The zone's level as its output reports it now, read from the device and published to every
+/// controller (as the poll does). A controller that saw the level change on the device itself (a
+/// phone's volume keys, read by the app on the phone) asks for it instead of setting it: a set
+/// could land after a newer change on the device and undo it. `null` when the output can't say.
+async fn read_volume(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Option<pm_model::ZoneVolume>> {
+    let zone = zone_of(&s, &id)?;
+    let read = tokio::time::timeout(std::time::Duration::from_secs(4), zone.refresh_volume()).await;
+    Ok(Json(read.ok().flatten()))
 }
 
 /// Apply a zone's volume limit (dB) to an absolute request: a dB request is capped at it, a
@@ -23357,5 +23370,45 @@ exec sleep 300
             "a long-unseen renderer isn't asked before it is dropped"
         );
         assert_eq!(named(&s, "Gone"), 0);
+    }
+
+    /// `GET /v1/zones/{id}/volume` reads the device now and publishes it (the app asks this after
+    /// the phone's volume keys; it never sets the level to report it): what the device says, also
+    /// a change made on the device itself; `null` for an output without a volume.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zones_level_is_read_from_the_device_on_request() {
+        use pm_zones::outputs::NullOutput;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let raw = Arc::new(NullOutput::with_volume(pm_model::VolumeKind::Percent));
+        let out: Arc<dyn pm_zones::Output> = raw.clone();
+        s.outputs.register(out.clone());
+        let zone = s.create_zone("Phone-like", out);
+        let plain: Arc<dyn pm_zones::Output> = Arc::new(NullOutput::new());
+        s.outputs.register(plain.clone());
+        let none = s.create_zone("No volume", plain);
+        let app = router(s.clone());
+        zone.wait_acked().await;
+        // The device changes its level itself (a volume key on the phone)
+        raw.pretend_level(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(7),
+            muted: false,
+        });
+        let zid = zone.id().0.clone();
+        let (st, v) = call(&app, "GET", &format!("/v1/zones/{zid}/volume"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v, serde_json::json!({"percent": 7, "muted": false}));
+        zone.wait_acked().await;
+        let (_, z) = call(&app, "GET", &format!("/v1/zones/{zid}"), None).await;
+        assert_eq!(
+            z["volume"],
+            serde_json::json!({"percent": 7, "muted": false}),
+            "published: {z}"
+        );
+        let nid = none.id().0.clone();
+        let (st, v) = call(&app, "GET", &format!("/v1/zones/{nid}/volume"), None).await;
+        assert_eq!((st, v), (StatusCode::OK, serde_json::Value::Null));
+        let (st, _) = call(&app, "GET", "/v1/zones/no-such-zone/volume", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }

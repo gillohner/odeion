@@ -234,7 +234,10 @@ def media_controls(zid, track):
     s = until("the app's media session, active and playing, with the track's title", playing, timeout=30)
     log("media session: " + " | ".join(l.strip() for l in s.splitlines() if "state=" in l or "metadata" in l or "active=" in l))
 
-    # One volume: Android's media volume is the zone's (0-5 % only)
+    # One volume: Android's media volume is the zone's. Paused meanwhile: one step up from 0 can
+    # be more than 5 % on a phone with few steps, so nothing plays while it is above 0
+    api("POST", f"/v1/zones/{zid}/transport", {"action": "pause"})
+    until("the zone paused", lambda: zone_state(zid).get("transport") == "paused", timeout=15)
     _, top = set_stream_music(0)
     until("the zone's level at 0 %", lambda: zone_percent(zid) == 0, timeout=20)
     adb("shell", "input", "keyevent", "KEYCODE_VOLUME_UP")
@@ -245,6 +248,8 @@ def media_controls(zid, track):
     api("POST", f"/v1/zones/{zid}/volume", {"volume": {"percent": 0}})
     until("the node's set: Android's media volume back at 0", lambda: (stream_music() or (None,))[0] == 0, timeout=15)
     log("the zone's volume set from the node moves Android's media volume")
+    api("POST", f"/v1/zones/{zid}/transport", {"action": "play"})
+    until("the zone playing again (at 0)", lambda: zone_state(zid).get("transport") == "playing", timeout=15)
 
     # The notification and the lock screen (Android 13+: notifications were refused above, as a
     # cautious owner would; allowed now so the media notification shows)
@@ -536,8 +541,8 @@ def run(node):
             assert phone, f"no output named like {want!r}"
             zone = until("the phone's zone", lambda: next((z for z in api("GET", "/v1/zones") if z["output"] == phone["id"]), None))
             zid = zone["id"]
-            # Twice: KEYCODE_MEDIA_NEXT has somewhere to go
-            api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"], track["id"]], "replace": True, "play": True})
+            # Three times: KEYCODE_MEDIA_NEXT has somewhere to go, however long the checks before it take
+            api("POST", f"/v1/zones/{zid}/queue", {"track_ids": [track["id"]] * 3, "replace": True, "play": True})
             until("playback", lambda: position(zid)[1], timeout=30)
             z = zone_state(zid)
             np = z["now_playing"]

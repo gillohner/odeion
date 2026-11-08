@@ -41,6 +41,8 @@ pub struct Media {
     native: Arc<dyn Native>,
     offline_origin: Arc<Mutex<Option<String>>>,
     st: Mutex<State>,
+    /// Every event, handled one after another (a call's pause and its end's play never cross).
+    queue: tokio::sync::mpsc::UnboundedSender<Event>,
 }
 
 #[derive(Default)]
@@ -57,8 +59,10 @@ struct State {
     art: Option<String>,
     /// The audio focus as last asked: held, and whether Android may duck it.
     focus: (bool, bool),
-    /// The phone's players paused by a call (or a prompt): they play on when it ends.
-    paused_for_now: Vec<String>,
+    /// The phone's zone paused by a call (or a prompt): it plays on when that ends, unless someone
+    /// played, paused or stopped it meanwhile (`true` once the node said it is paused; any other
+    /// state after that drops it).
+    paused_for_now: Vec<(String, bool)>,
     /// Counts media volume changes: only the newest tells the node.
     volume_seq: u64,
 }
@@ -80,12 +84,21 @@ pub fn init(
 ) -> Arc<Media> {
     let m = MEDIA
         .get_or_init(|| {
-            Arc::new(Media {
+            let (queue, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+            let m = Arc::new(Media {
                 app: app.clone(),
                 native,
                 offline_origin,
                 st: Mutex::new(State::default()),
-            })
+                queue,
+            });
+            let me = m.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    me.clone().handle(ev).await;
+                }
+            });
+            m
         })
         .clone();
     if let Some(s) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() {
@@ -130,6 +143,11 @@ impl Media {
         }
     }
 
+    /// An event from the app's side, in its turn.
+    pub fn send(&self, ev: Event) {
+        let _ = self.queue.send(ev);
+    }
+
     /// Connected to a node (again): follow its zones.
     pub fn connected(self: &Arc<Self>, s: Settings) {
         let gen = {
@@ -137,6 +155,7 @@ impl Media {
             st.settings = Some(s);
             st.feed += 1;
             st.zones.clear();
+            st.paused_for_now.clear();
             st.feed
         };
         let me = self.clone();
@@ -151,6 +170,7 @@ impl Media {
             st.feed += 1;
             st.zones.clear();
             st.controlled = None;
+            st.paused_for_now.clear();
         }
         self.push();
     }
@@ -245,6 +265,18 @@ impl Media {
     fn push(&self) {
         let (json, art, focus) = {
             let mut st = self.state();
+            // A zone a call paused: once the node says it is paused, anything else (someone played,
+            // paused or stopped it) means the listener chose, and the call's end leaves it be
+            let zones = std::mem::take(&mut st.zones);
+            st.paused_for_now.retain_mut(|(z, seen)| {
+                let paused =
+                    zones.get(z.as_str()).and_then(|z| z.get("transport")?.as_str()) == Some("paused");
+                if paused {
+                    *seen = true;
+                }
+                paused || !*seen
+            });
+            st.zones = zones;
             let s = Self::session(&st);
             let json = serde_json::to_string(&s).unwrap_or_default();
             let changed = json != st.pushed;
@@ -288,12 +320,19 @@ impl Media {
                 if auth {
                     req = req.bearer_auth(&s.token);
                 }
-                let resp = req.send().await.ok()?.error_for_status().ok()?;
+                let mut resp = req.send().await.ok()?.error_for_status().ok()?;
                 if resp.content_length().is_some_and(|n| n > ART_MAX) {
                     return None;
                 }
-                let b = resp.bytes().await.ok()?;
-                (b.len() as u64 <= ART_MAX).then(|| b.to_vec())
+                // Read up to the cap, whatever the length header says (or without one)
+                let mut b = Vec::new();
+                while let Some(chunk) = resp.chunk().await.ok()? {
+                    if (b.len() + chunk.len()) as u64 > ART_MAX {
+                        return None;
+                    }
+                    b.extend_from_slice(&chunk);
+                }
+                Some(b)
             }
             .await
             .unwrap_or_default();
@@ -302,7 +341,7 @@ impl Media {
     }
 
     /// What the app's side sent.
-    pub async fn handle(self: Arc<Self>, ev: Event) {
+    async fn handle(self: Arc<Self>, ev: Event) {
         match ev {
             Event::Command(c) => self.command(c).await,
             Event::Page { origin, data } => self.page(&origin, &data).await,
@@ -315,12 +354,13 @@ impl Media {
                 }
                 self.push();
             }
-            Event::MediaVolume => self.media_volume_changed().await,
+            // Reads only (a burst of key presses: the last counts), apart from the queue
+            Event::MediaVolume => self.volume_soon(),
             Event::Resumed => {
                 let _ = tauri::async_runtime::spawn_blocking(pm_out_local::exclusive::auto_ask).await;
                 self.state().pushed.clear();
                 self.push();
-                self.media_volume_changed().await;
+                self.volume_soon();
             }
         }
     }
@@ -376,11 +416,26 @@ impl Media {
             return;
         }
         if let Some(body) = c.transport() {
+            // The listener chose: a call's end doesn't play it again
+            self.state().paused_for_now.retain(|(z, _)| *z != zone);
             self.transport(&zone, body).await;
             return;
         }
+        if let Command::Mute(m) = c {
+            let muted = self
+                .state()
+                .zones
+                .get(&zone)
+                .and_then(|z| z.get("volume")?.get("muted")?.as_bool())
+                .unwrap_or(false);
+            let base = self.state().settings.as_ref().map(|s| s.base().to_string());
+            let url = base.and_then(|b| media::zone_url(&b, &zone, "volume"));
+            self.post(url, serde_json::json!({"volume": {"mute": m.unwrap_or(!muted)}}))
+                .await;
+            return;
+        }
         // A volume key or the system's panel on a zone with a volume of its own
-        let (body, base) = {
+        let body = {
             let mut st = self.state();
             let Some(z) = st.zones.get(&zone) else { return };
             let output = z.get("output").and_then(Value::as_str).unwrap_or("").to_string();
@@ -405,7 +460,7 @@ impl Media {
                 _ => None,
             };
             let Some(body) = body else { return };
-            // Shown at once; the node's read-back follows
+            // Shown at once; the node's read-back follows (and a refused set puts it back)
             if let Some(z) = st.zones.get_mut(&zone) {
                 let mut v = level.as_object().cloned().unwrap_or_default();
                 v.remove("percent");
@@ -415,11 +470,17 @@ impl Media {
                 }
                 z["volume"] = Value::Object(v);
             }
-            (body, st.settings.as_ref().map(|s| s.base().to_string()))
+            (body, st.settings.as_ref().map(|s| s.base().to_string()), level)
         };
+        let (body, base, was) = body;
         self.push();
         let url = base.and_then(|b| media::zone_url(&b, &zone, "volume"));
-        self.post(url, serde_json::json!({ "volume": body })).await;
+        if !self.post(url, serde_json::json!({ "volume": body })).await {
+            if let Some(z) = self.state().zones.get_mut(&zone) {
+                z["volume"] = was;
+            }
+            self.push();
+        }
     }
 
     async fn page(&self, origin: &str, data: &str) {
@@ -453,7 +514,8 @@ impl Media {
                 if let Ok(Err(e)) = set {
                     tracing::info!("media volume: {e}");
                 }
-                self.media_volume_changed().await;
+                // The level Android took (its own steps), in its turn
+                self.send(Event::MediaVolume);
             }
             Some(PageMsg::Player(p)) => {
                 self.state().page = p;
@@ -474,8 +536,8 @@ impl Media {
                     let mut st = self.state();
                     if action == FocusAction::PauseForNow {
                         for z in &playing {
-                            if !st.paused_for_now.contains(z) {
-                                st.paused_for_now.push(z.clone());
+                            if !st.paused_for_now.iter().any(|(x, _)| x == z) {
+                                st.paused_for_now.push((z.clone(), false));
                             }
                         }
                     } else {
@@ -488,7 +550,7 @@ impl Media {
             }
             FocusAction::Resume => {
                 let again = std::mem::take(&mut self.state().paused_for_now);
-                for z in again {
+                for (z, _) in again {
                     self.play(&z).await;
                 }
             }
@@ -497,8 +559,15 @@ impl Media {
         self.push();
     }
 
+    /// [`Self::media_volume_changed`] on its own task.
+    fn volume_soon(self: &Arc<Self>) {
+        let me = self.clone();
+        tauri::async_runtime::spawn(async move { me.media_volume_changed().await });
+    }
+
     /// Android's media volume changed (a key, the panel, the slider, another route): the page
-    /// hears it, and the node's level for the phone's own zone follows at once.
+    /// hears it, and the node reads the phone's own zone's level again at once. Never a set: one
+    /// arriving after a newer key press would undo it (louder).
     pub async fn media_volume_changed(&self) {
         let seq = {
             let mut st = self.state();
@@ -519,9 +588,8 @@ impl Media {
             return;
         };
         self.eval(media::media_volume_script(p));
-        // The phone's own zone on Android's media volume: the node reads it back now (a set to
-        // the level it already has changes nothing on the phone)
-        let nudge = {
+        // The phone's own zone on Android's media volume: the node reads it from the phone now
+        let stale = {
             let st = self.state();
             Self::phone_zone(&st).and_then(|z| {
                 let shown = z
@@ -536,11 +604,14 @@ impl Media {
             pm_out_local::media_volume::phone_kind(),
             Some(pm_model::VolumeKind::Percent)
         );
-        if let (Some(id), true) = (nudge, media) {
-            let base = self.state().settings.as_ref().map(|s| s.base().to_string());
-            let url = base.and_then(|b| media::zone_url(&b, &id, "volume"));
-            self.post(url, serde_json::json!({"volume": {"percent": p}}))
-                .await;
+        if let (Some(id), true) = (stale, media) {
+            let s = self.state().settings.clone();
+            let url = s.as_ref().and_then(|s| media::zone_url(s.base(), &id, "volume"));
+            if let (Some(s), Some(url), Some(c)) = (s, url, client()) {
+                if let Err(e) = c.get(url).bearer_auth(&s.token).send().await {
+                    tracing::debug!("media controls: the node's read of the phone's level: {e}");
+                }
+            }
         }
     }
 
@@ -548,8 +619,7 @@ impl Media {
     pub fn page_loaded(self: &Arc<Self>) {
         self.state().page = media::PagePlayer::default();
         self.push();
-        let me = self.clone();
-        tauri::async_runtime::spawn(async move { me.media_volume_changed().await });
+        self.volume_soon();
     }
 
     fn current(&self, gen: u64) -> Option<Settings> {

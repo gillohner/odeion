@@ -80,8 +80,11 @@ class MediaControl private constructor() {
         private var shown: JSONObject? = null
         private var artUrl = ""
         private var art: Bitmap? = null
-        private var focusRequest: Any? = null
+        private var focusRequest: AudioFocusRequest? = null
         private var focusDucks = true
+        /// What the notification shows, and what it showed last.
+        private var notifyKey = ""
+        private var notified = ""
         private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
             emit(JSONObject().put("k", "focus").put("change", change))
         }
@@ -151,11 +154,11 @@ class MediaControl private constructor() {
             val filter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
             filter.addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
             filter.addAction(actionName(c))
-            if (Build.VERSION.SDK_INT >= 33) {
-                c.registerReceiver(receiver, filter, null, main, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                c.registerReceiver(receiver, filter, null, main)
-            }
+            // Not exported on every version (the notification's buttons drive the zone: no other app
+            // may send them; below Android 13 ContextCompat guards it with a permission of the app's)
+            androidx.core.content.ContextCompat.registerReceiver(
+                c, receiver, filter, null, main, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+            )
             // Media's route changed (headphones, Bluetooth, a DAC): its volume is another device's
             audio()?.registerAudioDeviceCallback(object : AudioDeviceCallback() {
                 override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) {
@@ -179,6 +182,14 @@ class MediaControl private constructor() {
         fun safeAfterUnplug() {
             main.postDelayed({
                 val am = audio() ?: return@postDelayed
+                // Only where media plays on the phone itself now: never the DAC (Exclusive USB taking
+                // or giving it back lists it again) or another USB device
+                val usb = setOf(AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET)
+                val onUsb = runCatching {
+                    if (Build.VERSION.SDK_INT >= 33) am.getAudioDevicesForAttributes(media).any { it.type in usb }
+                    else am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).any { it.type in usb }
+                }.getOrDefault(true)
+                if (onUsb) return@postDelayed
                 runCatching {
                     val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                     val cap = maxOf(1, max * SAFE_PERCENT / 100)
@@ -293,6 +304,8 @@ class MediaControl private constructor() {
             if (s.optBoolean("can_next")) actions = actions or PlaybackState.ACTION_SKIP_TO_NEXT
             if (s.optBoolean("can_prev")) actions = actions or PlaybackState.ACTION_SKIP_TO_PREVIOUS
             if (s.optBoolean("can_seek")) actions = actions or PlaybackState.ACTION_SEEK_TO
+            notifyKey = listOf(title, s.optString("artist"), s.optString("zone_name"), s.optString("state"),
+                s.optBoolean("can_prev"), s.optBoolean("can_next"), if (bmp != null && artUrl == s.optString("art")) artUrl else "").joinToString("\u0000")
             ms.setPlaybackState(
                 PlaybackState.Builder()
                     .setActions(actions)
@@ -304,7 +317,11 @@ class MediaControl private constructor() {
                 ms.isActive = true
                 activity?.get()?.let { it.mediaController = MediaController(it, ms.sessionToken) }
             }
-            PlayerService.refresh(c)
+            // The notification only when what it shows changed (not for every position update)
+            if (notifyKey != notified) {
+                notified = notifyKey
+                PlayerService.refresh(c)
+            }
         }
 
         /// The session's volume: Android's media volume, or the zone's own in steps (remote).
@@ -324,9 +341,16 @@ class MediaControl private constructor() {
                                 emit(JSONObject().put("k", "cmd").put("a", "volume_to").put("v", currentVolume))
                             }
                             override fun onAdjustVolume(direction: Int) {
-                                if (direction == 0) return
-                                currentVolume = (currentVolume + direction).coerceIn(0, maxVolume)
-                                emit(JSONObject().put("k", "cmd").put("a", "volume_by").put("d", direction))
+                                when (direction) {
+                                    AudioManager.ADJUST_RAISE, AudioManager.ADJUST_LOWER -> {
+                                        currentVolume = (currentVolume + direction).coerceIn(0, maxVolume)
+                                        emit(JSONObject().put("k", "cmd").put("a", "volume_by").put("d", direction))
+                                    }
+                                    // Mute keys: the zone's mute, never its level
+                                    AudioManager.ADJUST_MUTE -> emit(JSONObject().put("k", "cmd").put("a", "mute").put("m", true))
+                                    AudioManager.ADJUST_UNMUTE -> emit(JSONObject().put("k", "cmd").put("a", "mute").put("m", false))
+                                    AudioManager.ADJUST_TOGGLE_MUTE -> emit(JSONObject().put("k", "cmd").put("a", "mute"))
+                                }
                             }
                         }
                         provider = np
@@ -354,6 +378,7 @@ class MediaControl private constructor() {
             shown = null
             provider = null
             providerKind = ""
+            notified = ""
             runCatching {
                 ms.isActive = false
                 ms.release()
@@ -404,20 +429,18 @@ class MediaControl private constructor() {
                 if (focusRequest != null && focusDucks == ducks) return@post
                 abandon(am)
                 focusDucks = ducks
-                if (Build.VERSION.SDK_INT >= 26) {
-                    val r = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(media)
-                        .setWillPauseWhenDucked(!ducks)
-                        .setOnAudioFocusChangeListener(focusListener, main)
-                        .build()
+                // (Android 8 and later: the app's minSdk is 26)
+                val r = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(media)
+                    .setWillPauseWhenDucked(!ducks)
+                    .setOnAudioFocusChangeListener(focusListener, main)
+                    .build()
+                if (am.requestAudioFocus(r) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
                     focusRequest = r
-                    if (am.requestAudioFocus(r) != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                        android.util.Log.i(TAG, "media controls: audio focus not granted now (a call?)")
-                    }
                 } else {
-                    focusRequest = focusListener
-                    @Suppress("DEPRECATION")
-                    am.requestAudioFocus(focusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN)
+                    // Refused (a call): the phone's zone pauses, as on a loss; asked again when it plays
+                    android.util.Log.i(TAG, "media controls: audio focus refused (a call?)")
+                    emit(JSONObject().put("k", "focus").put("change", AudioManager.AUDIOFOCUS_LOSS))
                 }
             }
         }
@@ -425,12 +448,7 @@ class MediaControl private constructor() {
         private fun abandon(am: AudioManager) {
             val r = focusRequest ?: return
             focusRequest = null
-            if (Build.VERSION.SDK_INT >= 26 && r is AudioFocusRequest) {
-                am.abandonAudioFocusRequest(r)
-            } else {
-                @Suppress("DEPRECATION")
-                am.abandonAudioFocus(focusListener)
-            }
+            am.abandonAudioFocusRequest(r)
         }
 
         /// The channel the player's notification uses (PlayerService.kt makes it too).

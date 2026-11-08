@@ -742,12 +742,12 @@ pub fn live_caps(
         return None;
     }
     // The zone's volume: the DAC's unit once the app holds it; before the first song, Android's
-    // media volume (the hand-over starts the unit from it); without a unit, Android's media
-    // volume only at full (turning it down ends the full-level path, never louder)
+    // media volume (the hand-over starts the unit from it). None without a unit (it plays at full
+    // level; Android's volume doesn't reach a DAC the app holds), nor with "Use the DAC's volume"
+    // off: a slider would show a level the DAC doesn't play at
     let hw = match hw_volume(dac, settings.dac_volume) {
         Some(k) => Some(k),
-        None if !settings.dac_volume => None,
-        None if has_unit(dac) || media == Some(100) => shared.hw_volume,
+        None if settings.dac_volume && has_unit(dac) && !holds(dac.id) => shared.hw_volume,
         None => None,
     };
     Some(OutputCaps {
@@ -2015,6 +2015,7 @@ pub(crate) mod tests {
         for f in [
             "fun hasPermission(vendor: Int, product: Int): Boolean",
             "fun requestPermission(vendor: Int, product: Int)",
+            "fun requestPermissionOnce(vendor: Int, product: Int)",
             "fun open(vendor: Int, product: Int): String",
             "fun openDetached(name: String): String",
             "fun release()",
@@ -2026,7 +2027,7 @@ pub(crate) mod tests {
         ] {
             assert!(kt.contains(f), "{f}");
         }
-        assert_eq!(kt.matches("@JvmStatic").count(), 10);
+        assert_eq!(kt.matches("@JvmStatic").count(), 11);
         // openDetached selects nothing itself: a lookup by the name the Rust side chose
         let od = kt
             .split("fun openDetached(name: String): String {")
@@ -2346,7 +2347,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn permission_is_asked_only_when_exclusive_usb_is_chosen() {
+    fn permission_is_asked_by_auto_once_and_when_exclusive_usb_is_chosen() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_p, app) = phone(false, Some(100));
         // Auto asked once by itself when the DAC appeared (the app's side shows Android's dialog
@@ -2396,6 +2397,35 @@ pub(crate) mod tests {
         exclusive(PreferredMode::Auto);
         auto_ask();
         assert_eq!(*app.asked_once.lock().unwrap(), 2);
+    }
+
+    /// Auto's order is Exclusive USB, then bit-perfect, then shared: an Exclusive USB that won't
+    /// open (another app holds the DAC) goes on to bit-perfect's decision, not straight to shared;
+    /// chosen by hand, Exclusive USB says why it plays shared instead.
+    #[test]
+    fn auto_goes_on_to_bit_perfect_when_exclusive_usb_wont_open() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true, Some(100));
+        *app.refuse.lock().unwrap() = Some(("another app holds the DAC".into(), false));
+        exclusive(PreferredMode::Auto);
+        assert!(matches!(
+            open_phone(id(), AudioFormat::pcm(48_000, 16, 2)),
+            PhoneOpen::Shared { .. }
+        ));
+        let note = usb_dac::current().unwrap().note.unwrap_or_default();
+        assert!(
+            !note.contains("another app holds"),
+            "bit-perfect's turn came: {note}"
+        );
+        assert!(note.contains("bit-perfect"), "{note}");
+        // Chosen by hand: shared, and why
+        exclusive(PreferredMode::Exclusive);
+        assert!(matches!(
+            open_phone(id(), AudioFormat::pcm(48_000, 16, 2)),
+            PhoneOpen::Shared { .. }
+        ));
+        let note = usb_dac::current().unwrap().note.unwrap_or_default();
+        assert!(note.contains("another app holds"), "{note}");
     }
 
     #[test]

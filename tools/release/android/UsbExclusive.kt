@@ -129,20 +129,26 @@ class UsbExclusive private constructor() {
             val p = prefs() ?: return
             val key = "auto-asked-$vendor:$product"
             if (p.getBoolean(key, false)) return
-            p.edit().putBoolean(key, true).apply()
-            requestPermission(vendor, product)
+            // Counted only once Android was really asked (the DAC listed, the app ready)
+            if (ask(vendor, product)) p.edit().putBoolean(key, true).apply()
         }
 
         /// Android's dialog for the DAC: when the listener chose Exclusive USB, or Auto's one ask.
         @JvmStatic
         fun requestPermission(vendor: Int, product: Int) {
-            val c = context ?: return
-            val d = find(vendor, product) ?: return
+            ask(vendor, product)
+        }
+
+        /// Whether Android's dialog was asked for.
+        private fun ask(vendor: Int, product: Int): Boolean {
+            val c = context ?: return false
+            val d = find(vendor, product) ?: return false
             // Explicit (this package) and mutable: Android adds the answer to it
             val intent = Intent(ACTION_PERMISSION).setPackage(c.packageName)
             val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
             val pi = PendingIntent.getBroadcast(c, 0, intent, flags)
-            runCatching { usb()?.requestPermission(d, pi) }
+            val um = usb() ?: return false
+            return runCatching { um.requestPermission(d, pi) }.isSuccess
         }
 
         private fun refused(why: String) = JSONObject().put("ok", false).put("why", why).toString()

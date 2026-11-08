@@ -56,6 +56,8 @@ fn answer_within(r: &mut BufReader<TcpStream>, within: Duration) -> Result<Frame
     r.get_ref().set_read_timeout(None)?;
     f
 }
+/// The endpoint's answer to `GetVolume` (its level now) comes within this, or it is unknown.
+const VOLUME_READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// An endpoint that answers nothing for this long is gone.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -403,7 +405,8 @@ impl Output for NetOutput {
         blocking(move || {
             let (mut c, _) = key.session(addr)?;
             write_frame(&mut c.w, &Frame::GetVolume { output: remote }).map_err(io_err)?;
-            match answer_within(&mut c.r, HANDSHAKE_TIMEOUT) {
+            // Shorter than the node's poll gives a read: reads never pile up on a slow phone
+            match answer_within(&mut c.r, VOLUME_READ_TIMEOUT) {
                 Ok(Frame::Level { volume }) => Ok(volume),
                 Ok(other) => Err(SinkError::Device(format!("unexpected {other:?}"))),
                 // An older app: it can't say

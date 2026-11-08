@@ -1351,9 +1351,8 @@ fn media_loop(jni: std::sync::Arc<JniMedia>, media: std::sync::Arc<crate::media_
             continue;
         }
         match crate::media::parse_event(&answer) {
-            Some(ev) => {
-                tauri::async_runtime::spawn(media.clone().handle(ev));
-            }
+            // In order, one after another (media_live's queue)
+            Some(ev) => media.send(ev),
             None => tracing::debug!("media controls: an event that isn't one of ours"),
         }
     }

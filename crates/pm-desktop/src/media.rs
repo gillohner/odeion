@@ -337,6 +337,8 @@ pub enum Command {
     VolumeTo(u32),
     /// A volume key: one step up or down.
     VolumeBy(i32),
+    /// Android's mute keys on a zone with its own volume: mute, unmute, or toggle (`None`).
+    Mute(Option<bool>),
 }
 
 impl Command {
@@ -350,7 +352,7 @@ impl Command {
             Command::Previous => "previous",
             Command::Stop => "stop",
             Command::Seek(ms) => return Some(serde_json::json!({"action": "seek", "position_ms": ms})),
-            Command::VolumeTo(_) | Command::VolumeBy(_) => return None,
+            Command::VolumeTo(_) | Command::VolumeBy(_) | Command::Mute(_) => return None,
         };
         Some(serde_json::json!({ "action": a }))
     }
@@ -364,7 +366,7 @@ impl Command {
             Command::Previous => ("previoustrack", None),
             Command::Stop => ("pause", None),
             Command::Seek(ms) => ("seekto", Some(*ms as f64 / 1000.0)),
-            Command::Toggle | Command::VolumeTo(_) | Command::VolumeBy(_) => return None,
+            Command::Toggle | Command::VolumeTo(_) | Command::VolumeBy(_) | Command::Mute(_) => return None,
         })
     }
 }
@@ -408,7 +410,16 @@ pub fn parse_event(s: &str) -> Option<Event> {
             "stop" => Command::Stop,
             "seek" => Command::Seek(ms(v.get("ms"))?),
             "volume_to" => Command::VolumeTo(u32::try_from(v.get("v")?.as_u64()?).ok()?),
-            "volume_by" => Command::VolumeBy(v.get("d")?.as_i64()?.signum() as i32),
+            // Only a step up or down: Android's mute codes (±100, 101) come as `mute`
+            "volume_by" => match v.get("d")?.as_i64()? {
+                1 => Command::VolumeBy(1),
+                -1 => Command::VolumeBy(-1),
+                _ => return None,
+            },
+            "mute" => Command::Mute(match v.get("m") {
+                Some(Value::Bool(b)) => Some(*b),
+                _ => None,
+            }),
             _ => return None,
         }),
         "page" => {
@@ -738,8 +749,25 @@ mod tests {
             Some(Event::Command(Command::Seek(5000)))
         );
         assert_eq!(
-            parse_event(r#"{"k":"cmd","a":"volume_by","d":-3}"#),
+            parse_event(r#"{"k":"cmd","a":"volume_by","d":-1}"#),
             Some(Event::Command(Command::VolumeBy(-1)))
+        );
+        // Android's mute codes (ADJUST_MUTE -100, ADJUST_UNMUTE 100) never move the level
+        for d in [-100, 100, 101, 0, 2] {
+            assert_eq!(
+                parse_event(&format!(r#"{{"k":"cmd","a":"volume_by","d":{d}}}"#)),
+                None,
+                "{d}"
+            );
+        }
+        assert_eq!(
+            parse_event(r#"{"k":"cmd","a":"mute","m":true}"#),
+            Some(Event::Command(Command::Mute(Some(true))))
+        );
+        assert_eq!(
+            parse_event(r#"{"k":"cmd","a":"mute"}"#),
+            Some(Event::Command(Command::Mute(None))),
+            "toggle"
         );
         assert_eq!(parse_event(r#"{"k":"cmd","a":"format"}"#), None);
         assert_eq!(parse_event("not json"), None);
