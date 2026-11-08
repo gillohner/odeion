@@ -2398,6 +2398,23 @@
     if (n.ex && n.d.format) return `Exclusive USB · ${n.d.name} · not confirmed${n.why && !/not confirmed/.test(n.why) ? ` · ${n.why}` : ''}`;
     return `Shared · ${n.d.name}${n.why ? ` · ${n.why}` : ''}`;
   };
+  // Now playing › Details, Output: where the sound goes and, when it is not bit-perfect, why.
+  // A zone with a USB DAC: dacLine. The Android app's in-app player (This phone) always plays
+  // through Android's mixer, which runs at its own rate (usually 48 kHz, what a USB DAC then
+  // shows): bit-perfect plays only on the phone's own zone, which the node has while it reaches
+  // the phone's player directly (not through remote access). [value, why]
+  const outputFacts = (z) => {
+    if (!z) return null;
+    if (z.id !== BROWSER) { const l = deviceOf(z) ? dacLine(z) : ''; return l ? [l, ''] : null; }
+    if (appPlatform() !== 'android') return null;
+    const id = window.pmDesktop.output;
+    const own = id ? Object.values(state.zones || {}).find((x) => x.output === id) : null;
+    const dac = appOutput();
+    const value = `${dac ? `${dac.device.name} · ` : ''}Android mixer · usually 48 kHz`;
+    return [value, own
+      ? `Not bit-perfect: ${hereName()} always plays through Android’s mixer. For bit-perfect, play on ${own.name}.`
+      : `Not bit-perfect: ${hereName()} always plays through Android’s mixer. Bit-perfect plays on the phone’s own zone, which the node adds when it can reach this phone directly (on the same network, not through remote access).`];
+  };
   const dacCaps = (d) => [d.max_rate ? `PCM up to ${kHz(d.max_rate)} kHz` : '', d.bits && d.bits.length ? `${d.bits.join(', ')} bit` : '', d.channels ? `${d.channels} channels` : '', d.dsd ? ({ native: 'DSD (native)', dop: 'DSD (DoP)' })[d.dsd] || 'DSD' : '', d.hardware_volume ? 'its own volume' : ''].filter(Boolean).join(' · ');
   // This app's own output (the app tells the page after it registers its player), with its device
   const appOutput = () => { const id = window.pmDesktop && window.pmDesktop.output; return id ? (state.outputs || []).find((o) => o.id === id && o.device) || null : null; };
@@ -3293,7 +3310,7 @@
       if (k === 'lyrics') return '<p class="muted" id="nplyricsload">Looking for lyrics…</p><div class="lyrics" id="nplyrics" hidden></div><p class="muted" id="nplyricsnone" hidden>No lyrics found for this song.</p>';
       if (k === 'details') {
         return pathHtml(zoneNp(z, np))
-            + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd></dl>`;
+            + `<dl class="kv np-facts">${it.album ? `<dt>Album</dt><dd>${esc(it.album)}</dd>` : ''}${it.artist ? `<dt>Artist</dt><dd>${esc(it.artist)}</dd>` : ''}${np.duration_ms ? `<dt>Length</dt><dd>${fmt(np.duration_ms)}</dd>` : ''}<dt>Playing on</dt><dd>${esc(z.name)}</dd>${(() => { const o = outputFacts(z); return o ? `<dt>Output</dt><dd class="np-output">${esc(o[0])}${o[1] ? `<span class="muted small np-output-why">${esc(o[1])}</span>` : ''}</dd>` : ''; })()}</dl>`;
       }
       if (k === 'sources') return `<div id="npsources">${songPage ? '<div class="skeleton" style="height:80px"></div>' : '<p class="muted">This song has no page of its own yet, so its other sources are not known.</p>'}</div>`;
       return '<div class="np-pubky" id="nppubky" aria-live="polite"></div>';

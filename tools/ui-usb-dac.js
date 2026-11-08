@@ -26,6 +26,8 @@
 //     format, or a path with a conversion or DSP, reads shared (with why); Settings › This phone
 //     offers Preferred mode and Use the DAC's volume when the app takes them, and sends them with
 //     PUT /v1/outputs/{id}/device; a zone paused because the DAC was unplugged says so in the bar.
+//   * Now playing › Details has an Output line, the Sound panel's: shared with Android's reason
+//     (its volume below full), and bit-perfect with the rate and bits when confirmed.
 // At 390 and 1280 px. Screenshots go to the shots folder.
 //   node tools/ui-usb-dac.js [repo] [shots]     (ONLY=web: the web UI part alone)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -166,6 +168,28 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     }
     await setZone(run, zone); await nodePlug(run, KA17);
     await page.keyboard.press('Escape'); await sleep(200);
+
+    // Now playing › Details: the Output line, with Android's reason when it is shared
+    {
+      const VOL = 'Android\'s volume is at 60%, and bit-perfect plays at full level: turn Android\'s volume up to full and set the level on the DAC, or choose Bit-perfect in Settings';
+      const detailsOutput = async () => {
+        await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
+        // the Details tab on wide screens (one scroll on phones, where Details is always there)
+        if (await page.evaluate(() => { const b = !document.querySelector('#nowplaying .np-output') && document.querySelector('#nowplaying [data-npsheet="details"]'); if (b) b.click(); return !!b; })) await sleep(400);
+        const t = await page.evaluate(() => { const d = document.querySelector('#nowplaying .np-output'); return d ? d.textContent : null; });
+        return t;
+      };
+      await setZone(run, bpZone); await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, media_volume: 60, note: VOL });
+      const o1 = await detailsOutput();
+      check(o1 === `Shared · FiiO KA17 · ${VOL}`, `${at}: Details' Output line, Auto below full volume: "${o1}"`);
+      await page.screenshot({ path: path.join(SHOTS, `details-output-shared-${w}.png`) });
+      await page.keyboard.press('Escape'); await sleep(300);
+      await nodePlug(run, BP);
+      const o2 = await detailsOutput();
+      check(o2 === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit', `${at}: Details' Output line, confirmed: "${o2}"`);
+      await page.keyboard.press('Escape'); await sleep(300);
+      await setZone(run, zone); await nodePlug(run, KA17);
+    }
 
     // Bit-perfect only when confirmed: unconfirmed and unknown modes read as shared
     for (const [dev, word, what] of [[{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: false }, 'shared', 'bit_perfect, not confirmed'], [{ ...KA17, mode: 'unknown', confirmed: true }, 'shared', 'an unknown mode, "confirmed"'], [{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true }, 'shared', 'bit_perfect, confirmed for no format the path plays as is'], [{ ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true, format: src }, 'bit-perfect', 'bit_perfect, confirmed for 96/24 playing bit-perfect']]) {

@@ -1818,6 +1818,8 @@ body.offline .bottomnav { grid-template-columns: repeat(2, 1fr); }
 .np-qitem .grow { display: flex; flex-direction: column; min-width: 0; }
 .np-qitem .name, .np-qitem .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .np-facts { margin-top: 14px; }
+.np-output { overflow-wrap: anywhere; }
+.np-output-why { display: block; margin-top: 2px; }
 /* Tablets and desktops: the player left, the open sheet as a panel right */
 .np2:not(.compact) .np-body { grid-template-columns: minmax(0, 1fr) minmax(300px, 1fr); gap: 32px; }
 .np2:not(.compact) .np-sheet { border-left: 1px solid var(--line); padding-left: 24px; }
