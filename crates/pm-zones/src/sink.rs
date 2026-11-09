@@ -509,6 +509,13 @@ pub trait Output: Send + Sync {
     fn id(&self) -> OutputId;
     fn name(&self) -> String;
     fn caps(&self) -> &OutputCaps;
+    /// Whether unmuting brings the device back to the level it had before the mute (a mute
+    /// switch: most outputs). `false` where the device has no mute of its own and unmuting is a
+    /// level the output chooses (AirPlay receivers, Squeezebox players): the zone then holds that
+    /// level to its limit itself.
+    fn unmute_restores_level(&self) -> bool {
+        true
+    }
 
     /// The device's maker and model in words, when the protocol tells (UPnP, AirPlay, Cast,
     /// BluOS); a UI shows it instead of the id.
