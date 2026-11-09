@@ -277,6 +277,45 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS report (
 CREATE INDEX IF NOT EXISTS report_sent ON report (sent_at);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);";
 
+/// How SQLite opens the inbox: never through a link, and never making it. Made by SQLite, the first
+/// inbox would be 0644 under the usual umask until the node changed it, and anyone who opened it
+/// in between could keep reading every report after (Claude review of 04a010e5); the node makes it
+/// itself, 0600 from the start ([`make_if_absent`]).
+fn open_flags() -> rusqlite::OpenFlags {
+    let mut flags = rusqlite::OpenFlags::default();
+    flags.remove(rusqlite::OpenFlags::SQLITE_OPEN_CREATE);
+    flags | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW
+}
+
+/// One making of the inbox at a time in this process: the descriptor that makes it is closed
+/// before any connection here can open the file, so its closing drops no lock of theirs.
+static MAKING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Makes the inbox file when nothing is at `path`: new (never an existing file, never through a
+/// link), the node's user's alone from the start. An existing one is never opened here: closing a
+/// descriptor of the node's own on it would drop every SQLite lock this process holds on it
+/// (sqlite.org/howtocorrupt.html 2.2; Claude review of 9ee7e1e3, Medium 2).
+fn make_if_absent(path: &Path) -> Result<(), InboxError> {
+    let _one = MAKING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Ok(());
+    }
+    let mut new = std::fs::OpenOptions::new();
+    new.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        new.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    match new.open(path) {
+        Ok(made) => drop(made),
+        // Another process made it just now: looked at like any existing one
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn not_ours(what: &str) -> InboxError {
     InboxError::Store(format!("{FILE} {what}; the inbox isn't opened"))
@@ -336,17 +375,18 @@ impl Inbox {
         // through a descriptor of the node's own: closing one drops every SQLite lock this process
         // holds on the file, and another process could then take a write in progress for a crashed
         // one (POSIX; sqlite.org/howtocorrupt.html 2.2; Claude review of 9ee7e1e3, Medium 2)
+        make_if_absent(&path)?;
         #[cfg(unix)]
-        let before = own_file(&path)?;
-        let flags = rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let mut conn = Connection::open_with_flags(&path, flags)?;
-        // Before anything is written: still the file looked at (or the one SQLite just made), made
-        // the node's user's alone, and SQLite's own files beside it are no links either
+        let before = own_file(&path)?.ok_or_else(|| not_ours("went away before it was opened"))?;
+        let mut conn = Connection::open_with_flags(&path, open_flags())?;
+        // Before anything is written: still the file looked at, the node's user's alone (an inbox
+        // made before the node made it itself may not be yet), and SQLite's own files beside it are
+        // no links either
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let now = own_file(&path)?.ok_or_else(|| not_ours("went away while it was opened"))?;
-            if before.is_some_and(|b| b.0 != now.0) {
+            if before.0 != now.0 {
                 return Err(not_ours("changed while it was opened"));
             }
             if now.1 & 0o777 != 0o600 {
@@ -1079,6 +1119,32 @@ mod tests {
         assert!(!same_person(&owner(None), Some(&listener("annkey"))));
         assert!(!same_person(&listener("annkey"), Some(&owner(None))));
         assert!(!same_person(&guest, Some(&guest)));
+    }
+
+    /// Claude review of 04a010e5: the first inbox is made by the node, 0600 from the start, and
+    /// SQLite, opening it as the inbox does, never makes the file (it would, 0644 under the usual
+    /// umask, until the node changed it). Whether SQLite may make it is checked directly: the
+    /// window it would leave can't be watched for from here.
+    #[cfg(unix)]
+    #[test]
+    fn the_first_inbox_is_made_private_and_sqlite_never_makes_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let absent = dir.path().join("absent.sqlite");
+        assert!(
+            Connection::open_with_flags(&absent, open_flags()).is_err(),
+            "SQLite made a file the inbox would open"
+        );
+        assert!(std::fs::symlink_metadata(&absent).is_err(), "nothing made");
+        let data = dir.path().join("data");
+        Inbox::open(&data).unwrap();
+        let m = std::fs::symlink_metadata(data.join(FILE)).unwrap();
+        assert!(m.file_type().is_file());
+        assert_eq!(m.permissions().mode() & 0o777, 0o600);
+        // Opened again, it is the same file, still private
+        Inbox::open(&data).unwrap();
+        let again = std::fs::symlink_metadata(data.join(FILE)).unwrap();
+        assert_eq!(again.permissions().mode() & 0o777, 0o600);
     }
 
     #[test]
