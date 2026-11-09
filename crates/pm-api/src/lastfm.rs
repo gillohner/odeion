@@ -178,28 +178,6 @@ fn set_pending(lib: &pm_library::Library, v: &[Value]) {
     }
 }
 
-/// Every scrobble waiting to be sent, taken for one sender under the library's lock: two plays
-/// ending together never send the same ones.
-fn take_pending(lib: &pm_library::Library) -> Vec<Value> {
-    let all = pending(lib);
-    if !all.is_empty() {
-        let _ = lib.delete_setting(PENDING_KEY);
-    }
-    all
-}
-
-/// What a sender couldn't send goes back to wait, before whatever another sender left there
-/// meanwhile; the oldest go when there are more than [`PENDING_MAX`].
-fn give_back(lib: &pm_library::Library, left: Vec<Value>) {
-    if left.is_empty() {
-        return;
-    }
-    let mut all = left;
-    all.extend(pending(lib));
-    let skip = all.len().saturating_sub(PENDING_MAX);
-    set_pending(lib, &all[skip..]);
-}
-
 // ---- the API, signed -----------------------------------------------------------------------------
 
 /// Last.fm's signature: every parameter but `format` and `callback`, sorted by name, name and
@@ -471,17 +449,23 @@ async fn count_once(s: &Arc<NodeState>, key: &PlayKey) {
     send_scrobbles(s, vec![scrobble]).await;
 }
 
-/// Send scrobbles with any that waited; what Last.fm can't take goes back to wait. The waiting
-/// ones are taken for this sender alone, so two plays ending together send each once.
+/// Send scrobbles with any that waited ([`crate::send_queue`]): `new` joins the waiting list on
+/// disk first, then one sender at a time sends the list and removes what Last.fm took. What it
+/// couldn't take, and anything added meanwhile, waits for the next send; not connected, they
+/// wait for the owner to sign in again.
 pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
+    crate::send_queue::enqueue(
+        &s.library.lock().expect("library poisoned"),
+        PENDING_KEY,
+        new,
+        PENDING_MAX,
+    );
     let Some((app, sess)) = ready(s) else {
-        // Not connected (any more): keep them for when the owner signs in again
-        give_back(&s.library.lock().expect("library poisoned"), new);
         return;
     };
-    let mut all = take_pending(&s.library.lock().expect("library poisoned"));
-    all.extend(new);
-    let mut left: Vec<Value> = Vec::new();
+    let _one = crate::send_queue::sender(&s.node_id, "lastfm").await;
+    let all = crate::send_queue::read(&s.library.lock().expect("library poisoned"), PENDING_KEY);
+    let mut sent: Vec<Value> = Vec::new();
     for chunk in all.chunks(BATCH) {
         let mut params: Vec<(String, String)> = Vec::new();
         for (i, sc) in chunk.iter().enumerate() {
@@ -499,15 +483,15 @@ pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
                 if ignored > 0 {
                     tracing::debug!(ignored, "lastfm ignored some scrobbles");
                 }
+                sent.extend_from_slice(chunk);
             }
             Err(e) => {
                 tracing::debug!("lastfm: {e}; keeping {} scrobbles for later", chunk.len());
                 note_problem(s, &e);
-                left.extend_from_slice(chunk);
             }
         }
     }
-    give_back(&s.library.lock().expect("library poisoned"), left);
+    crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent);
 }
 
 // ---- similar artists ---------------------------------------------------------------------------

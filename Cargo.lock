@@ -3832,6 +3832,7 @@ dependencies = [
  "libc",
  "md-5",
  "notify",
+ "pm-api",
  "pm-appdata",
  "pm-audio",
  "pm-discovery",

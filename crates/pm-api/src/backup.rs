@@ -743,12 +743,21 @@ pub async fn restore(
 /// A fault a test injects between the merge into the staged copy and the swap (a marker file
 /// in the node's data folder, so it touches that node only): the live library must come through
 /// unchanged.
+/// Only in this crate's own tests (cargo feature `test-hooks`): a release build has no fault point.
+#[cfg(feature = "test-hooks")]
 pub const FAIL_BEFORE_SWAP_MARKER: &str = ".fail-restore-before-swap";
 
+#[cfg(feature = "test-hooks")]
 fn fail_before_swap_for_tests(s: &NodeState) -> Result<(), BackupError> {
     if s.data_dir().join(FAIL_BEFORE_SWAP_MARKER).is_file() {
         return Err(BackupError::NotABackup("test fault before the swap".into()));
     }
+    Ok(())
+}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+fn fail_before_swap_for_tests(_: &NodeState) -> Result<(), BackupError> {
     Ok(())
 }
 

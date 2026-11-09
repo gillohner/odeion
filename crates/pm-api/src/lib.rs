@@ -93,6 +93,7 @@ pub mod reviews;
 pub mod roon_import;
 pub mod search;
 pub mod segmented;
+pub(crate) mod send_queue;
 pub mod shared;
 pub mod signin;
 pub mod smart;
@@ -108,6 +109,8 @@ pub mod subsonic;
 pub mod sync;
 pub mod tag_fixes;
 pub mod tags;
+#[doc(hidden)]
+pub mod test_hooks;
 pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;
@@ -24808,5 +24811,175 @@ exec sleep 300
             ["T1", "T2", "T3", "T4", "T5"],
             "all wait, none twice"
         );
+    }
+
+    /// A ListenBrainz mock whose submit answers only once let through (`gate`), takes nothing
+    /// whose payload holds a listen at `listened_at == 0`, and keeps what it took.
+    async fn gated_listenbrainz(
+        s: &NodeState,
+    ) -> (
+        Arc<tokio::sync::Semaphore>,
+        Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *s.listenbrainz_base.write().unwrap() =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/1/submit-listens",
+            post({
+                let (gate, got) = (gate.clone(), got.clone());
+                move |Json(b): Json<serde_json::Value>| {
+                    let (gate, got) = (gate.clone(), got.clone());
+                    async move {
+                        gate.acquire().await.unwrap().forget();
+                        let payload = b["payload"].as_array().unwrap().clone();
+                        if payload.iter().any(|l| l["listened_at"] == 0) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        got.lock().unwrap().extend(payload);
+                        StatusCode::OK
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        (gate, got)
+    }
+
+    fn a_listen(n: u64) -> serde_json::Value {
+        serde_json::json!({"listened_at": n, "track_metadata": {"artist_name": "A", "track_name": format!("T{n}")}})
+    }
+
+    fn waiting_listens(s: &NodeState) -> Vec<u64> {
+        let v: Vec<serde_json::Value> = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.pending")
+            .unwrap()
+            .map(|j| serde_json::from_str(&j).unwrap())
+            .unwrap_or_default();
+        v.iter().map(|l| l["listened_at"].as_u64().unwrap()).collect()
+    }
+
+    /// A send cut short (the node stopping mid-send: the task is dropped while ListenBrainz
+    /// hasn't answered) loses nothing: every waiting listen, the new one too, is still on disk,
+    /// and the next send takes them.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_send_cut_short_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got) = gated_listenbrainz(&s).await;
+        crate::send_queue::enqueue(
+            &s.library.lock().unwrap(),
+            "listenbrainz.pending",
+            (1..=3).map(a_listen).collect(),
+            1000,
+        );
+        let send = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(4)]).await })
+        };
+        // In flight: the waiting count is the whole list, the new listen included
+        for _ in 0..100 {
+            if waiting_listens(&s) == [1, 2, 3, 4] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(waiting_listens(&s), [1, 2, 3, 4], "counted while sending");
+        send.abort();
+        let _ = send.await;
+        assert_eq!(
+            waiting_listens(&s),
+            [1, 2, 3, 4],
+            "nothing lost when the send stops"
+        );
+        // The next send takes them all
+        gate.add_permits(10);
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(sent, [1, 2, 3, 4]);
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// A listen added while a send is under way waits on disk at once, isn't lost when the send
+    /// ends, and goes with the next sender; nothing is sent twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_added_during_a_send_waits_and_goes_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got) = gated_listenbrainz(&s).await;
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(1)]).await })
+        };
+        for _ in 0..100 {
+            if !waiting_listens(&s).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The first send is held at ListenBrainz; a second play ends now
+        let second = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(2)]).await })
+        };
+        for _ in 0..100 {
+            if waiting_listens(&s) == [1, 2] {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            waiting_listens(&s),
+            [1, 2],
+            "the new listen waits on disk at once"
+        );
+        gate.add_permits(10);
+        first.await.unwrap();
+        second.await.unwrap();
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(sent, [1, 2], "each once");
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// When ListenBrainz takes part of the backlog (one chunk of 100 refused, the other taken),
+    /// exactly the refused ones wait.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_listens_listenbrainz_refused_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got) = gated_listenbrainz(&s).await;
+        gate.add_permits(10);
+        crate::send_queue::enqueue(
+            &s.library.lock().unwrap(),
+            "listenbrainz.pending",
+            (0..150).map(a_listen).collect(),
+            1000,
+        );
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        assert_eq!(
+            waiting_listens(&s),
+            (0..100).collect::<Vec<u64>>(),
+            "the refused chunk waits"
+        );
+        assert_eq!(got.lock().unwrap().len(), 50, "the other chunk went");
     }
 }

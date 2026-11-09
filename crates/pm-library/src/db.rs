@@ -1597,15 +1597,23 @@ impl Library {
     }
 
     /// Replace the whole database with the one at `path` while the node runs (SQLite's backup
-    /// API copies it into this connection), then bring it up to this version's schema. Check the
-    /// file first by opening it with [`Library::open`]: a broken one must never get this far.
+    /// API copies it into this connection, all or nothing). Check the file first by opening it
+    /// with [`Library::open`], which also brings it up to this version's schema: a broken one
+    /// must never get this far. The result is the replacement's alone: once it is in, the
+    /// library is the copy, and the schema and title passes run after it (nothing to do for a
+    /// copy [`Library::open`] prepared) only log what goes wrong, so a restore that took effect
+    /// is never reported as failed.
     pub fn restore_from(&self, path: &Path) -> Result<()> {
         {
             let mut conn = self.lock();
             conn.restore(rusqlite::MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>)?;
         }
-        self.migrate()?;
-        self.tidy_file_name_titles()?;
+        if let Err(e) = self.migrate() {
+            tracing::error!("after a restore, the schema pass failed: {e}");
+        }
+        if let Err(e) = self.tidy_file_name_titles() {
+            tracing::error!("after a restore, the title pass failed: {e}");
+        }
         Ok(())
     }
 
