@@ -985,6 +985,53 @@ async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
     assert!(!fake.connected.lock().unwrap().contains(ANN), "and her grant");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, _ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    // Her grant, as the node keeps it (next to the library), on a folder it can't change
+    let grants = dir.path().join("grants");
+    std::fs::create_dir_all(&grants).unwrap();
+    let file = grants.join(format!("{ANN}.session"));
+    std::fs::write(&file, "fixture-secret").unwrap();
+    std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    let stuck = file.exists();
+    std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let listed = |s: &pm_api::NodeState| {
+        s.library
+            .lock()
+            .unwrap()
+            .get_setting("people")
+            .unwrap()
+            .unwrap_or_default()
+            .contains(ANN)
+    };
+    // (As root the folder can't refuse: nothing to show there)
+    if stuck {
+        assert_eq!(
+            st,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "never a success with her grant left: {v}"
+        );
+        assert!(!listed(&s), "she is off the roster all the same");
+        // Removing her again finishes it
+        let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    } else {
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    assert!(!file.exists(), "her grant is gone");
+    assert!(!listed(&s));
+    // Nothing left: a third removal is a plain "no such person"
+    let (st, _) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }

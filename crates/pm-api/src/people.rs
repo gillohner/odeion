@@ -561,6 +561,12 @@ pub(crate) async fn change(
 pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<String>) -> ApiResult<Roster> {
     let key = valid_key(&key)?;
     reconcile(&s).await?;
+    // Already off the roster, but a removal failed part way (their grant or copies are still on
+    // the node): this one finishes it
+    if !load(&s).people.iter().any(|p| p.key == key) && crate::personal::leftover(&s, &key) {
+        crate::accounts::forget_person(&s, &key)?;
+        return Ok(Json(load(&s)));
+    }
     let ((), r) = update(&s, |r| {
         let Some(i) = r.people.iter().position(|p| p.key == key) else {
             return Err(ApiError::not_found("no such person"));
