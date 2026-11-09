@@ -771,7 +771,7 @@ async fn restore_locked(
     };
     // The people list is replaced and merged below: no roster change runs meanwhile
     // (`people::update`), so none is lost or made to an older copy
-    let roster = s.roster.lock().await;
+    let roster = crate::people::roster_for_restore(s).await;
     let done = (|| -> Result<(), BackupError> {
         let lib = s.library.lock().expect("library poisoned");
         let keep: Vec<(&str, Option<String>)> = NODE_OWN
