@@ -401,7 +401,7 @@ fn load(s: &NodeState, key: &str) -> Copy {
 /// while a heart comes in, would otherwise each save their own and lose the other's.
 type PersonLocks = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+pub(crate) fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     static L: OnceLock<PersonLocks> = OnceLock::new();
     L.get_or_init(Default::default)
         .lock()
@@ -916,36 +916,30 @@ async fn answer_of(key: &str, id: &str, ttl: Duration) -> Result<serde_json::Val
     }
 }
 
-/// People › Remove: the grant of `key` goes. Its file is deleted here, so an error says it is
-/// still on the node (it couldn't be deleted): the removal answers that error after the rest of
-/// its cleanup, and removing them again finishes it ([`leftover`]). Approvals on their way end,
-/// and the store forgets them, in the background under their lock.
-pub(crate) fn forget(s: &NodeState, key: &str) -> Result<(), String> {
-    let b = backend(s);
-    let key = key.trim_start_matches("pubky").to_string();
-    sessions().lock().expect("sessions").remove(&key);
-    // The grant file goes now, not in the background, so a removal that can't delete it fails
-    let gone = match grant_file(&grants_dir(s), &key).map(std::fs::remove_file) {
-        Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
-            tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
-            Err(format!(
-                "their homeserver approval is still on the node ({e}): remove them again"
-            ))
-        }
+/// People › Remove: the grant of `key` goes. Called under their person lock (see
+/// [`crate::accounts::forget_person`]), which People › Remove holds across the roster change and
+/// this, and a re-add takes too: an approval past the relay either kept its grant before (and it
+/// is deleted here) or finds itself ended, and nothing of the removal runs later, after a re-add.
+/// An error says the grant is still on the node (it couldn't be deleted): the removal answers it
+/// after the rest of its cleanup, and removing them again finishes it ([`leftover`]).
+pub(crate) async fn forget(s: &NodeState, key: &str) -> Result<(), String> {
+    forget_with(backend(s).as_ref(), &grants_dir(s), key).await
+}
+
+/// [`forget`] with the store and the grants folder given. The store forgets them, and the grant
+/// file in `dir` goes too (the node's own store is that file; one standing in for it isn't).
+async fn forget_with(b: &dyn PersonalHomeserver, dir: &std::path::Path, key: &str) -> Result<(), String> {
+    let key = key.trim_start_matches("pubky");
+    end_approvals_of(key).await;
+    sessions().lock().expect("sessions").remove(key);
+    let file = match grant_file(dir, key).map(std::fs::remove_file) {
+        Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     };
-    // Approvals still on their way end, and the store forgets them, under their lock
-    if let Ok(h) = tokio::runtime::Handle::try_current() {
-        h.spawn(async move {
-            let lock = person_lock(&key);
-            let _one = lock.lock().await;
-            end_approvals_of(&key).await;
-            if let Err(e) = b.disconnect(&key).await {
-                tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
-            }
-        });
-    }
-    gone
+    b.disconnect(key).await.and(file).map_err(|e| {
+        tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
+        format!("their homeserver approval is still on the node ({e}): remove them again")
+    })
 }
 
 /// Whether anything of `key`'s is still on the node: their grant, their sessions, or their copies
@@ -1383,5 +1377,51 @@ mod tests {
         }
         assert!(g.disconnect(k).await.is_ok());
         assert!(!g.connected(k));
+    }
+
+    /// A store that only says whether it was told to forget.
+    #[derive(Default)]
+    struct Forgets(std::sync::atomic::AtomicBool);
+
+    #[async_trait::async_trait]
+    impl PersonalHomeserver for Forgets {
+        fn connected(&self, _key: &str) -> bool {
+            !self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        async fn disconnect(&self, _key: &str) -> Result<(), String> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn bookmarks(
+            &self,
+            _key: &str,
+            _known: &[(String, i64)],
+        ) -> Result<Vec<(String, i64)>, PersonalError> {
+            Err(PersonalError::NoGrant)
+        }
+        async fn put_bookmark(&self, _key: &str, _uri: &str, _at: i64) -> Result<(), PersonalError> {
+            Err(PersonalError::NoGrant)
+        }
+        async fn delete_bookmark(&self, _key: &str, _uri: &str) -> Result<(), PersonalError> {
+            Err(PersonalError::NoGrant)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_approval_waiting_behind_a_removal_keeps_nothing() {
+        waiting("t-rm-old", "rm-ann").await;
+        // People › Remove holds her lock: an approval past the relay waits for it
+        let lock = person_lock("rm-ann");
+        let removal = lock.lock().await;
+        let keeping = tokio::spawn(keep_if_current("t-rm-old", "rm-ann", || -> serde_json::Value {
+            panic!("a grant kept after her removal")
+        }));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let store = Forgets::default();
+        let dir = tempfile::tempdir().unwrap();
+        forget_with(&store, dir.path(), "rm-ann").await.unwrap();
+        drop(removal);
+        assert_eq!(keeping.await.unwrap()["state"], "expired");
+        assert!(!store.connected("rm-ann"), "and the store forgot her");
     }
 }
