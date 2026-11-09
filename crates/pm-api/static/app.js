@@ -2356,7 +2356,7 @@
     state.midRetry = state.midRetry && state.midRetry.i === i ? state.midRetry : { i, n: 0 };
     if (state.midRetry.n >= 1) return;
     state.midRetry.n++;
-    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };

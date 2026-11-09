@@ -149,6 +149,13 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check((await calls(p, 'native_load')).length === afterRetry && await p.evaluate(() => window.__audioPlays.length === 0) && (await now(p)).paused, `${at}: a later system pause cancels stale retry and refused-stream fallback`);
       await p.click('#toggle'); await sleep(250);
       check((await calls(p, 'native_load')).at(-1)[1].atMs >= 12000, `${at}: Play after a cancelled reopen failure keeps its saved position`);
+      const beforeMidRetry = (await calls(p, 'native_load')).length;
+      await p.evaluate(() => {
+        Object.assign(window.__app, { transport: 'paused', position_ms: 12000, broke: true, error: 'fixture stream broke' }); window.__send();
+        window.dispatchEvent(new CustomEvent('pmdesktop:native-command', { detail: { id: 4, action: 'pause' } }));
+      });
+      await sleep(1800);
+      check((await calls(p, 'native_load')).length === beforeMidRetry && (await now(p)).paused, `${at}: system Pause or noisy interruption cancels an already scheduled mid-song retry`);
       check(!r.state.errors.length, `${at}: combined media/native bridge has no page errors (${r.state.errors.join(' | ')})`);
       await p.screenshot({ path: path.join(SHOTS, `native-media-${w}.png`) });
       await r.context.close();
