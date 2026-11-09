@@ -382,6 +382,9 @@ html:not([data-shell="phone"]) .lyric-lines { overscroll-behavior: contain; }
 .dialog h2 { margin-bottom: 6px; }
 .dialog p { margin-bottom: 16px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* Phone dialog actions stay easy to tap, including when larger text needs another row. */
+html[data-shell="phone"] .dialog-actions { flex-wrap: wrap; }
+html[data-shell="phone"] .dialog-actions .btn { min-height: 44px; min-width: 44px; max-width: 100%; white-space: normal; }
 .field { display: block; }
 .field span { display: block; font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
 .field input, .input { width: 100%; background: var(--surface); border: 1px solid var(--line-strong); color: var(--fg); padding: 9px 12px; border-radius: var(--r-sm); font: inherit; }
