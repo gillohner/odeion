@@ -1647,10 +1647,11 @@
   // Download (or Remove download) for a song, a library album or a playlist, in its ⋯ menu
   const dlKeep = async (kind, id, on, title, sub, online, songs) => {
     try {
-      dlSet(await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null, songs: songs || null })); markDownloads();
+      const d = await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null, songs: songs || null });
+      dlSet(d); markDownloads();
       if (state.view === 'downloads' && state.dl) storageUpdate(state.dl);
-      // A song also kept with its album or a playlist stays
-      if (!on && kind === 'track' && dlHas(id)) { toast(`“${title}” stays on this phone with an album or playlist kept there`); return; }
+      // A song also kept with its album, a playlist or the favourites stays
+      if (!on && d && d.still_kept) { toast(`“${title}” stays on this phone: its album, a playlist or your favourites keep it there`); return; }
       toast(on ? `Downloading “${title}” to this phone${online ? `; ${online === 1 ? '1 song not in your library stays' : `${online} songs not in your library stay`} online` : ''}` : `“${title}” removed from this phone`);
     } catch (e) { toast(String((e && e.message) || e), 'error'); }
   };
@@ -1666,6 +1667,9 @@
   // The storage screen (Downloads in the app, online): what this phone keeps, its size against
   // the limit, the downloads under way, Remove per item and Remove all (the phone's copies only)
   const DL_LIMITS = [2e9, 5e9, 10e9, 20e9, 50e9, null];
+  // Each draw has a number: an older one finishing late (its fetch answered after an event) draws
+  // nothing
+  let storageDraws = 0;
   // What the screen's lists show (redrawn only when this changes)
   const storageKey = (d) => JSON.stringify([d.items, d.bytes, d.other_bytes, d.limit, d.songs]);
   const storageFacts = (d) => {
@@ -1678,12 +1682,15 @@
   // An event while the screen shows: the status line in place; the lists only when they changed
   const storageUpdate = (d) => {
     const main = $('#main'); const line = main && $('.dl-note', main);
-    if (!line || main.dataset.dlKey !== storageKey(d)) { if (main) drawStorage(main, d); return; }
+    if (!line) { if (main) drawStorage(main, d); return; }
     line.innerHTML = storageFacts(d);
+    // The lists again when they changed (a song done); the limit row and its picker stay
+    if (main.dataset.dlKey !== storageKey(d)) drawStorage(main, d, true);
   };
-  const drawStorage = async (main, given) => {
+  const drawStorage = async (main, given, listsOnly) => {
+    const mine = ++storageDraws;
     const d = given || await dlLoad();
-    if (state.view !== 'downloads') return;
+    if (state.view !== 'downloads' || mine !== storageDraws) return;
     if (!d) { main.innerHTML = pageHead('Downloads', null) + '<div class="notice">The app’s downloads can’t be read just now. Try again in a moment.</div>'; return; }
     main.dataset.dlKey = storageKey(d);
     const sub = (i) => [i.sub, i.kind === 'track' ? '' : i.songs ? `${i.here} of ${countOf(i.songs, 'songs')} here` : `${countOf(i.here, 'songs')} here`, i.online ? `${i.online} stay online` : '', i.bytes ? fileSize(i.bytes) : i.here ? '' : 'waiting'].filter(Boolean).map(esc).join(' · ');
@@ -1694,9 +1701,12 @@
       ? section('album', 'Albums') + section('playlist', 'Playlists') + section('track', 'Songs')
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
       : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
-    main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p>` + body + `<div class="set-group">${limit}</div>`;
+    const lists = $('#dllists', main);
+    if (listsOnly && lists) { lists.innerHTML = body; const c = $('.page-head .count, .page-head .muted', main); if (c && d.songs) c.textContent = String(d.songs); }
+    else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; if (x) dlKeep(x.kind, x.id, false, x.title); });
     const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    if (listsOnly && lists) return;
     $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
   };
   // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays

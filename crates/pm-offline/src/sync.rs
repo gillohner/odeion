@@ -753,7 +753,11 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
         // The limit (with what other nodes' downloads take) and the disk, before each song: what
         // is there stays, the rest waits
         if let Err(why) = fits(
-            store.index().bytes() + opts.other_bytes,
+            // (a song fetched again replaces its copy: that copy's bytes don't count twice)
+            {
+                let ix = store.index();
+                ix.bytes() - ix.tracks.get(&id).map_or(0, |t| t.bytes) + opts.other_bytes
+            },
             bytes,
             opts.cap_bytes,
             free_bytes(store.dir()),

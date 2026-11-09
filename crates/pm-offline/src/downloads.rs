@@ -53,6 +53,28 @@ fn artist_of(t: &Value) -> String {
         .to_string()
 }
 
+/// Whether the song `track_id` is still kept by something other than itself: its album, a kept
+/// playlist, or the favourites (its copy then stays when the song alone is let go).
+pub fn kept_otherwise(ix: &Index, track_id: i64) -> bool {
+    if ix.keep.favourites && ix.is_favourite(track_id) {
+        return true;
+    }
+    let album = ix.tracks.get(&track_id).and_then(|t| album_of(&t.track));
+    if album.is_some_and(|a| ix.keep.albums.contains(&a)) {
+        return true;
+    }
+    ix.keep.playlists.iter().any(|p| {
+        ix.playlists
+            .get(p)
+            .and_then(|v| v.get("tracks"))
+            .and_then(Value::as_array)
+            .is_some_and(|a| {
+                a.iter()
+                    .any(|t| t.get("id").and_then(Value::as_i64) == Some(track_id))
+            })
+    })
+}
+
 /// The storage screen's view of `ix`.
 pub fn summary(ix: &Index) -> Summary {
     let size = |id: &i64| ix.tracks.get(id).map(|t| t.bytes);
@@ -260,6 +282,9 @@ mod tests {
         assert_eq!((s.songs, s.bytes), (3, 350));
         assert_eq!(s.track_ids, [1, 2, 4]);
         assert_eq!(s.album_ids, [7], "album 8 has no song here yet");
+        // Song 2 stays kept by its album and the playlist; song 4 only by itself
+        assert!(kept_otherwise(&ix, 2));
+        assert!(!kept_otherwise(&ix, 4));
     }
 
     #[test]
