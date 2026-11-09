@@ -151,7 +151,13 @@ jobs:
       UPDATE: ${{ needs.changes.outputs.update }}
       # A fresh Gradle per build: each build's own environment (the update feed, the probe's CA)
       # reaches the Rust build, never a daemon's from the build before
-      GRADLE_OPTS: -Dorg.gradle.daemon=false
+      # Downloads time out and retry: run 42569853883 lost the build to one 504 from Maven Central
+      GRADLE_OPTS: >-
+        -Dorg.gradle.daemon=false
+        -Dorg.gradle.internal.http.connectionTimeout=120000
+        -Dorg.gradle.internal.http.socketTimeout=120000
+        -Dorg.gradle.internal.repository.max.retries=6
+        -Dorg.gradle.internal.repository.initial.backoff=2000
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -170,6 +176,15 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
+      # Gradle's downloads (its distribution, the Android and Kotlin plugins and libraries), kept
+      # between runs, so a build depends on Maven Central only when the Android project changes
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+          key: android-gradle-${{ hashFiles('crates/pm-desktop/package-lock.json', 'tools/release/android-patch.py') }}
+          restore-keys: android-gradle-
       # As in release.yml: gen/android is not committed
       - name: generate the Android project
         working-directory: crates/pm-desktop
@@ -205,6 +220,19 @@ jobs:
           "$bt/zipalign" -f 4 "$1" "$1.aligned"
           "$bt/apksigner" sign --ks "$RUNNER_TEMP/ci.p12" --ks-pass pass:ci-only --out "$2" "$1.aligned"
           SH
+          # tauri.sh <tauri android build args>: the build, run again (twice at most) only when Gradle
+          # could not download something (a network failure, not a build or test failure)
+          cat > "$RUNNER_TEMP/tauri.sh" <<'SH'
+          set -u
+          for i in 1 2 3; do
+            npx tauri android build "$@" 2>&1 | tee "$RUNNER_TEMP/tauri.log"
+            [ "${PIPESTATUS[0]}" = 0 ] && exit 0
+            grep -Eq 'Could not (GET|HEAD|download|resolve) .*(https?://|\.jar|\.pom)|Received status code 5[0-9][0-9]|Read timed out|Connect timed out|Downloading .* failed: timeout' "$RUNNER_TEMP/tauri.log" || exit 1
+            [ "$i" = 3 ] && exit 1
+            echo "::warning::Gradle could not download a dependency (attempt $i); building again"
+            sleep 30
+          done
+          SH
           # The newest release APK the last build wrote (copied out before the next build replaces it)
           cat > "$RUNNER_TEMP/built.sh" <<'SH'
           set -eu
@@ -231,12 +259,12 @@ jobs:
       - name: the APK (x86_64), for phone-as-zone and background playback
         if: env.PLAIN == 'true'
         run: |
-          (cd crates/pm-desktop && npx tauri android build --ci --apk --target x86_64)
+          (cd crates/pm-desktop && bash "$RUNNER_TEMP/tauri.sh" --ci --apk --target x86_64)
           bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" out/plain/app.apk
       - name: the APK with the Ring transport probe (x86_64)
         if: env.RING == 'true'
         run: |
-          (cd crates/pm-desktop && npx tauri android build --ci --apk --target x86_64 --features ring-transport-probe)
+          (cd crates/pm-desktop && bash "$RUNNER_TEMP/tauri.sh" --ci --apk --target x86_64 --features ring-transport-probe)
           bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" out/ring/app.apk
           cp "$RUNNER_TEMP"/fixture/{ca.pem,leaf.pem,leaf.key} out/ring/
       - name: N and N+1 with the fixture update feed (x86_64)
@@ -249,7 +277,7 @@ jobs:
           for build in "1000 0.0.1-1 old" "1001 0.0.1-2 new"; do
             read -r code version name <<< "$build"
             echo "{\"version\":\"$version\",\"bundle\":{\"android\":{\"versionCode\":$code}}}" > update.conf.json
-            npx tauri android build --ci --apk --target x86_64 --features update-feed-fixture --config update.conf.json
+            bash "$RUNNER_TEMP/tauri.sh" --ci --apk --target x86_64 --features update-feed-fixture --config update.conf.json
             (cd "$GITHUB_WORKSPACE" && bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" "out/update/$name.apk")
           done
           bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
@@ -264,7 +292,7 @@ jobs:
           ODEION_UPDATE_FEED: http://127.0.0.1:18480/latest.json
         run: |
           python3 -I ../../tools/release/android-patch.py . --without-updater
-          ODEION_UPDATE_CHANNEL= npx tauri android build --ci --aab --target x86_64 --features update-feed-fixture \
+          ODEION_UPDATE_CHANNEL= bash "$RUNNER_TEMP/tauri.sh" --ci --aab --target x86_64 --features update-feed-fixture \
             --config update.conf.json
           python3 -I ../../tools/release/aab-check.py gen/android/app/build/outputs "$GITHUB_WORKSPACE/out/update/old.apk"
       - if: env.PLAIN == 'true'
