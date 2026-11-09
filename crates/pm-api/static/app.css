@@ -1596,7 +1596,7 @@ html[data-shell="phone"] #jobpop, html[data-shell="phone"] #volpop { width: auto
 .picker .list-row:hover { background: var(--surface-2); }
 /* Search: one scrolling row of sources on phones */
 @media (max-width: 720px) {
-  .scopechips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; }
+  .scopechips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin-left: -14px; margin-right: -14px; padding: 0 14px; scroll-padding-inline: 14px; }
   .scopechips::-webkit-scrollbar { display: none; }
   .scopechips .chip { flex: none; }
 }

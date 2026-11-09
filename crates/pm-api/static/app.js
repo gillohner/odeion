@@ -4581,7 +4581,7 @@
     if (state.searchScope && off.has(state.searchScope)) state.searchScope = 'everywhere';
   };
   const FEATURE_WORDS = { search: 'Search', play: 'Plays on your zones', connect: 'Plays on its own devices', artists: 'Artist pages', library: 'Your library', playlists: 'Your playlists', downloads: 'Downloads what you bought', lyrics: 'Lyrics', scrobble: 'Reports your plays' };
-  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
+  const SERVICE_NAMES = { tidal: 'TIDAL', qobuz: 'Qobuz', soundcloud: 'SoundCloud', bandcamp: 'Bandcamp', deezer: 'Deezer', spotify: 'Spotify', jamendo: 'Jamendo', subsonic: 'your server', jellyfin: 'Jellyfin', plex: 'Plex', podcasts: 'Podcasts', radio: 'Internet radio', audiobookshelf: 'Audiobookshelf', youtube: 'YouTube', library: 'your library', audius: 'Audius', archive: 'Internet Archive', musicbrainz: 'MusicBrainz' };
   // ---- where playlist items play from (STEWARD-UX-BRIEF §3) ----
   // A row's source chip: where it plays from, a pin mark when the owner chose it.
   const sourceChip = (t, k) => t.pending ? '<span class="chip srcchip wait" aria-label="Finding where this plays"><span class="spin"></span></span>' : t.unavailable
@@ -5001,15 +5001,65 @@
     }
     return byKind;
   };
+  const renderSearchScopes = (chips, run) => {
+    const scope = run.scope;
+    const scrollLeft = chips.scrollLeft;
+    const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
+    const scopes = new Map([['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])]);
+    // A listener does not read the owner's /sources. A requested service uses its public name,
+    // even for tag searches (whose replies come from Library/Pubky). Keep it available after
+    // choosing another source, but never reintroduce a service explicitly switched off.
+    for (const saved of searchRuns.values()) {
+      const id = saved.scope;
+      const named = id !== 'musicbrainz' && Object.prototype.hasOwnProperty.call(SERVICE_NAMES, id);
+      if (!scopes.has(id) && (named || saved.sources.includes(id)) && !(state.sources || []).some((x) => x.id === id && x.enabled === false)) scopes.set(id, srcName(id));
+    }
+    const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
+    const buttons = new Map($$('[data-scope-in]', chips).map((b) => [b.dataset.scopeIn, b]));
+    const ordered = []; const focused = document.activeElement;
+    for (const [id, name] of scopes) {
+      const b = buttons.get(id) || document.createElement('button');
+      b.type = 'button'; b.className = `chip scope ${scope === id ? 'on' : ''}`; b.dataset.scopeIn = id;
+      const html = `${['everywhere', 'library', 'pubky'].includes(id) ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}`;
+      if (b.innerHTML !== html) b.innerHTML = html;
+      ordered.push(b); buttons.delete(id);
+      b.onclick = () => {
+        const focused = document.activeElement === b;
+        state.searchScope = id; startSearch(run.q, id); setView('search', { q: run.q, in: id }, 'replace');
+        if (focused && document.activeElement === document.body) $$('#scopechips [data-scope-in]').find((x) => x.dataset.scopeIn === id)?.focus({ preventScroll: true });
+      };
+    }
+    buttons.forEach((b) => b.remove());
+    // Keep the focused button attached, arranging its siblings around it when discovery changes
+    // their order. Moving that button itself would lose focus and a held Space key's activation.
+    let next = null;
+    for (const b of ordered.reverse()) {
+      if (b !== focused && (b.parentElement !== chips || b.nextElementSibling !== next)) chips.insertBefore(b, next);
+      next = b;
+    }
+    // Inserting earlier choices can make scroll snapping follow the old snap target.
+    // A person who already moved the row keeps their position instead.
+    if (chips.dataset.manuallyMoved) chips.scrollLeft = scrollLeft;
+    if (!chips.dataset.revealBound) {
+      chips.dataset.revealBound = '1';
+      // Source discovery may insert choices before the selected one. Reveal it again only if
+      // the person has not started moving through this row themselves.
+      for (const event of ['pointerdown', 'touchstart', 'wheel', 'keydown', 'focusin']) chips.addEventListener(event, () => { chips.dataset.manuallyMoved = '1'; }, { passive: true });
+    }
+    const selected = $$('[data-scope-in]', chips).find((b) => b.dataset.scopeIn === scope);
+    // Counts can widen the chip after its label first appears. Keep it in view until the person
+    // takes over the row, without moving a chip that is already visible or scrolling the page.
+    if (selected && !chips.dataset.manuallyMoved) {
+      const row = chips.getBoundingClientRect(), button = selected.getBoundingClientRect();
+      const padding = getComputedStyle(chips);
+      if (button.left < row.left + parseFloat(padding.paddingLeft) || button.right > row.right - parseFloat(padding.paddingRight)) chips.scrollLeft += (button.left + button.right - row.left - row.right) / 2;
+    }
+  };
   const renderSearchBody = (run) => {
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
     const scope = run.scope;
     if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
-    const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
-    const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
-    const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
-    chips.innerHTML = scopes.map(([id, name]) => `<button class="chip scope ${scope === id ? 'on' : ''}" data-scope-in="${id}">${id === 'everywhere' || id === 'library' || id === 'pubky' ? '' : svcBadge(id)}${esc(name)} ${scope === 'everywhere' || scope === id ? stat(id === 'everywhere' ? '' : id) : ''}</button>`).join('');
-    $$('[data-scope-in]', chips).forEach((b) => b.onclick = () => { state.searchScope = b.dataset.scopeIn; startSearch(run.q, b.dataset.scopeIn); setView('search', { q: run.q, in: b.dataset.scopeIn }, 'replace'); });
+    renderSearchScopes(chips, run);
     const allKinds = mergeSearch(run);
     run.facets = run.facets || {};
     const facetCounts = facetsOf(allKinds);
