@@ -673,9 +673,10 @@ impl Wipe {
     }
 
     /// A vault copy a node wrote of a sign-in made before the last sign-out everywhere (a copy
-    /// from then, put back): never taken.
+    /// from then, put back): never taken. One without a sign-in id (a node from before ids) can't
+    /// show it was made after, so it counts as from before, as the node's own copies do.
     fn signed_out(&self, t: &VaultSide) -> bool {
-        t.from_a_node && t.side.lineage.is_some() && self.predates(&t.side)
+        t.from_a_node && self.predates(&t.side)
     }
 }
 
@@ -959,6 +960,27 @@ pub(crate) fn record_last_sync(s: &NodeState, r: &CacheReport) {
     );
 }
 
+/// The mark a take by hand set aside ([`Vault::forget_mark`]), put back when the service's turn
+/// ends unless the take went through (`mark = None` then), whichever way it ended.
+struct MarkBack<'v, 'a> {
+    vault: &'v Vault<'a>,
+    service: &'static str,
+    mark: Option<(u64, u64)>,
+}
+
+impl Drop for MarkBack<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(mark) = self.mark.take() {
+            if let Err(e) = self.vault.restore_mark(self.service, mark) {
+                tracing::warn!(
+                    service = self.service,
+                    "vault: the node's record wasn't put back: {e}"
+                );
+            }
+        }
+    }
+}
+
 /// [`sync`] with [`NodeState::vault_pass`] already held. `take` settles one service's conflict
 /// (or takes a copy that isn't usable as it is) the way it says. `wiping`: this node just signed
 /// out everywhere, so every copy here goes aside.
@@ -983,11 +1005,26 @@ pub(crate) async fn sync_held(
     };
     for b in BRIDGES {
         let service = b.service.to_string();
+        let mut read = vault.read(b.service).await;
         // The person takes the vault's copy by hand: a copy older than one seen (a sign-in made
-        // anew elsewhere after a sign-out) is taken as new
-        if take == Some((b.service, Take::Vault)) {
-            if let Err(e) = vault.forget_mark(b.service) {
-                tracing::warn!(service = b.service, "vault: the node's record wasn't reset: {e}");
+        // anew elsewhere after a sign-out) is taken as new. The node's record of the newest copy
+        // seen goes only for that, once there is such a copy, and comes back unless the take goes
+        // through (`mark_back`): a take refused or failed leaves the older copy refused as before
+        let mut mark_back = MarkBack {
+            vault,
+            service: b.service,
+            mark: None,
+        };
+        if take == Some((b.service, Take::Vault)) && matches!(read, Err(VaultStoreError::Stale { .. })) {
+            match vault
+                .mark_of(b.service)
+                .and_then(|m| vault.forget_mark(b.service).map(|()| m))
+            {
+                Ok(mark) => {
+                    mark_back.mark = mark;
+                    read = vault.read(b.service).await;
+                }
+                Err(e) => tracing::warn!(service = b.service, "vault: the node's record wasn't reset: {e}"),
             }
         }
         // A copy signed by nobody the person trusts (an older client, a device signed out since),
@@ -995,7 +1032,7 @@ pub(crate) async fn sync_held(
         // is there but not taken: never as "gone", which would sign the node out
         let mut untrusted_there = false;
         let mut stale_there = false;
-        let theirs: Option<Opened> = match vault.read(b.service).await {
+        let theirs: Option<Opened> = match read {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
                 report.not_readable.push(service);
@@ -1374,6 +1411,8 @@ pub(crate) async fn sync_held(
                 report.pulled.push(service);
                 if taking.is_some() {
                     report.settled = Some(settled_as("pulled"));
+                    // The take went through: the copy taken is the newest seen from now on
+                    mark_back.mark = None;
                 }
             }
             Do::MoveAside => {
@@ -1811,12 +1850,23 @@ mod tests {
             decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(false)),
             Do::Conflict
         );
-        // First contact, same account, this copy from before the sign-out: the vault's wins
+        // First contact, same account, this copy from before the sign-out: the vault's copy made
+        // after it wins; one that can't show it was made after (no sign-in id) is from before
+        // too, so this copy goes aside and that one isn't taken
         let mut lasting = lin(side("a", "7"), "50-x");
         lasting.expires_at = Some(9_999);
         assert_eq!(
-            decide(None, Some(&lasting), Some(&vside("b", "7")), &w(false)),
+            decide(
+                None,
+                Some(&lasting),
+                Some(&vlin(vside("b", "7"), "150-y")),
+                &w(false)
+            ),
             Do::Pull
+        );
+        assert_eq!(
+            decide(None, Some(&lasting), Some(&vside("b", "7")), &w(false)),
+            Do::MoveAside
         );
         // A sign-in made here before the wipe and not synced, meeting a copy written after it: a
         // phone's (not usable here) puts it aside, another node's is taken; never pushed
@@ -2131,5 +2181,11 @@ mod tests {
         assert!(w.signed_out(&before) && !w.signed_out(&after));
         // Without a sign-out everywhere it is taken as before
         assert_eq!(decide(None, None, Some(&before), &Wipe::default()), Do::Pull);
+        // A node's copy without a sign-in id (from before ids) can't show it was made after the
+        // sign-out: not taken either, as the node's own copies without one go aside
+        let legacy = vside("h0", "7");
+        assert!(w.signed_out(&legacy));
+        assert_eq!(decide(None, None, Some(&legacy), &w), Do::NotUsable);
+        assert_eq!(decide(None, None, Some(&legacy), &Wipe::default()), Do::Pull);
     }
 }

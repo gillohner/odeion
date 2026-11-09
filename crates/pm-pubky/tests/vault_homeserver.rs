@@ -1483,3 +1483,93 @@ async fn an_unsigned_blob_is_not_shared_on_under_this_nodes_signature() {
     assert!(after.writer.is_none(), "not signed by A");
     assert!(!after.has_recipient(&v[2].client_key()));
 }
+
+/// Signing a device out rotates past it only what this node read and verified while the device
+/// was listed, unchanged since. A blob the device wrote that this node never saw (it could have
+/// written it after its entry left the list: its session still can), or one older than a copy
+/// this node has seen (put back), is left as it is and reported as not readable here; the node's
+/// own copy goes over it at its next sync.
+#[tokio::test]
+async fn signing_a_device_out_rotates_only_what_this_node_verified() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 3).await;
+    let keys: Vec<ClientSecret> = (0..3).map(|_| ClientSecret::generate()).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let marks: Vec<std::path::PathBuf> = (0..3).map(|i| dir.path().join(format!("{i}.json"))).collect();
+    let v: Vec<Vault> = sessions
+        .iter()
+        .zip(&keys)
+        .zip(&marks)
+        .map(|((s, k), m)| Vault::new(s, k).keep_marks(m))
+        .collect();
+    for (i, name) in ["Node", "Laptop", "Phone"].iter().enumerate() {
+        v[i].register(name).await.unwrap();
+    }
+    // The laptop writes two sign-ins, which the node reads (and so verifies)...
+    v[1].write_shared("tidal", &sign_in("t1")).await.unwrap();
+    v[1].write_shared("qobuz", &sign_in("q1")).await.unwrap();
+    for service in ["tidal", "qobuz"] {
+        assert!(v[0].read(service).await.unwrap().is_some(), "{service}");
+    }
+    let qobuz_verified = v[0].envelope("qobuz").await.unwrap().unwrap();
+    // ...then tidal again, which the node doesn't see before the laptop is signed out
+    v[1].write_shared("tidal", &sign_in("t2")).await.unwrap();
+    let tidal_unseen = v[0].envelope("tidal").await.unwrap().unwrap();
+    let r = v[0]
+        .sign_out_device(&v[1].client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    assert_eq!(r.rotated, ["qobuz"], "{r:?}");
+    assert_eq!(r.not_readable_here, ["tidal"], "{r:?}");
+    assert_eq!(
+        v[0].envelope("tidal").await.unwrap().unwrap(),
+        tidal_unseen,
+        "the blob the node never verified is left as it is"
+    );
+    assert!(matches!(
+        v[0].read("tidal").await,
+        Err(VaultStoreError::NotADevice(_))
+    ));
+    // The phone reads qobuz rotated past the laptop; the laptop no longer does
+    assert_eq!(
+        v[2].read("qobuz").await.unwrap().unwrap().sign_in.tokens["access_token"],
+        "q1"
+    );
+    assert!(v[1].read("qobuz").await.is_err());
+
+    // Older copies put back: the one the laptop wrote (verified back then, but the laptop is out
+    // now), and the node's own first copy of a sign-in it wrote again since (older than the copy
+    // the node has seen). Signing the phone out writes neither again
+    v[0].write_shared("spotify", &sign_in("s1")).await.unwrap();
+    let spotify_first = v[0].envelope("spotify").await.unwrap().unwrap();
+    v[0].write_shared("spotify", &sign_in("s2")).await.unwrap();
+    for (service, env) in [("qobuz", &qobuz_verified), ("spotify", &spotify_first)] {
+        sessions[0]
+            .storage()
+            .put(
+                blob_path(service).unwrap().as_str(),
+                serde_json::to_vec(env).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        v[0].read("qobuz").await,
+        Err(VaultStoreError::NotADevice(_))
+    ));
+    assert!(matches!(
+        v[0].read("spotify").await,
+        Err(VaultStoreError::Stale { .. })
+    ));
+    let r = v[0]
+        .sign_out_device(&v[2].client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    assert_eq!(r.rotated, Vec::<String>::new(), "{r:?}");
+    assert_eq!(r.not_readable_here, ["qobuz", "spotify", "tidal"], "{r:?}");
+    assert_eq!(v[0].envelope("qobuz").await.unwrap().unwrap(), qobuz_verified);
+    assert_eq!(v[0].envelope("spotify").await.unwrap().unwrap(), spotify_first);
+}

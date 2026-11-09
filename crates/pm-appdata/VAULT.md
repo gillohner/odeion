@@ -215,7 +215,14 @@ and a reader takes a blob only from one of the person's devices.
   device wrote is never taken afterwards, with one exception: the client signing a device out rotates the
   blobs that device wrote while it was trusted (under each blob's lock, right after the list says it is out,
   with the signing key its entry proved), so those sign-ins survive the sign-out under the rotating client's
-  signature, and nothing the device writes from then on is taken.
+  signature, and nothing the device writes from then on is taken. A signature says who wrote a blob, not
+  when, and the device's session can still write after its entry left the list: so the rotating client
+  rewrites only a blob of the device's that it had read and verified while the device was listed and that is
+  unchanged since (it keeps the hash of the newest envelope it verified per blob, with its marks). A blob of
+  the device's it never verified, or one older than a copy it has seen (put back), is left as it is and
+  reported as not readable here; the client's own copy goes over it at its next sync. A client that
+  rewrites a blob (a device added) checks the very envelope it rewrites, never a second copy the homeserver
+  served.
 - **Writing over a blob nobody trusted signed:** a client that holds a sign-in of its own writes it over such
   a blob (a node does so at its next sync) with a new data key, the next epoch and a revision above the
   blob's, so what the blob held is never taken and never comes back as newer; a blob at the last epoch or

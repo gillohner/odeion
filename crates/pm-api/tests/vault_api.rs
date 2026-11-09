@@ -767,3 +767,111 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
     assert_eq!(r["pushed"], json!(["jamendo"]), "{r}");
 }
+
+/// Taking the vault's copy by hand lets a copy older than one this node has seen in as new. The
+/// node's record of the newest copy seen goes only for that take, and comes back when the take
+/// doesn't go through: a copy refused for another reason (here: made before the person signed
+/// out everywhere) is refused as stale again at the next pass, not taken later as if it were new.
+#[tokio::test]
+async fn a_take_of_the_vaults_copy_that_doesnt_go_through_keeps_the_nodes_record() {
+    use pm_appdata::vault::{blob_path, INDEX_PATH};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
+    let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
+    let token = admin_call(
+        &a,
+        reqwest::Method::POST,
+        "/generate_signup_token",
+        Some(json!({"storage_quota_mb": "unlimited"})),
+    )
+    .await;
+    let signer = pubky().signer(Keypair::random());
+    signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let d1 = tempfile::tempdir().unwrap();
+    let n1 = node(d1.path());
+    {
+        let flow = homeserver.start_login("living-room.pubky.music").unwrap();
+        signer.approve_auth(flow.url()).await.unwrap();
+        let session = flow.await_approval().await.unwrap();
+        *n1.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        )));
+    }
+    let a1 = router(n1.clone());
+    let set = |n: &NodeState, k: &str, v: &str| n.library.lock().unwrap().set_setting(k, v).unwrap();
+    let get = |n: &NodeState, k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    set(
+        &n1,
+        "tidal.user",
+        r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#,
+    );
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["migrated"], json!(["tidal"]), "{r}");
+    let (s1, k1) = node_vault_parts(&n1);
+    let v1 = Vault::new(s1.session(), &k1);
+    let first = v1.envelope("tidal").await.unwrap().unwrap();
+    // The sign-in moves on, then the node signs out of it: the vault's copy goes, the node
+    // remembers the newest copy it saw
+    set(
+        &n1,
+        "tidal.user",
+        r#"{"access_token":"at-2","refresh_token":"rt-2","expires_at":2000,"user_id":"7","country":"CH"}"#,
+    );
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pushed"], json!(["tidal"]), "{r}");
+    n1.library.lock().unwrap().delete_setting("tidal.user").unwrap();
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["removed"], json!(["tidal"]), "{r}");
+    // The first copy put back: older than what the node saw, there but not taken
+    let path = blob_path("tidal").unwrap();
+    s1.session()
+        .storage()
+        .put(path.as_str(), serde_json::to_vec(&first).unwrap())
+        .await
+        .unwrap();
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["not_usable"], json!(["tidal"]), "{r}");
+    assert_eq!(r["details"][0]["reason"], "stale", "{r}");
+    // The person signed out everywhere since that copy was made (the device list says so)
+    let mut ix = v1.index().await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    ix.extra
+        .insert(pm_pubky::vault::SIGNED_OUT_EVERYWHERE.into(), json!(now));
+    s1.session()
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    // Taking the vault's copy by hand: it would be let in past the record, but it is from before
+    // the sign-out everywhere, so the take is refused...
+    let (st, r) = post_json(
+        &a1,
+        "/v1/vault/sync",
+        json!({"service": "tidal", "take": "vault"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{r}");
+    assert!(
+        r["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("signed out everywhere"),
+        "{r}"
+    );
+    assert_eq!(get(&n1, "tidal.user"), None);
+    // ...and the record stays: the next pass refuses the old copy as stale again
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["not_usable"], json!(["tidal"]), "{r}");
+    assert_eq!(
+        r["details"][0]["reason"], "stale",
+        "the record of the newest copy seen is back: {r}"
+    );
+}
