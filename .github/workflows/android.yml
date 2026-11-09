@@ -60,9 +60,10 @@ on:
         type: boolean
         default: true
 concurrency:
-  group: android-${{ github.event_name }}-${{ github.head_ref || github.ref }}
-  # A pull request's newer push replaces its older run; on main each push's run finishes (the next
-  # one checks only the files it changed)
+  # A pull request's newer push replaces its older run. Anything else runs per commit: on main each
+  # push's run finishes, and is not replaced while it waits (the next push checks only the files it
+  # changed).
+  group: android-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
