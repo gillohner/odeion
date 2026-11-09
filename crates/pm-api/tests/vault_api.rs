@@ -1068,36 +1068,60 @@ async fn a_sign_in_switch_mid_sync_writes_nothing_more() {
     assert_eq!(on_a, [theirs], "the node's bookmark went to A's homeserver");
 }
 
-/// The same for a vault pass: stopped right after it read A's TIDAL sign-in, B signs in, and the
-/// pass ends before it takes it or writes anything to A's vault.
+/// The same for a vault pass, on a sign-in a node can take: another node of A's put its TIDAL
+/// sign-in in A's vault; a node of A's that runs its pass undisturbed takes it (the control), while
+/// the node whose pass is stopped right after it read the sign-in, and replaced by B's sign-in
+/// there, takes nothing and writes nothing to A's vault.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sign_in_switch_mid_vault_pass_writes_nothing_more() {
     use pm_pubky::vault::VaultStoreError;
-    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music", "phone.pubky.music"]).await else {
+    let Some(mut ids) = identities_with_sessions(
+        2,
+        &["node.pubky.music", "kitchen.pubky.music", "bedroom.pubky.music"],
+    )
+    .await
+    else {
         eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
         return;
     };
     let mut b = ids.pop().unwrap();
     let mut a = ids.pop().unwrap();
-    let (a_phone, a_node) = (a.pop().unwrap(), a.pop().unwrap());
-    let d = tempfile::tempdir().unwrap();
-    let n = node(d.path());
-    n.set_sync(Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(network()).unwrap(),
-        a_node,
-    ))));
-    let app = router(n.clone());
-    let (st, v) = call(&app, "POST", "/v1/vault/register").await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let phone_key = ClientSecret::generate();
-    let phone = Vault::new(&a_phone, &phone_key);
-    phone.register("Phone").await.unwrap();
-    let tidal: SignIn = serde_json::from_value(json!({"service": "tidal", "way": "app",
-        "tokens": {"access_token": "never-shown", "refresh_token": "never-shown-either"}}))
-    .unwrap();
-    phone.write_shared("tidal", &tidal).await.unwrap();
-    let index_before = serde_json::to_value(phone.index().await.unwrap()).unwrap();
-    let blob_before = phone.envelope("tidal").await.unwrap().unwrap();
+    let (a_control, a_writer, a_node) = (a.pop().unwrap(), a.pop().unwrap(), a.pop().unwrap());
+    let make = |session: pubky::PubkySession| {
+        let d = tempfile::tempdir().unwrap();
+        let n = node(d.path());
+        n.set_sync(Some(Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        ))));
+        (d, n)
+    };
+    let (_dn, n) = make(a_node);
+    let (_dw, writer) = make(a_writer);
+    let (_dc, control) = make(a_control);
+    // The node and the control join A's vault first, so the sign-in is wrapped to them
+    for x in [&n, &control] {
+        let (st, v) = call(&router(x.clone()), "POST", "/v1/vault/register").await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let tidal =
+        r#"{"access_token":"at-1","refresh_token":"rt-1","expires_at":1000,"user_id":"7","country":"CH"}"#;
+    writer
+        .library
+        .lock()
+        .unwrap()
+        .set_setting("tidal.user", tidal)
+        .unwrap();
+    let (_, r) = call(&router(writer.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(r["migrated"], json!(["tidal"]), "{r}");
+    // Undisturbed, a node of A's takes it
+    let (_, r) = call(&router(control.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pulled"], json!(["tidal"]), "the control takes it: {r}");
+    let (s1, k1) = node_vault_parts(&writer);
+    let v_writer = Vault::new(s1.session(), &k1);
+    let index_before = serde_json::to_value(v_writer.index().await.unwrap()).unwrap();
+    let blob_before = v_writer.envelope("tidal").await.unwrap().unwrap();
+    // The node's pass, stopped after its read of TIDAL; B signs in there
     let (sync_a, key) = node_vault_parts(&n);
     let vault = Vault::new(sync_a.session(), &key).device("node");
     let (reached, release) = pm_api::test_hooks::arm(&format!("vault.after_read:{}:tidal", vault.owner()));
@@ -1108,7 +1132,10 @@ async fn a_sign_in_switch_mid_vault_pass_writes_nothing_more() {
             pm_api::vault_cache::pass(&n, &vault, None, &|| !sync_a.is_retired()).await
         })
     };
-    reached.await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the pass reached its pause")
+        .unwrap();
     n.set_sync(Some(Arc::new(PubkySync::from_session(
         NodeHomeserver::new(network()).unwrap(),
         b.pop().unwrap(),
@@ -1119,10 +1146,53 @@ async fn a_sign_in_switch_mid_vault_pass_writes_nothing_more() {
     let get = |k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
     assert_eq!(get("tidal.user"), None, "A's sign-in landed on the node");
     assert_eq!(
-        serde_json::to_value(phone.index().await.unwrap()).unwrap(),
+        serde_json::to_value(v_writer.index().await.unwrap()).unwrap(),
         index_before
     );
-    assert_eq!(phone.envelope("tidal").await.unwrap().unwrap(), blob_before);
+    assert_eq!(v_writer.envelope("tidal").await.unwrap().unwrap(), blob_before);
+}
+
+/// A replaced first sync leaves the new sign-in's activity alone: whatever it set running is reset
+/// when the session is replaced (here while the first sync is stopped mid-pass), it never writes
+/// the activity afterwards, and the node's storage save, which skips while a sync runs, saves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replaced_first_sync_leaves_no_sync_running() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a.pop().unwrap()));
+    n.set_sync(Some(sync_a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.after_reads:{}", sync_a.z32()));
+    pm_api::sync::first_sync_in_background(&n, sync_a.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the first sync reached its pause")
+        .unwrap();
+    assert!(n.sync_activity.lock().unwrap().running, "the first sync runs");
+    // Replaced there (what a restore with a session in it, or a new sign-in, does)
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        b.pop().unwrap(),
+    ))));
+    assert!(
+        !n.sync_activity.lock().unwrap().running,
+        "reset at the replacement"
+    );
+    let _ = release.send(());
+    // The retired first sync ends; it never sets anything running again
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!n.sync_activity.lock().unwrap().running);
+    }
+    let (st, v) = call(&router(n.clone()), "POST", "/v1/storage/save").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(v["saving"]["last_saved_at"].is_number(), "the save ran: {v}");
 }
 
 /// The settings backup of a session replaced while it read the old identity's settings copy
@@ -1174,5 +1244,79 @@ async fn a_replaced_settings_backup_adopts_no_history_delete() {
             .unwrap(),
         None,
         "A's history delete was adopted"
+    );
+}
+
+/// The settings backup checks the session after it has the library: a replacement made while it
+/// waited for the lock (another task held it) is seen, and the old identity's history delete is
+/// not adopted, so the node's listens stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut a = ids.pop().unwrap();
+    let a_node = a.pop().unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    homeserver
+        .write_node_settings(
+            &a_node,
+            &json!({"version": 1, "saved_at": 0, "node": "elsewhere",
+                "settings": {"listens.cleared_before": now_us.to_string()}}),
+        )
+        .await
+        .unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    // A listen of the node's, written before A's delete time
+    let listen_id = pm_pubky::ids::timestamp_id(now_us - 10_000_000);
+    n.library
+        .lock()
+        .unwrap()
+        .upsert_music_post(&pm_library::MusicPostRow {
+            id: listen_id.clone(),
+            kind: "pubky.music/activity".into(),
+            visibility: "private".into(),
+            json: "{}".into(),
+            created_at: now_us - 10_000_000,
+            updated_at: now_us - 10_000_000,
+            synced_at: None,
+            deleted: false,
+        })
+        .unwrap();
+    let sync_a = Arc::new(PubkySync::from_session(homeserver.clone(), a_node));
+    n.set_sync(Some(sync_a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.backup_after_read:{}", sync_a.z32()));
+    let backup = {
+        let (n, sync_a) = (n.clone(), sync_a.clone());
+        tokio::spawn(async move { sync_a.backup_settings(&n).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .expect("the backup reached its pause")
+        .unwrap();
+    // Another task holds the library; the backup goes on and waits for it
+    let held = n.library.lock().unwrap();
+    let _ = release.send(());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // The session is replaced while the backup waits (only the flag: the library is held here)
+    sync_a.retire();
+    drop(held);
+    backup.await.unwrap();
+    let lib = n.library.lock().unwrap();
+    assert_eq!(
+        lib.get_setting("listens.cleared_before").unwrap(),
+        None,
+        "A's delete adopted"
+    );
+    let row = lib.get_music_post(&listen_id).unwrap().unwrap();
+    assert!(
+        !row.deleted,
+        "the node's listen was deleted by A's history delete"
     );
 }

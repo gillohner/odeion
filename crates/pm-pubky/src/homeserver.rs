@@ -298,6 +298,9 @@ where
     Ok(Listing { entries, complete })
 }
 
+/// Why a write stopped: the caller's session was replaced by another sign-in meanwhile.
+pub const REPLACED: &str = "another sign-in replaced this session";
+
 #[derive(Clone)]
 pub struct NodeHomeserver {
     pubky: Pubky,
@@ -725,6 +728,7 @@ impl NodeHomeserver {
         &self,
         session: &PubkySession,
         dir: &str,
+        still: &(dyn Fn() -> bool + Sync),
     ) -> Result<(usize, usize), HomeserverError> {
         let user = session.public_key();
         let paths = self
@@ -747,7 +751,14 @@ impl NodeHomeserver {
                 kept += 1;
                 continue;
             };
+            // Each write and delete only while the caller's session is still the one to write
+            if !still() {
+                return Err(HomeserverError::Transport(REPLACED.into()));
+            }
             self.write_object(session, &v1_path, &v1_tag).await?;
+            if !still() {
+                return Err(HomeserverError::Transport(REPLACED.into()));
+            }
             self.delete(session, &path).await?;
             moved += 1;
         }

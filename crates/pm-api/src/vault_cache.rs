@@ -991,7 +991,10 @@ pub(crate) async fn sync_held(
     let client = vault.client_key().to_hex();
     // Whether the person signed out everywhere decides too much to guess: without the device
     // list, nothing is synced this time
-    let marker = match vault.index().await.and_then(|ix| vault.marker(&ix)) {
+    // The device list read (an await) before the marker is remembered: still this session's?
+    let ix = vault.index().await;
+    current()?;
+    let marker = match ix.and_then(|ix| vault.marker(&ix)) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!("vault: the device list can't be read, not synced this time: {e}");
@@ -1041,6 +1044,9 @@ pub(crate) async fn sync_held(
         };
         let (mine, seen, lineage) = {
             let lib = s.library.lock().expect("library poisoned");
+            // The lock first, then the check: `local_lineage` below can write the node's id for
+            // the sign-in, and the vault read above was an await
+            current()?;
             let mine = match carried(&lib, b) {
                 Ok(m) => m,
                 Err(e) => {
@@ -1267,7 +1273,9 @@ pub(crate) async fn sync_held(
         };
         // Written only while the vault holds what this pass decided on
         let expected = theirs.as_ref().map(|o| vault_hash(&o.sign_in));
-        let unchanged = |cur: Option<&SignIn>| cur.map(vault_hash) == expected;
+        // Checked by the vault under the blob's lock, right before it writes: a session another
+        // sign-in replaced meanwhile writes nothing there either (the lock is still let go)
+        let unchanged = |cur: Option<&SignIn>| still() && cur.map(vault_hash) == expected;
         current()?;
         match what {
             Do::Nothing => {}
@@ -1278,7 +1286,9 @@ pub(crate) async fn sync_held(
                     // unsigned copy), under the blob's lock
                     if o.signed_by.is_none() && !took_unsigned {
                         match vault
-                            .resign_if(b.service, &|cur| vault_hash(cur) == vault_hash(&o.sign_in))
+                            .resign_if(b.service, &|cur| {
+                                still() && vault_hash(cur) == vault_hash(&o.sign_in)
+                            })
                             .await
                         {
                             Ok(true) => report.signed.push(service.clone()),
@@ -1330,6 +1340,8 @@ pub(crate) async fn sync_held(
                     .await
                 {
                     Ok(Some(revision)) => {
+                        // Written; the node's record of it only while this is still its session
+                        current()?;
                         record(
                             &s.library.lock().expect("library poisoned"),
                             revision,
@@ -1426,6 +1438,7 @@ pub(crate) async fn sync_held(
             }
             Do::Remove => match vault.remove_if(b.service, &unchanged).await {
                 Ok(true) => {
+                    current()?;
                     let lib = s.library.lock().expect("library poisoned");
                     let _ = lib.delete_setting(&synced_key(b.service));
                     let _ = lib.delete_setting(&lineage_key(b.service));
@@ -1535,6 +1548,9 @@ pub async fn pass(
         sync_held(s, vault, take, false, still).await
     })
     .await?;
+    if !still() {
+        return Err(VaultStoreError::Replaced);
+    }
     record_last_sync(s, &r);
     Ok(r)
 }

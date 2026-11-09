@@ -2110,6 +2110,15 @@ impl NodeState {
         // homeserver, and its background loops stop (sync.rs, vault_cache.rs)
         if let Some(old) = &old {
             old.retire();
+            // What the replaced session's first sync left running is the new one's to start: reset,
+            // or the page shows a sync forever and storage saves wait on it (they skip while running)
+            let mut a = self.sync_activity.lock().expect("sync activity");
+            if a.owner == Some(old.id()) {
+                a.running = false;
+                a.step = None;
+                a.owner = None;
+                a.finished_at = Some(pm_library::db::now_unix());
+            }
         }
         drop(old);
         // The owner's browser sessions belong to this identity from now on (Kimi review of #209).

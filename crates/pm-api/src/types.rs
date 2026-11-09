@@ -1044,6 +1044,10 @@ pub struct SyncActivity {
     pub last: Option<SyncReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The session whose first sync this is (`PubkySync::id`): only it updates the activity, and
+    /// a sign-in that replaces it resets what it left running.
+    #[serde(skip)]
+    pub owner: Option<u64>,
 }
 
 // ---- activity and import (integrations) ----

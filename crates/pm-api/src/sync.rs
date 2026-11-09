@@ -51,6 +51,8 @@ pub struct PubkySync {
     refused: std::sync::atomic::AtomicBool,
     /// One pass at a time (a manual sync and the background carry-on never overlap).
     pass: tokio::sync::Mutex<()>,
+    /// This handle among all the node's sessions (its first sync's activity names it).
+    id: u64,
     /// Set when another sign-in replaced this session ([`crate::state::NodeState::set_sync`]):
     /// a pass still running writes nothing more, to the library or the homeserver.
     retired: std::sync::atomic::AtomicBool,
@@ -73,8 +75,14 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
     let s = s.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
+        // Under the activity's lock: a session another sign-in replaced (retired before its
+        // activity is reset, `NodeState::set_sync`) never writes the new one's activity
         let step = |s: &crate::state::NodeState, words: &str| {
             let mut a = s.sync_activity.lock().expect("sync activity");
+            if sync.is_retired() {
+                return;
+            }
+            a.owner = Some(sync.id());
             a.running = true;
             a.step = Some(words.to_string());
             if a.started_at.is_none() || a.finished_at.is_some() {
@@ -106,12 +114,13 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
         let ms = started.elapsed().as_millis() as u64;
         // Replaced: the new sign-in's first sync is the one the page follows, and it may be
         // running right now; nothing of its activity is touched
-        if matches!(result, Err(SyncError::Replaced)) {
-            tracing::info!(ms, "first sync ended: another sign-in replaced this one");
-            return;
-        }
         {
             let mut a = s.sync_activity.lock().expect("sync activity");
+            // Replaced (whatever the pass returned): the new sign-in owns the activity now
+            if sync.is_retired() {
+                tracing::info!(ms, "first sync ended: another sign-in replaced this one");
+                return;
+            }
             a.running = false;
             a.step = None;
             a.finished_at = Some(pm_library::db::now_unix());
@@ -174,6 +183,11 @@ pub fn node_record(
     }
 }
 
+fn next_sync_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
     pub async fn connect(network: Network, secret: &str) -> Result<Self, HomeserverError> {
@@ -191,6 +205,7 @@ impl PubkySync {
             refused: Default::default(),
             pass: Default::default(),
             retired: Default::default(),
+            id: next_sync_id(),
         })
     }
 
@@ -204,7 +219,13 @@ impl PubkySync {
             refused: Default::default(),
             pass: Default::default(),
             retired: Default::default(),
+            id: next_sync_id(),
         }
+    }
+
+    /// This handle among the node's sessions.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Another sign-in replaced this session: whatever pass is running ends before its next
@@ -230,8 +251,11 @@ impl PubkySync {
         &self,
         library: &'a Arc<Mutex<Library>>,
     ) -> Result<std::sync::MutexGuard<'a, Library>, SyncError> {
+        // The lock first, then the check: a replacement made while this waited for the lock is
+        // seen here, not only one made before it
+        let lib = library.lock().expect("library poisoned");
         self.current()?;
-        Ok(library.lock().expect("library poisoned"))
+        Ok(lib)
     }
 
     /// The folders the node asks for at sign-in that this session was not granted.
@@ -451,7 +475,11 @@ impl PubkySync {
                 continue;
             }
             self.current()?;
-            match self.homeserver.move_tags_to_v1(&self.session, dir).await {
+            match self
+                .homeserver
+                .move_tags_to_v1(&self.session, dir, &|| !self.is_retired())
+                .await
+            {
                 Ok((moved, kept)) => {
                     if moved > 0 {
                         tracing::info!(moved, kept, from = dir, "tags moved to /pub/social/v1/tags/");
@@ -508,7 +536,7 @@ impl PubkySync {
                     ));
                     continue;
                 }
-                if let Err(e) = self.homeserver.write_object(&self.session, &path, &tag).await {
+                if let Err(e) = self.write_object(&path, &tag).await {
                     report.errors.push(tag_write_hint(format!("write {path}: {e}")));
                     continue;
                 }
@@ -789,11 +817,7 @@ impl PubkySync {
                                 continue;
                             }
                         };
-                        if let Err(e) = self
-                            .homeserver
-                            .write_object(&self.session, &path, &post.to_json())
-                            .await
-                        {
+                        if let Err(e) = self.write_object(&path, &post.to_json()).await {
                             let msg = format!("write {path}: {e}");
                             let stop = is_forbidden(&msg);
                             report.errors.push(namespace_hint(msg));
@@ -887,11 +911,7 @@ impl PubkySync {
                         continue;
                     }
                 };
-                if let Err(e) = self
-                    .homeserver
-                    .write_object(&self.session, &path, &bookmark)
-                    .await
-                {
+                if let Err(e) = self.write_object(&path, &bookmark).await {
                     let msg = format!("write {path}: {e}");
                     let stop = is_forbidden(&msg);
                     report.errors.push(namespace_hint(msg));
@@ -1039,8 +1059,24 @@ impl PubkySync {
         Ok(())
     }
 
+    /// Write an object for this pass, never once another sign-in replaced this session.
+    async fn write_object<T: serde::Serialize + Sync + ?Sized>(
+        &self,
+        path: &str,
+        value: &T,
+    ) -> Result<(), HomeserverError> {
+        if self.is_retired() {
+            return Err(HomeserverError::Transport(pm_pubky::homeserver::REPLACED.into()));
+        }
+        self.homeserver.write_object(&self.session, path, value).await
+    }
+
     /// Delete, counting "already gone" as done.
     async fn delete_quietly(&self, path: &str) -> Result<(), HomeserverError> {
+        // Never once another sign-in replaced this session (the pass ends at its next check)
+        if self.is_retired() {
+            return Err(HomeserverError::Transport(pm_pubky::homeserver::REPLACED.into()));
+        }
         match self.homeserver.delete(&self.session, path).await {
             Err(HomeserverError::Pubky(e)) if e.to_string().contains("404") => Ok(()),
             other => other,
@@ -1121,8 +1157,7 @@ impl PubkySync {
         };
         let (dest, body) =
             v1::publish_plan(social, id, &edit_id, owner).map_err(|e| format!("publish {id}: {e}"))?;
-        self.homeserver
-            .write_object(&self.session, &dest, &body)
+        self.write_object(&dest, &body)
             .await
             .map_err(|e| format!("write {dest}: {e}"))?;
         heads.record(v1::Root::Pub, ns, id, &dest);
