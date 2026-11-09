@@ -33,7 +33,8 @@ pub struct Fake {
     pub down: AtomicBool,
     /// Every call, as `key op uri`.
     pub calls: Mutex<Vec<String>>,
-    /// Writes it will never take (a 400 or 413), by key.
+    /// Writes it will never take (a 400, 413 or 422): every collection write of a key here, and
+    /// the bookmark of a URI here.
     pub rejects: Mutex<HashSet<String>>,
     /// Writes under /pub/ refused (a grant that lost its public folder).
     pub refuse_pub: AtomicBool,
@@ -56,6 +57,9 @@ impl Fake {
         }
         if self.down.load(Ordering::SeqCst) {
             return Err(PersonalError::Unreachable("connection refused".into()));
+        }
+        if (op == "put" || op == "delete") && self.rejects.lock().unwrap().contains(uri) {
+            return Err(PersonalError::Rejected("422 Unprocessable Entity".into()));
         }
         Ok(())
     }
@@ -255,16 +259,21 @@ pub fn uris(v: &serde_json::Value) -> Vec<String> {
     u
 }
 
-/// The owner's bookmarks as the node's own tables hold them (what its sync pushes).
+/// The owner's bookmarks as the node's own tables hold them, and what its sync still has to push
+/// (marked `unsynced:`).
 pub fn owners_rows(s: &NodeState) -> Vec<String> {
-    let mut v: Vec<String> = s
-        .library
-        .lock()
-        .unwrap()
+    let lib = s.library.lock().unwrap();
+    let mut v: Vec<String> = lib
         .list_bookmarks()
         .unwrap()
         .into_iter()
         .map(|r| r.uri)
+        .chain(
+            lib.unsynced_bookmarks()
+                .unwrap()
+                .into_iter()
+                .map(|r| format!("unsynced:{}", r.uri)),
+        )
         .collect();
     v.sort();
     v

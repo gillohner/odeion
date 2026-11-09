@@ -398,7 +398,14 @@ struct Copy {
     /// Their homeserver refused the grant: nothing is tried until they approve the node again.
     #[serde(default)]
     lost: bool,
+    /// Bookmarks they cleared, with when (the newest [`CLEARED_KEPT`]): a heart made before one of
+    /// these, sent late by another device, doesn't bring it back.
+    #[serde(default)]
+    cleared: Vec<Item>,
 }
+
+/// How many clears a listener's copy remembers.
+const CLEARED_KEPT: usize = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Item {
@@ -471,11 +478,34 @@ pub(crate) fn mark_lost(s: &NodeState, key: &str, why: &str) -> Result<(), ApiEr
 impl Copy {
     fn apply(&mut self, uri: &str, on: bool, at: i64) {
         self.items.retain(|i| i.uri != uri);
+        self.cleared.retain(|i| i.uri != uri);
+        let item = Item {
+            uri: uri.to_string(),
+            at,
+        };
         if on {
-            self.items.push(Item {
-                uri: uri.to_string(),
-                at,
-            });
+            self.items.push(item);
+        } else {
+            self.cleared.push(item);
+            if self.cleared.len() > CLEARED_KEPT {
+                self.cleared.sort_by_key(|i| std::cmp::Reverse(i.at));
+                self.cleared.truncate(CLEARED_KEPT);
+            }
+        }
+    }
+
+    /// Whether a change of `uri` made at `at` is older than the last one the node knows of the
+    /// other kind (by a second or more, so clocks a little apart don't matter): a clear older
+    /// than the bookmark, or a bookmark older than the clear.
+    fn outdated(&self, uri: &str, on: bool, at: i64) -> bool {
+        let newer = |list: &[Item]| {
+            list.iter()
+                .any(|i| i.uri == uri && i.at >= at.saturating_add(1_000_000))
+        };
+        if on {
+            newer(&self.cleared)
+        } else {
+            newer(&self.items)
         }
     }
 }
@@ -564,8 +594,9 @@ pub(crate) async fn bookmark_uris(
 }
 
 /// Bookmarks (`on`) or un-bookmarks `uri` (its stored form) for listener `key`. `at` (Unix
-/// seconds) is when a device made the change offline: a bookmark keeps that time, and a clear
-/// older than the bookmark the node knows leaves it (it was bookmarked again since).
+/// seconds) is when a device made the change offline: a bookmark keeps that time; a clear older
+/// than the bookmark the node knows leaves it (it was bookmarked again since), and a bookmark
+/// older than the clear the node knows doesn't bring it back.
 pub(crate) async fn set_bookmark(
     s: &NodeState,
     key: &str,
@@ -585,12 +616,10 @@ pub(crate) async fn set_bookmark(
     }
     let now = pm_pubky::ids::now_micros();
     let at = at.map_or(now, |a| a.clamp(0, now / 1_000_000).saturating_mul(1_000_000));
-    if !on
-        && c.items
-            .iter()
-            .any(|i| i.uri == uri && i.at >= at.saturating_add(1_000_000))
-    {
-        return Ok(Json(BookmarkChanged::new(uri, true)).into_response());
+    // Made before the last change of the other kind (another device's, sent late): that one
+    // stands, and neither their homeserver nor what waits for it is touched
+    if c.outdated(&uri, on, at) {
+        return Ok(Json(BookmarkChanged::new(uri, !on)).into_response());
     }
     let r = if on {
         b.put_bookmark(key, &uri, at).await
@@ -604,9 +633,10 @@ pub(crate) async fn set_bookmark(
             false
         }
         Err(PersonalError::NoGrant) => return Ok(needs_connect(false)),
+        // For good: a 4xx, so a device's offline queue drops it rather than sending it forever
         Err(PersonalError::Rejected(m)) => {
             return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
+                StatusCode::UNPROCESSABLE_ENTITY,
                 format!("Your homeserver won't keep this bookmark: {m}"),
             ))
         }
@@ -636,7 +666,8 @@ pub(crate) async fn set_bookmark(
 
 // ---- connecting a listener's homeserver ------------------------------------------------------
 
-/// Whether a Ring approval may become `key`'s grant: approved by them, for every folder.
+/// Whether a Ring approval may become `key`'s grant: approved by them, for every folder, and for
+/// nothing beyond those folders (the node never holds a key to the rest of their homeserver).
 pub(crate) fn may_keep(key: &str, approver: &str, granted: &[String]) -> Result<(), &'static str> {
     if approver.trim_start_matches("pubky") != key.trim_start_matches("pubky") {
         return Err("approved by another identity than yours");
@@ -644,7 +675,28 @@ pub(crate) fn may_keep(key: &str, approver: &str, granted: &[String]) -> Result<
     if !pm_pubky::homeserver::missing_capabilities(granted, PERSONAL_CAPABILITIES).is_empty() {
         return Err("not approved for your bookmarks and collections folders");
     }
+    if granted.iter().any(|g| !within(g, PERSONAL_CAPABILITIES)) {
+        return Err("approved for more than your bookmarks and collections folders: approve only what the node asks for");
+    }
     Ok(())
+}
+
+/// Whether the granted `scope:actions` stays inside one of `allowed` (a list like
+/// [`PERSONAL_CAPABILITIES`]): the same folder or one in it, with none of its actions beyond.
+fn within(granted: &str, allowed: &str) -> bool {
+    let Some((scope, actions)) = granted.trim().rsplit_once(':') else {
+        return false;
+    };
+    // A `..` or `.` segment could step out of the folder it seems to be in
+    !scope.is_empty()
+        && !scope.split('/').any(|s| s == ".." || s == ".")
+        && allowed
+            .split(',')
+            .filter_map(|a| a.trim().rsplit_once(':'))
+            .any(|(a_scope, a_actions)| {
+                let inside = scope == a_scope || (a_scope.ends_with('/') && scope.starts_with(a_scope));
+                inside && actions.chars().all(|c| a_actions.contains(c))
+            })
 }
 
 /// How long one relay poll or grant exchange may take before the approval is given up.
@@ -669,6 +721,19 @@ type Connects = tokio::sync::Mutex<HashMap<String, Connect>>;
 fn connects() -> &'static Connects {
     static C: OnceLock<Connects> = OnceLock::new();
     C.get_or_init(Default::default)
+}
+
+/// Whether approval `id` is still asked for: not replaced, expired away or ended by a Disconnect.
+async fn still_asked(id: &str) -> bool {
+    connects().lock().await.contains_key(id)
+}
+
+/// Ends every approval `key` has in progress (Disconnect, People › Remove): none of them can
+/// keep a grant after. Called under their person lock, which [`keep_grant`] holds while it
+/// checks and writes.
+async fn end_approvals_of(key: &str) {
+    let key = key.trim_start_matches("pubky");
+    connects().lock().await.retain(|_, c| c.who != key);
 }
 
 /// The approval `id`'s task: asks the relay until Ring approves (`poll`), then hands the session
@@ -711,8 +776,9 @@ where
     }
 }
 
-/// Keeps an approved session as `key`'s grant, when it may be theirs.
-async fn keep_grant(s: Arc<NodeState>, key: String, session: PubkySession) -> serde_json::Value {
+/// Keeps an approved session as `key`'s grant, when it may be theirs and approval `id` is still
+/// asked for.
+async fn keep_grant(s: Arc<NodeState>, id: String, key: String, session: PubkySession) -> serde_json::Value {
     let approver = session.public_key().to_string();
     let granted = pm_pubky::homeserver::session_capabilities(&session);
     if let Err(why) = may_keep(&key, &approver, &granted) {
@@ -724,6 +790,11 @@ async fn keep_grant(s: Arc<NodeState>, key: String, session: PubkySession) -> se
     };
     let lock = person_lock(&key);
     let _one = lock.lock().await;
+    // They disconnected (or started another approval) while this one was exchanged: nothing is
+    // kept, so a Disconnect that has answered stays done
+    if !still_asked(&id).await {
+        return serde_json::json!({"state": "expired"});
+    }
     // Their music access went meanwhile: nothing is kept
     if !crate::people::may_use_music(&s, &key) {
         return serde_json::json!({"state": "denied", "reason": "you have no music access on this node any more"});
@@ -780,6 +851,8 @@ pub(crate) async fn disconnect(
     let key = listener_key(&c)?;
     let lock = person_lock(&key);
     let _one = lock.lock().await;
+    // An approval still on its way would bring the grant back after this answer
+    end_approvals_of(&key).await;
     backend(&s).disconnect(&key).await;
     let copy = load(&s, &key);
     Ok(Json(PersonalState {
@@ -827,7 +900,10 @@ pub(crate) async fn connect_start(
             let flow = flow.clone();
             async move { flow.poll().await }
         },
-        move |session| keep_grant(s, key, session),
+        {
+            let id = id.clone();
+            move |session| keep_grant(s, id, key, session)
+        },
     ));
     Ok(Json(
         serde_json::json!({"id": id, "qr_svg": crate::qr_svg(&url), "url": url}),
@@ -875,6 +951,7 @@ pub(crate) fn forget(s: &NodeState, key: &str) {
             h.spawn(async move {
                 let lock = person_lock(&key);
                 let _one = lock.lock().await;
+                end_approvals_of(&key).await;
                 b.disconnect(&key).await;
             });
         }
@@ -1131,5 +1208,72 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn a_grant_wider_than_the_three_folders_is_never_kept() {
+        let k = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let all: Vec<String> = PERSONAL_CAPABILITIES.split(',').map(String::from).collect();
+        let with = |extra: &[&str]| -> Vec<String> {
+            all.iter()
+                .cloned()
+                .chain(extra.iter().map(|x| x.to_string()))
+                .collect()
+        };
+        // Each covers the three folders, and more: the node would hold a key to the rest
+        for (granted, what) in [
+            (vec!["/:rw".to_string()], "the whole homeserver"),
+            (
+                vec![
+                    "/priv/social/v1/:rw".to_string(),
+                    "/pub/social/v1/posts/:rw".to_string(),
+                ],
+                "every private social folder",
+            ),
+            (with(&["/priv/pubky.music/vault/:rw"]), "their sources vault"),
+            (with(&["/pub/pubky.app/:r"]), "an unrelated folder, read only"),
+            (
+                with(&["/priv/social/v1/:r"]),
+                "the parent of two of them, read only",
+            ),
+            (with(&["garbage"]), "something unreadable"),
+            (
+                with(&["/priv/social/v1/posts/../../pubky.music/vault/:rw"]),
+                "a folder that steps out of its own",
+            ),
+        ] {
+            assert!(may_keep(k, k, &granted).is_err(), "{what}: {granted:?}");
+        }
+        // Exactly the three, in any order, or narrower within them, is theirs to give
+        let mut back = all.clone();
+        back.reverse();
+        assert!(may_keep(k, k, &back).is_ok());
+        assert!(may_keep(k, k, &with(&["/priv/social/v1/posts/abc/:r"])).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_ends_the_listeners_approvals_and_nothing_is_kept_after() {
+        waiting("t-dis-ann", "dis-ann").await;
+        waiting("t-dis-bo", "dis-bo").await;
+        let approved_slowly = || async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok::<_, HomeserverError>(Some(()))
+        };
+        let task = tokio::spawn(ask(
+            "t-dis-ann".into(),
+            Duration::from_secs(60),
+            approved_slowly,
+            |()| async { panic!("nothing is kept once she disconnected") },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        end_approvals_of("dis-ann").await;
+        task.await.unwrap();
+        assert_eq!(poll_as("dis-ann", "t-dis-ann").await.unwrap()["state"], "expired");
+        assert!(still_asked("t-dis-bo").await, "another listener's approval stays");
+        // An approval already past the relay checks it is still asked for, under her lock
+        waiting("t-dis-late", "dis-ann").await;
+        assert!(still_asked("t-dis-late").await);
+        end_approvals_of("dis-ann").await;
+        assert!(!still_asked("t-dis-late").await);
     }
 }

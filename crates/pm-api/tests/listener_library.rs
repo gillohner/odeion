@@ -30,6 +30,9 @@ async fn each_person_bookmarks_on_their_own_homeserver() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    // The owner's rows and what the owner's sync still has to push: nothing of a listener's joins them
+    let owners = owners_rows(&s);
+    assert!(owners.contains(&SONG_A.to_string()), "{owners:?}");
     let (st, v) = call(
         &app,
         &ann,
@@ -67,7 +70,7 @@ async fn each_person_bookmarks_on_their_own_homeserver() {
     assert_eq!(fake.of(BO), vec![SONG_C]);
     assert_eq!(
         owners_rows(&s),
-        vec![SONG_A],
+        owners,
         "a listener's bookmark never lands in the owner's"
     );
     assert!(
@@ -88,7 +91,7 @@ async fn each_person_bookmarks_on_their_own_homeserver() {
         StatusCode::OK,
         "Bo removing a bookmark he doesn't have is a no-op"
     );
-    assert_eq!(owners_rows(&s), vec![SONG_A], "and never the owner's");
+    assert_eq!(owners_rows(&s), owners, "and never the owner's");
 }
 
 #[tokio::test]
@@ -104,6 +107,7 @@ async fn a_listener_without_their_homeserver_is_asked_to_connect() {
         Some(serde_json::json!({"uri": SONG_A})),
     )
     .await;
+    let owners = owners_rows(&s);
 
     let (st, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
@@ -119,7 +123,7 @@ async fn a_listener_without_their_homeserver_is_asked_to_connect() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert_eq!(v["needs_connect"], true, "{v}");
-    assert_eq!(owners_rows(&s), vec![SONG_A]);
+    assert_eq!(owners_rows(&s), owners);
     assert!(fake.of(ANN).is_empty());
     let (st, v) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
@@ -503,6 +507,103 @@ async fn a_library_item_not_identified_yet_is_no_listener_bookmark() {
             .is_none(),
         "nor in the owner's node-only bookmarks"
     );
+}
+
+#[tokio::test]
+async fn an_older_heart_never_brings_back_a_newer_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let heart = |uri: &str, at: Option<i64>| {
+        let mut b = serde_json::json!({"uri": uri});
+        if let Some(at) = at {
+            b["at"] = at.into();
+        }
+        b
+    };
+    // Her phone clears a heart now; her laptop's heart from an hour ago (offline) comes in after
+    call(&app, &ann, "PUT", "/v1/bookmarks", Some(heart(SONG_B, None))).await;
+    let q = format!("/v1/bookmarks?uri={}", urlencode(SONG_B));
+    let (st, _) = call(&app, &ann, "DELETE", &q, None).await;
+    assert_eq!(st, StatusCode::OK);
+    let hour_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 3600;
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(heart(SONG_B, Some(hour_ago))),
+    )
+    .await;
+    assert_eq!(
+        (st, v["bookmarked"].clone()),
+        (StatusCode::OK, serde_json::json!(false)),
+        "the newer clear stands: {v}"
+    );
+    assert!(fake.of(ANN).is_empty(), "nothing written back to her homeserver");
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(uris(&v).is_empty(), "{v}");
+    // The same while her homeserver is away: the older heart doesn't replace the waiting clear
+    call(&app, &ann, "PUT", "/v1/bookmarks", Some(heart(SONG_C, None))).await;
+    fake.down.store(true, Ordering::SeqCst);
+    let q = format!("/v1/bookmarks?uri={}", urlencode(SONG_C));
+    let (_, v) = call(&app, &ann, "DELETE", &q, None).await;
+    assert_eq!(v["pending"], true, "{v}");
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(heart(SONG_C, Some(hour_ago))),
+    )
+    .await;
+    assert_eq!(
+        (st, v["bookmarked"].clone()),
+        (StatusCode::OK, serde_json::json!(false)),
+        "{v}"
+    );
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(uris(&v).is_empty(), "{v}");
+    assert_eq!(v["homeserver"]["pending"], 1, "only the clear waits: {v}");
+    fake.down.store(false, Ordering::SeqCst);
+    call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(
+        fake.of(ANN).is_empty(),
+        "the clear landed, the old heart never did"
+    );
+    // A heart made after the clear is hers again
+    let (_, v) = call(&app, &ann, "PUT", "/v1/bookmarks", Some(heart(SONG_C, None))).await;
+    assert_eq!(v["bookmarked"], true, "{v}");
+    assert_eq!(fake.of(ANN), vec![SONG_C]);
+    assert!(owners_rows(&s).is_empty());
+}
+
+#[tokio::test]
+async fn a_change_her_homeserver_never_takes_is_refused_for_good() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    fake.rejects.lock().unwrap().insert(SONG_B.to_string());
+    let app = router(s.clone());
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_B})),
+    )
+    .await;
+    // A 4xx: a device's offline queue drops it and goes on (a 5xx it would send again forever)
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(uris(&v).is_empty(), "{v}");
+    assert_eq!(v["homeserver"]["pending"], 0, "nothing waits: {v}");
+    assert!(owners_rows(&s).is_empty());
 }
 
 fn urlencode(s: &str) -> String {
