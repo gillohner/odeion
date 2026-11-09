@@ -55,11 +55,11 @@ async fn the_node_reaches_the_apps_player_through_the_tunnel() {
     assert_eq!(app.connect().await.unwrap(), Route::Direct);
     app.serve_player(player().await).await;
 
-    let relay = node.player_relay(app.id()).await.unwrap();
-    assert!(relay.ip().is_loopback(), "{relay}");
+    let (relay, made) = node.player_relay(app.id()).await.unwrap();
+    assert!(made && relay.ip().is_loopback(), "{relay}");
     assert_eq!(
         node.player_relay(app.id()).await.unwrap(),
-        relay,
+        (relay, false),
         "one relay per app"
     );
     assert_eq!(round_trip(relay, b"hello").await, b"HELLO");
@@ -87,7 +87,7 @@ async fn the_node_reaches_the_apps_player_through_the_tunnel() {
         "serving the player is not a new connection"
     );
     assert_eq!(again.id(), id, "the kept key: the node knows the app again");
-    assert_eq!(node.player_relay(again.id()).await.unwrap(), relay);
+    assert_eq!(node.player_relay(again.id()).await.unwrap(), (relay, false));
     let mut ok = false;
     for _ in 0..50 {
         // The node learns the new connection as it is accepted
@@ -111,7 +111,7 @@ async fn the_node_reaches_the_apps_player_through_the_tunnel() {
     let other = ClientTunnel::start(node.addr(), &Relays::Off).await.unwrap();
     other.connect().await.unwrap();
     assert_ne!(other.id(), again.id());
-    let theirs = node.player_relay(other.id()).await.unwrap();
+    let (theirs, _) = node.player_relay(other.id()).await.unwrap();
     assert_ne!(theirs, relay);
     // Its relay goes when its player isn't used any more
     node.drop_player_relay(other.id()).await;

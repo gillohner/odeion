@@ -150,7 +150,7 @@ pub async fn register_through_tunnel(
     let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
     // The tunnel's streams come from an address of their own: they get the node's room before
     // Hello (the phone's other apps, connecting from 127.0.0.1, don't)
-    player.endpoint.expect_peer(pm_remote::TUNNEL_SOURCE);
+    player.endpoint.expect_peer(pm_remote::tunnel_source());
     let Some(port) = player.listen(lo) else {
         return (s, false);
     };

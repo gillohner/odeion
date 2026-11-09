@@ -106,6 +106,22 @@ async fn the_apps_player_away_from_home_is_a_zone_through_the_tunnel() {
     .await
     .unwrap();
 
+    // A re-registration that fails (here a wrong player key; on a phone, a link that drops
+    // during Hello) leaves the working zone as it was: its relay stays
+    let r = reqwest::Client::new()
+        .post(format!("http://{}/v1/outputs/endpoints", app.local_addr()))
+        .bearer_auth(OWNER)
+        .json(&serde_json::json!({ "address": name, "key": pm_stream::Key::random().expose() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::BAD_REQUEST);
+    let mut sink = out.open(fmt).await.expect("still reached through the tunnel");
+    let block = AudioBlock::pcm_i32(fmt, vec![0; 2 * 4_410]);
+    tokio::task::spawn_blocking(move || sink.write(&block).unwrap())
+        .await
+        .unwrap();
+
     // Another app's key that never connected: refused, nothing registered
     let other = format!("tunnel:{}", SecretKey::generate().public());
     let r = reqwest::Client::new()

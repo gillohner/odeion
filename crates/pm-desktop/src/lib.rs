@@ -240,6 +240,14 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     Ok(())
 }
 
+/// Close the tunnel, if any, and wait until its endpoint is closed (its key is free again).
+async fn close_tunnel(state: &AppState) {
+    let old = state.tunnel.lock().await.take();
+    if let Some(old) = old {
+        old.close().await;
+    }
+}
+
 /// This app's iroh key for the tunnel, kept next to its settings: the node knows the app's player
 /// again by it (its zone stays the same across the app's starts). A new one each time if it can't
 /// be kept.
@@ -264,9 +272,10 @@ async fn register_any(app: AppHandle, s: Settings) {
 /// its signal path, bit-perfect and the Sound panel); the player service then runs as for a zone.
 #[cfg(any(desktop, target_os = "android"))]
 async fn register_tunnel_player(app: AppHandle, s: Settings) {
-    if register_through_tunnel(app.clone(), s).await {
-        watch_tunnel(app).await;
-    }
+    // Watched from before this registration (a reconnect during it counts), and also when it
+    // fails (a mobile link: the next connection tries again)
+    watch_tunnel(app.clone()).await;
+    register_through_tunnel(app, s).await;
 }
 
 /// [`register_tunnel_player`] without starting the watch (the watch's own call): whether it
@@ -488,7 +497,7 @@ async fn reach(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<(Se
     s.via.clear();
     let msg = match node::probe(&s).await {
         Ok(info) => {
-            state.tunnel.lock().await.take();
+            close_tunnel(state).await;
             return Ok((s, info));
         }
         Err(node::ProbeError::Unreachable(msg)) => msg,
@@ -523,6 +532,8 @@ async fn through_tunnel(
         return Err(msg);
     }
     let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
+    // The kept key is never live twice: the old tunnel is closed first
+    close_tunnel(state).await;
     let tunnel = pm_remote::ClientTunnel::start_with_key(id, &pm_remote::Relays::Public, tunnel_key(state))
         .await
         .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
@@ -707,12 +718,12 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
 async fn sign_in_and_connect(app: &AppHandle, state: &AppState, mut s: Settings) -> Result<String, String> {
     match node::probe(&s).await {
         Ok(info) => {
-            state.tunnel.lock().await.take();
+            close_tunnel(state).await;
             connected(app, state, s, &info)?;
             return Ok(info.name);
         }
         Err(node::ProbeError::NeedsSignIn) => {
-            state.tunnel.lock().await.take();
+            close_tunnel(state).await;
         }
         Err(node::ProbeError::Unreachable(msg)) => s = tunnel_for_sign_in(state, s, msg).await?,
         Err(e) => return Err(e.into()),
@@ -730,6 +741,8 @@ async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> R
         return Err(msg);
     }
     let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
+    // The kept key is never live twice: the old tunnel is closed first
+    close_tunnel(state).await;
     let tunnel = pm_remote::ClientTunnel::start_with_key(id, &pm_remote::Relays::Public, tunnel_key(state))
         .await
         .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;

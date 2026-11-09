@@ -156,27 +156,18 @@ impl NodeTunnel {
     /// Where the node reaches the player of the controller with key `peer`: a listener on its own
     /// loopback whose connections each become a stream to that controller (over its live
     /// connection; none while it isn't connected). One per controller, kept while the node runs.
-    pub async fn player_relay(&self, peer: EndpointId) -> anyhow::Result<SocketAddr> {
+    /// The relay and whether this call made it (`false`: it existed).
+    pub async fn player_relay(&self, peer: EndpointId) -> anyhow::Result<(SocketAddr, bool)> {
+        if let Some((addr, _)) = self.relays.lock().await.get(&peer) {
+            return Ok((*addr, false));
+        }
+        // Only for a controller connected now (the one registering, over this connection)
+        if !self.peers().wait_connected(peer).await {
+            anyhow::bail!("that app is not connected through the tunnel");
+        }
         let mut relays = self.relays.lock().await;
         if let Some((addr, _)) = relays.get(&peer) {
-            return Ok(*addr);
-        }
-        // Only for a controller connected now (the one registering, over this connection; its
-        // connection may be a moment from being recorded)
-        let connected = || {
-            self.peers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&peer)
-                .is_some_and(|c| c.close_reason().is_none())
-        };
-        let mut waited = 0;
-        while !connected() {
-            if waited >= 60 {
-                anyhow::bail!("that app is not connected through the tunnel");
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            waited += 1;
+            return Ok((*addr, false));
         }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let addr = listener.local_addr()?;
@@ -221,7 +212,12 @@ impl NodeTunnel {
             }
         });
         relays.insert(peer, (addr, task));
-        Ok(addr)
+        Ok((addr, true))
+    }
+
+    /// The controllers connected now, to wait for one without holding anything else.
+    pub fn peers(&self) -> Peers {
+        Peers(self.peers.clone())
     }
 
     /// The controller's player is not used any more (its registration failed, or it was removed):
@@ -282,6 +278,30 @@ async fn pipe(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) {
         let _ = send.finish();
     };
     tokio::join!(up, down);
+}
+
+/// The node's connected controllers ([`NodeTunnel::peers`]).
+#[derive(Clone)]
+pub struct Peers(Arc<std::sync::Mutex<HashMap<EndpointId, Connection>>>);
+
+impl Peers {
+    /// Whether `peer` is connected, waiting up to 3 s for a connection a moment from being
+    /// recorded (it connected just now).
+    pub async fn wait_connected(&self, peer: EndpointId) -> bool {
+        for _ in 0..60 {
+            let live = self
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&peer)
+                .is_some_and(|c| c.close_reason().is_none());
+            if live {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
 }
 
 // ---- controller side ----
@@ -354,12 +374,23 @@ impl Player {
 /// connect from 127.0.0.1) and give only them the node's room before `Hello`.
 pub const TUNNEL_SOURCE: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 
-/// Connect to the player from [`TUNNEL_SOURCE`] (where that address can't be used, from 127.0.0.1).
+/// The address the node's streams really come from on this machine: [`TUNNEL_SOURCE`], or
+/// 127.0.0.1 where that can't be bound (macOS has only 127.0.0.1 on its loopback). The player
+/// expects exactly this one.
+pub fn tunnel_source() -> std::net::IpAddr {
+    static USABLE: std::sync::OnceLock<std::net::IpAddr> = std::sync::OnceLock::new();
+    *USABLE.get_or_init(
+        || match std::net::TcpListener::bind(SocketAddr::new(TUNNEL_SOURCE, 0)) {
+            Ok(_) => TUNNEL_SOURCE,
+            Err(_) => std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),
+        },
+    )
+}
+
+/// Connect to the player from [`tunnel_source`].
 async fn connect_from_tunnel(target: SocketAddr) -> std::io::Result<TcpStream> {
     let s = tokio::net::TcpSocket::new_v4()?;
-    if s.bind(SocketAddr::new(TUNNEL_SOURCE, 0)).is_err() {
-        return TcpStream::connect(target).await;
-    }
+    s.bind(SocketAddr::new(tunnel_source(), 0))?;
     s.connect(target).await
 }
 

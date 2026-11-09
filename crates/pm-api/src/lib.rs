@@ -1799,13 +1799,13 @@ async fn add_endpoint(
     let mut body = body;
     let tunnel = match body.address.trim().strip_prefix(state::TUNNEL_PREFIX) {
         Some(peer) => {
-            let name = s.tunnel_player(peer).await.map_err(|e| {
+            let (name, made) = s.tunnel_player(peer).await.map_err(|e| {
                 ApiError::bad_request(format!(
                     "cannot reach the app's player through remote access: {e}"
                 ))
             })?;
             body.address = name.clone();
-            Some(name)
+            Some((name, made))
         }
         None => None,
     };
@@ -1814,9 +1814,13 @@ async fn add_endpoint(
     let added = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    // Not registered: its relay goes again
-    if let (Err(_), Some(name)) = (&added, &tunnel) {
-        s.drop_tunnel_player(name).await;
+    // Not registered: a relay this request made goes again (one the player's outputs already
+    // use stays: a failed re-registration must not cut a working zone off)
+    if let (Err(_), Some((name, true))) = (&added, &tunnel) {
+        let prefix = format!("net:{name}/");
+        if !s.outputs.list().iter().any(|o| o.id.0.starts_with(&prefix)) {
+            s.drop_tunnel_player(name).await;
+        }
     }
     let outs = added.map_err(|e| {
         let from = local_address().unwrap_or_else(|| "this node".into());
