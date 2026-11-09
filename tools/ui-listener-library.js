@@ -49,11 +49,13 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       await page.route(/\/v1\/me\/homeserver\/connect\/poll\?/, (r) => { polls += 1; if (polls < 2) return r.fulfill({ json: { state: 'pending' } }); hs = { connected: true, lost: false, pending: 0, stale: false }; return r.fulfill({ json: { state: 'ok' } }); });
       await page.route(/\/v1\/me\/services$/, (r) => (listener ? r.fulfill({ json: [
         { source: 'tidal', name: 'TIDAL', connected: false, available: true, setup: '/v1/sources/tidal/signin' },
-        { source: 'qobuz', name: 'Qobuz', connected: false, available: false, reason: 'the owner hasn’t set up a Qobuz app', setup: '/v1/sources/qobuz/signin' },
+        { source: 'qobuz', name: 'Qobuz', connected: false, available: true, setup: '/v1/sources/qobuz/signin' },
         { source: 'spotify', name: 'Spotify', connected: true, user: 'ann-spot', way: 'app', available: true, setup: '/v1/sources/spotify/signin' }] }) : r.fallback()));
       await page.route(/\/v1\/sources\/tidal\/signin$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { source: 'tidal', chosen: 'own-device', in_use: null, ways: [
         { id: 'app', label: 'TIDAL’s own sign-in', available: true }, { id: 'device', label: 'A device code', available: true, recommended: true }, { id: 'own-device', label: 'A device client of your own', available: true }],
         details: { unofficial: { client_from: null }, status: { signed_in: false } }, imports: [], places: [] } }) : r.fallback()));
+      // Qobuz: their own account, email and password (the node finds Qobuz's app itself)
+      await page.route(/\/v1\/sources\/qobuz\/unofficial$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { signed_in: false, enabled: false, quality: 'max', hires: false } }) : r.fallback()));
       await page.route(/\/v1\/sources\/spotify\/signin$/, (r) => (listener && r.request().method() === 'GET' ? r.fulfill({ json: { source: 'spotify', chosen: 'app', in_use: null, ways: [{ id: 'app', label: 'Spotify’s own sign-in', available: true, recommended: true }],
         details: { status: { configured: true, signed_in: false, app_from: 'settings', client_id: 'nodesclientid0123', redirect_uri: 'http://node.example/v1/sources/spotify/callback' }, librespot: {} }, imports: [], places: [] } }) : r.fallback()));
       const go = async (p) => { await page.goto(BASE + p); await page.locator('#main h1, #main h2').first().waitFor({ timeout: 20000 }); await sleep(400); };
@@ -97,7 +99,7 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       const txt = await page.locator('#main').innerText();
       assert.doesNotMatch(txt, /later version/, 'the old promise is gone');
       assert.match(txt, /My homeserver/); assert.match(txt, /Connected: your bookmarks are kept there/);
-      assert.match(txt, /My streaming accounts/i); assert.match(txt, /Signed in as ann-spot/); assert.match(txt, /hasn’t set up a Qobuz app/);
+      assert.match(txt, /My streaming accounts/i); assert.match(txt, /Signed in as ann-spot/); assert.match(txt, /Qobuz[\s\S]*Not signed in/);
       assert.doesNotMatch(txt, /Service apps|Device client ID|App ID and secret/, 'never the node’s own apps');
       await shot('settings-listener');
       // TIDAL: their own sign-in ways; the node's device client is the owner's to set
@@ -112,6 +114,11 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       const sp = await page.locator('details[data-svc="spotify"]').innerText();
       assert.doesNotMatch(sp, /nodesclientid0123|Your Spotify app/, 'never the node’s Spotify app');
       assert.equal(await page.locator('details[data-svc="spotify"] #spotapp, details[data-svc="spotify"] #spotappchange').count(), 0);
+      // Qobuz: the sign-in form of their own account, no app ID or secret (the node's)
+      await page.locator('details[data-svc="qobuz"] > summary').click();
+      await page.locator('details[data-svc="qobuz"] #qbin input[name="email"]').waitFor();
+      assert.equal(await page.locator('details[data-svc="qobuz"] #qbapp, details[data-svc="qobuz"] input[name="secret"]').count(), 0, 'never the node’s Qobuz app');
+      await shot('settings-qobuz');
       // Disconnect
       await page.locator('#hsoff').click(); await sleep(400);
       assert.ok(writes.some((w) => w.m === 'DISCONNECT'));

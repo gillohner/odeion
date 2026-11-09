@@ -651,6 +651,11 @@ mod tests {
             "a listener not connected yet"
         );
         assert!(!refused_for_good(&SyncError::Status(503, String::new())));
+        assert!(
+            refused_for_good(&SyncError::Status(422, String::new())),
+            "a listener's homeserver won't take it"
+        );
+        assert!(!refused_for_good(&SyncError::Status(502, String::new())));
         assert!(!refused_for_good(&SyncError::Unreachable(String::new())));
     }
 }
