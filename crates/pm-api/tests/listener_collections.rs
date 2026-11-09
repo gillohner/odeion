@@ -941,7 +941,7 @@ async fn a_change_waits_when_her_homeserver_cant_be_read_first() {
 }
 
 #[tokio::test]
-async fn her_other_apps_version_the_node_cant_hold_is_still_followed() {
+async fn her_other_apps_version_the_node_cant_hold_is_followed_never_written_over() {
     let dir = tempfile::tempdir().unwrap();
     let (s, fake, ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
@@ -976,17 +976,19 @@ async fn her_other_apps_version_the_node_cant_hold_is_still_followed() {
         Some(serde_json::json!({"public": false})),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert!(fake.paths(ANN, PUBLISHED).is_empty(), "its public copy went too");
-    assert!(
-        newest(&fake, ANN, &id).0 > other,
-        "the node's version is above it"
+    // Changing it here would write over that version unread: refused, nothing written
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(
+        newest(&fake, ANN, &id).0,
+        other,
+        "the other app's version stays the newest"
     );
+    // A delete reaches every version, the one it couldn't hold too
     let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT);
     assert!(
-        fake.paths(ANN, DRAFTS).is_empty(),
-        "every version went, the one it couldn't hold too"
+        fake.paths(ANN, DRAFTS).is_empty() && fake.paths(ANN, PUBLISHED).is_empty(),
+        "every version went, the one it couldn't hold and its public copy too"
     );
 }
 
@@ -1270,9 +1272,112 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
         .filter(|c| c.ends_with(&format!("read {phone}")))
         .count();
     assert_eq!(reads, 1, "not downloaded again on every read");
+    // Room again (the other collection shortened): it is read, kept, and changes go above it
+    set_ballast(1_000);
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Renamed"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (path, content) = newest(&fake, ANN, &id);
+    assert!(path > phone, "{path} above her phone's {phone}");
+    assert_eq!(item_uris(&content).len(), 501, "her phone's songs are kept");
     // Even with the copy over the cap, a delete goes, every version
     set_ballast(CAP + 100_000);
     let (st, v) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
     assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
     assert!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).is_empty());
+}
+
+#[tokio::test]
+async fn a_newer_version_the_node_cant_read_is_never_written_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let rename = |name: &str| Some(serde_json::json!({"name": name}));
+    let (_, v) = create(&app, &ann, "Long one", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    // Another device of hers made it longer than the node can read (over its 1 MiB cap)
+    let phone = another_app_writes(&fake, &id, false, |c| c["name"] = "Longer".into());
+    fake.unreadable.lock().unwrap().insert(phone.clone());
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        rename("Here"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(
+        newest(&fake, ANN, &id).0,
+        phone,
+        "nothing written over her other device's"
+    );
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        rename("Here"),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "and on the next try too (it is set aside): {v}"
+    );
+    assert_eq!(newest(&fake, ANN, &id).0, phone);
+
+    // The same when it is caught up from its own folder (all her posts can't be listed)
+    let (_, v) = create(&app, &ann, "Another", &[SONG_A]).await;
+    let other = v["summary"]["id"].as_str().unwrap().to_string();
+    let laptop = another_app_writes(&fake, &other, false, |c| c["name"] = "Longer too".into());
+    fake.unreadable.lock().unwrap().insert(laptop.clone());
+    fake.whole_list_fails.store(true, Ordering::SeqCst);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{other}"),
+        rename("Here"),
+    )
+    .await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(newest(&fake, ANN, &other).0, laptop);
+
+    // A delete still goes, every version
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{other}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(fake.paths(ANN, &format!("{DRAFTS}{other}/")).is_empty());
+}
+
+#[tokio::test]
+async fn a_new_one_her_homeserver_never_takes_goes_while_all_her_posts_cant_be_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    // Made while her homeserver was away: it waits
+    fake.down.store(true, Ordering::SeqCst);
+    let (st, v) = create(&app, &ann, "Never taken", &[SONG_A]).await;
+    assert_eq!(
+        (st, v["summary"]["synced"].clone()),
+        (StatusCode::OK, serde_json::json!(false)),
+        "{v}"
+    );
+    // Back, but all her posts can't be listed and it won't take that one: it goes, not shown as kept
+    fake.down.store(false, Ordering::SeqCst);
+    fake.whole_list_fails.store(true, Ordering::SeqCst);
+    fake.rejects.lock().unwrap().insert(ANN.to_string());
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(v, serde_json::json!([]), "{v}");
+    let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+    assert_eq!(me["pending"], 0, "{me}");
 }

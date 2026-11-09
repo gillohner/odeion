@@ -71,17 +71,33 @@ struct Shelf {
     #[serde(default)]
     other: Vec<String>,
     /// Newest versions of their collections the node left unread because its copy would pass
-    /// [`MAX_SHELF_BYTES`]: not downloaded again, and never written over.
+    /// [`MAX_SHELF_BYTES`], with what they would take: not downloaded again until they fit (other
+    /// collections deleted or shortened), and never written over.
     #[serde(default)]
-    too_big: Vec<String>,
+    too_big: Vec<TooBig>,
     /// The last read couldn't list all of their posts (more than the node lists, or their
     /// homeserver away): `GET /v1/me/homeserver` says `stale`.
     #[serde(default)]
     behind: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TooBig {
+    path: String,
+    bytes: usize,
+}
+
+/// Whether a version left unread for the copy's size would fit now, in place of `was`.
+fn fits_now(sh: &Shelf, path: &str, was: usize) -> bool {
+    sh.too_big
+        .iter()
+        .find(|t| t.path == path)
+        .is_some_and(|t| bytes_of(sh).saturating_sub(was).saturating_add(t.bytes) <= MAX_SHELF_BYTES)
+}
+
 /// What a refresh found: whether the node couldn't read what is there, and the collections
-/// whose newer version it left unread to stay within [`MAX_SHELF_BYTES`].
+/// whose newer version it left unread (to stay within [`MAX_SHELF_BYTES`], or one it can't read
+/// or hold at all): a change of those is refused rather than written over it; a delete goes.
 #[derive(Debug, Default)]
 struct Caught {
     stale: bool,
@@ -290,10 +306,11 @@ async fn refresh(
         .retain(|k| k.pending || written.contains(&k.id) || private.contains_key(&k.id));
     let heads: std::collections::HashSet<&str> = private.values().map(|h| h.path.as_str()).collect();
     sh.other.retain(|p| heads.contains(p.as_str()));
-    sh.too_big.retain(|p| heads.contains(p.as_str()));
+    sh.too_big.retain(|t| heads.contains(t.path.as_str()));
     let other: std::collections::HashSet<String> = sh.other.iter().cloned().collect();
-    let too_big: std::collections::HashSet<String> = sh.too_big.iter().cloned().collect();
+    let too_big: std::collections::HashSet<String> = sh.too_big.iter().map(|t| t.path.clone()).collect();
     let mut caught = Caught::default();
+    let size_now = bytes_of(&*sh);
 
     let mut wanted: Vec<(&String, &v1::Head)> = Vec::new();
     // New ones are downloaded only while the node keeps fewer than MAX_COLLECTIONS
@@ -304,24 +321,34 @@ async fn refresh(
         match sh.items.iter_mut().find(|k| &k.id == id) {
             // Still waiting (their homeserver stopped answering), or just written: the node's is newer
             Some(k) if k.pending || written.contains(&k.id) => {}
-            // Its newest version is no collection the node can hold (another app's, or too big):
-            // not read again, but still followed, so a delete or "private again" reaches it and
-            // the node's next version goes above it
+            // Its newest version is no collection the node can hold (another app's, or one it can
+            // never read): not read again, but still followed, so a delete reaches it; a change
+            // here would write over it unread, so it is refused
             Some(k) if other.contains(&head.path) => {
                 k.versions = versions;
                 k.public = public.contains_key(id);
                 if head.edit_id.as_bytes() > k.head.as_bytes() {
-                    k.head = head.edit_id.clone();
+                    caught.held_back.insert(id.clone());
                 }
             }
             Some(k) => {
                 k.versions = versions;
                 k.public = public.contains_key(id);
                 if head.edit_id.as_bytes() > k.head.as_bytes() {
-                    // Left unread to stay within MAX_SHELF_BYTES: not downloaded again, and a
-                    // change of it is refused rather than written over it
+                    // Left unread to stay within MAX_SHELF_BYTES: not downloaded again until it
+                    // fits, and a change of it meanwhile is refused rather than written over it
                     if too_big.contains(&head.path) {
-                        caught.held_back.insert(id.clone());
+                        let was = bytes_of(&*k);
+                        let held = sh
+                            .too_big
+                            .iter()
+                            .find(|t| t.path == head.path)
+                            .map_or(usize::MAX, |t| t.bytes);
+                        if size_now.saturating_sub(was).saturating_add(held) > MAX_SHELF_BYTES {
+                            caught.held_back.insert(id.clone());
+                        } else {
+                            wanted.push((id, head));
+                        }
                     } else {
                         wanted.push((id, head));
                     }
@@ -355,7 +382,7 @@ async fn refresh(
             // post, so the ones after it still come in
             Err(PersonalError::Rejected(m)) => {
                 tracing::warn!(%key, %id, "a listener's collection version can't be read; left aside: {m}");
-                set_aside(sh, id, head);
+                set_aside(sh, id, head, &mut caught);
                 continue;
             }
             Err(e) => {
@@ -364,7 +391,7 @@ async fn refresh(
             }
         };
         let Some(playlist) = their_collection(&bytes, id, &head.edit_id) else {
-            set_aside(sh, id, head);
+            set_aside(sh, id, head, &mut caught);
             continue;
         };
         let mut versions = head.versions.clone();
@@ -383,11 +410,16 @@ async fn refresh(
         let grown = size.saturating_sub(was).saturating_add(bytes_of(&k));
         if grown > MAX_SHELF_BYTES {
             tracing::warn!(%key, %id, "a listener's collections are over {MAX_SHELF_BYTES} bytes on the node; this version isn't kept");
-            sh.too_big.push(head.path.clone());
+            sh.too_big.retain(|t| t.path != head.path);
+            sh.too_big.push(TooBig {
+                path: head.path.clone(),
+                bytes: bytes_of(&k),
+            });
             caught.held_back.insert(id.clone());
             continue;
         }
         size = grown;
+        sh.too_big.retain(|t| t.path != head.path);
         match sh.items.iter_mut().find(|x| x.id == *id) {
             Some(x) => *x = k,
             None => sh.items.push(k),
@@ -397,13 +429,17 @@ async fn refresh(
 }
 
 /// A newest version the node can't hold (another app's post, or one it can never read) is left
-/// aside: not downloaded again. A collection the node has still goes above it.
-fn set_aside(sh: &mut Shelf, id: &str, head: &v1::Head) {
+/// aside: not downloaded again. When it is a newer version of a collection the node has, that
+/// collection is held back: a change here would write over it unread, so it is refused (a
+/// delete still goes).
+fn set_aside(sh: &mut Shelf, id: &str, head: &v1::Head, caught: &mut Caught) {
     sh.other.push(head.path.clone());
-    if let Some(k) = sh.items.iter_mut().find(|k| k.id == id && !k.pending) {
-        if head.edit_id.as_bytes() > k.head.as_bytes() {
-            k.head = head.edit_id.clone();
-        }
+    if sh
+        .items
+        .iter()
+        .any(|k| k.id == id && !k.pending && head.edit_id.as_bytes() > k.head.as_bytes())
+    {
+        caught.held_back.insert(id.to_string());
     }
 }
 
@@ -459,13 +495,15 @@ async fn catch_up_one(
     };
     k.versions = versions;
     k.public = public.is_some();
-    if head.edit_id.as_bytes() <= k.head.as_bytes() || sh.other.contains(&head.path) {
-        if head.edit_id.as_bytes() > k.head.as_bytes() {
-            k.head = head.edit_id.clone();
-        }
+    if head.edit_id.as_bytes() <= k.head.as_bytes() {
         return Ok(caught);
     }
-    if sh.too_big.contains(&head.path) {
+    // Newer, and one the node can't hold, or left unread for the copy's size (and still too big
+    // for it): held back, never written over
+    let was = bytes_of(&sh.items[i]);
+    if sh.other.contains(&head.path)
+        || (sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was))
+    {
         caught.held_back.insert(id.to_string());
         return Ok(caught);
     }
@@ -478,18 +516,22 @@ async fn catch_up_one(
                 let grown = bytes_of(&*sh)
                     .saturating_sub(bytes_of(&sh.items[i]))
                     .saturating_add(bytes_of(&newer));
+                sh.too_big.retain(|t| t.path != head.path);
                 if grown > MAX_SHELF_BYTES {
-                    sh.too_big.push(head.path.clone());
+                    sh.too_big.push(TooBig {
+                        path: head.path.clone(),
+                        bytes: bytes_of(&newer),
+                    });
                     caught.held_back.insert(id.to_string());
                 } else {
                     sh.items[i] = newer;
                 }
             }
-            None => set_aside(sh, id, &head),
+            None => set_aside(sh, id, &head, &mut caught),
         },
         // Gone a moment ago: the next read sees it
         Ok(None) => {}
-        Err(PersonalError::Rejected(_)) => set_aside(sh, id, &head),
+        Err(PersonalError::Rejected(_)) => set_aside(sh, id, &head, &mut caught),
         Err(e) => caught.stale = read_outcome(s, key, e)?,
     }
     Ok(caught)
@@ -525,9 +567,15 @@ async fn drain_one_by_one(
             }
             Err(PersonalError::Rejected(m)) => {
                 tracing::warn!(%key, %id, "a listener's homeserver won't take a waiting collection; dropped: {m}");
-                k.pending = false;
-                k.head.clear();
-                sh.items[i] = k;
+                if k.versions.is_empty() {
+                    // Never on their homeserver (a new one): it goes, rather than showing as kept
+                    sh.items.remove(i);
+                } else {
+                    // What their homeserver has comes back at the next read of it
+                    k.pending = false;
+                    k.head.clear();
+                    sh.items[i] = k;
+                }
             }
             Err(e) => {
                 // The versions written before it failed are kept
@@ -679,7 +727,7 @@ async fn change(
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
-                "This collection changed in another app and is now more than this node keeps for you ({} MiB in all): change it there, or delete or shorten others here first",
+                "This collection has a newer version from another app that this node can't read or keep (it keeps {} MiB of collections for you): change it there, or delete or shorten others here and try again",
                 MAX_SHELF_BYTES >> 20
             ),
         ));
