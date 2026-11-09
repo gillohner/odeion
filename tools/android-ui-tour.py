@@ -55,7 +55,7 @@ def run(h):
         tap(lambda n: 'text="Zones"' in n or 'content-desc="Zones"' in n, "the Zones tab")
         time.sleep(2)
         # (the WebView exposes a button's words on a node of their own, not always the clickable one)
-        tap(lambda n: 'text="Play to"' in n or 'content-desc="Play to"' in n, "Play to on the phone's zone card")
+        tap(lambda n: 'Play to' in n and 'Play to on' not in n, "Play to on the phone's zone card")
         time.sleep(2)
         tap(lambda n: 'text="Home"' in n or 'content-desc="Home"' in n, "the Home tab")
         time.sleep(2)
@@ -163,6 +163,13 @@ def run(h):
         except Exception as e:  # noqa: BLE001
             log(f"album page / Confirm matches not reached here: {e}")
         log("PASS: the phone UI tour (mini player and cover swipes, sheets, Back order)")
+    except Exception:
+        # (what the screen offered, for the next attempt's matchers)
+        try:
+            (out / "ui-nodes-fail.txt").write_text("\n".join(ui_nodes()))
+        except Exception:  # noqa: BLE001
+            pass
+        raise
     finally:
         api("POST", f"/v1/zones/{zid}/transport", {"action": "stop"})
         if rec:
