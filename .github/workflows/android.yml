@@ -93,6 +93,8 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: emulator harness regression checks
+        run: python3 -I tools/android-endpoint-test.py
       - id: pick
         env:
           EVENT: ${{ github.event_name }}
@@ -373,8 +375,8 @@ jobs:
           # No sound card on the runner: the emulator's audio is consumed in real time and dropped.
           QEMU_AUDIO_DRV: none
           # Then the phone UI with a finger (tools/android-ui-tour.py): swipes, sheets, Back, with
-          # screenshots and a recording; it reports (strict would fail the job on it)
-          PM_UI_TOUR: '1'
+          # screenshots and a recording; every assertion must pass
+          PM_UI_TOUR: strict
         with:
           api-level: ${{ matrix.api }}
           arch: x86_64

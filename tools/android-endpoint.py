@@ -2,7 +2,7 @@
 """The phone as a zone, on an Android emulator (CI: android.yml, phone-as-zone; release.yml, android-emulator).
 
 The release APK is installed and connected by address to a node on the host
-(10.0.2.2 from the emulator) over plain http, and must show the node's page.
+(127.0.0.1:17788 through adb reverse) over plain http, and must show the node's page.
 Its built-in player (AAudio through cpal)
 must become a zone that plays a track in real time, and keep playing with the
 app in the background: the foreground service (PlayerService.kt) keeps the
@@ -37,24 +37,73 @@ import time
 import urllib.request
 import wave
 from pathlib import Path
+from urllib.parse import urlsplit
 
 PKG = "to.synonym.pubkymusic"
 NODE = os.environ.get("PM_TEST_NODE", "http://127.0.0.1:7788")
-# The node gets an API token: the app reaches it as 10.0.2.2 (the emulator's name for the runner),
-# and a node without one answers only at its loopback names. Made per run.
+# An API token made per run, required even over the emulator's adb-reverse connection.
 TOKEN = secrets.token_hex(16)
 apk, node_bin, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
 
 
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] {str(msg).replace(TOKEN, '[redacted]')}", flush=True)
 
 
 def adb(*args, check=True):
-    r = subprocess.run(["adb", *args], capture_output=True, text=True, timeout=120)
+    try:
+        r = subprocess.run(["adb", *args], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"adb {' '.join(args)} timed out".replace(TOKEN, "[redacted]")) from None
     if check and r.returncode != 0:
-        raise RuntimeError(f"adb {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
+        raise RuntimeError(f"adb {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}".replace(TOKEN, "[redacted]"))
     return r.stdout
+
+
+def guest_http_status(host, port):
+    """Probe from Android without credentials; retain only the HTTP status, never the body."""
+    request = f"GET /v1/info HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    try:
+        r = subprocess.run(["adb", "shell", "toybox", "nc", "-w", "5", host, str(port)],
+                           input=request, capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    if r.returncode:
+        return f"exit {r.returncode}"
+    status = re.match(r"HTTP/1\.[01] (\d{3})\b", r.stdout)
+    return status.group(1) if status else "no HTTP response"
+
+
+def prepare_node_transport():
+    """Wire the emulator to this runner's fixture before starting the app, without a fallback.
+
+    Run 42581763874 reached connect_manual but timed out at 10.0.2.2 while the host node
+    answered. Record that alias separately; use adb reverse for a stable fixture route, as
+    the update/Ring probes do. The real app still submits the token and connects over HTTP.
+    """
+    node = urlsplit(NODE)
+    if node.scheme != "http" or node.hostname not in ("127.0.0.1", "localhost"):
+        raise RuntimeError("PM_TEST_NODE must name the HTTP fixture on the runner's loopback")
+    port = node.port or 80
+    log(f"diagnostic host alias without a token: {guest_http_status('10.0.2.2', port)}")
+    adb("reverse", "--no-rebind", "tcp:17788", f"tcp:{port}")
+    status = guest_http_status("127.0.0.1", 17788)
+    if status != "401":
+        raise RuntimeError(f"emulator fixture preflight must refuse an absent token with 401; got {status}")
+    log("emulator fixture reachable through adb reverse; an absent token is refused (401)")
+    return "127.0.0.1:17788"
+
+
+def run_ui_tour():
+    """Every enabled tour is an acceptance gate; no report-only mode."""
+    if not os.environ.get("PM_UI_TOUR"):
+        return
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("android_ui_tour", Path(__file__).with_name("android-ui-tour.py"))
+    tour = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tour)
+    tour.run({"adb": adb, "api": api, "shot": shot, "ui_nodes": ui_nodes, "tap": tap,
+              "center": center, "until": until, "log": log, "out": out})
 
 
 def api(method, path, body=None):
@@ -344,6 +393,7 @@ def run(node):
     log(adb("install", "-r", *([] if sdk >= 33 else ["-g"]), apk).strip())
     # Before the app starts: the address it will register reaches its player
     relay(GUEST)
+    app_node = prepare_node_transport()
     adb("logcat", "-c")
     lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
                           stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
@@ -351,7 +401,7 @@ def run(node):
         adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
         tap(lambda n: "connect by address" in n, "“Or connect by address”")
         # The address field is the page's first text field (its id and hint differ between WebViews)
-        type_into(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field", "10.0.2.2:7788")
+        type_into(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field", app_node)
         # The node's token in the form's token field (a password field shows no text to check)
         type_into(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field",
                   TOKEN, readable=False)
@@ -367,7 +417,11 @@ def run(node):
         def diagnose():
             """What the app shows, and whether the node still answers the runner."""
             try:
-                screen = " / ".join(t for t in re.findall(r'text="([^"]+)"', "\n".join(ui_nodes())) if t.strip())[:300]
+                nodes = "\n".join(ui_nodes()).replace(TOKEN, "[redacted]")
+                (out / "connect-failure-ui.txt").write_text(nodes)
+                # Keep the error at the bottom of the form, which the old 300-character prefix
+                # cut off. The full, redacted accessibility dump is retained in the artifact.
+                screen = " / ".join(t for t in re.findall(r'text="([^"]+)"', nodes) if t.strip())[-1000:]
             except Exception as e:  # noqa: BLE001
                 screen = f"(no screen: {e})"
             try:
@@ -501,20 +555,7 @@ def run(node):
         until("the player service after a restart", lambda: "player service started" in logcat(), timeout=90)
         shot("4-restarted")
         log("restarted: reconnected to the saved node, player service started")
-        if os.environ.get("PM_UI_TOUR"):
-            # The phone UI with a finger: swipes, sheets, Back (tools/android-ui-tour.py)
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("android_ui_tour", Path(__file__).with_name("android-ui-tour.py"))
-            tour = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(tour)
-            # (it reports; PM_UI_TOUR=strict fails the job on it: it taps Play to where CI's emulator
-            # screen has it, so another screen may need its own place)
-            try:
-                tour.run({"adb": adb, "api": api, "shot": shot, "ui_nodes": ui_nodes, "tap": tap, "center": center, "until": until, "log": log, "out": out})
-            except Exception as e:  # noqa: BLE001
-                if os.environ.get("PM_UI_TOUR") == "strict":
-                    raise
-                log(f"UI tour did not complete (reported, not failing the job): {e!r}")
+        run_ui_tour()
 
         # A crash: the next launch shows the report, and Continue carries on
         crashed = subprocess.run(["adb", "shell", "am", "crash", PKG], capture_output=True, text=True, timeout=60)

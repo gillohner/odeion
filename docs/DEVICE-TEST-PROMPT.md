@@ -195,7 +195,9 @@ the phone: the WebView itself, the keyboard, the first frames of a cold start.
 Checked here with a phone's viewport rules in Chromium (tools/ui-phone-simplify.js and
 tools/ui-nowplaying-phone.js at 360, 390 and 412 px, swipes as a finger's Pointer Events) and in the
 Android emulator (the android workflow's phone-as-zone job: its UI tour, screenshots and a
-recording). Not checked without the phone: how the swipes feel under a real finger (speed, the
+recording; every tour assertion must pass). The emulator reaches its fixture node through
+ADB; a real phone reaching its node over Wi-Fi is a separate acceptance check.
+Not checked without the phone: how the swipes feel under a real finger (speed, the
 40 px threshold), the keyboard over the tag field, and Back from the system's gesture navigation.
 
 ```

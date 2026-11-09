@@ -1,4 +1,4 @@
-"""The phone UI with a finger, on the Android emulator (android-endpoint.py runs it with PM_UI_TOUR=1).
+"""The phone UI with a finger, on the Android emulator (android-endpoint.py runs it with PM_UI_TOUR=strict).
 
 The app is connected to the node and its own zone registered. Three songs are queued on that zone and
 the page is pointed at it (Zones, its card's Play to). Then everything goes as a finger does it
