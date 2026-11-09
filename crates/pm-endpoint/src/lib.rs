@@ -38,12 +38,18 @@ pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// that is gone.
 const KEEPALIVE: Duration = Duration::from_secs(60);
 
+pub mod owner;
+
+/// How long an `Open` waits for the app's own player to let go of the output.
+const TAKE_WAIT: Duration = Duration::from_secs(3);
+
 pub struct Endpoint {
     pub name: String,
     pub outputs: OutputRegistry,
     key: Key,
-    /// Outputs with an open session; a second `Open` is refused.
-    busy: Mutex<HashSet<OutputId>>,
+    /// Outputs in use: by a session (a second `Open` is refused) or the app's own player (an
+    /// `Open` stops it first).
+    owner: owner::OutputOwner,
     sessions: Arc<AtomicUsize>,
     waiting: Arc<Mutex<Waiting>>,
     /// Addresses that showed the key, or where the app expects its node: they wait apart.
@@ -192,12 +198,17 @@ impl Endpoint {
             name: name.to_string(),
             outputs,
             key,
-            busy: Mutex::new(HashSet::new()),
+            owner: owner::OutputOwner::new(),
             sessions: Arc::new(AtomicUsize::new(0)),
             waiting: Arc::default(),
             known: Mutex::default(),
             limits,
         })
+    }
+
+    /// Who uses which output: the app's own player takes its output here too.
+    pub fn owner(&self) -> &owner::OutputOwner {
+        &self.owner
     }
 
     /// Give `ip` (where the app expects its node) room of its own before `Hello`, as an address
@@ -430,19 +441,27 @@ impl Endpoint {
                         )?;
                         continue;
                     };
-                    if !self.busy.lock().expect("busy").insert(id.clone()) {
-                        write_frame(
-                            w,
-                            &Frame::Error {
-                                message: format!("{output} is in use"),
-                            },
-                        )?;
-                        continue;
-                    }
+                    // The app's own player on it is stopped first: its read side shut, this
+                    // session ends where it reads next and tells the node why
+                    let taken = Arc::new(AtomicBool::new(false));
+                    let stop: owner::Stop = {
+                        let (taken, conn) = (taken.clone(), r.get_ref().try_clone()?);
+                        Arc::new(move || {
+                            taken.store(true, Ordering::SeqCst);
+                            let _ = conn.shutdown(std::net::Shutdown::Read);
+                        })
+                    };
+                    let claim = match self.owner.take(&id, owner::Holder::Node, stop, TAKE_WAIT) {
+                        Ok(c) => c,
+                        Err(message) => {
+                            write_frame(w, &Frame::Error { message })?;
+                            continue;
+                        }
+                    };
                     // A paused zone keeps its output open without a word for as long as it likes
                     r.get_ref().set_read_timeout(None)?;
-                    let result = self.run_open(r, w, out, format);
-                    self.busy.lock().expect("busy").remove(&id);
+                    let result = self.run_open(r, w, out, format, &taken);
+                    drop(claim);
                     match result {
                         Ok(()) => return Ok(()),
                         Err(e) => {
@@ -483,6 +502,7 @@ impl Endpoint {
         w: &mut BufWriter<TcpStream>,
         out: Arc<dyn Output>,
         format: AudioFormat,
+        taken: &AtomicBool,
     ) -> Result<(), StreamError> {
         let mut sink: Box<dyn AudioSink> = match block_on(out.open(format)) {
             Ok(s) => s,
@@ -508,6 +528,10 @@ impl Endpoint {
         // held unplayed is written again on its successor
         let mut recent = Recent::default();
         loop {
+            // The app's own player took the output: the zone pauses and says so
+            if taken.load(Ordering::SeqCst) {
+                return taken_by_app(w, sink, &*out);
+            }
             match read_frame(r) {
                 Ok(Incoming::Audio(bytes)) => {
                     let block = decode_samples(format, &bytes)?;
@@ -564,12 +588,39 @@ impl Endpoint {
                 Err(StreamError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     // Connection dropped: stop immediately rather than play out stale audio.
                     let _ = sink.flush();
+                    // Or the app's own player took the output
+                    if taken.load(Ordering::SeqCst) {
+                        return taken_by_app(w, sink, &*out);
+                    }
                     return Ok(());
                 }
                 Err(e) => return Err(e),
             }
         }
     }
+}
+
+/// Why the phone's own zone paused when the app's player took its output.
+pub const TAKEN_BY_APP: &str = "the Odeion app on this device plays here now";
+
+/// The app's own player took the output: let go of the device first, then tell the node (its
+/// zone pauses with [`TAKEN_BY_APP`]).
+fn taken_by_app(
+    w: &mut BufWriter<TcpStream>,
+    mut sink: Box<dyn AudioSink>,
+    out: &dyn Output,
+) -> Result<(), StreamError> {
+    let _ = sink.flush();
+    drop(sink);
+    let gone = SinkError::Gone(out.id(), TAKEN_BY_APP.into());
+    let _ = write_frame(
+        w,
+        &Frame::Error {
+            message: gone.to_string(),
+        },
+    );
+    let _ = std::io::Write::flush(w);
+    Ok(())
 }
 
 /// A sink's error for the node: a Gone said to it is one the zone hears (it pauses), so the sink
