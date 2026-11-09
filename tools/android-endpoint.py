@@ -187,21 +187,50 @@ def zone_state(zid):
 
 
 def stream_music():
-    """Android's media volume as (index, max), from `cmd media_session` (or the older `media`)."""
+    """Android's media volume as (index, max): `cmd media_session volume --get` where it answers,
+    else `dumpsys audio` (the STREAM_MUSIC block: its Max, and Current for the device it plays on).
+    What each said goes to volume-cmd.txt."""
+    seen = []
     for cmd in (["cmd", "media_session", "volume", "--stream", "3", "--get"], ["media", "volume", "--stream", "3", "--get"]):
         r = subprocess.run(["adb", "shell", *cmd], capture_output=True, text=True, timeout=30)
+        seen.append(f"$ {' '.join(cmd)}\n{r.stdout}{r.stderr}")
         m = re.search(r"volume is (\d+) in range \[(\d+)\.\.(\d+)\]", r.stdout + r.stderr)
         if m:
             return int(m.group(1)), int(m.group(3))
-    return None
+    d = adb("shell", "dumpsys", "audio", check=False)
+    block = re.search(r"- STREAM_MUSIC:(.*?)(?:\n- STREAM_|\Z)", d, re.S)
+    found = None
+    if block:
+        b = block.group(1)
+        top = re.search(r"Max:\s*(\d+)", b)
+        cur = re.search(r"Current:\s*([^\n]*)", b)
+        dev = re.search(r"Devices:\s*([^\s(]+)", b)
+        if top and cur:
+            pairs = re.findall(r"\(([^)]*)\):\s*(\d+)", cur.group(1))
+            pick = next((v for n, v in pairs if dev and n == dev.group(1)), pairs[0][1] if pairs else None)
+            if pick is not None:
+                found = (int(pick), int(top.group(1)))
+        seen.append("dumpsys audio STREAM_MUSIC:" + b[:600])
+    with open(out / "volume-cmd.txt", "a") as f:
+        f.write("\n".join(seen) + f"\n=> {found}\n\n")
+    return found
 
 
 def set_stream_music(index):
+    """Android's media volume to `index`; down to 0 by the volume-down key where the shell can't set
+    it (the app on screen: its local session takes the key, as a phone's own button)."""
     for cmd in (["cmd", "media_session", "volume", "--stream", "3", "--set", str(index)], ["media", "volume", "--stream", "3", "--set", str(index)]):
         subprocess.run(["adb", "shell", *cmd], capture_output=True, text=True, timeout=30)
         s = stream_music()
         if s and s[0] == index:
             return s
+    if index == 0:
+        for _ in range(60):
+            s = stream_music()
+            if s and s[0] == 0:
+                return s
+            adb("shell", "input", "keyevent", "KEYCODE_VOLUME_DOWN")
+            time.sleep(0.3)
     raise AssertionError(f"cannot set Android's media volume to {index} (now {stream_music()})")
 
 
