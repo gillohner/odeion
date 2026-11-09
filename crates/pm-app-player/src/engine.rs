@@ -152,7 +152,11 @@ impl From<bool> for Heard {
 
 impl Page {
     /// What the zone says plays now (its id and position): where the current song is.
-    fn note(&mut self, playing: Option<(u64, u64)>) {
+    fn note(&mut self, playing: Option<(u64, u64)>, transport: Transport) {
+        // Playing again: a play from the pause is over (whatever the order its events came in)
+        if transport == Transport::Playing {
+            self.resuming = None;
+        }
         if let Some((id, at)) = playing {
             if Some(id) == self.current {
                 self.heard_at = at;
@@ -298,6 +302,8 @@ struct Inner {
     page: Mutex<Page>,
     notify: Mutex<Option<Notify>>,
     last: Mutex<Option<(Status, Instant)>>,
+    /// The USB DAC the player paused on (see [`same_dac`]); a stop or a failed open forgets it.
+    paused_dac: Arc<Mutex<Option<String>>>,
 }
 
 /// The app's own player on one output. Cloning shares it.
@@ -319,6 +325,7 @@ impl AppPlayer {
                 page: Mutex::default(),
                 notify: Mutex::default(),
                 last: Mutex::default(),
+                paused_dac: Arc::default(),
             }),
         }
     }
@@ -360,7 +367,7 @@ impl AppPlayer {
         let weak = Arc::downgrade(&self.inner);
         let owned: Arc<dyn Output> = Arc::new(Owned {
             inner: self.inner.output.clone(),
-            paused_dac: Arc::default(),
+            paused_dac: self.inner.paused_dac.clone(),
             owner: self.inner.owner.clone(),
             player: weak.clone(),
         });
@@ -418,6 +425,7 @@ impl AppPlayer {
                 p.taken_at = None;
                 p.broke_at = None;
                 p.breaking = false;
+                *self.inner.paused_dac.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                     z.stop();
                     z.clear();
@@ -570,6 +578,7 @@ impl AppPlayer {
             p.resuming = None;
             p.taken_at = None;
             p.url = None;
+            *self.inner.paused_dac.lock().unwrap_or_else(|e| e.into_inner()) = None;
             p.current = None;
         }
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
@@ -658,9 +667,12 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             Ok(ev) => {
                                 let Some(inner) = player.upgrade() else { return };
                                 let p = AppPlayer { inner };
-                                let playing = state.borrow().now_playing.as_ref().map(|np| (np.item.id, np.position_ms));
+                                let (playing, transport) = {
+                                    let z = state.borrow();
+                                    (z.now_playing.as_ref().map(|np| (np.item.id, np.position_ms)), z.transport)
+                                };
                                 let mut pg = p.page();
-                                pg.note(playing);
+                                pg.note(playing, transport);
                                 let heard = pg.on(&ev);
                                 // (under the page's lock: no load comes in between)
                                 if heard.stop {
@@ -681,8 +693,11 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             }
                             player.upgrade().map(|inner| {
                                 let p = AppPlayer { inner };
-                                let playing = state.borrow().now_playing.as_ref().map(|np| (np.item.id, np.position_ms));
-                                p.page().note(playing);
+                                let (playing, transport) = {
+                                    let z = state.borrow();
+                                    (z.now_playing.as_ref().map(|np| (np.item.id, np.position_ms)), z.transport)
+                                };
+                                p.page().note(playing, transport);
                                 (p, false)
                             })
                         }
@@ -802,7 +817,7 @@ fn same_dac(paused_dac: &Mutex<Option<String>>, output: &dyn Output, id: &Output
     }
     Err(SinkError::Gone(
         id.clone(),
-        format!("{name} is no longer connected"),
+        format!("{name} is no longer where this phone plays"),
     ))
 }
 
@@ -1141,7 +1156,7 @@ mod tests {
         let st = wait(&p, "still paused, saying why", |s| {
             s.error
                 .as_deref()
-                .is_some_and(|e| e.contains("FiiO KA17 is no longer connected"))
+                .is_some_and(|e| e.contains("FiiO KA17 is no longer where this phone plays"))
         });
         assert_eq!(st.transport, Transport::Paused, "{st:?}");
         assert!(
@@ -1165,9 +1180,22 @@ mod tests {
             s.transport == Transport::Paused
                 && s.error
                     .as_deref()
-                    .is_some_and(|e| e.contains("no longer connected"))
+                    .is_some_and(|e| e.contains("no longer where this phone plays"))
         });
         assert_eq!(out.inner.opens_total(), opens, "nothing opened");
+        p.stop();
+        // Paused on the DAC, stopped, unplugged: a new song later plays (nothing remembered)
+        *out.dac.lock().unwrap() = Some("FiiO KA17".into());
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "playing", |s| s.transport == Transport::Playing);
+        p.pause();
+        wait(&p, "paused", |s| s.transport == Transport::Paused);
+        p.stop();
+        *out.dac.lock().unwrap() = None;
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "a new song plays", |s| {
+            s.transport == Transport::Playing && s.error.is_none()
+        });
         p.stop();
     }
 
@@ -1355,9 +1383,9 @@ mod tests {
             ahead: Some(("b".into(), 2)),
             ..Page::default()
         };
-        pg.note(Some((1, 61_000)));
+        pg.note(Some((1, 61_000)), Transport::Playing);
         // The zone has already published the next song (at 0) when the error is handled
-        pg.note(Some((2, 0)));
+        pg.note(Some((2, 0)), Transport::Playing);
         let h = pg.on(&ZoneEvent::Error {
             message: "decode: the stream broke off".into(),
         });
