@@ -326,7 +326,8 @@ def media_controls(zid, track):
         raise
     def remote():
         s = our_session()
-        return s if "volumeType=2" in s else None
+        # Android 11 prints the type as a number, 15 by name
+        return s if re.search(r"volumeType=(?:2\b|REMOTE)", s) else None
     try:
         until("the session on the network zone, with its own volume (remote)", remote, timeout=20)
     except RuntimeError:
