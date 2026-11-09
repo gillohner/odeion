@@ -64,6 +64,7 @@ struct State {
     phone_volume: Value,
     /// Changing the output mode/consent or DAC during a call revokes automatic resume.
     native_focus_route: Option<u64>,
+    native_request: u64,
     pushed: String,
     art: Option<String>,
     /// The audio focus as last asked: held, and whether Android may duck it.
@@ -394,6 +395,7 @@ impl Media {
             Event::Page { origin, data } => self.page(&origin, &data).await,
             Event::Focus(change) => self.focus_changed(change).await,
             Event::Noisy => {
+                self.native_notice("pause");
                 if let Some(p) = crate::native::media_player() {
                     p.pause_for_focus(false);
                 }
@@ -589,19 +591,26 @@ impl Media {
         // entitlement belong to the engine and work with a suspended WebView.
         match c {
             Command::Play => {
-                let _ = tauri::async_runtime::spawn_blocking(move || p.play()).await;
+                self.native_play(p).await;
             }
-            Command::Pause => p.pause(),
-            Command::Stop => p.stop(),
-            Command::Seek(ms) => p.seek(ms),
+            Command::Pause | Command::Stop => {
+                self.native_notice("pause");
+                p.pause();
+            }
+            Command::Seek(ms) => {
+                self.native_notice("seek");
+                p.seek(ms);
+            }
             Command::Toggle => {
                 if p.status().transport == pm_app_player::Transport::Playing {
+                    self.native_notice("pause");
                     p.pause();
                 } else {
-                    let _ = tauri::async_runtime::spawn_blocking(move || p.play()).await;
+                    self.native_play(p).await;
                 }
             }
             Command::Next | Command::Previous => {
+                self.native_notice("queue");
                 p.cancel_focus_resume();
                 if let Some((action, time)) = c.page_action() {
                     self.eval(media::page_action_script(action, time));
@@ -648,6 +657,45 @@ impl Media {
                 }
             }
         }
+    }
+
+    /// Keep the page's retry cancellation in step with direct engine commands. The request id
+    /// and the page's own command sequence discard a late failure after any newer choice.
+    fn native_notice(&self, action: &str) -> u64 {
+        let id = {
+            let mut st = self.state();
+            st.native_request += 1;
+            st.native_request
+        };
+        let detail = serde_json::json!({"id":id,"action":action});
+        self.eval(format!(
+            "window.dispatchEvent(new CustomEvent('pmdesktop:native-command',{{detail:{detail}}}));"
+        ));
+        id
+    }
+
+    async fn native_play(&self, p: pm_app_player::AppPlayer) {
+        let before = p.status();
+        if before.url.is_none() {
+            // A previous open failed: only the page still has its queue entry and retry policy.
+            self.eval(media::page_action_script("play", None));
+            return;
+        }
+        let id = self.native_notice("play");
+        let result = tauri::async_runtime::spawn_blocking(move || p.play()).await;
+        let error = match result {
+            Ok(Err(e)) if !e.overtaken => e,
+            Err(e) => pm_app_player::LoadError {
+                refused: false,
+                overtaken: false,
+                message: format!("the app's play request did not finish: {e}"),
+            },
+            _ => return,
+        };
+        let detail = serde_json::json!({"id":id,"url":before.url,"at":before.position_ms as f64 / 1000.0,"error":error});
+        self.eval(format!(
+            "window.dispatchEvent(new CustomEvent('pmdesktop:native-failed',{{detail:{detail}}}));"
+        ));
     }
 
     async fn page(&self, origin: &str, data: &str) {
@@ -720,6 +768,7 @@ impl Media {
         tracing::info!(change, ?action, "audio focus");
         match action {
             FocusAction::PauseForNow | FocusAction::Pause => {
+                self.native_notice("pause");
                 if action == FocusAction::Pause {
                     self.state().native_focus_route = None;
                 } else {
@@ -764,6 +813,9 @@ impl Media {
                 if let Some(p) = crate::native::media_player() {
                     let route = self.state().native_focus_route.take();
                     if route == Some(pm_out_local::usb_dac::generation()) {
+                        if p.focus_pending() {
+                            self.native_notice("resume");
+                        }
                         p.resume_after_focus();
                     } else {
                         p.cancel_focus_resume();

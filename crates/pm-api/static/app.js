@@ -1491,6 +1491,24 @@
     // (restore, a seek before it plays); live: the app has src; adopt: the app already went on
     // to the song handed ahead; want: play pressed, the app not there yet; ahead: last handed
     let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false; let seq = 0; let fresh = false; let opening = false;
+    let nativeCommand = 0; let external = null;
+    window.addEventListener('pmdesktop:native-command', (e) => {
+      const d = e.detail || {}; if (!(d.id > nativeCommand)) return;
+      // A seek or queue notice cancels an older direct-command error, but the pending local
+      // open still owns its reply (including the timer before native_load). A new local play
+      // supplies its own token; only an explicit system pause cancels and settles this open.
+      nativeCommand = d.id; external = null;
+      if (d.action === 'pause') ++seq;
+      if (d.action === 'play') { if (st && st.url === src) at = st.position_ms / 1000; held = false; want = true; external = { id: d.id, seq }; }
+      else if (d.action === 'pause') { held = true; want = false; opening = false; fire('pause'); }
+      else if (d.action === 'resume') held = false;
+    });
+    window.addEventListener('pmdesktop:native-failed', (e) => {
+      const d = e.detail || {}, err = d.error || {};
+      if (!external || d.id !== external.id || seq !== external.seq || d.url !== src || held || err.overtaken) return;
+      external = null; opening = false; want = false; live = false; at = Math.max(0, Number(d.at) || 0);
+      fire('pause'); fire(err.refused ? 'nativerefused' : 'nativefailed', { why: String(err.message || 'it did not start'), at: d.at || 0 });
+    });
     const mine = () => live && !!st && st.url === src;
     const playing = () => mine() && st.transport === 'playing';
     window.addEventListener('pmdesktop:native', (e) => {
@@ -1540,7 +1558,7 @@
         const run = st.transport === 'playing' ? Math.min(1000, Date.now() - stAt) : 0;
         return (st.position_ms + run) / 1000;
       },
-      set currentTime(v) { const ms = Math.max(0, Math.round((Number(v) || 0) * 1000)); done = false; if (mine()) { st = { ...st, position_ms: ms }; stAt = Date.now(); call('native_seek', { ms }).catch(() => {}); } else at = ms / 1000; },
+      set currentTime(v) { external = null; const ms = Math.max(0, Math.round((Number(v) || 0) * 1000)); done = false; if (mine()) { st = { ...st, position_ms: ms }; stAt = Date.now(); call('native_seek', { ms }).catch(() => {}); } else at = ms / 1000; },
       get duration() { return mine() && st.duration_ms ? st.duration_ms / 1000 : NaN; },
       // Never a gain on the samples here: the level is Android's (or the DAC's own)
       get volume() { return vol; },
@@ -1549,7 +1567,7 @@
       set muted(_) { /* Android's */ },
       get src() { return src; },
       set src(v) {
-        const u = abs(v);
+        external = null; const u = abs(v);
         if (adopt && st && u === st.url) {
           adopt = false; src = u; live = true; done = false;
           if (st.transport === 'playing') setTimeout(() => { if (src === u) { fire('play'); fire('playing'); } }, 0);
@@ -1562,7 +1580,7 @@
       set preload(_) { /* opened when it plays */ },
       load() { /* opened when it plays */ },
       async play() {
-        if (!src) throw new Error('nothing to play');
+        external = null; if (!src) throw new Error('nothing to play');
         done = false; held = false;
         if (mine()) {
           if (st.transport === 'playing') return;
@@ -1620,8 +1638,8 @@
         // Paused while it opened
         if (held && src === u) call('native_pause').catch(() => {});
       },
-      pause() { want = false; held = true; if (live) call('native_pause').catch(() => {}); },
-      stop() { want = false; adopt = false; done = false; opening = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
+      pause() { external = null; want = false; held = true; if (live) call('native_pause').catch(() => {}); },
+      stop() { external = null; want = false; adopt = false; done = false; opening = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
       // What follows what plays now (the page's next song), for a gapless join
       ahead(u) { const a = u ? abs(u) : null; if (a === ahead) return; ahead = a; if (live) call('native_ahead', { url: a }).catch(() => {}); },
       status: () => (mine() ? st : null),
@@ -2425,7 +2443,7 @@
     state.midRetry = state.midRetry && state.midRetry.i === i ? state.midRetry : { i, n: 0 };
     if (state.midRetry.n >= 1) return;
     state.midRetry.n++;
-    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
+    const src = audio.src; setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; audio.src = src; audio.currentTime = at; audio.play().catch(() => {}); }, 1500);
   });
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
