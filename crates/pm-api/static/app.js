@@ -1725,18 +1725,18 @@
   const secretInput = (name, label, placeholder, autocomplete = 'off', disabled = false) => `<span class="secretwrap"><input class="input" name="${name}" type="password" placeholder="${esc(placeholder)}" autocomplete="${autocomplete}" aria-label="${esc(label)}" spellcheck="false" required ${disabled ? 'disabled' : ''}><button class="icon-btn showpw" type="button" aria-label="Show ${esc(label)}" aria-pressed="false" title="Show">${icon('eye')}</button></span>`;
   // One name ("Show …") and the pressed state say it all; only the picture and the tooltip change
   const wireSecretToggles = (root) => $$('.showpw', root).forEach((b) => b.onclick = () => { const i = b.previousElementSibling; const show = i.type === 'password'; i.type = show ? 'text' : 'password'; b.setAttribute('aria-pressed', String(show)); b.title = show ? 'Hide' : 'Show'; b.innerHTML = icon(show ? 'eye-off' : 'eye'); });
-  // A pasted block (`app_id=… app_secret=…`, a config section, JSON) split into its two values
-  const splitAppPaste = (text, kind) => {
+  // A pasted block (`client_id=… client_secret=…`, a config section, JSON) split into its two values
+  const splitAppPaste = (text) => {
     const t = String(text || ''); if (!/[=:]/.test(t)) return null;
-    const idRe = kind === 'tidal' ? /client_?id\b["']?\s*[=:]\s*["']?([A-Za-z0-9._-]{4,})/i : /app_?id\b["']?\s*[=:]\s*["']?(\d{3,})/i;
-    const secRe = kind === 'tidal' ? /client_?secret\b["']?\s*[=:]\s*["']?([A-Za-z0-9+/=._-]{8,})/i : /(?:app_?secret|secrets?)\b["']?\s*[=:]\s*\[?\s*["']?([A-Za-z0-9]{8,})/i;
+    const idRe = /client_?id\b["']?\s*[=:]\s*["']?([A-Za-z0-9._-]{4,})/i;
+    const secRe = /client_?secret\b["']?\s*[=:]\s*["']?([A-Za-z0-9+/=._-]{8,})/i;
     const id = idRe.exec(t); const sec = secRe.exec(t);
     return id || sec ? { id: id ? id[1] : '', secret: sec ? sec[1] : '' } : null;
   };
   const wireAppPaste = (form, kind) => {
     if (!form) return; const idF = form.querySelector('input[name=id]'); const secF = form.querySelector('input[name=secret]');
     [idF, secF].forEach((f) => f && f.addEventListener('paste', (e) => {
-      const got = splitAppPaste(e.clipboardData && e.clipboardData.getData('text'), kind); if (!got) return;
+      const got = splitAppPaste(e.clipboardData && e.clipboardData.getData('text')); if (!got) return;
       e.preventDefault(); if (got.id) idF.value = got.id; if (got.secret) secF.value = got.secret;
       (got.id && got.secret ? form.querySelector('.btn[type=button]') || form.querySelector('button[type=submit]') : got.id ? secF : idF).focus();
       toast('Split into ID and secret');
@@ -1944,68 +1944,40 @@
   // The device code, big: Open link.tidal.com fills it in (TIDAL's complete verification address);
   // Copy for a device where that doesn't work; the time left under it (wired in `after`)
   const tidalCodeBox = (p) => `<div class="codebox" id="tfpending"><p class="small">Open link.tidal.com, sign in to TIDAL and enter this code. The button opens it with the code filled in. This page continues by itself once TIDAL says yes.</p><div class="toolbar"><code class="tf-code big" id="tfcode">${esc(p.user_code)}</code><button class="btn ghost sm" type="button" data-copylink="${esc(p.user_code)}" aria-label="Copy the code">${icon('copy')} Copy</button></div><div class="toolbar"><a class="btn primary" id="tfopen" href="${esc(webUrl(p.uri))}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a><span class="muted small" id="tfcount" role="status"></span></div></div>`;
-  // ---- Qobuz: one guided page (TASK-qobuz-tidal-setup-ux) ----
-  // The full-tracks status at the top (Off / Needs app / Needs sign-in / Working), then two step
-  // cards: 1. the app ID and secret (with Check), 2. the owner's Qobuz account (email and password,
-  // sent once). streamrip's or qobuz-dl's config does both at once, under step 1. Qobuz has no
-  // OAuth, so there is nothing to open: the guide says what to ask Qobuz for.
+  // ---- Qobuz: one account card; web-player app discovery happens on the node ----
   const qobuzSetup = async (el) => {
     if (!el || !el.isConnected) return;
-    let u, si;
-    try { [u, si] = await Promise.all([api('GET', '/sources/qobuz/unofficial'), api('GET', '/sources/qobuz/signin')]); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)}</div>`; return; }
+    let u;
+    try { u = await api('GET', '/sources/qobuz/unofficial'); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)}</div>`; return; }
     if (!el.isConnected) return;
-    const mem = state.signin = state.signin || {}; const m = mem.qobuz = mem.qobuz || {};
-    const broke = !!(u.health && !u.health.ok); const hasApp = !!u.app_from;
+    const broke = !!(u.health && !u.health.ok);
     const quality = u.quality === 'mp3' ? 'MP3 320 kbps' : u.quality === 'cd' || !u.hires ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz';
-    const st = !hasApp ? { cls: '', label: 'Needs app', text: 'Needs a Qobuz app ID and secret (step 1).' }
-      : !u.signed_in ? { cls: '', label: 'Needs sign-in', text: 'Needs your Qobuz account (step 2).' }
+    const st = !u.signed_in ? { cls: '', label: 'Needs sign-in', text: 'Sign in with your Qobuz account below.' }
       : broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
       : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here.' }
       : { cls: 'ok', label: 'Working', text: `Full tracks ${quality}.` };
-    const status = sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your Qobuz account. ${guideLink('qobuz.md')}`,
+    const status = sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working; needs a paid Qobuz plan. ${guideLink('qobuz.md')}`,
       (u.signed_in ? `<input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks">` : '') + (u.signed_in ? '<button class="btn ghost sm" id="qbout">Sign out</button>' : ''))
       + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>` : '');
-    // 1. The app
-    const appInfo = hasApp ? `<p class="small">App <code class="path">${esc(u.app_id || '')}</code> · ${u.app_from === 'config' ? 'set in the node config' : u.app_from === 'import' ? 'from an imported config' : 'entered here'}.${u.app_from !== 'config' ? ` <button class="btn ghost sm" type="button" id="qbappchange">${m.changeApp ? 'Keep it' : 'Change'}</button> <button class="btn ghost sm" type="button" id="qbappforget">Forget</button>` : ''}</p>` : '';
-    const appForm = hasApp && !m.changeApp ? '' : `<form class="stack" id="qbapp" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="App ID (digits)" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Qobuz app ID" required>${secretInput('secret', 'Qobuz app secret', 'App secret')}</div><div class="toolbar"><button class="btn" type="button" id="qbcheck">Check</button><button class="btn primary" type="submit">Save</button><span class="check-out small" id="qbcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>app_id=… app_secret=…</code> block or JSON into either field: it is split.</p></form>`;
-    const found = si.imports || []; const places = si.places || [];
-    const importBox = `<details class="small" id="qbimport"><summary>Already use streamrip or qobuz-dl? Use its config</summary><div class="stack">${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><p class="muted small">Pick streamrip’s config.toml or qobuz-dl’s config.ini: it is only read; its app values and sign-in are kept here like the node’s own, replacing the current app.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="[qobuz] … or [DEFAULT] … from streamrip’s config.toml or qobuz-dl’s config.ini" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Nothing is shown again once saved.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div></details>`;
-    const step1 = stepCard(1, 'App ID and secret', hasApp, `Qobuz has no public developer page: ask Qobuz for API access at <a href="mailto:api@qobuz.com">api@qobuz.com</a> (an app ID and secret). The node keeps them like a sign-in and never shows the secret again. ${guideLink('qobuz.md')}`, appInfo + appForm + importBox);
-    // 2. The account
-    const acct = u.signed_in
+    const account = u.signed_in
       ? `<p class="small">Signed in${u.user ? ' as ' + esc(u.user) : ''}${u.plan ? ' · ' + esc(u.plan) : ''} · ${u.hires ? 'hi-res' : 'CD quality'}. Only Qobuz’s session is kept. <button class="btn ghost sm" type="button" id="qbout2">Sign out</button></p>`
-      : `<form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required ${hasApp ? '' : 'disabled'}>${secretInput('password', 'Qobuz password', 'Password', 'current-password', !hasApp)}<button class="btn primary" type="submit" ${hasApp ? '' : 'disabled'}>Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
-    const step2 = stepCard(2, 'Your Qobuz account', u.signed_in, `${hasApp ? '' : 'After step 1. '}Your email and password go to Qobuz once; the node keeps only the session Qobuz answers with. A paid streaming plan is needed.`, acct);
+      : `<p class="muted small">Your email and password go to Qobuz once; the node keeps only the session.</p><form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required>${secretInput('password', 'Qobuz password', 'Password', 'current-password')}<button class="btn primary" type="submit">Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
     const playback = u.signed_in ? sgGroup('Playback', sgRow('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option><option value="mp3" ${u.quality === 'mp3' ? 'selected' : ''}>MP3 (320 kbps)</option></select>`)
       + (u.health && u.health.ok ? sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>') : '')) : '';
-    el.innerHTML = sgGroup('Qobuz', status) + sgGroup('Set up', `<div class="setup-steps">${step1}${step2}</div>`) + playback;
-    // Wiring
+    el.innerHTML = sgGroup('Qobuz', status) + sgGroup('Sign in with your Qobuz account', account) + playback;
     const refill = () => qobuzSetup(el);
     const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } state.sources = null; refill(); };
     const on = $('#qbon'); if (on) on.onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Qobuz full tracks are on' : 'Qobuz full tracks are off');
     const retry = $('#qbretry'); if (retry) retry.onclick = () => put({ enabled: true }, 'Trying Qobuz again');
     const signOut = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (e) { toast(e.message, 'error'); } state.sources = null; render(); };
     for (const id of ['#qbout', '#qbout2']) { const b = $(id); if (b) b.onclick = signOut; }
-    const ac = $('#qbappchange'); if (ac) ac.onclick = () => { m.changeApp = !m.changeApp; refill(); };
-    const ag = $('#qbappforget'); if (ag) ag.onclick = () => { m.changeApp = false; put({ app_id: '' }, 'Qobuz app forgotten'); };
-    const af = $('#qbapp'); if (af) {
-      wireSecretToggles(af); wireAppPaste(af, 'qobuz');
-      const chk = $('#qbcheck'); chk.onclick = () => { const f = new FormData(af); runCheck(chk, $('#qbcheckout'), '/sources/qobuz/unofficial/app/check', { app_id: String(f.get('id') || ''), app_secret: String(f.get('secret') || '') }); };
-      af.onsubmit = (e) => { e.preventDefault(); const f = new FormData(af); m.changeApp = false; m.focusEmail = true; put({ app_id: String(f.get('id') || '').trim(), app_secret: String(f.get('secret') || '').trim() }, 'Qobuz app saved'); };
-    }
     const qi = $('#qbin'); if (qi) {
       wireSecretToggles(qi);
-      if (m.focusEmail) { m.focusEmail = false; const em = qi.querySelector('input[name=email]'); if (em && !em.disabled) em.focus(); }
       qi.onsubmit = async (e) => {
         e.preventDefault(); const f = new FormData(qi); const b = qi.querySelector('button[type=submit]'); const err = $('#qbinerr'); b.disabled = true; err.hidden = true;
         try { await api('POST', '/sources/qobuz/unofficial/login', { email: f.get('email'), password: f.get('password') }); toast('Signed in to Qobuz'); state.sources = null; render(); } catch (er) { err.textContent = er.message; err.hidden = false; b.disabled = false; }
       };
     }
-    // streamrip's / qobuz-dl's config: the app values and the sign-in at once
-    const imp = async (body, what) => { const err = $('#qbimperr'); err.hidden = true; try { const r = await api('POST', '/sources/qobuz/signin/import', body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); state.sources = null; render(); } catch (e) { err.textContent = e.message; err.hidden = false; } };
-    $$('[data-qbimp]', el).forEach((b) => b.onclick = async () => { b.disabled = true; await imp({ id: b.dataset.qbimp }, b.dataset.qbimp); b.disabled = false; });
-    const ff = $('#qbimpfile'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } imp({ text: await file.text() }, 'the file'); };
-    const pf = $('#qbimppaste'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); imp({ text: pf.querySelector('textarea').value }, 'the pasted config'); };
     const qq = $('#qbq'); if (qq) qq.onchange = () => put({ quality: qq.value }, 'Quality saved');
   };
   // Spotify: your own app (Connect control, library), librespot picked in a Spotify app, or

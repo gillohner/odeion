@@ -2,7 +2,7 @@
 """The .aab (for Google Play) has no updater: neither REQUEST_INSTALL_PACKAGES in its manifest nor
 the AppUpdate class (tools/release/android-patch.py --without-updater). The APK given for
 comparison must have the class, so the check can see it at all. Used by release.yml and
-android-update.yml.
+android.yml (update).
 
 Usage: aab-check.py <gradle outputs dir> <an APK built with the updater>
 """
