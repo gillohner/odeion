@@ -1574,7 +1574,13 @@
           }
           if (tok !== seq) return;
           // (a load this play overtook won't end `opening`: this answer does)
-          if (opening) { opening = false; if (src && st && st.url === src && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); } }
+          if (opening) {
+            opening = false;
+            if (src && st && st.url === src && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
+            // (the output didn't open: said, as for a failed start)
+            else if (src && st && st.url === src && st.transport === 'stopped' && st.error && !st.broke) { want = false; live = false; fire('pause'); fire('nativefailed', { why: st.error, at: pos }); return; }
+          }
+          if (held) call('native_pause').catch(() => {});
           return;
         }
         // Its first events may come before the answer. Only the latest play() changes anything
@@ -1590,9 +1596,11 @@
           if (tok === seq) opening = false;
           if (src !== u || tok !== seq || (e && e.overtaken)) return;
           want = false; live = false;
-          // Only what the app can't play itself goes to <audio>; anything else may pass (the
-          // page tries once more)
-          const err = new Error(String((e && e.message) || e)); err.name = e && e.refused ? 'NativeRefused' : 'NativeFailed'; throw err;
+          // Said through the engine's own events, whoever pressed play (the bar, the lock screen,
+          // a retry): only what the app can't play itself goes to <audio>; anything else may pass
+          // (the page tries once more)
+          fire('pause'); fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: at });
+          return;
         }
         if (tok !== seq) return;
         opening = false;
@@ -2433,7 +2441,7 @@
     if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i, at); }, 2000); return; }
     toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
   };
-  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; if (state.natOn && state.browserIndex >= 0) nativeRetry(state.browserIndex, (typeof d === 'string' ? d : d.why) || 'it did not start', d.at || 0); });
+  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; const why = (typeof d === 'string' ? d : d.why) || 'it did not start'; if (!state.natOn || state.browserIndex < 0) return; startFail(why, true); nativeRetry(state.browserIndex, why, d.at || 0); renderBar(); });
   // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
   nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
   audio.addEventListener('play', () => renderBar());
