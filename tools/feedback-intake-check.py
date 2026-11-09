@@ -269,6 +269,49 @@ def fake():
         os.unlink(cfg["receipts"])
         os.rename(real, cfg["receipts"])
 
+        # A hard link where a copy or the receipts file goes: another name for a file outside the
+        # intake's keeping (Kimi review of a58e5a5a, M5). A linked copy is replaced by one of the
+        # intake's own; a linked receipts file stops the intake before any receipt. The other
+        # file is never changed, mode included.
+        eighth = dict(good, id="fb_0000000000000fff", text="SYNTHETIC eighth report")
+        outside_copy = os.path.join(work, "outside-copy.json")
+        with open(outside_copy, "w", encoding="utf-8") as f:
+            json.dump({"warning": k["warning"], "report": eighth}, f)
+        os.chmod(outside_copy, 0o644)
+        with open(outside_copy, "rb") as f:
+            copy_before = f.read()
+        linked_copy = os.path.join(cfg["dir"], eighth["id"] + ".json")
+        os.link(outside_copy, linked_copy)
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[eighth]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = quick_intake()
+        counts = json.loads(out or "{}")
+        check(rc == 0 and counts.get("repaired") == 1 and counts.get("received") == 1,
+              f"a hard-linked copy is replaced by the intake's own ({rc} {counts} {err.strip()})")
+        check(os.stat(linked_copy).st_nlink == 1 and mode(linked_copy) == 0o600, "the copy is a private file of its own")
+        with open(outside_copy, "rb") as f:
+            check(f.read() == copy_before and mode(outside_copy) == 0o644, "the hard-linked copy's other file is left as it is")
+
+        outside_receipts = os.path.join(work, "outside-receipts.jsonl")
+        with open(outside_receipts, "w") as f:
+            f.write("not the intake's\n")
+        os.chmod(outside_receipts, 0o644)
+        real = cfg["receipts"] + ".real"
+        os.rename(cfg["receipts"], real)
+        os.link(outside_receipts, cfg["receipts"])
+        ninth = dict(good, id="fb_0000000000000a01", text="SYNTHETIC ninth report")
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[ninth]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = quick_intake()
+        with open(state) as f:
+            calls = json.load(f)["calls"]
+        check(rc == 1 and calls == [] and "receipts" in err,
+              f"a hard-linked receipts file stops the intake before any receipt ({rc} {calls} {err.strip()})")
+        with open(outside_receipts) as f:
+            check(f.read() == "not the intake's\n" and mode(outside_receipts) == 0o644, "the hard-linked receipts file's other file is left as it is")
+        os.unlink(cfg["receipts"])
+        os.rename(real, cfg["receipts"])
+
         # One intake at a time
         import fcntl
         with open(os.path.join(cfg["dir"], ".lock"), "a") as lock:

@@ -1079,6 +1079,186 @@ async fn a_hard_link_in_place_of_the_inbox_is_refused_and_its_target_left_alone(
     assert_eq!(mode, 0o644, "the linked database's mode is unchanged");
 }
 
+/// Removed while the inbox is busy, then given music again before any housekeeping (Kimi review
+/// of a58e5a5a, M1): the reports from before the remove are never Ann's again (My reports shows
+/// none) and go at housekeeping; what she sends after stays, and so does everyone else's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_from_before_a_remove_never_come_back_with_music_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let roster = json!({"people": [
+        {"key": ANN, "access": "homeserver_music", "music_enabled": true, "added_at": 0},
+        {"key": BEN, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    // Music again, through People, before any housekeeping
+    let (st, r) = call(
+        &app,
+        Some(OWNER),
+        "PATCH",
+        &format!("/v1/people/{ANN}"),
+        Some(json!({"music": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let (st, r) = call(&app, Some(&ann), "GET", "/v1/feedback/mine", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        r.as_array().map(Vec::len),
+        Some(0),
+        "none from before the remove: {r}"
+    );
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's new")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    pm_api::feedback::start_housekeeping(&s);
+    let want = ["ann's new", "ben's", "owner's"];
+    assert_eq!(until_left(dir.path(), &want).await, want);
+}
+
+/// Housekeeping reads the roster and deletes by it in one step, never while a change to the
+/// roster is under way (Kimi review of a58e5a5a, M2): Ann is given music again during it and sends
+/// a new report; only her reports from before go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn housekeeping_waits_for_a_roster_change_and_keeps_what_came_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    // A change to the roster is under way (People and restores hold this while they change it)
+    let busy = s.roster.lock().await;
+    pm_api::feedback::start_housekeeping(&s);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(
+        texts(dir.path()),
+        ["ann's", "ben's", "owner's"],
+        "housekeeping waits for the roster change"
+    );
+    // The change: Ann has music again, as a new membership, and sends a new report meanwhile
+    let again = json!({"people": [
+        {"key": ANN, "access": "music", "music_enabled": true, "added_at": 1, "reports": "membership-2"},
+        {"key": BEN, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &again.to_string())
+        .unwrap();
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's new")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    drop(busy);
+    let want = ["ann's new", "ben's", "owner's"];
+    assert_eq!(until_left(dir.path(), &want).await, want);
+}
+
+/// SQLite's own files beside the inbox, there at 0644 before it is opened (Kimi review of
+/// a58e5a5a, M4), are made 0600 before the inbox is used. `-shm` is one SQLite never touches in
+/// the inbox's journal mode, so what the node does to it is seen as it is; `-journal` and `-wal`
+/// are either made private or taken away by SQLite.
+#[cfg(unix)]
+#[tokio::test]
+async fn sqlite_files_beside_the_inbox_are_made_private_before_use() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let app = router(s.clone());
+    let (st, r) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(report("owner's"))).await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    for ext in ["-shm", "-journal", "-wal"] {
+        let side = dir.path().join(format!("{}{ext}", pm_api::feedback::FILE));
+        std::fs::write(&side, b"").unwrap();
+        std::fs::set_permissions(&side, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let opened = Inbox::open(dir.path());
+        assert!(opened.is_ok(), "{ext}");
+        let mode = std::fs::metadata(&side).map(|m| m.permissions().mode() & 0o777);
+        if ext == "-shm" {
+            assert_eq!(mode.unwrap(), 0o600, "{ext} made private");
+        } else {
+            assert!(matches!(mode, Ok(0o600) | Err(_)), "{ext}: {mode:?}");
+        }
+        drop(opened);
+        let _ = std::fs::remove_file(&side);
+    }
+    assert_eq!(texts(dir.path()), ["owner's"]);
+}
+
+/// The inbox opens only in a data folder no other user may write in (Kimi review of a58e5a5a,
+/// M3): putting another file in its place (or swapping one in while it is opened) takes write
+/// access to that folder, which only the node's own user then has.
+#[cfg(unix)]
+#[test]
+fn the_inbox_opens_only_in_a_folder_no_one_else_may_write_in() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    Inbox::open(&data).unwrap();
+    for (mode, ok) in [
+        (0o777, false),
+        (0o775, false),
+        (0o757, false),
+        (0o711, true),
+        (0o700, true),
+    ] {
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert_eq!(Inbox::open(&data).is_ok(), ok, "{mode:o}");
+        assert_eq!(Inbox::open_existing(&data).is_ok(), ok, "{mode:o}");
+    }
+}
+
+/// An inbox the node can't look at is an error, never "no inbox" (Kimi review of a58e5a5a, Low
+/// 7): My reports and the operator's pending list say so instead of showing none.
+#[cfg(unix)]
+#[test]
+fn an_inbox_that_cant_be_looked_at_is_an_error_not_no_inbox() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    Inbox::open(&data).unwrap();
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let looked = Inbox::open_existing(&data);
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // As root every file can be looked at; the check means something only for a service user
+    if std::fs::read_dir("/root").is_ok() {
+        return;
+    }
+    assert!(looked.is_err(), "taken for no inbox");
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {

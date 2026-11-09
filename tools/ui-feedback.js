@@ -243,6 +243,21 @@ const afterIntake = async (browser) => {
         ok(reports.some((x) => x.text === 'SLOW report') && reports.some((x) => x.text === 'SLOW report, more'), `${w} both versions are saved, each once`);
         ok(errors.length === 0, `${w} no page errors after a late answer ${errors.join('; ')}`);
         await page.keyboard.press('Escape');
+        // While a report is on its way it can't be edited: an edit then would be lost when the
+        // answer clears the draft (Kimi review of a58e5a5a, Low 9)
+        await help.click(); await page.getByRole('menuitem', { name: 'Report a problem…' }).click();
+        dlg = page.getByRole('dialog', { name: 'Report a problem' });
+        await dlg.getByRole('textbox', { name: 'Description' }).fill('HELD report');
+        let releaseHeld; hold = new Promise((res) => { releaseHeld = res; });
+        await dlg.getByRole('button', { name: 'Send' }).click();
+        await dlg.getByText('Sending…').first().waitFor();
+        const editable = await dlg.getByRole('textbox', { name: 'Description' }).isEditable();
+        const kindOpen = await dlg.getByRole('radio', { name: 'Idea' }).isEnabled();
+        releaseHeld();
+        await page.getByRole('dialog', { name: 'Report saved' }).waitFor();
+        ok(!editable && !kindOpen, `${w} a report can't be edited while it is on its way (text editable ${editable}, kind ${kindOpen})`);
+        ok(posts[posts.length - 1].body.text === 'HELD report', `${w} what is saved is what was sent`);
+        await page.keyboard.press('Escape');
         // A late "My reports" answer for someone who signed out is never shown to who is here now
         let releaseMine; holdMine = new Promise((res) => { releaseMine = res; });
         await help.click(); await page.getByRole('menuitem', { name: 'My reports' }).click();
