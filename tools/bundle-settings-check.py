@@ -20,6 +20,8 @@ checked with a stand-in `docker` in a throwaway folder: nothing real is started,
 import os
 import shutil
 import subprocess
+import re
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -389,6 +391,7 @@ print(t, end="")
         dd = b / "nodedata"
         dd.mkdir()
         for name, body in data_files.items():
+            (dd / name).parent.mkdir(parents=True, exist_ok=True)
             (dd / name).write_text(body)
         subprocess.run(["tar", "czf", str(b / "node" / "data.tar.gz"), "-C", str(dd), "."], check=True)
         shutil.rmtree(dd)
@@ -604,6 +607,30 @@ exit 0
     vol = d / "state" / "vol-ctr-music"
     check(r.returncode == 0 and (vol / "covers.txt").exists(), f"restore.sh with usage.sqlite in an older backup ({r.stderr.strip()[-140:]!r})")
     check(not any(vol.glob("usage.sqlite*")), "restore.sh never brings back usage insights from a backup")
+
+    # A listener's homeserver grant (grants/<key>.session, crates/pm-api/src/personal.rs) is never in
+    # a backup: it is a key to their own homeserver. backup.sh's tar of the node's data folder leaves
+    # grants/ out, as tar itself reads those excludes (run here with the script's own list), and
+    # restore.sh leaves out an older backup's
+    tar_cmd = re.search(r'tar czf - -C /data \\\n(.*?) \. > "\$DEST/node/data\.tar\.gz"', bk, re.S)
+    check(tar_cmd is not None, "backup.sh's tar of the node's data folder is where this check reads it")
+    if tar_cmd:
+        excludes = shlex.split(tar_cmd.group(1).replace("\\\n", " "))
+        src = Path(tempfile.mkdtemp(dir=base, prefix="nodedata-"))
+        (src / "grants").mkdir()
+        (src / "grants" / "fixturekey.session").write_text("fixture-grant")
+        (src / "covers.txt").write_text("kept")
+        archive = src.parent / (src.name + ".tar.gz")
+        subprocess.run(["tar", "czf", str(archive), "-C", str(src), *excludes, "."], check=True)
+        names = subprocess.run(["tar", "tzf", str(archive)], capture_output=True, text=True, check=True).stdout.split()
+        check("./covers.txt" in names and not any("grants" in n for n in names),
+              f"backup.sh's tar leaves listeners' grants out of the data folder's copy ({names})")
+    b = make_backup("", {"node.toml": '[api]\ntoken = "fixture-backup-cfg"\n', "grants/fixturekey.session": "fixture-grant",
+                         "covers.txt": "kept"})
+    d, r, calls, n = restore(b, "")
+    vol = d / "state" / "vol-ctr-music"
+    check(r.returncode == 0 and (vol / "covers.txt").exists(), f"restore.sh with a grant in an older backup ({r.stderr.strip()[-140:]!r})")
+    check(not (vol / "grants").exists(), "restore.sh never brings back a listener's homeserver grant from a backup")
 
     for script in ("backup.sh", "restore.sh"):
         s = (BUNDLE / script).read_text()
