@@ -153,17 +153,19 @@ def run(h):
         log(f"swipe up on Now playing opens Up next ({up:.3f})")
         shot("ui-4-sheet-up-next")
         # Sideways on the sheet: Lyrics, then More (the list below the tabs changes)
-        body = (0, H * 30 // 100, W, H * 80 // 100)
+        # (the tab bar, whose underline moves, and the top of the list: a tab can be nearly empty, as
+        # Lyrics is for the test tone)
+        body = (0, H * 17 // 100, W, H * 50 // 100)
         swipe(W * 7 // 8, H * 60 // 100, W // 8, H * 60 // 100, settle=1)
-        s2, t1 = settles(s1, body, over=0.02)
+        s2, t1 = settles(s1, body, over=0.01)
         time.sleep(1.5)
         s2 = raw()
-        assert t1 > 0.02, f"a sideways swipe on the sheet didn't change its tab ({t1:.3f})"
+        assert t1 > 0.01, f"a sideways swipe on the sheet didn't change its tab ({t1:.3f})"
         log(f"a sideways swipe on the sheet: Lyrics ({t1:.3f})")
         shot("ui-5-sheet-lyrics")
         swipe(W * 7 // 8, H * 60 // 100, W // 8, H * 60 // 100, settle=1)
-        s3, t2 = settles(s2, body, over=0.02)
-        assert t2 > 0.02, f"a second sideways swipe didn't change the tab ({t2:.3f})"
+        s3, t2 = settles(s2, body, over=0.01)
+        assert t2 > 0.01, f"a second sideways swipe didn't change the tab ({t2:.3f})"
         log(f"again: More ({t2:.3f})")
         shot("ui-6-sheet-more")
         # Back: the sheet closes and Now playing stays (its top looks as before the sheet); Back again: it closes
