@@ -846,6 +846,9 @@ async fn a_waiting_change_never_taken_is_dropped_and_a_refusal_loses_the_grant()
     assert!(owners_rows(&s).is_empty());
 }
 
+/// A regression check for People › Remove while a change waits on her homeserver. (The narrower
+/// gap between the roster check and the write is closed by construction, one library hold for
+/// both in `personal::save`; a test can't land a removal inside it.)
 #[tokio::test]
 async fn a_listener_removed_while_her_change_is_on_its_way_leaves_no_copy() {
     let dir = tempfile::tempdir().unwrap();

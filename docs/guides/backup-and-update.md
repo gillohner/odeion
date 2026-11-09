@@ -115,7 +115,9 @@ tracks keep their playlists and history.
 The node's data folder holds everything, including the access token and the key for remote
 access. Stop the node before copying it. Copying it on a NAS needs a terminal (SSH);
 the backup file above doesn't. Leave out `usage.sqlite` (usage insights, if they are on): no backup
-holds them, and a Clear never reaches a copy.
+holds them, and a Clear never reaches a copy. Leave out `grants/` too: listeners' approvals to
+reach their own homeservers, theirs to give. No backup holds them, and a copy would bring back
+the approval of someone who has disconnected since.
 
 | Install | Data folder |
 | :-- | :-- |
