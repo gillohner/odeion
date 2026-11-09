@@ -3881,6 +3881,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-app-player"
+version = "0.2.2"
+dependencies = [
+ "async-trait",
+ "hound",
+ "pm-audio",
+ "pm-endpoint",
+ "pm-model",
+ "pm-zones",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "symphonia",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "pm-appdata"
 version = "0.2.2"
 dependencies = [

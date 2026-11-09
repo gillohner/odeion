@@ -27,6 +27,7 @@ members = [
     "crates/pm-appdata",
     "crates/pm-offline",
     "crates/pm-usb-audio",
+    "crates/pm-app-player",
 ]
 # The desktop shell needs WebKitGTK on Linux; built on its own in CI/release.
 exclude = ["crates/pm-desktop"]
@@ -50,6 +51,7 @@ pm-api = { path = "crates/pm-api" }
 pm-client = { path = "crates/pm-client" }
 pm-stream = { path = "crates/pm-stream" }
 pm-endpoint = { path = "crates/pm-endpoint" }
+pm-app-player = { path = "crates/pm-app-player" }
 pm-out-net = { path = "crates/pm-out-net" }
 pm-out-upnp = { path = "crates/pm-out-upnp" }
 pm-out-slimproto = { path = "crates/pm-out-slimproto" }

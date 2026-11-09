@@ -1,0 +1,25 @@
+[package]
+name = "pm-app-player"
+description = "The Odeion app's own player: plays the node's streams and files through this device's outputs, with the node's zone engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-model = { workspace = true }
+pm-zones = { workspace = true }
+pm-audio = { workspace = true }
+pm-endpoint = { workspace = true }
+symphonia = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+hound = { workspace = true }
+tempfile = "3"

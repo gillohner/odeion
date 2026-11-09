@@ -1,0 +1,800 @@
+//! The page's player, played here: a `pm_zones::Zone` on this device's output, with the page's
+//! URLs as its queue. The page keeps its own queue, repeat and shuffle; it hands this player what
+//! plays now and what comes next ([`AppPlayer::load`], [`AppPlayer::ahead`]), and hears what the
+//! `<audio>` element would say through [`Status`]: playing or paused, where, and `ended` counted
+//! up at the end of each song. When the next song was handed ahead, the zone joins it without a
+//! gap and the status already names it when `ended` goes up.
+//!
+//! The output is taken through the endpoint's [`OutputOwner`]: this player opening it stops the
+//! node's session on it, and the node opening it stops this player ([`Status::error`] says so).
+
+use crate::source::UrlSources;
+use pm_endpoint::owner::{Claim, Holder, OutputOwner, Stop};
+use pm_model::{AudioBlock, AudioFormat, OutputCaps, SignalPath, Volume};
+use pm_zones::{
+    AudioSink, BufferLevel, Insert, Output, OutputDevice, OutputId, QueueItem, SinkError, StreamInfo,
+    Transport, Zone, ZoneEvent, ZoneId, ZoneState,
+};
+use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
+
+/// Why this player stopped when the node took its output.
+pub const TAKEN_BY_NODE: &str = "the node plays on this device's zone now";
+/// How long an open waits for the node's session to let go of the output.
+const TAKE_WAIT: Duration = Duration::from_secs(3);
+/// Position-only changes reach the page at most this often.
+const POSITION_EVERY: Duration = Duration::from_millis(500);
+
+/// What the page's `<audio>`-like engine reads.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Status {
+    /// What plays (or is paused) now: the URL the page loaded or handed ahead.
+    pub url: Option<String>,
+    pub transport: Transport,
+    pub position_ms: u64,
+    pub duration_ms: Option<u64>,
+    /// Songs that came to their end so far (the page's `ended`).
+    pub ended: u64,
+    /// The last thing that went wrong, until the next start.
+    pub error: Option<String>,
+    /// The URL could not be played here (opened or decoded): the page plays it itself.
+    pub refused: Option<String>,
+    /// The node took the output for its own zone: paused here, [`Status::error`] says so.
+    pub taken: bool,
+    /// The format and path of what plays, as a zone reports them.
+    pub now_playing: Option<Playing>,
+    pub output: OutputId,
+    /// The hardware behind the output (a USB DAC), as the node's output list has it.
+    pub device: Option<OutputDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Playing {
+    pub source_format: AudioFormat,
+    pub output_format: AudioFormat,
+    pub signal_path: SignalPath,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<StreamInfo>,
+}
+
+/// Called with the status whenever it changes.
+pub type Notify = Arc<dyn Fn(&Status) + Send + Sync>;
+
+/// Where the page and the zone stand.
+#[derive(Debug, Default, Clone)]
+struct Page {
+    url: Option<String>,
+    /// The zone's queue id of `url`.
+    current: Option<u64>,
+    ahead: Option<(String, u64)>,
+    ended: u64,
+    error: Option<String>,
+    refused: Option<String>,
+    /// The node took the output: paused here at this position (a play loads it again there).
+    taken_at: Option<u64>,
+    /// Stopped by this player itself (load, stop): that Stopped is no end.
+    stopping: bool,
+}
+
+impl Page {
+    /// The zone said `ev`; true when the page should hear of it now.
+    fn on(&mut self, ev: &ZoneEvent) -> bool {
+        match ev {
+            ZoneEvent::TrackEnded { item, .. } if Some(item.id) == self.current => {
+                self.ended += 1;
+                // Handed ahead: the zone goes on with it, and the page hears both at once
+                if let Some((url, id)) = self.ahead.take() {
+                    self.url = Some(url);
+                    self.current = Some(id);
+                }
+                true
+            }
+            ZoneEvent::TrackStarted { item, .. } if Some(item.id) == self.current => {
+                self.error = None;
+                self.refused = None;
+                true
+            }
+            ZoneEvent::Skipped { item, reason } if Some(item.id) == self.current => {
+                self.refused = Some(reason.clone());
+                true
+            }
+            ZoneEvent::Skipped { item, .. } if self.ahead.as_ref().is_some_and(|(_, id)| *id == item.id) => {
+                // The next one can't play here: the page opens it when its turn comes
+                self.ahead = None;
+                false
+            }
+            ZoneEvent::Error { message } => {
+                if self.taken_at.is_none() {
+                    self.error = Some(message.clone());
+                }
+                true
+            }
+            ZoneEvent::Stopped => {
+                self.stopping = false;
+                true
+            }
+            ZoneEvent::Paused { .. } | ZoneEvent::Resumed | ZoneEvent::Seeked { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn status(&self, z: Option<&ZoneState>, output: &dyn Output) -> Status {
+        let np = z.and_then(|z| z.now_playing.as_ref());
+        let mine = np.filter(|np| Some(np.item.id) == self.current);
+        let (transport, position_ms) = match (self.taken_at, z, mine) {
+            (Some(at), _, _) => (Transport::Paused, at),
+            (None, Some(z), Some(np)) => (z.transport, np.position_ms),
+            _ => (Transport::Stopped, 0),
+        };
+        Status {
+            url: self.url.clone(),
+            transport,
+            position_ms,
+            duration_ms: mine.and_then(|np| np.duration_ms),
+            ended: self.ended,
+            error: self.error.clone(),
+            refused: self.refused.clone(),
+            taken: self.taken_at.is_some(),
+            now_playing: mine.map(|np| Playing {
+                source_format: np.source_format,
+                output_format: np.output_format,
+                signal_path: np.signal_path.clone(),
+                format: np.format.clone(),
+            }),
+            output: output.id(),
+            device: output.device(),
+        }
+    }
+}
+
+struct Inner {
+    output: Arc<dyn Output>,
+    owner: OutputOwner,
+    sources: Arc<UrlSources>,
+    zone: Mutex<Option<Arc<Zone>>>,
+    page: Mutex<Page>,
+    notify: Mutex<Option<Notify>>,
+    last: Mutex<Option<(Status, Instant)>>,
+}
+
+/// The app's own player on one output. Cloning shares it.
+#[derive(Clone)]
+pub struct AppPlayer {
+    inner: Arc<Inner>,
+}
+
+impl AppPlayer {
+    /// A player on `output`, taken through `owner` (the endpoint's, so the node's zone on the
+    /// same output and this player never play at once).
+    pub fn new(output: Arc<dyn Output>, owner: OutputOwner) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                output,
+                owner,
+                sources: Arc::new(UrlSources::new()),
+                zone: Mutex::default(),
+                page: Mutex::default(),
+                notify: Mutex::default(),
+                last: Mutex::default(),
+            }),
+        }
+    }
+
+    /// Where each change goes (the page).
+    pub fn on_change(&self, f: Notify) {
+        *self.inner.notify.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    }
+
+    /// The URL opener (files kept on this device go there).
+    pub fn sources(&self) -> &UrlSources {
+        &self.inner.sources
+    }
+
+    pub fn status(&self) -> Status {
+        let z = self.zone_state();
+        self.page().status(z.as_ref(), &*self.inner.output)
+    }
+
+    fn page(&self) -> std::sync::MutexGuard<'_, Page> {
+        self.inner.page.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn zone_state(&self) -> Option<ZoneState> {
+        self.inner
+            .zone
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|z| z.state())
+    }
+
+    /// The zone, made on first use with its watcher.
+    fn zone(&self) -> Arc<Zone> {
+        let mut slot = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(z) = slot.as_ref() {
+            return z.clone();
+        }
+        let weak = Arc::downgrade(&self.inner);
+        let owned: Arc<dyn Output> = Arc::new(Owned {
+            inner: self.inner.output.clone(),
+            owner: self.inner.owner.clone(),
+            player: weak.clone(),
+        });
+        let zone = Arc::new(Zone::new(
+            ZoneId::new("app"),
+            &self.inner.output.name(),
+            owned,
+            self.inner.sources.clone(),
+        ));
+        *slot = Some(zone.clone());
+        drop(slot);
+        watch(weak, &zone);
+        zone
+    }
+
+    /// Play `url` from `at_ms`, with `ahead` to follow it without a gap. Opens it first (network
+    /// I/O: call from a blocking thread); `Err` says why it can't play here, and nothing changed.
+    pub fn load(&self, url: &str, at_ms: u64, ahead: Option<&str>) -> Result<(), String> {
+        if let Err(why) = self.inner.sources.prepare(url) {
+            tracing::info!("the app's player leaves this one to the page: {why}");
+            return Err(why);
+        }
+        let zone = self.zone();
+        {
+            let mut p = self.page();
+            p.stopping = zone.state().transport != Transport::Stopped;
+            p.error = None;
+            p.refused = None;
+            p.taken_at = None;
+        }
+        zone.clear();
+        let mut items = vec![QueueItem::new(url)];
+        items.extend(ahead.map(QueueItem::new));
+        let ids = zone.enqueue(items, Insert::End);
+        {
+            let mut p = self.page();
+            p.url = Some(url.to_string());
+            p.current = ids.first().copied();
+            p.ahead = ahead.zip(ids.get(1).copied()).map(|(u, id)| (u.to_string(), id));
+        }
+        zone.play_index(0);
+        if at_ms > 1_000 {
+            zone.seek_ms(at_ms);
+        }
+        self.changed(true);
+        Ok(())
+    }
+
+    /// What comes after what plays now (`None`: nothing, the end of the page's queue).
+    pub fn ahead(&self, url: Option<&str>) {
+        let Some(zone) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return;
+        };
+        let mut p = self.page();
+        if p.ahead.as_ref().map(|(u, _)| u.as_str()) == url {
+            return;
+        }
+        if let Some((_, id)) = p.ahead.take() {
+            zone.remove(id);
+        }
+        if let (Some(url), Some(_)) = (url, p.current) {
+            let ids = zone.enqueue(vec![QueueItem::new(url)], Insert::End);
+            p.ahead = ids.first().map(|id| (url.to_string(), *id));
+        }
+    }
+
+    /// Carry on: from the pause; after the node took the output, from where it was (again
+    /// through [`Self::load`], so call it from a blocking thread too).
+    pub fn play(&self) -> Result<(), String> {
+        let (url, at, ahead, taken) = {
+            let p = self.page();
+            (
+                p.url.clone(),
+                p.taken_at,
+                p.ahead.as_ref().map(|a| a.0.clone()),
+                p.taken_at.is_some(),
+            )
+        };
+        let Some(url) = url else {
+            return Err("nothing to play".into());
+        };
+        let st = self.zone_state();
+        let stopped = st.as_ref().is_none_or(|s| s.transport == Transport::Stopped);
+        if taken || stopped {
+            return self.load(&url, at.unwrap_or(0), ahead.as_deref());
+        }
+        self.zone().play();
+        Ok(())
+    }
+
+    pub fn pause(&self) {
+        if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            z.pause();
+        }
+    }
+
+    pub fn seek(&self, ms: u64) {
+        {
+            let mut p = self.page();
+            if let Some(at) = p.taken_at.as_mut() {
+                *at = ms;
+                drop(p);
+                self.changed(true);
+                return;
+            }
+        }
+        if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            z.seek_ms(ms);
+        }
+    }
+
+    /// Stop and let the output go (the page plays something else, or on another zone).
+    pub fn stop(&self) {
+        {
+            let mut p = self.page();
+            p.stopping = true;
+            p.ahead = None;
+            p.taken_at = None;
+            p.url = None;
+            p.current = None;
+        }
+        if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            z.stop();
+            z.clear();
+        }
+        self.changed(true);
+    }
+
+    /// The node took the output: paused here where it was.
+    fn taken(&self) {
+        let at = self.status().position_ms;
+        {
+            let mut p = self.page();
+            if p.url.is_none() || p.taken_at.is_some() {
+                return;
+            }
+            p.taken_at = Some(at);
+            p.stopping = true;
+            p.error = Some(TAKEN_BY_NODE.into());
+        }
+        if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            z.stop();
+        }
+        self.changed(true);
+    }
+
+    /// Tell the page, now (`urgent`) or when the position alone moved and it is time.
+    fn changed(&self, urgent: bool) {
+        let st = self.status();
+        let mut last = self.inner.last.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((was, at)) = last.as_ref() {
+            if *was == st {
+                return;
+            }
+            let moved_only = Status {
+                position_ms: was.position_ms,
+                ..st.clone()
+            } == *was;
+            if moved_only && !urgent && at.elapsed() < POSITION_EVERY {
+                return;
+            }
+        }
+        *last = Some((st.clone(), Instant::now()));
+        drop(last);
+        let f = self
+            .inner
+            .notify
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(f) = f {
+            f(&st);
+        }
+    }
+}
+
+/// Follow the zone's events and state for the page, until the player is gone.
+fn watch(player: Weak<Inner>, zone: &Zone) {
+    let mut events = zone.subscribe();
+    let mut state = zone.watch();
+    let spawned = std::thread::Builder::new().name("app-player".into()).spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_time().build() else {
+            return;
+        };
+        rt.block_on(async move {
+            loop {
+                let urgent = tokio::select! {
+                    ev = events.recv() => match ev {
+                        Ok(ev) => {
+                            let Some(inner) = player.upgrade() else { return };
+                            let p = AppPlayer { inner };
+                            let urgent = p.page().on(&ev);
+                            Some((p, urgent))
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+                        Err(_) => return,
+                    },
+                    ch = state.changed() => {
+                        if ch.is_err() {
+                            return;
+                        }
+                        player.upgrade().map(|inner| (AppPlayer { inner }, false))
+                    }
+                    // A position that moves with nothing else changing still reaches the page
+                    _ = tokio::time::sleep(POSITION_EVERY) => player.upgrade().map(|inner| (AppPlayer { inner }, false)),
+                };
+                match urgent {
+                    Some((p, urgent)) => p.changed(urgent),
+                    None if player.strong_count() == 0 => return,
+                    None => {}
+                }
+            }
+        });
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("the app's player can't follow its zone: {e}");
+    }
+}
+
+/// The device's output as this player opens it: taken from the node first, and given up when
+/// the node takes it back (the sink's next write says so and the zone stops).
+struct Owned {
+    inner: Arc<dyn Output>,
+    owner: OutputOwner,
+    player: Weak<Inner>,
+}
+
+#[async_trait::async_trait]
+impl Output for Owned {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    fn model(&self) -> Option<String> {
+        self.inner.model()
+    }
+    fn live_caps(&self) -> OutputCaps {
+        self.inner.live_caps()
+    }
+    fn live_caps_for(&self, src: AudioFormat) -> OutputCaps {
+        self.inner.live_caps_for(src)
+    }
+    fn device(&self) -> Option<OutputDevice> {
+        self.inner.device()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        let lost = Arc::new(AtomicBool::new(false));
+        let stop: Stop = {
+            let (lost, player) = (lost.clone(), self.player.clone());
+            Arc::new(move || {
+                lost.store(true, Ordering::SeqCst);
+                if let Some(inner) = player.upgrade() {
+                    // Not on the caller's thread: the zone's stop waits for nothing, but the
+                    // page's notify may
+                    std::thread::spawn(move || AppPlayer { inner }.taken());
+                }
+            })
+        };
+        let claim = self
+            .owner
+            .take(&self.id(), Holder::App, stop, TAKE_WAIT)
+            .map_err(|why| SinkError::Unavailable(self.id(), why))?;
+        let sink = self.inner.open(fmt).await?;
+        Ok(Box::new(OwnedSink {
+            inner: sink,
+            id: self.id(),
+            lost,
+            _claim: claim,
+        }))
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.inner.set_volume(v).await
+    }
+}
+
+struct OwnedSink {
+    inner: Box<dyn AudioSink>,
+    id: OutputId,
+    lost: Arc<AtomicBool>,
+    _claim: Claim,
+}
+
+impl OwnedSink {
+    fn check(&self) -> Result<(), SinkError> {
+        if self.lost.load(Ordering::SeqCst) {
+            return Err(SinkError::Gone(self.id.clone(), TAKEN_BY_NODE.into()));
+        }
+        Ok(())
+    }
+}
+
+impl AudioSink for OwnedSink {
+    fn format(&self) -> AudioFormat {
+        self.inner.format()
+    }
+    fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
+        self.check()?;
+        self.inner.write(block)
+    }
+    fn buffer_level(&self) -> BufferLevel {
+        self.inner.buffer_level()
+    }
+    fn flush(&mut self) -> Result<(), SinkError> {
+        self.inner.flush()
+    }
+    fn drain(&mut self) -> Result<(), SinkError> {
+        self.inner.drain()
+    }
+    fn pause(&mut self) -> Result<bool, SinkError> {
+        self.inner.pause()
+    }
+    fn resume(&mut self) -> Result<(), SinkError> {
+        self.check()?;
+        self.inner.resume()
+    }
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        self.check()?;
+        self.inner.ready_to_resume()
+    }
+    fn frames_written(&self) -> u64 {
+        self.inner.frames_written()
+    }
+    fn reopen_at_track(&self) -> bool {
+        self.inner.reopen_at_track()
+    }
+    fn gone_reported(&mut self) {
+        self.inner.gone_reported()
+    }
+    fn reopen_now(&self) -> bool {
+        self.inner.reopen_now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::range::tests::{serve, Mode};
+    use pm_model::Samples;
+    use pm_zones::outputs::{read_wav, NullOutput, WavFileOutput};
+
+    fn wav_bytes(rate: u32, bits: u16, frames: usize, seed: i64) -> (Vec<u8>, Vec<i32>) {
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: rate,
+            bits_per_sample: bits,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cur = std::io::Cursor::new(Vec::new());
+        let mut samples = Vec::new();
+        {
+            let mut w = hound::WavWriter::new(&mut cur, spec).unwrap();
+            let fs = 1i64 << (bits - 1);
+            for i in 0..frames as i64 * 2 {
+                let s = ((i * 7919 + seed * 104_729) % (2 * fs) - fs) as i32;
+                samples.push(s);
+                if bits == 16 {
+                    w.write_sample(s as i16).unwrap();
+                } else {
+                    w.write_sample(s).unwrap();
+                }
+            }
+            w.finalize().unwrap();
+        }
+        (cur.into_inner(), samples)
+    }
+
+    fn wait(p: &AppPlayer, what: &str, ok: impl Fn(&Status) -> bool) -> Status {
+        let until = Instant::now() + Duration::from_secs(15);
+        loop {
+            let st = p.status();
+            if ok(&st) {
+                return st;
+            }
+            assert!(Instant::now() < until, "{what}: {st:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Every status the page was told, in order.
+    fn recorder(p: &AppPlayer) -> Arc<Mutex<Vec<Status>>> {
+        let seen: Arc<Mutex<Vec<Status>>> = Arc::default();
+        let s2 = seen.clone();
+        p.on_change(Arc::new(move |st| s2.lock().unwrap().push(st.clone())));
+        seen
+    }
+
+    #[test]
+    fn a_flac_and_a_wav_over_http_reach_the_output_sample_for_sample() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../pm-audio/tests/fixtures");
+        let flac = fixtures.join("63_predictor_overflow_check_24-bit.flac");
+        let want_flac = pm_audio::Decoder::open(&flac).unwrap().decode_all().unwrap();
+        let (wav, want_wav) = wav_bytes(96_000, 24, 20_000, 3);
+        for (body, ct, want) in [
+            (
+                std::fs::read(&flac).unwrap(),
+                "audio/flac",
+                want_flac.samples.clone(),
+            ),
+            (wav, "audio/wav", Samples::PcmI32(want_wav)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("out.wav");
+            let p = AppPlayer::new(Arc::new(WavFileOutput::new(&out)), OutputOwner::new());
+            let (url, _) = serve(body, ct, Mode::default());
+            p.load(&url, 0, None).unwrap();
+            let st = wait(&p, "the end", |s| {
+                s.ended == 1 && s.transport == Transport::Stopped
+            });
+            assert_eq!(st.url.as_deref(), Some(url.as_str()));
+            assert!(st.error.is_none(), "{st:?}");
+            p.stop();
+            assert_eq!(read_wav(&out).unwrap().samples, want, "{ct}");
+        }
+    }
+
+    /// The next song handed ahead joins without a gap: one sink, both songs in it back to back,
+    /// and the page hears the end of the first together with the second's URL.
+    #[test]
+    fn the_song_handed_ahead_follows_gaplessly() {
+        let (a, mut want) = wav_bytes(44_100, 16, 30_000, 1);
+        let (b, wb) = wav_bytes(44_100, 16, 20_000, 2);
+        want.extend(wb);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let (ub, _) = serve(b, "audio/wav", Mode::default());
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.wav");
+        let p = AppPlayer::new(Arc::new(WavFileOutput::new(&out)), OutputOwner::new());
+        let seen = recorder(&p);
+        p.load(&ua, 0, Some(&ub)).unwrap();
+        wait(&p, "both ended", |s| {
+            s.ended == 2 && s.transport == Transport::Stopped
+        });
+        p.stop();
+        assert_eq!(read_wav(&out).unwrap().samples, Samples::PcmI32(want));
+        let first_end = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|s| s.ended == 1)
+            .cloned()
+            .unwrap();
+        assert_eq!(first_end.url.as_deref(), Some(ub.as_str()), "{first_end:?}");
+    }
+
+    #[test]
+    fn what_cant_be_decoded_here_is_left_to_the_page() {
+        let p = AppPlayer::new(Arc::new(NullOutput::new()), OutputOwner::new());
+        let (html, _) = serve(b"<html>busy</html>".to_vec(), "text/html", Mode::default());
+        let e = p.load(&html, 0, None).unwrap_err();
+        assert!(e.contains("instead of audio"), "{e}");
+        let (hls, _) = serve(
+            b"#EXTM3U\n".to_vec(),
+            "application/vnd.apple.mpegurl",
+            Mode::default(),
+        );
+        assert!(p.load(&hls, 0, None).unwrap_err().contains("playlist"));
+        let (junk, _) = serve(vec![7u8; 4096], "application/octet-stream", Mode::default());
+        assert!(p
+            .load(&junk, 0, None)
+            .unwrap_err()
+            .contains("can't decode it here"));
+        assert_eq!(p.status().url, None, "nothing changed");
+    }
+
+    #[test]
+    fn pause_play_and_seek_move_the_zone() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 4, 1);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let p = AppPlayer::new(Arc::new(NullOutput::realtime()), OutputOwner::new());
+        p.load(&ua, 2_000, None).unwrap();
+        let st = wait(&p, "playing past the seek", |s| {
+            s.transport == Transport::Playing && s.position_ms >= 2_000
+        });
+        assert_eq!(st.duration_ms, Some(4_000));
+        assert_eq!(
+            st.now_playing.unwrap().output_format,
+            AudioFormat::pcm(48_000, 16, 2)
+        );
+        p.pause();
+        let at = wait(&p, "paused", |s| s.transport == Transport::Paused).position_ms;
+        p.seek(500);
+        wait(&p, "seeked while paused", |s| {
+            s.position_ms == 500 && s.transport == Transport::Paused
+        });
+        p.play().unwrap();
+        wait(&p, "playing again", |s| s.transport == Transport::Playing);
+        assert!(at >= 2_000);
+        p.stop();
+        let st = wait(&p, "stopped", |s| s.transport == Transport::Stopped);
+        assert_eq!(st.ended, 0, "a stop is no end");
+        assert_eq!(st.url, None);
+    }
+
+    /// One output, one stream: the node's session takes it from this player (paused here with
+    /// the reason, where it was), and a play here takes it back (the node's session is stopped).
+    #[test]
+    fn the_node_and_the_app_hand_the_output_over() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 6, 1);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let owner = OutputOwner::new();
+        let out = Arc::new(NullOutput::realtime());
+        let id = out.id();
+        let p = AppPlayer::new(out, owner.clone());
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "playing", |s| {
+            s.transport == Transport::Playing && s.position_ms > 300
+        });
+        assert_eq!(owner.holder(&id), Some(Holder::App));
+        let node_stopped = Arc::new(AtomicBool::new(false));
+        let ns = node_stopped.clone();
+        let node = owner
+            .take(
+                &id,
+                Holder::Node,
+                Arc::new(move || ns.store(true, Ordering::SeqCst)),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        let st = wait(&p, "taken", |s| s.error.as_deref() == Some(TAKEN_BY_NODE));
+        assert_eq!(st.transport, Transport::Paused);
+        assert!(st.position_ms > 300, "{st:?}");
+        assert_eq!(owner.holder(&id), Some(Holder::Node));
+        // Play here again: the node's session is told to stop and lets go
+        let slot = Arc::new(Mutex::new(Some(node)));
+        let s2 = slot.clone();
+        let release = std::thread::spawn(move || {
+            while !node_stopped.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            s2.lock().unwrap().take();
+        });
+        p.play().unwrap();
+        let st = wait(&p, "playing here again", |s| {
+            s.transport == Transport::Playing && s.position_ms > st.position_ms
+        });
+        assert!(st.error.is_none(), "{st:?}");
+        release.join().unwrap();
+        assert_eq!(owner.holder(&id), Some(Holder::App));
+        p.stop();
+        wait(&p, "let go", |_| owner.holder(&id).is_none());
+    }
+
+    #[test]
+    fn the_page_hears_ends_only_for_its_own_songs() {
+        let item = |id| QueueItem {
+            id,
+            ..QueueItem::new("u")
+        };
+        let mut pg = Page {
+            url: Some("a".into()),
+            current: Some(1),
+            ahead: Some(("b".into(), 2)),
+            ..Page::default()
+        };
+        assert!(pg.on(&ZoneEvent::TrackEnded {
+            item: item(1),
+            verify_ok: None
+        }));
+        assert_eq!((pg.ended, pg.url.as_deref(), pg.current), (1, Some("b"), Some(2)));
+        assert!(pg.ahead.is_none());
+        // An old item's end changes nothing
+        assert!(!pg.on(&ZoneEvent::TrackEnded {
+            item: item(1),
+            verify_ok: None
+        }));
+        assert_eq!(pg.ended, 1);
+        // The adopted one refused by the opener: the page plays it itself
+        assert!(pg.on(&ZoneEvent::Skipped {
+            item: item(2),
+            reason: "can't decode it here".into()
+        }));
+        assert_eq!(pg.refused.as_deref(), Some("can't decode it here"));
+    }
+}
