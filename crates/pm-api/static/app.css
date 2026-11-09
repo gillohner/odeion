@@ -2140,7 +2140,8 @@ html[data-shell="phone"] .srow .name { white-space: nowrap; overflow: hidden; te
    lowered by half the difference between its size and the word's x-height. */
 .section-head > .btn.selstart { align-items: baseline; gap: 6px; min-height: 0; padding-top: 0; padding-bottom: 0; line-height: 32px; }
 .section-head > .btn.selstart > .ic { width: 16px; height: 16px; align-self: baseline; position: relative; top: 0.22em; }
-html[data-shell="phone"] .section-head > .btn.selstart { line-height: 48px; padding: 0 8px; margin: -12px -8px -12px 0; }
+/* (its word ends at the row's edge, inside it: no negative side margin) */
+html[data-shell="phone"] .section-head > .btn.selstart { line-height: 48px; padding: 0 0 0 8px; margin: -12px 0; }
 
 /* Album page (phones): a compact header (the cover beside the title, artist and source), Play and
    Shuffle, then three icon buttons of one kind; "Not matched · Match" as one small row under them */
