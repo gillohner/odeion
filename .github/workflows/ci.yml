@@ -589,6 +589,7 @@ jobs:
             echo "::endgroup::"
           done <<'LIST'
           ui-browser-library.js library-playback-shots
+          ui-search-routing.js search-routing-shots
           ui-artist-links.js artist-link-shots
           ui-review-fixes.js review-fixes-shots
           ui-personal-play-share.js personal-play-share-shots

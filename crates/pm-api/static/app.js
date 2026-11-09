@@ -3924,7 +3924,7 @@
   }, true);
   const isLink = (q) => /^https?:\/\/\S+$/i.test(q);
   const linkKind = (u) => (/\/(artist|artists)\//.test(u) ? 'artist' : /\/(album|albums|release|release-group)\//.test(u) ? 'album' : 'song');
-  const runSearch = async (how) => {
+  const runSearch = async (how, savedScope) => {
     const q = search.value.trim();
     if (!q) { if (state.view === 'search') setView('home'); return; }
     // A pasted link skips searching: its item page (by-uri, then resolve; "Reading this link…").
@@ -3932,7 +3932,7 @@
     // A pasted Pubky key (with or without pubky:// or the pubky prefix) opens that person
     const pk = /^(?:pubky:\/\/|pubky)?([a-z0-9]{52})\/?$/.exec(q);
     if (pk) { setView('person', pk[1]); return; }
-    const scope = (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
+    const scope = savedScope || (state.viewArg && state.view === 'search' && state.viewArg.in) || state.searchScope || 'everywhere';
     startSearch(q, scope);
     setView('search', { q, in: scope }, how === 'pop' ? 'pop' : 'push');
   };
@@ -7924,7 +7924,15 @@
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z])); state.zonesSeen = true;
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
-      { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
+      {
+        const r = routeFromPath();
+        if (r && r.v === 'search' && r.arg && r.arg.q) {
+          search.value = r.arg.q;
+          history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search);
+          // A saved search's source applies to its first request, before the view is drawn.
+          runSearch('pop', r.arg.in || 'everywhere');
+        } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace');
+      }
       link.loaded = true;
       openEvents();
     } catch (e) {
