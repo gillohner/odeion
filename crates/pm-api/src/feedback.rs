@@ -761,22 +761,42 @@ fn sender(c: &Caller) -> Option<Sender> {
     }
 }
 
-/// Whether the caller a token gives `now` is still the person it gave `then`: the owner, or the
-/// same listener. Not the whole `Caller`: the owner's key can load during a request (the node's
-/// identity syncing), which is no sign-out (held Low 3 of the Claude review of 2d2f0a8a).
-/// A listener's membership name now ([`crate::people::reports_of`]); the owner has none.
-fn membership_of(s: &NodeState, who: &Sender) -> Option<String> {
-    match who {
-        Sender::Owner => None,
-        Sender::Listener(k) => crate::people::reports_of(s, k),
+/// The authenticated report membership now. An outer `None` refuses access; `Some(None)` is an
+/// owner or a valid legacy listener, not a missing/unreadable/no-music entry. Listener tokens and
+/// their membership are read under one library lock, including when an inbox transaction calls
+/// back here. Never take the roster lock: removal holds it while waiting for that inbox.
+fn membership_of(s: &NodeState, token: &str, caller: &Caller) -> Option<Option<String>> {
+    match sender(caller)? {
+        Sender::Owner => {
+            same_person(caller, crate::accounts::caller(s, Some(token)).as_ref()).then_some(None)
+        }
+        Sender::Listener(k) => crate::accounts::listener_report_membership(s, token, &k),
     }
 }
 
+/// Whether the caller a token gives `now` is still the person it gave `then`: the owner, or the
+/// same listener. Not the whole `Caller`: the owner's key can load during a request (the node's
+/// identity syncing), which is no sign-out (held Low 3 of the Claude review of 2d2f0a8a).
 fn same_person(then: &Caller, now: Option<&Caller>) -> bool {
     match (sender(then), now.and_then(sender)) {
         (Some(Sender::Owner), Some(Sender::Owner)) => true,
         (Some(Sender::Listener(a)), Some(Sender::Listener(b))) => a == b,
         _ => false,
+    }
+}
+
+// Per-request synchronization at the capture boundary for the restore regressions. It is absent
+// from production builds and cannot block unrelated requests or parallel tests.
+#[cfg(test)]
+tokio::task_local! {
+    static CAPTURE_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+}
+
+#[cfg(test)]
+async fn after_capture() {
+    if let Ok((captured, resume)) = CAPTURE_GATE.try_with(Clone::clone) {
+        captured.notify_one();
+        resume.notified().await;
     }
 }
 
@@ -968,14 +988,15 @@ pub async fn send(
         }
         bytes.extend_from_slice(&chunk);
     }
-    // Still signed in as the same person once the body is here (and again at the write)
-    let signed_in = {
-        let (s, token, c) = (s.clone(), token.clone(), c.clone());
-        move || same_person(&c, crate::accounts::caller(&s, Some(&token)).as_ref())
-    };
-    if !signed_in() {
+    // Capture authorization and report membership together once the body is here. A token can
+    // become valid again after two restores, without giving it the retired report membership.
+    let Some(membership) = membership_of(&s, &token, &c) else {
         return refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
-    }
+    };
+    let signed_in = {
+        let (s, token, c, captured) = (s.clone(), token.clone(), c.clone(), membership.clone());
+        move || membership_of(&s, &token, &c).as_ref() == Some(&captured)
+    };
     let Ok(mut r) = serde_json::from_slice::<NewReport>(&bytes) else {
         return refuse(StatusCode::BAD_REQUEST, NOT_UNDERSTOOD);
     };
@@ -991,7 +1012,8 @@ pub async fn send(
         Ok(text) => text,
         Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
     };
-    let membership = membership_of(&s, &who);
+    #[cfg(test)]
+    after_capture().await;
     let dir = s.data_dir();
     let saved = tokio::task::spawn_blocking(move || {
         let mut inbox = Inbox::open(&dir)?;
@@ -1055,16 +1077,17 @@ pub async fn mine(
     let Some(who) = sender(&c) else {
         return refuse(StatusCode::FORBIDDEN, "Only the node's people send reports.");
     };
-    // Still signed in as the same person when the inbox answers, as at a write: a read that waited
-    // for the inbox while its sign-in ended shows nothing (Kimi review of fc1dca51, M2)
-    let signed_in = {
-        let (s, c) = (s.clone(), c.clone());
-        move || same_person(&c, crate::accounts::caller(&s, Some(&token)).as_ref())
-    };
-    if !signed_in() {
+    // The token and report membership must both survive the read. Reinstating a token by restore
+    // never makes a delayed read of a retired membership valid again.
+    let Some(membership) = membership_of(&s, &token, &c) else {
         return refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
-    }
-    let membership = membership_of(&s, &who);
+    };
+    let signed_in = {
+        let (s, c, captured) = (s.clone(), c.clone(), membership.clone());
+        move || membership_of(&s, &token, &c).as_ref() == Some(&captured)
+    };
+    #[cfg(test)]
+    after_capture().await;
     let dir = s.data_dir();
     match tokio::task::spawn_blocking(move || {
         let list = match Inbox::open_existing(&dir)? {
@@ -1190,6 +1213,10 @@ pub fn housekeeping(dir: &Path, now: i64) -> Result<usize, InboxError> {
     }
     Ok(n)
 }
+
+#[cfg(test)]
+#[path = "feedback_restore_tests.rs"]
+mod restore_tests;
 
 #[cfg(test)]
 mod tests {

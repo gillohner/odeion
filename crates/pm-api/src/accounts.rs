@@ -645,6 +645,30 @@ fn listener_of(s: &NodeState, token: &str) -> Option<String> {
     crate::people::may_use_music(s, &key).then_some(key)
 }
 
+/// This listener token's active report membership, read with its authorization under one library
+/// lock. `Some(None)` is a valid legacy membership; `None` means no matching token, no enabled
+/// music membership, or unreadable state. A restore cannot put the token and roster reads on
+/// opposite sides of a replacement. No roster lock: feedback also calls this inside an inbox write.
+pub(crate) fn listener_report_membership(s: &NodeState, token: &str, key: &str) -> Option<Option<String>> {
+    if !token.starts_with("pml_") || token == s.token()?.as_str() {
+        return None;
+    }
+    let key = key.trim_start_matches("pubky");
+    let h = hash(token);
+    let lib = s.library.lock().expect("library poisoned");
+    let tokens: Vec<PersonToken> = serde_json::from_str(&lib.get_setting(TOKENS).ok()??).ok()?;
+    if !tokens.iter().any(|t| t.hash == h && t.key == key) {
+        return None;
+    }
+    let roster: crate::people::Roster =
+        serde_json::from_str(&lib.get_setting(crate::people::SETTING).ok()??).ok()?;
+    roster
+        .people
+        .into_iter()
+        .find(|p| p.key == key && p.access.music() && p.music_enabled)
+        .map(|p| p.reports)
+}
+
 /// The zones a listener may play on: the owner's list, or every zone when none is set
 /// (`None`). A list that can't be read, or isn't a list of zone ids, is an error: listeners
 /// are then kept off every zone until the owner sets the list again, never let onto all of them.
