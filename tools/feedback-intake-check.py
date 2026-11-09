@@ -186,6 +186,56 @@ def fake():
         check(rc == 0 and repaired == other and len(calls) == 1, f"the copy is repaired, then received ({rc} {out.strip()})")
         check(mode(broken) == 0o600 and not [n for n in os.listdir(cfg["dir"]) if ".tmp" in n], "the repaired copy is private, no temp files left")
 
+        # Files there before the intake (a copy made by hand, an older receipts file) are made the
+        # operator's alone too, and a link is never followed (Kimi review of fc1dca51, M4)
+        third = dict(good, id="fb_0000000000000aaa", text="SYNTHETIC third report")
+        hand = os.path.join(cfg["dir"], third["id"] + ".json")
+        with open(hand, "w", encoding="utf-8") as f:
+            json.dump({"warning": k["warning"], "report": third}, f)
+        os.chmod(hand, 0o644)
+        os.chmod(cfg["receipts"], 0o644)
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[third]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = intake(cfg_path, "intake")
+        counts = json.loads(out or "{}")
+        check(rc == 0 and counts.get("again") == 1 and counts.get("received") == 1, f"a copy made by hand is taken as kept ({rc} {counts} {err.strip()})")
+        check(mode(hand) == 0o600, f"a copy made by hand is made private ({oct(mode(hand))})")
+        check(mode(cfg["receipts"]) == 0o600, f"an older receipts file is made private ({oct(mode(cfg['receipts']))})")
+
+        outside = os.path.join(work, "outside.jsonl")
+        with open(outside, "w") as f:
+            f.write("not the intake's\n")
+        os.chmod(outside, 0o644)
+        real = cfg["receipts"] + ".real"
+        os.rename(cfg["receipts"], real)
+        os.symlink(outside, cfg["receipts"])
+        fourth = dict(good, id="fb_0000000000000bbb", text="SYNTHETIC fourth report")
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[fourth]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = intake(cfg_path, "intake")
+        with open(state) as f:
+            calls = json.load(f)["calls"]
+        with open(outside) as f:
+            check(f.read() == "not the intake's\n" and mode(outside) == 0o644, "a linked receipts file's target is left as it is")
+        check(rc == 1 and "receipts" in err and calls == [], f"a linked receipts file stops the intake before any receipt ({rc} {calls} {err.strip()})")
+        os.unlink(cfg["receipts"])
+        os.rename(real, cfg["receipts"])
+
+        fifth = dict(good, id="fb_0000000000000ccc", text="SYNTHETIC fifth report")
+        elsewhere = os.path.join(work, "elsewhere.json")
+        with open(elsewhere, "w", encoding="utf-8") as f:
+            json.dump({"warning": k["warning"], "report": fifth}, f)
+        os.chmod(elsewhere, 0o644)
+        linked = os.path.join(cfg["dir"], fifth["id"] + ".json")
+        os.symlink(elsewhere, linked)
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[fifth]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = intake(cfg_path, "intake")
+        counts = json.loads(out or "{}")
+        check(rc == 0 and counts.get("repaired") == 1 and counts.get("received") == 1, f"a linked copy is replaced by a kept one ({rc} {counts} {err.strip()})")
+        check(not os.path.islink(linked) and mode(linked) == 0o600, "the copy in the intake folder is a private file, not a link")
+        check(mode(elsewhere) == 0o644, "a linked copy's target is left as it is")
+
         # One intake at a time
         import fcntl
         with open(os.path.join(cfg["dir"], ".lock"), "a") as lock:

@@ -777,6 +777,182 @@ async fn a_listener_reports_under_the_nodes_sign_ins() {
     assert_eq!(r.as_array().map(Vec::len), Some(1), "{r}");
 }
 
+/// The texts of the reports in the inbox, sorted.
+fn texts(dir: &std::path::Path) -> Vec<String> {
+    let mut t: Vec<String> = inbox(dir)
+        .pending(pm_api::feedback::now())
+        .unwrap()
+        .into_iter()
+        .map(|p| p.text)
+        .collect();
+    t.sort();
+    t
+}
+
+/// Ann, Ben and the owner each send a report.
+async fn three_reports(app: &axum::Router, ann: &str, ben: &str) {
+    for (who, text) in [(ann, "ann's"), (ben, "ben's"), (OWNER, "owner's")] {
+        let (st, r) = call(app, Some(who), "POST", "/v1/feedback", Some(report(text))).await;
+        assert_eq!(st, StatusCode::CREATED, "{r}");
+    }
+}
+
+/// Waits up to 15 s for the inbox to hold exactly `want`.
+async fn until_left(dir: &std::path::Path, want: &[&str]) -> Vec<String> {
+    let mut left = texts(dir);
+    for _ in 0..150 {
+        if left == want {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        left = texts(dir);
+    }
+    left
+}
+
+/// People › Remove while the inbox is held longer than it waits (Kimi review of fc1dca51, M1): the
+/// listener is removed, and their reports go at the next housekeeping, which the node runs at
+/// start and every hour. Nobody else's go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_a_busy_inbox_kept_at_a_remove_go_at_housekeeping() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    assert_eq!(
+        texts(dir.path()),
+        ["ann's", "ben's", "owner's"],
+        "precondition: the remove couldn't reach the inbox"
+    );
+    pm_api::feedback::start_housekeeping(&s);
+    assert_eq!(
+        until_left(dir.path(), &["ben's", "owner's"]).await,
+        ["ben's", "owner's"]
+    );
+}
+
+/// A restore brings back a roster without Ann (held Low 6 of the Claude review of 2d2f0a8a): her
+/// reports go at the next housekeeping, as a People › Remove would have taken them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reports_of_someone_no_longer_on_the_roster_go_at_housekeeping() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    let only_ben = json!({"people": [{"key": BEN, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &only_ben.to_string())
+        .unwrap();
+    pm_api::feedback::start_housekeeping(&s);
+    assert_eq!(
+        until_left(dir.path(), &["ben's", "owner's"]).await,
+        ["ben's", "owner's"]
+    );
+}
+
+/// A roster the node can't read is never taken for an empty one: no report goes for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_roster_takes_no_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", "{not a roster")
+        .unwrap();
+    pm_api::feedback::start_housekeeping(&s);
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert_eq!(texts(dir.path()), ["ann's", "ben's", "owner's"]);
+}
+
+/// Signed out while My reports waits for the inbox (Kimi review of fc1dca51, M2): the answer is
+/// a 401, never the list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sign_out_while_my_reports_are_read_shows_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s.clone());
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's own")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    // Another connection holds the inbox: the read waits there, past the token check
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let req = Request::get("/v1/feedback/mine")
+        .header("authorization", format!("Bearer {ann}"))
+        .body(Body::empty())
+        .unwrap();
+    let pending = tokio::spawn(send_owned(app.clone(), req));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(
+        !pending.is_finished(),
+        "precondition: the read waits for the inbox"
+    );
+    pm_api::accounts::sign_out_everywhere(&s, ANN).unwrap();
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    let (st, r) = pending.await.unwrap();
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "{r}");
+    assert!(!r.to_string().contains("ann's own"), "{r}");
+}
+
+/// `feedback.sqlite` is a link to another database (Kimi review of fc1dca51, M3): the inbox
+/// refuses it, and the database it points to is left exactly as it was, mode included.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_in_place_of_the_inbox_is_refused_and_its_target_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let app = router(s.clone());
+    let elsewhere = dir.path().join("elsewhere.sqlite");
+    {
+        let db = rusqlite::Connection::open(&elsewhere).unwrap();
+        db.execute_batch("CREATE TABLE keep (x TEXT); INSERT INTO keep VALUES ('as it was');")
+            .unwrap();
+    }
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let before = std::fs::read(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, dir.path().join(pm_api::feedback::FILE)).unwrap();
+    let (st, r) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(report("owner's"))).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    let (st, r) = call(&app, Some(OWNER), "GET", "/v1/feedback/mine", None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    assert!(Inbox::open(dir.path()).is_err());
+    assert!(Inbox::open_existing(dir.path()).is_err());
+    assert!(pm_api::feedback::housekeeping(dir.path(), pm_api::feedback::now()).is_err());
+    assert_eq!(
+        std::fs::read(&elsewhere).unwrap(),
+        before,
+        "the linked database is unchanged"
+    );
+    let mode = std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644, "the linked database's mode is unchanged");
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {
