@@ -132,6 +132,9 @@ jobs:
       # Every action pinned to a commit SHA (a tag can be moved to other code)
       - run: python3 -I tools/workflow-pins-check.py --self-test && python3 -I tools/workflow-pins-check.py
       - run: python3 -I tools/bundle-settings-check.py
+      # Problem reports: tools/feedback-intake.py against a fake node (ids, argv, 0600/0700, the
+      # untrusted marker, the time limit); no build
+      - run: python3 -I tools/feedback-intake-check.py
       - run: python3 -I tools/units-check.py
       - run: python3 -I tools/compose-check.py
   desktop:
@@ -521,6 +524,8 @@ jobs:
         run: python3 -I tools/console-links.py
       - name: no client secret, private key or keystore in the repository or the binary
         run: python3 -I tools/secret-scan.py --binary target/debug/pm-node
+      - name: problem reports end to end (synthetic text; reports over HTTP, intake through `pm-node feedback`, the sender sees the receipt)
+        run: mkdir -p "$RUNNER_TEMP/feedback-intake" && python3 -I tools/feedback-intake-check.py "$GITHUB_WORKSPACE/target/debug/pm-node" "$RUNNER_TEMP/feedback-intake"
       # The pages checked against fixtures (no node) run in ui-fixtures
       - name: TIDAL sign-in with an app and no secret, through the return page (mock TIDAL)
         run: |
@@ -609,6 +614,11 @@ jobs:
           ui-item-about.js item-about-shots
           ui-usb-dac.js usb-dac-shots
           LIST
+      # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
+      # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
+      - name: problem reports (Help "?", the report dialog and My reports; mocked node)
+        if: matrix.shard == 1
+        run: cd /tmp/pw && node "$GITHUB_WORKSPACE/tools/ui-feedback.js" ci-token mock /tmp/pm/feedback-shots < /dev/null
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

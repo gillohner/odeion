@@ -53,6 +53,22 @@ const afterIntake = async (browser) => {
   const browser = await chromium.launch();
   try {
     if (AFTER_INTAKE) { await afterIntake(browser); console.log(`${passed} passed`); return; }
+    // The app's own page links feedback.css in its head (index.html): mounting adds no second copy
+    {
+      const page = await browser.newPage();
+      const linked = HOST.replace('<link rel="stylesheet" href="/app.css">', '<link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/feedback.css">');
+      assert.notEqual(linked, HOST, 'the test page links app.css');
+      await page.route(`${ORIGIN}/__fb-host`, (r) => r.fulfill({ contentType: 'text/html', body: linked }));
+      await page.route(`${ORIGIN}/__fb-mount.js`, (r) => r.fulfill({ contentType: 'text/javascript', body: MOUNT }));
+      for (const f of ['feedback.js', 'feedback.css', 'app.css']) {
+        await page.route(`${ORIGIN}/${f}`, (r) => r.fulfill({ contentType: f.endsWith('.js') ? 'text/javascript' : 'text/css', body: fs.readFileSync(path.join(STATIC, f), 'utf8') }));
+      }
+      await page.goto(`${ORIGIN}/__fb-host`);
+      await page.getByRole('button', { name: 'Help and problem reports' }).waitFor();
+      const links = await page.locator('link[rel="stylesheet"][href="/feedback.css"]').count();
+      ok(links === 1, `a page that links feedback.css itself keeps one link (${links})`);
+      await page.close();
+    }
     for (const width of [390, 768, 1280]) {
       const phone = width < 600;
       const ctx = await browser.newContext({ viewport: { width, height: phone ? 760 : 900 }, reducedMotion: 'reduce', hasTouch: phone, isMobile: phone });
