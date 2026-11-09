@@ -2339,13 +2339,13 @@ async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
 #[tokio::test]
 async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller() {
     let r = rig(&[("a", RATE, 100_000), ("b", RATE, 100_000)]);
-    r.zone
-        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
-    r.zone.set_shuffle(true);
+    let zone = Arc::new(r.zone);
+    zone.enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    zone.set_shuffle(true);
     let boundary = Arc::new(std::sync::Barrier::new(2));
     let proceed = Arc::new(std::sync::Barrier::new(2));
     let replacement = {
-        let zone = r.zone.clone();
+        let zone = zone.clone();
         let boundary = boundary.clone();
         let proceed = proceed.clone();
         std::thread::spawn(move || {
@@ -2356,13 +2356,12 @@ async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller(
         })
     };
     boundary.wait();
-    r.zone.set_shuffle(false);
+    zone.set_shuffle(false);
     proceed.wait();
     replacement.join().unwrap();
-    assert!(!r.zone.shuffle());
+    assert!(!zone.shuffle());
     assert_eq!(
-        r.zone
-            .wait_acked()
+        zone.wait_acked()
             .await
             .queue
             .iter()
