@@ -458,6 +458,13 @@ pub(crate) async fn start(
         if let Some(why) = room.space().and_then(|sp| sp.too_little(coming + b.size)) {
             return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
         }
+        // This empty-file operation must finish before publishing the reservation. An
+        // async filesystem task can outlive a dropped request and recreate an orphan.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(part_path(&s, &id))
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         u.insert(
             id.clone(),
             Upload {
@@ -474,10 +481,6 @@ pub(crate) async fn start(
                 writing: false,
             },
         );
-    }
-    if let Err(e) = tokio::fs::write(part_path(&s, &id), b"").await {
-        s.music_uploads.lock().expect("uploads").remove(&id);
-        return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
     }
     Ok(Json(UploadStarted {
         id: Some(id),

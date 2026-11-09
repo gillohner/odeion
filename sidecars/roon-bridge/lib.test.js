@@ -46,31 +46,27 @@ test("scrobbles once per track after the halfway mark, keyed per zone", async ()
   assert.equal(s.seekUpdate({ zone_id: "unknown", seek_position: 1 }), null);
 });
 
-test("a busy or failing node is tried again after a pause; a refusal is final", async () => {
-  let status = 503;
-  const { fetchImpl, calls } = fakeFetch(() => (status === 200 ? [200, { uri: "https://musicbrainz.org/recording/x" }] : [status, { error: "no" }]));
-  let clock = 1000;
-  const s = new Scrobbler(makeApi({ fetchImpl }), quiet, () => clock);
-  const zone = (seek) => ({ zone_id: "z", state: "playing", now_playing: { three_line: { line1: "Get Lucky", line2: "Daft Punk", line3: "RAM" }, length: 369, seek_position: seek } });
-  assert.equal(await s.maybeScrobble(zone(10)), false, "not yet");
-  assert.equal(await s.maybeScrobble(zone(200)), false, "the node was busy");
-  assert.equal(calls.length, 1);
-  assert.equal(await s.maybeScrobble(zone(201)), false, "not again at once");
-  assert.equal(calls.length, 1);
-  clock += 5000;
-  status = 200;
-  assert.equal(await s.maybeScrobble(zone(210)), true, "tried again after the pause, posted");
-  assert.equal(calls.length, 2);
-  assert.equal(await s.maybeScrobble(zone(220)), false, "posted once");
-  assert.equal(calls.length, 2);
-  // A refusal (here 401) is not tried again
-  status = 401;
-  const t = new Scrobbler(makeApi({ fetchImpl }), quiet, () => clock);
-  await t.maybeScrobble(zone(10));
-  assert.equal(await t.maybeScrobble(zone(200)), false);
-  clock += 120000;
-  assert.equal(await t.maybeScrobble(zone(230)), false);
-  assert.equal(calls.length, 3, "one try, no retry");
+test("a lost response or error never reposts the same playback", async () => {
+  for (const status of [undefined, 429, 503, 401]) {
+    const accepted = [];
+    const api = async (method, path, body) => {
+      accepted.push(body); // The node committed before its answer was lost or replaced.
+      const error = new Error("response lost after commit");
+      error.status = status;
+      throw error;
+    };
+    const s = new Scrobbler(api, quiet);
+    const zone = (seek, title = "Get Lucky") => ({ zone_id: "z", state: "playing", now_playing: { three_line: { line1: title, line2: "Daft Punk", line3: "RAM" }, length: 369, seek_position: seek } });
+    await s.maybeScrobble(zone(10));
+    assert.equal(await s.maybeScrobble(zone(200)), false);
+    for (const seek of [201, 210, 300, 360]) {
+      assert.equal(await s.maybeScrobble(zone(seek)), false);
+    }
+    assert.equal(accepted.length, 1, "an ambiguous commit is never replayed");
+    await s.maybeScrobble(zone(10, "Next song"));
+    await s.maybeScrobble(zone(200, "Next song"));
+    assert.equal(accepted.length, 2, "the next playback still gets its own attempt");
+  }
 });
 
 test("a 422 from the node is a skip, not a failure", async () => {
