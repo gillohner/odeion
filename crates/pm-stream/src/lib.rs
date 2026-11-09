@@ -83,6 +83,15 @@ pub enum Frame {
         output: String,
         settings: pm_zones::DeviceSettings,
     },
+    /// The output's level now (a phone's media volume, or its USB DAC's own), answered by
+    /// `Level`. An endpoint from before it ends the session: the level is unknown then.
+    GetVolume {
+        output: String,
+    },
+    /// The answer to `GetVolume`; `None` when the output can't say.
+    Level {
+        volume: Option<pm_model::ZoneVolume>,
+    },
     Done,
     Close,
     Error {

@@ -65,6 +65,9 @@ impl CpalOutput {
     #[cfg(target_os = "android")]
     fn android(mut self) -> Self {
         self.device_name = "Speaker or headphones".into();
+        // The zone's volume is Android's media volume (`media_volume`): the slider, the phone's
+        // volume keys and Android's panel are one value
+        self.caps.hw_volume = Some(pm_model::VolumeKind::Percent);
         self.caps.pcm_rates = ANDROID_RATES.to_vec();
         self.caps.quality_ceiling = QualityCeiling::LosslessUpTo {
             rate_hz: 48_000,
@@ -231,17 +234,36 @@ impl Output for CpalOutput {
         Ok(Box::new(sink))
     }
 
-    /// In Exclusive USB with "Use the DAC's volume" on: the DAC's own (its feature unit), the
-    /// samples untouched. Otherwise none of its own: Android's (the phone's buttons) in shared
-    /// mode; in bit-perfect mode the level is the DAC's. The zone's software volume (DSP) still
-    /// works, and the signal path then says it changes the samples.
+    /// On Android, one volume (`media_volume`): in Exclusive USB with "Use the DAC's volume" on,
+    /// the DAC's own (its feature unit), the samples untouched; otherwise Android's media volume,
+    /// which the phone's volume keys move too (bit-perfect plays only at its full level: turning
+    /// it down plays shared). None in bit-perfect at full level by the listener's agreement (the
+    /// DAC or amplifier sets it). Elsewhere none of its own: the zone's software volume (DSP)
+    /// still works, and the signal path then says it changes the samples.
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         #[cfg(target_os = "android")]
-        if self.live_caps().hw_volume.is_some() {
-            return crate::exclusive::set_volume(v).map_err(SinkError::Device);
+        {
+            use crate::media_volume::{phone_set, SetError};
+            return match phone_set(self.live_caps().hw_volume, v) {
+                Ok(()) => Ok(()),
+                Err(SetError::NoVolume) => Err(SinkError::NoVolume(self.id())),
+                Err(SetError::Failed(why)) => Err(SinkError::Device(why)),
+            };
         }
-        let _ = v;
-        Err(SinkError::NoVolume(self.id()))
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = v;
+            Err(SinkError::NoVolume(self.id()))
+        }
+    }
+
+    /// On Android, the level now: Android's media volume, or the DAC's own in Exclusive USB (its
+    /// own buttons show too), so the node's read-back shows a key press on every controller.
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        #[cfg(target_os = "android")]
+        return Ok(crate::media_volume::phone_read(self.live_caps().hw_volume));
+        #[cfg(not(target_os = "android"))]
+        Ok(None)
     }
 }
 

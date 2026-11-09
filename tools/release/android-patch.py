@@ -43,6 +43,11 @@ silently cannot connect.
 12. The window's own colour before the first page paints: the pages' background (light, and dark
    in values-night) as the theme's windowBackground and Android 12's splash screen background, so a
    cold start shows no black frame (owner's recording, 2026-11-06).
+13. The system's media controls (tools/release/android/MediaControl.kt, src/media.rs): one media
+   session for the zone the app controls (the player service's notification becomes the media
+   notification; lock screen, quick settings, headset and Bluetooth buttons, the volume keys), the
+   page's message port (androidx.webkit, in Tauri's template) and Android's media volume. ProGuard
+   keep rule: its static methods are called over JNI.
 
 Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """
@@ -123,6 +128,7 @@ updater = "-keep class **.AppUpdate { public static *; }"
 usb_audio = "-keep class **.UsbAudio { public static *; }"
 bit_perfect = "-keep class **.BitPerfect { public static *; }"
 exclusive = "-keep class **.UsbExclusive { public static *; }"
+media_control = "-keep class **.MediaControl { public static *; }"
 if player not in existing:
     existing = existing.rstrip("\n") + "\n\n# The player service's start/stop (called over JNI from src/android.rs)\n" + player + "\n"
 if crash.split("\n")[0] not in existing:
@@ -135,6 +141,8 @@ if bit_perfect not in existing:
     existing = existing.rstrip("\n") + "\n\n# Bit-perfect playback: its static methods are called over JNI from src/android.rs\n" + bit_perfect + "\n"
 if exclusive not in existing:
     existing = existing.rstrip("\n") + "\n\n# Exclusive USB: its static methods are called over JNI from src/android.rs\n" + exclusive + "\n"
+if media_control not in existing:
+    existing = existing.rstrip("\n") + "\n\n# The media controls: their static methods are called over JNI from src/android.rs\n" + media_control + "\n"
 proguard.write_text(existing)
 
 # 4. multicast permission
@@ -315,6 +323,15 @@ ex_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", ex_kt, count=1
 if n != 1:
     die("UsbExclusive.kt has no package line")
 (activities[0].parent / "UsbExclusive.kt").write_text(ex_kt)
+
+# 13. the media controls, next to MainActivity; the page's message port is androidx.webkit's
+if "androidx.webkit:webkit" not in gradle.read_text():
+    die(f"androidx.webkit is not in {gradle}: the media controls' message port needs it")
+mc_kt = (Path(__file__).parent / "android" / "MediaControl.kt").read_text()
+mc_kt, n = re.subn(r"^package [\w.]+", f"package {pkg.group(1)}", mc_kt, count=1, flags=re.M)
+if n != 1:
+    die("MediaControl.kt has no package line")
+(activities[0].parent / "MediaControl.kt").write_text(mc_kt)
 mtext = manifest.read_text()
 audio_perm = '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />'
 if audio_perm not in mtext:
@@ -350,5 +367,5 @@ for t in themes:
 
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB), window colour"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB), window colour, media controls"
 )

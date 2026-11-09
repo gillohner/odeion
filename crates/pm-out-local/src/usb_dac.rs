@@ -839,6 +839,18 @@ pub fn set_dac(dac: Option<Dac>) -> bool {
 
 /// [`set_dac`], with why the DAC went when it goes (`None`: it was unplugged).
 fn set_dac_because(dac: Option<Dac>, why: Option<String>) -> bool {
+    let appeared = dac.is_some()
+        && with_phone(|p| p.dac.as_ref().map(|d| (d.id, d.device.name.clone())))
+            != dac.as_ref().map(|d| (d.id, d.device.name.clone()));
+    let changed = set_dac_locked(dac, why);
+    // Auto's best path for a new DAC is Exclusive USB: Android's permission, asked once
+    if appeared {
+        crate::exclusive::auto_ask();
+    }
+    changed
+}
+
+fn set_dac_locked(dac: Option<Dac>, why: Option<String>) -> bool {
     with_phone(|p| {
         let before = view(p);
         let other =

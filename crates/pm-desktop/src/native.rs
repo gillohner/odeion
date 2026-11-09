@@ -67,6 +67,12 @@ pub fn on() -> bool {
     cfg!(target_os = "android") && PLAYER.get().is_some()
 }
 
+/// The single engine also serves Android's session/focus controls while the page sleeps.
+#[cfg(target_os = "android")]
+pub(crate) fn media_player() -> Option<AppPlayer> {
+    PLAYER.get().cloned()
+}
+
 /// The player on the endpoint's output (the phone has one), with the endpoint's owner.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn start(app: &AppHandle, endpoint: &Arc<pm_endpoint::Endpoint>) {
@@ -89,6 +95,10 @@ pub fn start(app: &AppHandle, endpoint: &Arc<pm_endpoint::Endpoint>) {
 
 /// The page hears the player (and the player service whether it plays).
 fn push(app: &AppHandle, st: &Status) {
+    #[cfg(target_os = "android")]
+    if let Some(m) = crate::media_live::get() {
+        m.native_changed(st);
+    }
     let playing = st.transport == pm_app_player::Transport::Playing;
     if PLAYING.swap(playing, Ordering::SeqCst) != playing {
         #[cfg(target_os = "android")]
@@ -156,9 +166,9 @@ fn event_script(st: &Status) -> String {
 /// A page (re)loads: the player stops with the page that played it, as `<audio>` would.
 pub fn page_changed() {
     if let Some(p) = PLAYER.get() {
-        if p.status().url.is_some() {
-            p.stop();
-        }
+        // A first load has no URL yet; stopping still invalidates its generation and focus
+        // entitlement so a page that has gone away cannot start it later.
+        p.stop();
     }
 }
 

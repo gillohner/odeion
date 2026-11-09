@@ -12,6 +12,11 @@
 #[cfg(target_os = "android")]
 mod android;
 mod crash;
+// The system's media controls on Android (the decisions; tested on every host)
+#[cfg(any(test, target_os = "android"))]
+mod media;
+#[cfg(target_os = "android")]
+mod media_live;
 mod node;
 mod offline;
 // The page's own player played by the app (Android; built everywhere the player is)
@@ -85,8 +90,14 @@ fn init_script(s: Option<&Settings>) -> String {
     let (origin, token) = s
         .and_then(|s| Some((s.origin()?, s.token.clone())))
         .unwrap_or_default();
+    // Android: the page's two calls to the app (`window.OdeionAndroid`) and its Media Session
+    // mirrored to the system's media controls (`media::BRIDGE_JS`)
+    #[cfg(target_os = "android")]
+    let bridge = media::BRIDGE_JS;
+    #[cfg(not(target_os = "android"))]
+    let bridge = "";
     format!(
-        "(function(){{var o={o},t={t};if(o&&location.origin===o){{try{{localStorage.setItem('pm.token',t);}}catch(e){{}}}}window.pmDesktop={{version:{v},platform:{p}}};{EXTERNAL_LINKS_JS}}})();",
+        "(function(){{var o={o},t={t};if(o&&location.origin===o){{try{{localStorage.setItem('pm.token',t);}}catch(e){{}}}}window.pmDesktop={{version:{v},platform:{p}}};{EXTERNAL_LINKS_JS}}})();{bridge}",
         o = serde_json::to_string(&origin).unwrap_or_default(),
         t = serde_json::to_string(&token).unwrap_or_default(),
         v = serde_json::to_string(env!("CARGO_PKG_VERSION")).unwrap_or_default(),
@@ -234,6 +245,8 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     {
         let (text, zone) = player_service(&info.name, s.via.is_empty(), state.player.is_some());
         android::start_player_service(app, text, zone);
+        // The system's media controls follow this node's zones
+        media_live::connected(s.clone());
     }
     // Through the tunnel the node is far away and cannot reach this machine's player.
     #[cfg(any(desktop, target_os = "android"))]
@@ -740,7 +753,10 @@ fn forget(app: AppHandle, state: State<'_, AppState>) {
     state.store(None);
     // No node: the player service ends (and isn't started again when the app comes back)
     #[cfg(target_os = "android")]
-    android::stop_player_service(&app);
+    {
+        android::stop_player_service(&app);
+        media_live::forget();
+    }
     #[cfg(not(target_os = "android"))]
     let _ = app;
 }
@@ -851,6 +867,8 @@ pub fn run() {
             let handle = app.handle().clone();
             let guard = shared.clone();
             let loads = shared;
+            #[cfg(target_os = "android")]
+            let media_origin = offline_origin.clone();
             #[allow(unused_mut)]
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .initialization_script(init_script(initial.as_ref()))
@@ -870,6 +888,11 @@ pub fn run() {
                     };
                     if s.origin().as_deref() == Some(payload.url().origin().ascii_serialization().as_str()) {
                         let _ = w.eval(token_sync_script(&s.token));
+                        // Android's media volume, for the page's own player's slider
+                        #[cfg(target_os = "android")]
+                        if let Some(m) = media_live::get() {
+                            m.page_loaded();
+                        }
                         // Which output is this app's (a phone's USB DAC shows in its Settings)
                         #[cfg(any(desktop, target_os = "android"))]
                         {
@@ -923,6 +946,8 @@ pub fn run() {
                         }
                     }
                 });
+                // The system's media controls (MediaControl.kt): before the node's page loads
+                android::start_media(app.handle(), media_origin);
                 let handle = app.handle().clone();
                 android::watch_usb_audio(app.handle(), move || {
                     let app = handle.clone();
@@ -956,6 +981,10 @@ pub fn run() {
                         // On screen again: the player service as it was (refused from the background,
                         // or ended after a while with nothing playing)
                         android::resume_player_service(app);
+                        // The media controls look again (Android's volume, Auto's USB permission)
+                        if let Some(m) = media_live::get() {
+                            m.send(media::Event::Resumed);
+                        }
                     }
                     _ => {}
                 }

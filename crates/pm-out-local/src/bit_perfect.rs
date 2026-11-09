@@ -379,7 +379,14 @@ pub fn live_caps(
         pcm_bits: bits,
         max_channels: 2,
         dsd: None,
-        hw_volume: None,
+        // At full media volume the zone's volume stays Android's (turning it down plays shared at
+        // once: one volume, never louder); below full, by the listener's agreement, there is none
+        // here: Android's volume doesn't apply, the DAC or amplifier sets the level
+        hw_volume: if media_percent == Some(100) {
+            shared.hw_volume
+        } else {
+            None
+        },
         quality_ceiling: QualityCeiling::BitPerfect,
         ..shared.clone()
     }
@@ -619,6 +626,8 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
         PhoneOpen::Gone(why)
     };
     let mut why_not = None;
+    // Auto tried Exclusive USB first for this open and it didn't play: bit-perfect is next
+    let mut auto_tried_exclusive = false;
     if let Some(dac) = usb_dac::current_dac() {
         let media = media_now();
         // Android's attenuation for the DAC, before anything touches it (the hand-over's)
@@ -627,6 +636,19 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
         why_not =
             match crate::exclusive::decide(&dac, usb_dac::settings(), usb_dac::full_level_consent(), media) {
                 Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning, media, media_db) {
+                    // Auto: an Exclusive USB that took the DAC and won't start plays nothing now
+                    // (never another path mid-take); from the next song Auto plays this DAC through
+                    // Android (bit-perfect, then shared), unless the listener muted the zone on it
+                    // (Android's paths don't know that mute: they would play)
+                    Ok(PhoneOpen::Failed(why))
+                        if usb_dac::settings().mode == PreferredMode::Auto
+                            && !crate::exclusive::listener_muted(&dac) =>
+                    {
+                        crate::exclusive::auto_failed(&dac);
+                        return PhoneOpen::Failed(format!(
+                            "{why}. Auto plays it through Android from the next song"
+                        ));
+                    }
                     Ok(o) => return o,
                     Err(why) => {
                         tracing::warn!(format = %fmt, "no Exclusive USB: {why}");
@@ -636,6 +658,14 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                 Some(Err(why)) => Some((dac.clone(), why)),
                 None => None,
             };
+        // Auto's order: Exclusive USB, then bit-perfect, then shared. Only Exclusive USB chosen by
+        // hand plays shared (and says why) when it can't play
+        if why_not.is_some() && usb_dac::settings().mode == PreferredMode::Auto {
+            if let Some((_, why)) = why_not.take() {
+                tracing::info!(format = %fmt, "Auto: no Exclusive USB ({why}); bit-perfect next");
+            }
+            auto_tried_exclusive = true;
+        }
         // Android's paths only once Android has the DAC back: never while the app holds it, and
         // after the app gave it back (or touched it in a failed attempt) only once Android lists
         // it again, under a new id: the DAC this open is for is fixed again then
@@ -684,8 +714,9 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
                     return gone(lost);
                 }
                 tracing::warn!(format = %fmt, "no bit-perfect player: {why}");
-                // Auto: Exclusive USB instead, where permission was given before (never asks)
-                if usb_dac::settings().mode == PreferredMode::Auto {
+                // Auto: Exclusive USB instead, where permission was given before (never asks), unless
+                // it was tried first for this open
+                if usb_dac::settings().mode == PreferredMode::Auto && !auto_tried_exclusive {
                     let media = media_now();
                     if let Some(warning) = crate::exclusive::auto_fallback(&dac, media) {
                         let media_db = crate::exclusive::handover_reading();
@@ -1383,6 +1414,19 @@ mod tests {
         assert_eq!(
             live_caps(Some(&ka17), chosen, true, Some(40), &shared_caps()),
             caps
+        );
+        // On the phone, whose zone volume is Android's media volume: at full volume it stays the
+        // zone's volume (turning it down plays shared: one volume); below full by agreement there
+        // is none (Android's volume doesn't apply, the DAC or amplifier sets it)
+        let mut phone = shared_caps();
+        phone.hw_volume = Some(pm_model::VolumeKind::Percent);
+        assert_eq!(
+            live_caps(Some(&ka17), DeviceSettings::default(), false, Some(100), &phone).hw_volume,
+            Some(pm_model::VolumeKind::Percent)
+        );
+        assert_eq!(
+            live_caps(Some(&ka17), chosen, true, Some(40), &phone).hw_volume,
+            None
         );
         // Shared in Settings, Android 13, no DAC: the shared caps, as today
         let shared_pref = DeviceSettings {
