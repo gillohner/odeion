@@ -191,9 +191,10 @@ def receipt(cfg, report_id, state):
 def open_private(path, flags, what):
     """Opens `path` never through a link, as a regular file that is the operator's alone (0600),
     whatever it was before: a copy made by hand or an older file is made private here (Kimi review
-    of fc1dca51, M4)."""
+    of fc1dca51, M4). Without waiting: a FIFO there is refused, never waited on while the intake
+    holds its lock (Claude review of 9ee7e1e3, Low 2)."""
     try:
-        fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     except OSError as e:
         if e.errno == errno.ELOOP:
             raise IntakeError(f"{what} is a link; the intake never follows one") from None

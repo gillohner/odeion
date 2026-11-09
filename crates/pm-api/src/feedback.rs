@@ -277,6 +277,38 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS report (
 CREATE INDEX IF NOT EXISTS report_sent ON report (sent_at);
 CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);";
 
+#[cfg(unix)]
+fn not_ours(what: &str) -> InboxError {
+    InboxError::Store(format!("{FILE} {what}; the inbox isn't opened"))
+}
+
+/// What is at `path`, looked at without following a link: `None` when nothing is there, else its
+/// identity (device, inode) and mode. Refused unless it is a regular file with this one name.
+#[cfg(unix)]
+fn own_file(path: &Path) -> Result<Option<((u64, u64), u32)>, InboxError> {
+    use std::os::unix::fs::MetadataExt;
+    let m = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !m.file_type().is_file() {
+        return Err(InboxError::Store(format!(
+            "{name} isn't a regular file (a link is refused); the inbox isn't opened"
+        )));
+    }
+    if m.nlink() != 1 {
+        return Err(InboxError::Store(format!(
+            "{name} has another name (a hard link); the inbox isn't opened"
+        )));
+    }
+    Ok(Some(((m.dev(), m.ino()), m.mode())))
+}
+
 /// The node's private inbox.
 pub struct Inbox {
     conn: Connection,
@@ -299,53 +331,35 @@ impl Inbox {
     pub fn open(dir: &Path) -> Result<Inbox, InboxError> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE);
-        // Made for the node's user alone, before SQLite opens it, and never through a link: a link
-        // at the inbox's place would have reports written into whatever it points to (Kimi review
-        // of fc1dca51, M3). The file is looked at and made private through the opened descriptor
+        // Never through a link, symbolic or hard: reports would go into whatever it names (Kimi
+        // review of fc1dca51, M3; Claude review of 9ee7e1e3, Low 1). Looked at by its path only, never
+        // through a descriptor of the node's own: closing one drops every SQLite lock this process
+        // holds on the file, and another process could then take a write in progress for a crashed
+        // one (POSIX; sqlite.org/howtocorrupt.html 2.2; Claude review of 9ee7e1e3, Medium 2)
+        #[cfg(unix)]
+        let before = own_file(&path)?;
+        let flags = rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let mut conn = Connection::open_with_flags(&path, flags)?;
+        // Before anything is written: still the file looked at (or the one SQLite just made), made
+        // the node's user's alone, and SQLite's own files beside it are no links either
         #[cfg(unix)]
         {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let not_ours = |what: String| InboxError::Store(format!("{FILE} {what}; the inbox isn't opened"));
-            let file = match std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(&path)
-            {
-                Ok(f) => f,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(&path)
-                    .map_err(|e| not_ours(format!("can't be opened as a file, a link is refused ({e})")))?,
-                Err(e) => return Err(e.into()),
-            };
-            let meta = file.metadata()?;
-            if !meta.file_type().is_file() {
-                return Err(not_ours("isn't a regular file".into()));
+            use std::os::unix::fs::PermissionsExt;
+            let now = own_file(&path)?.ok_or_else(|| not_ours("went away while it was opened"))?;
+            if before.is_some_and(|b| b.0 != now.0) {
+                return Err(not_ours("changed while it was opened"));
             }
-            if meta.permissions().mode() & 0o777 != 0o600 {
-                file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            if now.1 & 0o777 != 0o600 {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
                     InboxError::Store(format!(
                         "{FILE} can't be made private ({e}): it belongs to another user; run as the node's user"
                     ))
                 })?;
             }
-            // SQLite's own files beside it: a link there would take report pages elsewhere too
             for ext in ["-journal", "-wal", "-shm"] {
-                let side = dir.join(format!("{FILE}{ext}"));
-                if let Ok(m) = std::fs::symlink_metadata(&side) {
-                    if !m.file_type().is_file() {
-                        return Err(not_ours(format!("has a {ext} that isn't a regular file")));
-                    }
-                }
+                own_file(&dir.join(format!("{FILE}{ext}")))?;
             }
         }
-        let flags = rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
-        let mut conn = Connection::open_with_flags(&path, flags)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // What the inbox lets go of (a purged report, a cleared digest) is overwritten in this
         // file, not left in its free space: whoever copies the file has its key too. It is set per
@@ -955,9 +969,11 @@ pub fn forget_listener(dir: &Path, key: &str) -> Result<usize, InboxError> {
         .execute("DELETE FROM report WHERE reporter = ?1", params![reporter])?)
 }
 
-/// Listeners' reports whose sender is no longer on the roster (`listed`, its keys) go: a People ›
-/// Remove the inbox was too busy or broken for is finished here (Kimi review of fc1dca51, M1), and
-/// so is a restore that brought back a roster without them. The owner's stay. How many went.
+/// Listeners' reports whose sender no longer has music access (`listed`: the keys of those who
+/// do, [`crate::people::music_keys`]) go: a People › Remove the inbox was too busy or broken for is
+/// finished here (Kimi review of fc1dca51, M1), also for someone kept listed for their homeserver
+/// account (Claude review of 9ee7e1e3, Medium 1), and so is a restore that brought back a roster
+/// without them. The owner's stay. How many went.
 pub fn forget_unlisted(dir: &Path, listed: &[String]) -> Result<usize, InboxError> {
     let Some(inbox) = Inbox::open_existing(dir)? else {
         return Ok(0);
@@ -981,8 +997,9 @@ pub fn forget_unlisted(dir: &Path, listed: &[String]) -> Result<usize, InboxErro
     Ok(gone)
 }
 
-/// Every hour, and once at start: expired reports go, and the reports of anyone no longer on the
-/// roster, whether or not anyone sends or reads one. A roster that can't be read takes none.
+/// Every hour, and once at start: expired reports go, and the reports of anyone whose music access
+/// was taken away (People › Remove), whether or not anyone sends or reads one. A roster that can't
+/// be read takes none.
 pub fn start_housekeeping(s: &Arc<NodeState>) {
     let s = s.clone();
     tokio::spawn(async move {
@@ -995,11 +1012,13 @@ pub fn start_housekeeping(s: &Arc<NodeState>) {
                 if let Err(e) = housekeeping(&dir, now()) {
                     tracing::warn!("feedback: expired reports not removed: {e}");
                 }
-                match crate::people::listed_keys(&s).map(|keys| forget_unlisted(&dir, &keys)) {
+                match crate::people::music_keys(&s).map(|keys| forget_unlisted(&dir, &keys)) {
                     Some(Ok(0)) => {}
-                    Some(Ok(n)) => tracing::info!(n, "feedback: reports of people no longer listed removed"),
+                    Some(Ok(n)) => {
+                        tracing::info!(n, "feedback: reports of people without music access removed")
+                    }
                     Some(Err(e)) => {
-                        tracing::warn!("feedback: reports of people no longer listed not removed: {e}")
+                        tracing::warn!("feedback: reports of people without music access not removed: {e}")
                     }
                     None => {
                         tracing::warn!("feedback: the roster can't be read; no one's reports removed for it")

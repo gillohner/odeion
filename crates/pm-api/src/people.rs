@@ -123,14 +123,20 @@ pub fn load(s: &NodeState) -> Roster {
         .unwrap_or_default()
 }
 
-/// The keys on the roster, or `None` when it can't be read (a damaged setting): unlike [`load`],
-/// never an empty roster in its place, so what deletes by it never takes everyone's.
-pub fn listed_keys(s: &NodeState) -> Option<Vec<String>> {
+/// The keys of the people with music access (a paused music switch still counts; People › Remove
+/// takes it away, also from someone kept listed for their homeserver account), or `None` when the
+/// roster can't be read (a damaged setting): unlike [`load`], never an empty roster in its place,
+/// so what deletes by it never takes everyone's.
+pub fn music_keys(s: &NodeState) -> Option<Vec<String>> {
     match s.library.lock().expect("library poisoned").get_setting(SETTING) {
         Ok(None) => Some(Vec::new()),
-        Ok(Some(j)) => serde_json::from_str::<Roster>(&j)
-            .ok()
-            .map(|r| r.people.into_iter().map(|p| p.key).collect()),
+        Ok(Some(j)) => serde_json::from_str::<Roster>(&j).ok().map(|r| {
+            r.people
+                .into_iter()
+                .filter(|p| p.access.music())
+                .map(|p| p.key)
+                .collect()
+        }),
         Err(_) => None,
     }
 }

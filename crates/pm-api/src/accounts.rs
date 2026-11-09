@@ -1032,8 +1032,8 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
     // Their problem reports too (feedback.rs); if the inbox can't be written now, they go at the
-    // node's next housekeeping (at start and hourly), which takes the reports of anyone no longer
-    // on the roster
+    // node's next housekeeping (at start and hourly), which takes the reports of anyone without
+    // music access (Remove takes it away, also from someone kept listed for their homeserver account)
     if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), key) {
         tracing::warn!("feedback: a removed listener's reports not removed: {e}");
     }
