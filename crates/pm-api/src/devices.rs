@@ -298,7 +298,8 @@ pub struct Manifest {
     pub device: DeviceRow,
     pub keep: Keep,
     pub have: Vec<Have>,
-    /// Kept songs it doesn't have yet.
+    /// Kept songs it doesn't have yet, or has an older copy of (an original whose size on the
+    /// node changed since).
     pub wanted: Vec<Wanted>,
     /// Files it has that nothing keeps any more (it may delete them).
     pub unkept: Vec<i64>,
@@ -383,9 +384,23 @@ fn manifest(s: &NodeState, d: &Device) -> Result<Manifest, ApiError> {
         ids: kept_set,
     } = kept_tracks(s, &d.keep)?;
     let have: BTreeSet<i64> = d.have.iter().map(|h| h.track_id).collect();
+    // An original whose size on the node changed since the device fetched it (the file was
+    // replaced or re-tagged) is wanted again; the device's new copy replaces its old one
+    let changed: BTreeSet<i64> = d
+        .have
+        .iter()
+        .filter(|h| h.format == "original")
+        .filter(|h| {
+            kept.iter()
+                .any(|t| t.id.is_some_and(|i| i.0 == h.track_id) && t.file.size_bytes != h.bytes)
+        })
+        .map(|h| h.track_id)
+        .collect();
     let wanted = kept
         .into_iter()
-        .filter(|t| t.id.is_some_and(|i| !have.contains(&i.0)))
+        .filter(|t| {
+            t.id.is_some_and(|i| !have.contains(&i.0) || changed.contains(&i.0))
+        })
         .map(|t| Wanted {
             track_id: t.id.map_or(0, |i| i.0),
             title: t.title.clone(),
