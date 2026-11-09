@@ -81,6 +81,8 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 const NODE_OWN: &[&str] = &[
     "stream.secret",
     "node.id",
+    // Restoring an older backup must not revive a delayed pre-disconnect sender.
+    "listenbrainz.send_generation",
     SCHEDULE_KEY,
     crate::accounts::OWNER_SESSIONS_TOKEN,
     crate::accounts::OWNER_SESSIONS,
