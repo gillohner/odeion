@@ -953,6 +953,132 @@ async fn a_link_in_place_of_the_inbox_is_refused_and_its_target_left_alone() {
     assert_eq!(mode, 0o644, "the linked database's mode is unchanged");
 }
 
+/// People › Remove of someone with an account on the node's homeserver keeps them listed, with
+/// their music taken away (Claude review of 9ee7e1e3, Medium 1): with the inbox busy at the
+/// remove, their reports still go at the next housekeeping. Music paused (People › music off)
+/// isn't a remove: Ben's reports stay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_removed_homeserver_listeners_reports_go_at_housekeeping() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let roster = json!({"people": [
+        {"key": ANN, "access": "homeserver_music", "music_enabled": true, "added_at": 0},
+        {"key": BEN, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    let (st, r) = call(&app, Some(OWNER), "GET", "/v1/people", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert!(
+        r.to_string().contains(ANN),
+        "precondition: Ann stays listed for her homeserver account: {r}"
+    );
+    let paused = json!({"people": [
+        {"key": ANN, "access": "homeserver", "music_enabled": false, "added_at": 0},
+        {"key": BEN, "access": "music", "music_enabled": false, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &paused.to_string())
+        .unwrap();
+    assert_eq!(
+        texts(dir.path()),
+        ["ann's", "ben's", "owner's"],
+        "precondition: the remove couldn't reach the inbox"
+    );
+    pm_api::feedback::start_housekeeping(&s);
+    assert_eq!(
+        until_left(dir.path(), &["ben's", "owner's"]).await,
+        ["ben's", "owner's"]
+    );
+}
+
+/// Opening the inbox leaves every SQLite lock this process holds on it in place (Claude review
+/// of 9ee7e1e3, Medium 2): closing any other descriptor to the file would drop them all (POSIX;
+/// sqlite.org/howtocorrupt.html, 2.2), and another process (the operator's `pm-node feedback`)
+/// could then take a write in progress for a crashed one. Here another connection holds the
+/// inbox's write lock while the inbox is opened; a separate process still finds it locked.
+#[cfg(unix)]
+#[tokio::test]
+async fn opening_the_inbox_keeps_the_locks_this_process_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let app = router(s.clone());
+    let (st, r) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(report("owner's"))).await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    let path = dir.path().join(pm_api::feedback::FILE);
+    let other_process_writes = || {
+        std::process::Command::new("python3")
+            .args([
+                "-I",
+                "-c",
+                "import sqlite3, sys\nc = sqlite3.connect(sys.argv[1], timeout=0)\nc.execute('BEGIN IMMEDIATE')\nc.rollback()",
+            ])
+            .arg(&path)
+            .output()
+            .expect("python3 runs")
+            .status
+            .success()
+    };
+    assert!(
+        other_process_writes(),
+        "precondition: unlocked, another process may write"
+    );
+    let hold = rusqlite::Connection::open(&path).unwrap();
+    hold.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert!(!other_process_writes(), "precondition: the write lock is held");
+    // Opening waits on that lock (5 s) and gives up; whatever it answers, the lock must stay
+    let _ = Inbox::open(dir.path());
+    let _ = Inbox::open_existing(dir.path());
+    assert!(
+        !other_process_writes(),
+        "another process could write while this one holds the inbox's write lock"
+    );
+    hold.execute_batch("ROLLBACK").unwrap();
+}
+
+/// A hard link in place of the inbox, to another database (Claude review of 9ee7e1e3, Low 1):
+/// refused like a symbolic one, and the linked database is left exactly as it was.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hard_link_in_place_of_the_inbox_is_refused_and_its_target_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let app = router(s.clone());
+    let elsewhere = dir.path().join("elsewhere.sqlite");
+    {
+        let db = rusqlite::Connection::open(&elsewhere).unwrap();
+        db.execute_batch("CREATE TABLE keep (x TEXT); INSERT INTO keep VALUES ('as it was');")
+            .unwrap();
+    }
+    std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let before = std::fs::read(&elsewhere).unwrap();
+    std::fs::hard_link(&elsewhere, dir.path().join(pm_api::feedback::FILE)).unwrap();
+    let (st, r) = call(&app, Some(OWNER), "POST", "/v1/feedback", Some(report("owner's"))).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    assert!(Inbox::open(dir.path()).is_err());
+    assert_eq!(
+        std::fs::read(&elsewhere).unwrap(),
+        before,
+        "the linked database is unchanged"
+    );
+    let mode = std::fs::metadata(&elsewhere).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644, "the linked database's mode is unchanged");
+}
+
 // ---- helpers ----
 
 async fn send_owned(app: axum::Router, req: Request<Body>) -> (StatusCode, Value) {

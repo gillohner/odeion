@@ -236,6 +236,39 @@ def fake():
         check(not os.path.islink(linked) and mode(linked) == 0o600, "the copy in the intake folder is a private file, not a link")
         check(mode(elsewhere) == 0o644, "a linked copy's target is left as it is")
 
+        # A FIFO where a copy or the receipts file goes never hangs the intake, which holds its lock
+        # meanwhile (Claude review of 9ee7e1e3, Low 2)
+        def quick_intake():
+            try:
+                p = subprocess.run([sys.executable, "-I", TOOL, cfg_path, "intake"], capture_output=True, text=True, timeout=20)
+                return p.returncode, p.stdout, p.stderr
+            except subprocess.TimeoutExpired:
+                return None, "", "hung"
+
+        sixth = dict(good, id="fb_0000000000000ddd", text="SYNTHETIC sixth report")
+        fifo = os.path.join(cfg["dir"], sixth["id"] + ".json")
+        os.mkfifo(fifo, 0o600)
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[sixth]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = quick_intake()
+        counts = json.loads(out or "{}")
+        check(rc == 0 and counts.get("repaired") == 1 and counts.get("received") == 1,
+              f"a FIFO where a copy goes doesn't hang the intake; a real copy replaces it ({rc} {counts} {err.strip()})")
+        check(os.path.isfile(fifo) and mode(fifo) == 0o600, "the copy is a private regular file")
+
+        real = cfg["receipts"] + ".real"
+        os.rename(cfg["receipts"], real)
+        os.mkfifo(cfg["receipts"], 0o600)
+        seventh = dict(good, id="fb_0000000000000eee", text="SYNTHETIC seventh report")
+        with open(state, "w") as f:
+            json.dump({"export": dict(export, reports=[seventh]), "calls": [], "receipt_status": 0}, f)
+        rc, out, err = quick_intake()
+        with open(state) as f:
+            calls = json.load(f)["calls"]
+        check(rc == 1 and calls == [], f"a FIFO as the receipts file stops the intake at once, before any receipt ({rc} {calls} {err.strip()})")
+        os.unlink(cfg["receipts"])
+        os.rename(real, cfg["receipts"])
+
         # One intake at a time
         import fcntl
         with open(os.path.join(cfg["dir"], ".lock"), "a") as lock:
