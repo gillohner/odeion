@@ -298,6 +298,7 @@ def main():
     # answers with. The sign-in now asks for the newest record network-first before any request routes
     # on it (`freshened`, pm_pubky::records), on each of the three clients below, so every one of them
     # must decide on the newest record any lookup in this run found and send to the host it names.
+    clean = ret.get("held_clean") or {}
     stamps = [((st.get("lookup") or {}).get("packet") or {}).get("timestamp_us") for st in steps.values() if isinstance(st, dict)]
     stamps += [((c.get("lookup") or {}).get("packet") or {}).get("timestamp_us") for c in ret.values() if isinstance(c, dict)]
     def freshened_stamps(step):
@@ -305,7 +306,6 @@ def main():
             yield r.get("timestamp_us")
     stamps += [t for st in (default, ex, clean) for t in freshened_stamps(st)]
     newest = max((t for t in stamps if isinstance(t, int)), default=None)
-    clean = ret.get("held_clean") or {}
     for name, step in (("default client", default),
                        ("grant exchange after Ring's approval came in while away", ex),
                        ("unused held client back in the foreground", clean)):
