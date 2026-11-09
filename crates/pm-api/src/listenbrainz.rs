@@ -268,14 +268,34 @@ pub(crate) fn track_ended(s: &Arc<NodeState>, zone: &pm_zones::ZoneId, item: &pm
 /// on disk first, then one sender at a time sends the list and removes what ListenBrainz took.
 /// What it couldn't take, and anything added meanwhile, waits for the next send.
 pub(crate) async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
-    crate::send_queue::enqueue(
+    // Not stored (the library refused the write): sent from memory with the rest all the same
+    let unstored = match crate::send_queue::enqueue(
         &s.library.lock().expect("library poisoned"),
         PENDING_KEY,
         new,
         PENDING_MAX,
-    );
+    ) {
+        Ok(()) => Vec::new(),
+        Err((e, new)) => {
+            tracing::warn!("listenbrainz: the new ones couldn't be stored ({e}); sending them now");
+            new
+        }
+    };
     let _one = crate::send_queue::sender(&s.node_id, "listenbrainz").await;
-    let all = crate::send_queue::read(&s.library.lock().expect("library poisoned"), PENDING_KEY);
+    // The account and the list together, under the library's lock: a sender that waited while
+    // the owner connected another account sends nothing (the list is that account's now)
+    let all = {
+        let lib = s.library.lock().expect("library poisoned");
+        let current = lib
+            .get_setting(ACCOUNT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<Account>(&j).ok());
+        if current.is_none_or(|a| a.token != token || !a.submit) {
+            return;
+        }
+        crate::send_queue::batch(&lib, PENDING_KEY, unstored)
+    };
     let mut sent: Vec<Value> = Vec::new();
     // ListenBrainz takes up to 1000 per import; listens are small
     for chunk in all.chunks(100) {
@@ -285,7 +305,11 @@ pub(crate) async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
             Err(e) => tracing::debug!("listenbrainz: {e}; keeping {} listens for later", chunk.len()),
         }
     }
-    crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent);
+    if let Err(e) =
+        crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent)
+    {
+        tracing::warn!("listenbrainz: the ones sent couldn't be taken off the list ({e})");
+    }
 }
 
 fn view(s: &NodeState) -> ListenBrainzView {

@@ -24643,6 +24643,15 @@ exec sleep 300
         use std::sync::atomic::{AtomicBool, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
+        // The account the senders send for (a sender checks it is still the one connected)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "listenbrainz.account",
+                &serde_json::json!({"token": "LBT", "user": "owner", "submit": true}).to_string(),
+            )
+            .unwrap();
         let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
         let refuse = Arc::new(AtomicBool::new(false));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -24759,7 +24768,13 @@ exec sleep 300
         );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         lastfm::set_api_base(&format!("{base}/"));
-        lastfm::set_config_app(KEY, SECRET);
+        // The app in this node's own settings, never the process-wide config another test reads
+        let app = serde_json::json!({"api_key": KEY, "api_secret": SECRET, "from": "settings"}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(lastfm::APP_KEY, &app)
+            .unwrap();
         let session =
             serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string();
         s.library
@@ -24823,6 +24838,15 @@ exec sleep 300
     ) {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        // The account the senders send for (a sender checks it is still the one connected)
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "listenbrainz.account",
+                &serde_json::json!({"token": "LBT", "user": "owner", "submit": true}).to_string(),
+            )
+            .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         *s.listenbrainz_base.write().unwrap() =
             format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -24830,7 +24854,7 @@ exec sleep 300
             "/1/submit-listens",
             post({
                 let (gate, got) = (gate.clone(), got.clone());
-                move |Json(b): Json<serde_json::Value>| {
+                move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
                     let (gate, got) = (gate.clone(), got.clone());
                     async move {
                         gate.acquire().await.unwrap().forget();
@@ -24838,7 +24862,16 @@ exec sleep 300
                         if payload.iter().any(|l| l["listened_at"] == 0) {
                             return StatusCode::SERVICE_UNAVAILABLE;
                         }
-                        got.lock().unwrap().extend(payload);
+                        // Which account it went to, with each listen
+                        let token = h
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        got.lock().unwrap().extend(payload.into_iter().map(|mut l| {
+                            l["_to"] = serde_json::json!(token);
+                            l
+                        }));
                         StatusCode::OK
                     }
                 }
@@ -24877,7 +24910,8 @@ exec sleep 300
             "listenbrainz.pending",
             (1..=3).map(a_listen).collect(),
             1000,
-        );
+        )
+        .unwrap();
         let send = {
             let s = s.clone();
             tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(4)]).await })
@@ -24973,7 +25007,8 @@ exec sleep 300
             "listenbrainz.pending",
             (0..150).map(a_listen).collect(),
             1000,
-        );
+        )
+        .unwrap();
         listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
         assert_eq!(
             waiting_listens(&s),
@@ -24981,5 +25016,88 @@ exec sleep 300
             "the refused chunk waits"
         );
         assert_eq!(got.lock().unwrap().len(), 50, "the other chunk went");
+    }
+
+    /// A sender that waited for its turn while the owner connected another ListenBrainz account
+    /// sends nothing with the old account: the waiting list is the new account's now, and its own
+    /// sender sends it there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiting_sender_never_sends_the_next_accounts_listens() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got) = gated_listenbrainz(&s).await;
+        let account =
+            |token: &str| serde_json::json!({"token": token, "user": token, "submit": true}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.account", &account("TOKA"))
+            .unwrap();
+        // A's first sender is held at ListenBrainz with listen 1; A's second waits its turn
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKA", vec![a_listen(1)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let waiting = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKA", vec![a_listen(2)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The owner connects B; B's play ends
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.account", &account("TOKB"))
+            .unwrap();
+        let b = {
+            let s = s.clone();
+            tokio::spawn(async move { listenbrainz::send_listens(&s, "TOKB", vec![a_listen(3)]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        gate.add_permits(10);
+        first.await.unwrap();
+        waiting.await.unwrap();
+        b.await.unwrap();
+        let to = |token: &str| {
+            let mut v: Vec<u64> = got
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|l| l["_to"] == format!("Token {token}"))
+                .map(|l| l["listened_at"].as_u64().unwrap())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(to("TOKA"), [1], "A's account got only what A's first sender took");
+        assert_eq!(to("TOKB"), [2, 3], "the rest went to the account connected now");
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// A new listen the library refuses to store (a failing write) is still sent with the rest,
+    /// from memory: it isn't lost before any try.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_that_cant_be_stored_is_still_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got) = gated_listenbrainz(&s).await;
+        gate.add_permits(10);
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER no_pending_i BEFORE INSERT ON settings WHEN NEW.key = 'listenbrainz.pending'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_pending_u BEFORE UPDATE ON settings WHEN NEW.key = 'listenbrainz.pending'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+        )
+        .unwrap();
+        listenbrainz::send_listens(&s, "LBT", vec![a_listen(7)]).await;
+        let sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        assert_eq!(sent, [7], "sent from memory");
     }
 }

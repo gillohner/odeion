@@ -454,17 +454,33 @@ async fn count_once(s: &Arc<NodeState>, key: &PlayKey) {
 /// couldn't take, and anything added meanwhile, waits for the next send; not connected, they
 /// wait for the owner to sign in again.
 pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
-    crate::send_queue::enqueue(
+    // Not stored (the library refused the write): sent from memory with the rest all the same
+    let unstored = match crate::send_queue::enqueue(
         &s.library.lock().expect("library poisoned"),
         PENDING_KEY,
         new,
         PENDING_MAX,
-    );
+    ) {
+        Ok(()) => Vec::new(),
+        Err((e, new)) => {
+            tracing::warn!("lastfm: the new ones couldn't be stored ({e}); sending them now");
+            new
+        }
+    };
     let Some((app, sess)) = ready(s) else {
         return;
     };
     let _one = crate::send_queue::sender(&s.node_id, "lastfm").await;
-    let all = crate::send_queue::read(&s.library.lock().expect("library poisoned"), PENDING_KEY);
+    // The session and the list together, under the library's lock: a sender that waited while
+    // the owner signed in to another account sends nothing (the list is that account's now)
+    let all = {
+        let lib = s.library.lock().expect("library poisoned");
+        let current = session_of(&lib).filter(|x| x.submit && x.problem.is_none());
+        if current.is_none_or(|c| c.key != sess.key) {
+            return;
+        }
+        crate::send_queue::batch(&lib, PENDING_KEY, unstored)
+    };
     let mut sent: Vec<Value> = Vec::new();
     for chunk in all.chunks(BATCH) {
         let mut params: Vec<(String, String)> = Vec::new();
@@ -491,7 +507,11 @@ pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
             }
         }
     }
-    crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent);
+    if let Err(e) =
+        crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent)
+    {
+        tracing::warn!("lastfm: the ones sent couldn't be taken off the list ({e})");
+    }
 }
 
 // ---- similar artists ---------------------------------------------------------------------------
