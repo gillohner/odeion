@@ -661,7 +661,8 @@ pub trait Output: Send + Sync {
                 safety.record(self.id(), false);
             }
             _ if !sole
-                && (safety.unresolved(&self.id()) || last.and_then(|f| f()).and_then(back).is_some()) =>
+                && (safety.unresolved(&self.id())
+                    || last.and_then(|f| f()).is_none_or(|l| back(l).is_some())) =>
             {
                 safety.record(self.id(), true);
                 return Unmuted::nothing(SinkError::Device(format!(

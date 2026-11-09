@@ -2611,6 +2611,50 @@ async fn a_member_that_cant_report_stays_muted_when_the_limit_came_down_below_th
     assert_eq!((k.level, k.muted), (VolumeLevel::Db(-30.0), false));
 }
 
+/// Without any published level, a chooser must not lend its cap to an unreadable peer.
+#[tokio::test]
+async fn a_fresh_mixed_group_keeps_unknown_members_muted_across_retries() {
+    use pm_model::VolumeLevel;
+    for mute_first in [false, true] {
+        let zones = zones_with_limit(Arc::new(Mutex::new(Some(-20.0))));
+        let chooses = Arc::new(ChoosesOnUnmute::new());
+        let keeps = Arc::new(Mute {
+            inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+        });
+        // Only the device knows this level. No absolute zone write has established safety.
+        keeps.inner.set_volume(Volume::Db(-10.0)).await.unwrap();
+        keeps.inner.set_volume(Volume::Mute(true)).await.unwrap();
+        let members: Vec<Arc<dyn Output>> = vec![chooses.clone(), keeps.clone()];
+        let group = Arc::new(pm_zones::outputs::GroupOutput::new("Fresh pair", members).unwrap());
+        let zone = zones.create("Fresh pair", group);
+        if mute_first {
+            zone.set_volume(Volume::Mute(true)).await.unwrap();
+        }
+        assert!(zone.state().volume.is_none());
+        for mute_again in [false, false, true] {
+            if mute_again {
+                zone.set_volume(Volume::Mute(true)).await.unwrap();
+            }
+            assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+            zone.wait_acked().await;
+            let kept = keeps.inner.volume().await.unwrap().unwrap();
+            assert_eq!((kept.level, kept.muted), (VolumeLevel::Db(-10.0), true));
+            let chosen = chooses.inner.volume().await.unwrap().unwrap();
+            assert_eq!((chosen.level, chosen.muted), (VolumeLevel::Db(-20.0), false));
+            assert_eq!(zone.state().volume.map(|v| v.muted), Some(false));
+        }
+        zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+        zone.set_volume(Volume::Mute(true)).await.unwrap();
+        zone.set_volume(Volume::Mute(false)).await.unwrap();
+        let kept = keeps.inner.volume().await.unwrap().unwrap();
+        assert_eq!((kept.level, kept.muted), (VolumeLevel::Db(-30.0), false));
+    }
+}
+
 /// A device that can't report, above a lowered limit, refuses the correction after its unmute:
 /// the zone shows it unmuted at the level it had (not the limit), so the next unmute corrects
 /// it, which goes through once the device takes levels again.
