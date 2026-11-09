@@ -465,5 +465,8 @@ class MediaControl private constructor() {
         }
 
         fun active(): Boolean = session != null
+
+        /// The session's zone plays now.
+        fun playing(): Boolean = session != null && shown?.optString("state") == "playing"
     }
 }
