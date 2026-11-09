@@ -18,8 +18,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [SHARD, SHARDS] = (process.env.UI_SHARD || '1/1').split('/').map(Number);
 if (!(SHARDS >= 1 && SHARD >= 1 && SHARD <= SHARDS)) { console.log(`UI_SHARD must be k/n with 1 <= k <= n, not ${process.env.UI_SHARD}`); process.exit(2); }
 // FNV-1a of the view and the control's kind
-const owner = (view, sig) => { let h = 2166136261; for (const ch of `${view}\n${sig}`) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; } return (h % SHARDS) + 1; };
-const mine = (view, sig) => owner(view, sig) === SHARD;
+// A control's shard comes from its view and its `key`: its kind without the state it shows (a
+// Repeat button reads "Repeat: off" in one shard and "Repeat: this song" in another, after that
+// shard's own clicks; run 42571268508 lost 38 such controls when the state picked the shard).
+const owner = (view, key) => { let h = 2166136261; for (const ch of `${view}\n${key}`) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; } return (h % SHARDS) + 1; };
+const mine = (view, key) => owner(view, key) === SHARD;
 const SKIP = /compact|comfortable|share on pubky|add my|bring my|make private|delete|remove|trash|sign (in|out)|sign in again|log ?out|forget|clear|reset|rescan|scan|sync|import|mirror|upload|download|backup|restore|tag my whole|identify|accept|write ids|write into|fixgo|tag every|copy library|bring files|restart|stop|change token|add folder|create|save|apply|disconnect|connect|pubky ring|copy/i;
 const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Authorization: 'Bearer ' + TOKEN } })).json();
 
@@ -60,7 +63,10 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       const sig = `${b.className}|${data}|${words}`;
       if (seen.has(sig)) return; seen.add(sig);
       b.dataset.auditIdx = String(i);
-      out.push({ i, sig, words, id: b.id });
+      // The kind without its state: state classes dropped, and the wording up to a colon
+      const cls = b.className.split(/\s+/).filter((c) => c && !/^(on|off|active|selected|current|open|playing|paused|pressed|checked|is-.*)$/.test(c)).join(' ');
+      const key = `${cls}|${data}|${words.split(':')[0].trim()}`;
+      out.push({ i, sig, key, words, id: b.id });
     });
     return out;
   });
@@ -71,8 +77,8 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
     const list = await kinds();
     for (const k of list) {
       const lasting = SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig);
-      if (!lasting) seen.push({ view, sig: k.sig, owner: owner(view, k.sig) });
-      if (!mine(view, k.sig)) continue;
+      if (!lasting) seen.push({ view, sig: k.sig, key: k.key, owner: owner(view, k.key) });
+      if (!mine(view, k.key)) continue;
       if (lasting) { skipped++; continue; }
       await p.goto(BASE + view); await settle();
       const now = await kinds(); const target = now.find((x) => x.sig === k.sig);
@@ -82,7 +88,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       const el = await p.$(`button[data-audit-idx="${target.i}"]`);
       if (!el) continue;
       try { await el.click({ timeout: 3000 }); } catch { try { await el.click({ force: true, timeout: 2000 }); } catch { continue; } }
-      clicked++; clickedSigs.push({ view, sig: k.sig });
+      clicked++; clickedSigs.push({ view, sig: k.sig, key: k.key });
       // Moving the view (scrolling to a section) counts; moving focus alone does not: people do not see it.
       // Up to 900 ms for the click to show, looked at every 100 ms. The audit moves on sooner only once
       // the click showed, no request is open and the last one ended 150 ms ago (its answer handled, any
