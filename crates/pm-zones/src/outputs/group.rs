@@ -323,6 +323,19 @@ impl Output for GroupOutput {
         self.members.iter().all(|m| m.unmute_restores_level())
     }
 
+    /// Per member, down only: each member by its own reading; none is given the group's last level
+    /// (a member may have been turned down on its own). Every member is tried; the first refusal
+    /// is reported after.
+    async fn hold_down(&self, max: f32, _last: Option<pm_model::VolumeLevel>) -> Result<(), SinkError> {
+        let mut failed = None;
+        for m in &self.members {
+            if let Err(e) = m.hold_down(max, None).await {
+                failed.get_or_insert(e);
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
     /// Per member: one that chooses its level on unmuting gets `level` first, one that restores
     /// its own is only unmuted (a mixed group never raises the member that kept a lower level).
     /// Every member is tried; the group came back when any member did.

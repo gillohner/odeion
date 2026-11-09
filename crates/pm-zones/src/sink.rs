@@ -525,6 +525,25 @@ pub trait Output: Send + Sync {
         true
     }
 
+    /// After an unmute under the zone's limit `max`: bring this device down to it when it is above,
+    /// never up. A device that reports its level is checked by its reading. One that can't is
+    /// checked by `last`, the level the zone last gave it, when the zone is its only controller
+    /// (a single device); a group gives its members no `last`, so a member that keeps its own
+    /// level and can't report is left alone (it may have been turned down on its own: lowering
+    /// it to the limit could raise it). One that chooses its level was given one held to the
+    /// limit already ([`Output::unmute_held`]).
+    async fn hold_down(&self, max: f32, last: Option<pm_model::VolumeLevel>) -> Result<(), SinkError> {
+        let level = match self.volume().await {
+            Ok(Some(v)) => Some(v.level),
+            _ if self.unmute_restores_level() => last,
+            _ => None,
+        };
+        match level.and_then(|l| crate::zone::back_to_limit(l, max, |db| self.percent_for_db(db))) {
+            Some(back) => self.set_volume(back).await,
+            None => Ok(()),
+        }
+    }
+
     /// Unmute, with `level` (the zone's level, held to its limit) for a device that chooses its
     /// level on unmuting: it gets `level` first, so it never comes back above it; a device that
     /// restores its own level is only unmuted, never raised. A group does this per member.

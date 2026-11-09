@@ -2352,3 +2352,122 @@ async fn an_unmute_that_went_nowhere_leaves_the_zone_muted() {
         "still shown muted"
     );
 }
+
+/// A device that keeps its own level through a mute, reports it, and refuses level changes once
+/// `stuck` is set (a member that went away, say); mute changes it always takes.
+struct Stuck {
+    inner: NullOutput,
+    stuck: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl Output for Stuck {
+    fn id(&self) -> OutputId {
+        OutputId::new("stuck", "1")
+    }
+    fn name(&self) -> String {
+        "Stuck".into()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        if !matches!(v, Volume::Mute(_)) && self.stuck.load(Ordering::SeqCst) {
+            return Err(SinkError::Device("away".into()));
+        }
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        self.inner.volume().await
+    }
+}
+
+fn zones_with_limit(limit: Arc<Mutex<Option<f32>>>) -> Zones {
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(move |_: &OutputId| *limit.lock().unwrap())));
+    zones
+}
+
+/// The limit lowered while a mixed group is muted: on unmute, the member that chooses its level
+/// gets the new limit, and the member that keeps its own level and can't report is not touched:
+/// it was turned down on its own below the limit, and setting it to the limit would raise it.
+#[tokio::test]
+async fn a_limit_lowered_while_muted_never_raises_a_member_on_unmute() {
+    use pm_model::VolumeLevel;
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let chooses = Arc::new(ChoosesOnUnmute::new());
+    let keeps = Arc::new(Mute {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let members: Vec<Arc<dyn Output>> = vec![chooses.clone(), keeps.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    keeps.inner.set_volume(Volume::Db(-45.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    // The owner lowers the limit while the pair is muted
+    *limit.lock().unwrap() = Some(-20.0);
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    let k = keeps.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (k.level, k.muted),
+        (VolumeLevel::Db(-45.0), false),
+        "never raised"
+    );
+    let c = chooses.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (c.level, c.muted),
+        (VolumeLevel::Db(-20.0), false),
+        "held to the new limit"
+    );
+    assert_eq!(zone.state().volume.map(|v| v.muted), Some(false));
+}
+
+/// A member that came back above a lowered limit and then refuses to be brought down: the rest of
+/// the group plays, so the zone is shown unmuted, and the refusal is returned.
+#[tokio::test]
+async fn a_member_refusing_the_correction_still_leaves_the_zone_shown_unmuted() {
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let chooses = Arc::new(ChoosesOnUnmute::new());
+    let stuck = Arc::new(Stuck {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+        stuck: Default::default(),
+    });
+    let members: Vec<Arc<dyn Output>> = vec![chooses.clone(), stuck.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    stuck.stuck.store(true, Ordering::SeqCst);
+    *limit.lock().unwrap() = Some(-20.0);
+    assert!(
+        zone.set_volume(Volume::Mute(false)).await.is_err(),
+        "the refusal is said"
+    );
+    zone.wait_acked().await;
+    assert_eq!(
+        zone.state().volume.map(|v| v.muted),
+        Some(false),
+        "the members that came back play: shown unmuted"
+    );
+    let c = chooses.inner.volume().await.unwrap().unwrap();
+    assert_eq!(c.level, pm_model::VolumeLevel::Db(-20.0));
+}

@@ -198,7 +198,7 @@ pub fn cap_volume(v: Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8
 const PERCENT_STEP: u8 = 3;
 
 /// The request that brings `level` back to `limit` when it is above it.
-fn back_to_limit(
+pub(crate) fn back_to_limit(
     level: pm_model::VolumeLevel,
     limit: f32,
     percent_for: impl Fn(f32) -> u8,
@@ -536,9 +536,15 @@ impl Zone {
                 .error
                 .unwrap_or_else(|| SinkError::Device("the unmute went nowhere".into())));
         }
+        let mut error = r.error;
+        // Down to the limit, never up: per member in a group ([`Output::hold_down`])
+        if let Err(e) = self.output.hold_down(max, was.map(|l| l.level)).await {
+            error.get_or_insert(e);
+        }
         let (mut next, reported) = self.read_after(Volume::Mute(false)).await;
-        if !reported && chooses {
-            // What a device that chooses its level plays at now
+        // A device that can't report: what the zone gave it, held to the limit (a device that
+        // keeps its own level and was never given one stays unknown)
+        if !reported && (chooses || was.is_some()) {
             next = Some(pm_model::ZoneVolume {
                 level: match held {
                     Volume::Db(d) => pm_model::VolumeLevel::Db(d),
@@ -548,23 +554,9 @@ impl Zone {
                 muted: false,
             });
         }
-        let back = if reported {
-            next.and_then(|n| back_to_limit(n.level, max, percent_for))
-        } else {
-            was.and_then(|l| back_to_limit(l.level, max, percent_for))
-        };
-        if let Some(back) = back {
-            let (again, read) = self.set_and_read(back).await?;
-            next = again;
-            // The unmute went through before this level: the state says so
-            if !read {
-                if let Some(n) = next.as_mut() {
-                    n.muted = false;
-                }
-            }
-        }
+        // Some device came back: the zone shows it, and a member's refusal is said after
         self.publish_volume(next, seen);
-        r.error.map_or(Ok(()), Err)
+        error.map_or(Ok(()), Err)
     }
 
     /// Publish `next` as the zone's level (none: the last one stays), unless the device announced
