@@ -649,12 +649,9 @@ pub(crate) async fn change(
 pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<String>) -> ApiResult<Roster> {
     let key = valid_key(&key)?;
     reconcile(&s).await?;
-    let (removing, removed_key) = (s.clone(), key.clone());
     let r = tokio::task::spawn_blocking(move || -> Result<Roster, ApiError> {
         // The worker owns this lock through the last inbox delete, even if the HTTP request is
         // cancelled. Re-adding someone cannot race an all-memberships cleanup left running.
-        let s = removing;
-        let key = removed_key;
         let _one = s.roster.blocking_lock();
         let mut r = load(&s);
         let before = r.clone();
@@ -682,11 +679,13 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
         if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), &key) {
             tracing::warn!("feedback: a removed listener's reports not removed now: {e}");
         }
+        // Finish the existing account cleanup here too: cancelling the request cannot leave
+        // old sessions usable if someone is given music again after the worker releases the lock.
+        crate::accounts::forget_person(&s, &key)?;
         Ok(r)
     })
     .await
     .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "could not remove this person"))??;
-    crate::accounts::forget_person(&s, &key)?;
     Ok(Json(r))
 }
 

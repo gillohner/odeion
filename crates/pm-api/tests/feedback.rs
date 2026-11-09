@@ -1428,6 +1428,10 @@ async fn cancelling_remove_cannot_delete_reports_from_a_later_membership() {
     drop(hold);
     let (st, r) = readd.await.unwrap();
     assert_eq!(st, StatusCode::OK, "{r}");
+    assert!(
+        pm_api::accounts::caller(&s, Some(&ann)).is_none(),
+        "cancelling Remove must not preserve the old sign-in after a re-add"
+    );
     let ann = pm_api::accounts::mint(&s, ANN).unwrap();
     let (st, r) = call(
         &app,
