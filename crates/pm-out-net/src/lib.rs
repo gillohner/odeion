@@ -31,6 +31,10 @@ use std::time::{Duration, Instant};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Audio sent and not acknowledged yet, at most (at least one block is always sent).
 pub const IN_FLIGHT: Duration = Duration::from_millis(100);
+/// [`IN_FLIGHT`] for an endpoint reached through the node's tunnel (the app's player away from
+/// home, [`KeyCell::through_tunnel`]): a mobile link's round trip is often 100-300 ms, and at most
+/// one window of audio travels per round trip.
+pub const IN_FLIGHT_TUNNEL: Duration = Duration::from_millis(1500);
 /// The endpoint's Welcome comes within this, or the session fails; also its answer to a setting.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// The endpoint's answer to `Open` (its device may take a moment to start) comes within this.
@@ -84,6 +88,9 @@ pub struct KeyCell {
     /// The number the next session takes.
     next: Arc<std::sync::atomic::AtomicU64>,
     on_change: Arc<RwLock<Option<DeviceChanged>>>,
+    /// Reached through the node's tunnel: the endpoint's name in its outputs' ids (its loopback
+    /// relay's address changes with every start of the node; its key does not).
+    tunnel: Arc<RwLock<Option<String>>>,
 }
 
 /// What the outputs last said, and the number of the session that said it.
@@ -111,6 +118,29 @@ impl KeyCell {
 
     pub fn set(&self, key: Key) {
         *self.key.write().expect("endpoint key") = key;
+    }
+
+    /// The endpoint is reached through the node's tunnel, as `name` (`tunnel:<the app's key>`):
+    /// its outputs' ids carry that name instead of the relay's address, and audio has
+    /// [`IN_FLIGHT_TUNNEL`] on its way.
+    pub fn through_tunnel(&self, name: &str) {
+        *self.tunnel.write().expect("endpoint route") = Some(name.to_string());
+    }
+
+    /// The node's id for one of this endpoint's outputs, reached at `addr`.
+    fn id_for(&self, addr: SocketAddr, remote: &OutputId) -> OutputId {
+        match self.tunnel.read().expect("endpoint route").as_deref() {
+            Some(name) => OutputId::new("net", &format!("{name}/{remote}")),
+            None => net_id(addr, remote),
+        }
+    }
+
+    fn in_flight(&self) -> Duration {
+        if self.tunnel.read().expect("endpoint route").is_some() {
+            IN_FLIGHT_TUNNEL
+        } else {
+            IN_FLIGHT
+        }
     }
 
     pub fn get(&self) -> Key {
@@ -149,7 +179,7 @@ impl KeyCell {
                     tracing::info!(output = %o.id, device = ?o.device.as_ref().map(|d| &d.name), "endpoint output device");
                     // A new output without a device is no change anyone shows
                     if before.flatten() != o.device {
-                        changed.push(net_id(addr, &o.id));
+                        changed.push(self.id_for(addr, &o.id));
                     }
                 }
             }
@@ -288,7 +318,7 @@ impl NetOutput {
 #[async_trait]
 impl Output for NetOutput {
     fn id(&self) -> OutputId {
-        net_id(self.addr, &self.remote.id)
+        self.key.id_for(self.addr, &self.remote.id)
     }
 
     fn name(&self) -> String {
@@ -618,7 +648,7 @@ impl NetSink {
             SampleKind::Pcm => self.fmt.rate_hz as u64,
             SampleKind::Dsd => self.fmt.rate_hz as u64 / 8,
         };
-        per_s * IN_FLIGHT.as_millis() as u64 / 1000
+        per_s * self.key.in_flight().as_millis() as u64 / 1000
     }
 
     /// A write that failed because the endpoint closed: what it said first (its device went away,

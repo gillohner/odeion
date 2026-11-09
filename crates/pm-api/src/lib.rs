@@ -1795,6 +1795,14 @@ async fn add_endpoint(
             "the player's key is not 32 to 256 visible ASCII characters".to_string()
         })
     })?;
+    // The app's player away from home: reached through the tunnel, by the app's key
+    if let Some(peer) = body.address.strip_prefix(state::TUNNEL_PREFIX) {
+        s.tunnel_player(peer).await.map_err(|e| {
+            ApiError::bad_request(format!(
+                "cannot reach the app's player through remote access: {e}"
+            ))
+        })?;
+    }
     let st = s.clone();
     let address = body.address.clone();
     let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))

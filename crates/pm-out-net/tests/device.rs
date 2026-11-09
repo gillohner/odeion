@@ -698,3 +698,18 @@ async fn the_phones_own_level_is_read_back() {
     assert_eq!(out.volume().await.unwrap(), None, "unknown, not an error");
     server.join().unwrap();
 }
+
+/// The app's player away from home, reached through the node's tunnel at a loopback relay: its
+/// outputs are named by the app's key, not by the relay's address (which changes with every start
+/// of the node), so its zone stays the same.
+#[test]
+fn an_endpoint_through_the_tunnel_is_named_by_its_key() {
+    let (_phone, serving, cell) = phone();
+    cell.through_tunnel("tunnel:abc123");
+    let out = NetOutput::connect(serving.addr(), &cell).unwrap().remove(0);
+    assert_eq!(out.id().0, "net:tunnel:abc123/cpal:Speaker or headphones");
+    let plain = NetOutput::connect(serving.addr(), &KeyCell::new(cell.get()))
+        .unwrap()
+        .remove(0);
+    assert!(plain.id().0.starts_with("net:127.0.0.1:"), "{}", plain.id());
+}

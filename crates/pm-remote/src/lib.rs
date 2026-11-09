@@ -9,7 +9,14 @@
 //!
 //! iroh dials by key, punches through NATs, and falls back to a relay. [`Route`] says which one a
 //! connection uses, so the UI can say "direct" or "relayed".
+//!
+//! The other way, for the app's player away from home: a controller that serves a player
+//! ([`ClientTunnel::serve_player`]) takes the streams the node opens on its connection and pipes
+//! each to that player's listener on its loopback; the node reaches it at a loopback address of its
+//! own ([`NodeTunnel::player_relay`], one per controller key). The player still answers only the
+//! node holding its key (pm-stream's `Hello`), as on a LAN.
 
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -100,14 +107,21 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 pub struct NodeTunnel {
     endpoint: Endpoint,
     task: tokio::task::JoinHandle<()>,
+    /// Each controller's live connection, by its key (for the streams to its player).
+    peers: Arc<std::sync::Mutex<HashMap<EndpointId, Connection>>>,
+    /// Each controller's player relay: its loopback address here, and its listener's task.
+    relays: Mutex<HashMap<EndpointId, (SocketAddr, tokio::task::JoinHandle<()>)>>,
 }
 
 impl NodeTunnel {
     pub async fn start(key: SecretKey, relays: &Relays, target: SocketAddr) -> anyhow::Result<Self> {
         let endpoint = bind(Some(key), relays, vec![ALPN.to_vec()]).await?;
         let ep = endpoint.clone();
+        let peers: Arc<std::sync::Mutex<HashMap<EndpointId, Connection>>> = Arc::default();
+        let known = peers.clone();
         let task = tokio::spawn(async move {
             while let Some(incoming) = ep.accept().await {
+                let known = known.clone();
                 tokio::spawn(async move {
                     let conn = match incoming.accept() {
                         Ok(accepting) => match accepting.await {
@@ -116,12 +130,72 @@ impl NodeTunnel {
                         },
                         Err(e) => return tracing::debug!("tunnel connection refused: {e}"),
                     };
-                    tracing::info!(peer = %conn.remote_id().fmt_short(), "remote controller connected");
-                    serve_connection(conn, target).await;
+                    let peer = conn.remote_id();
+                    tracing::info!(peer = %peer.fmt_short(), "remote controller connected");
+                    known
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(peer, conn.clone());
+                    serve_connection(conn.clone(), target).await;
+                    // Gone: forgotten, unless it already connected again
+                    let mut k = known.lock().unwrap_or_else(|e| e.into_inner());
+                    if k.get(&peer).is_some_and(|c| c.stable_id() == conn.stable_id()) {
+                        k.remove(&peer);
+                    }
                 });
             }
         });
-        Ok(Self { endpoint, task })
+        Ok(Self {
+            endpoint,
+            task,
+            peers,
+            relays: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Where the node reaches the player of the controller with key `peer`: a listener on its own
+    /// loopback whose connections each become a stream to that controller (over its live
+    /// connection; none while it isn't connected). One per controller, kept while the node runs.
+    pub async fn player_relay(&self, peer: EndpointId) -> anyhow::Result<SocketAddr> {
+        let mut relays = self.relays.lock().await;
+        if let Some((addr, _)) = relays.get(&peer) {
+            return Ok(*addr);
+        }
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let addr = listener.local_addr()?;
+        let peers = self.peers.clone();
+        let task = tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let peers = peers.clone();
+                tokio::spawn(async move {
+                    // The app's connection, also one that is just being accepted (it connected a
+                    // moment ago, or again)
+                    let mut conn = None;
+                    for _ in 0..60 {
+                        conn = peers
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .get(&peer)
+                            .filter(|c| c.close_reason().is_none())
+                            .cloned();
+                        if conn.is_some() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    let Some(conn) = conn else {
+                        tracing::debug!(peer = %peer.fmt_short(), "the app's player is not connected");
+                        return;
+                    };
+                    match conn.open_bi().await {
+                        Ok((send, recv)) => pipe(tcp, send, recv).await,
+                        Err(e) => tracing::debug!("stream to the app's player failed: {e}"),
+                    }
+                });
+            }
+        });
+        relays.insert(peer, (addr, task));
+        Ok(addr)
     }
 
     /// The key controllers dial.
@@ -143,6 +217,9 @@ impl NodeTunnel {
 
     pub async fn close(self) {
         self.task.abort();
+        for (_, (_, t)) in self.relays.lock().await.drain() {
+            t.abort();
+        }
         self.endpoint.close().await;
     }
 }
@@ -189,22 +266,77 @@ pub struct ClientTunnel {
     conn: Arc<Mutex<Option<Connection>>>,
     node: EndpointAddr,
     task: tokio::task::JoinHandle<()>,
+    player: Player,
+}
+
+/// The player a controller serves to the node over its connection ([`ClientTunnel::serve_player`]).
+#[derive(Clone, Default)]
+struct Player {
+    target: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    /// The connections whose streams it already takes.
+    served: Arc<std::sync::Mutex<HashSet<usize>>>,
+}
+
+impl Player {
+    /// Take the node's streams on `conn` (once per connection), while a player is served.
+    fn serve(&self, conn: &Connection) {
+        if self.target.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            return;
+        }
+        if !self
+            .served
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(conn.stable_id())
+        {
+            return;
+        }
+        let (conn, me) = (conn.clone(), self.clone());
+        tokio::spawn(async move {
+            while let Ok((send, recv)) = conn.accept_bi().await {
+                let Some(target) = *me.target.lock().unwrap_or_else(|e| e.into_inner()) else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    match TcpStream::connect(target).await {
+                        Ok(tcp) => pipe(tcp, send, recv).await,
+                        Err(e) => tracing::warn!(%target, "the node's stream cannot reach the player: {e}"),
+                    }
+                });
+            }
+            me.served
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&conn.stable_id());
+        });
+    }
 }
 
 impl ClientTunnel {
     /// Listen on `127.0.0.1:<random>` and connect to `node` (dialed by key; addresses help when known).
     pub async fn start(node: impl Into<EndpointAddr>, relays: &Relays) -> anyhow::Result<Self> {
+        Self::start_with_key(node, relays, None).await
+    }
+
+    /// [`ClientTunnel::start`] with this controller's own key (kept, so the node knows it again:
+    /// its player keeps its zone), or a new one each time (`None`).
+    pub async fn start_with_key(
+        node: impl Into<EndpointAddr>,
+        relays: &Relays,
+        key: Option<SecretKey>,
+    ) -> anyhow::Result<Self> {
         let node = node.into();
-        let endpoint = bind(None, relays, vec![]).await?;
+        let endpoint = bind(key, relays, vec![]).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let local = listener.local_addr()?;
         let conn: Arc<Mutex<Option<Connection>>> = Arc::new(Mutex::new(None));
-        let (ep, c, n) = (endpoint.clone(), conn.clone(), node.clone());
+        let player = Player::default();
+        let (ep, c, n, pl) = (endpoint.clone(), conn.clone(), node.clone(), player.clone());
         let task = tokio::spawn(async move {
             while let Ok((tcp, _)) = listener.accept().await {
-                let (ep, c, n) = (ep.clone(), c.clone(), n.clone());
+                let (ep, c, n, pl) = (ep.clone(), c.clone(), n.clone(), pl.clone());
                 tokio::spawn(async move {
-                    let conn = match connection(&ep, &c, &n).await {
+                    let conn = match connection(&ep, &c, &n, &pl).await {
                         Ok(conn) => conn,
                         Err(e) => return tracing::warn!("cannot reach the node over the tunnel: {e:#}"),
                     };
@@ -224,6 +356,7 @@ impl ClientTunnel {
             conn,
             node,
             task,
+            player,
         })
     }
 
@@ -231,10 +364,24 @@ impl ClientTunnel {
         self.local
     }
 
+    /// This controller's key: the node reaches its player by it ([`NodeTunnel::player_relay`]).
+    pub fn id(&self) -> EndpointId {
+        self.endpoint.id()
+    }
+
     /// Connect now (rather than on the first request) and say how.
     pub async fn connect(&self) -> anyhow::Result<Route> {
-        let conn = connection(&self.endpoint, &self.conn, &self.node).await?;
+        let conn = connection(&self.endpoint, &self.conn, &self.node, &self.player).await?;
         Ok(route(&conn))
+    }
+
+    /// Serve the player listening at `target` (this machine's loopback) to the node: every stream
+    /// the node opens on this tunnel's connection, now and after a reconnect, goes there.
+    pub async fn serve_player(&self, target: SocketAddr) {
+        *self.player.target.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
+        if let Some(c) = self.conn.lock().await.as_ref() {
+            self.player.serve(c);
+        }
     }
 
     /// The current route, if connected.
@@ -262,6 +409,7 @@ async fn connection(
     ep: &Endpoint,
     slot: &Mutex<Option<Connection>>,
     node: &EndpointAddr,
+    player: &Player,
 ) -> anyhow::Result<Connection> {
     let mut slot = slot.lock().await;
     if let Some(c) = slot.as_ref() {
@@ -272,6 +420,7 @@ async fn connection(
     let c = tokio::time::timeout(Duration::from_secs(15), ep.connect(node.clone(), ALPN))
         .await
         .context("timed out")??;
+    player.serve(&c);
     *slot = Some(c.clone());
     Ok(c)
 }

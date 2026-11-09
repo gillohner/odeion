@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-09
+
+- **The phone is a zone away from home too.** Through remote access (the iroh tunnel), the Android app (and the desktop app) now serves its player to the node over the same connection, so the phone's own zone exists on mobile data as at home: with its signal path, the Sound panel, bit-perfect and Exclusive USB to a USB DAC, and the media controls. The node reaches the player through the tunnel, names it by the app's own key (the same zone each time), and lets more audio be on its way (1.5 s) for a mobile link's round trip.
+
 ### 2026-11-08
 
 - **The Android app works with the phone's media controls, its volume keys and a USB DAC by itself** (owner: "connect to android media player thing and audio volume control … if direct usb device is available and connected take full control"). The notification, the lock screen, the quick-settings panel and headset or Bluetooth buttons show and drive the zone the app has chosen (any zone: the phone's own, This phone, a Linn). One volume: on a network zone the volume keys and Android's panel set the zone's own volume; on the phone's zones the slider is Android's media volume, which the keys move too, with no second volume in the app; the node reads the phone's level back, so every controller shows a key press. With a USB DAC, Auto now asks Android's permission once and plays Exclusive USB first (the DAC's own volume is the zone's), then bit-perfect, then shared; "this phone" then plays through the phone's own zone. A call pauses the phone's zone and it plays on afterwards; unplugging the DAC leaves the speaker at a quarter of Android's volume at most.

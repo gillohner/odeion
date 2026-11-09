@@ -233,12 +233,59 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
         // The system's media controls follow this node's zones
         media_live::connected(s.clone());
     }
-    // Through the tunnel the node is far away and cannot reach this machine's player.
+    // On the LAN the node reaches this machine's player at its address; through the tunnel, over
+    // the tunnel (the app serves it to the node)
     #[cfg(any(desktop, target_os = "android"))]
-    if s.via.is_empty() {
-        tauri::async_runtime::spawn(register_player(app.clone(), s));
-    }
+    tauri::async_runtime::spawn(register_any(app.clone(), s));
     Ok(())
+}
+
+/// This app's iroh key for the tunnel, kept next to its settings: the node knows the app's player
+/// again by it (its zone stays the same across the app's starts). A new one each time if it can't
+/// be kept.
+fn tunnel_key(state: &AppState) -> Option<pm_remote::SecretKey> {
+    let path = state.path.with_file_name("iroh-app.key");
+    pm_remote::load_or_create_key(&path)
+        .map_err(|e| tracing::warn!("the tunnel's key can't be kept: {e:#}"))
+        .ok()
+}
+
+/// Register the player the way the node reaches it now: at its address, or through the tunnel.
+#[cfg(any(desktop, target_os = "android"))]
+async fn register_any(app: AppHandle, s: Settings) {
+    if s.via.is_empty() {
+        register_player(app, s).await;
+    } else {
+        register_tunnel_player(app, s).await;
+    }
+}
+
+/// Away from home: the player through the tunnel, so the phone's own zone exists there too (with
+/// its signal path, bit-perfect and the Sound panel); the player service then runs as for a zone.
+#[cfg(any(desktop, target_os = "android"))]
+async fn register_tunnel_player(app: AppHandle, s: Settings) {
+    let state = app.state::<AppState>();
+    let player = state.player.clone();
+    let (s, ok) = {
+        let tunnel = state.tunnel.lock().await;
+        let Some(tunnel) = tunnel.as_ref() else { return };
+        player::register_through_tunnel(s, player, tunnel).await
+    };
+    if state.current().map(|c| c.node_url) != Some(s.node_url.clone()) {
+        return;
+    }
+    state.store(Some(s));
+    let script = player::output_script();
+    if let (false, Some(w)) = (script.is_empty(), app.get_webview_window(MAIN)) {
+        let _ = w.eval(script);
+    }
+    // The node may start music on this phone now: the service runs as for a zone
+    #[cfg(target_os = "android")]
+    if ok {
+        android::start_player_service(&app, "This phone is a zone of your node".into(), true);
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = ok;
 }
 
 /// Register the player with the node in `s`, keep its address, and tell the node's page which
@@ -426,7 +473,7 @@ async fn through_tunnel(
         return Err(msg);
     }
     let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
-    let tunnel = pm_remote::ClientTunnel::start(id, &pm_remote::Relays::Public)
+    let tunnel = pm_remote::ClientTunnel::start_with_key(id, &pm_remote::Relays::Public, tunnel_key(state))
         .await
         .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
     let route = tunnel
@@ -633,7 +680,7 @@ async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> R
         return Err(msg);
     }
     let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
-    let tunnel = pm_remote::ClientTunnel::start(id, &pm_remote::Relays::Public)
+    let tunnel = pm_remote::ClientTunnel::start_with_key(id, &pm_remote::Relays::Public, tunnel_key(state))
         .await
         .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
     tunnel
@@ -897,9 +944,7 @@ pub fn run() {
                 pm_out_local::usb_dac::on_change(move || {
                     let app = h2.clone();
                     if let Some(s) = app.state::<AppState>().current() {
-                        if s.via.is_empty() {
-                            tauri::async_runtime::spawn(register_player(app, s));
-                        }
+                        tauri::async_runtime::spawn(register_any(app, s));
                     }
                 });
                 // The system's media controls (MediaControl.kt): before the node's page loads
@@ -910,9 +955,7 @@ pub fn run() {
                     let Some(s) = app.state::<AppState>().current() else {
                         return;
                     };
-                    if s.via.is_empty() {
-                        tauri::async_runtime::spawn(register_player(app, s));
-                    }
+                    tauri::async_runtime::spawn(register_any(app, s));
                 });
             }
             Ok(())
