@@ -120,13 +120,14 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       assert.ok(overflow <= 0, `no sideways scroll on People at ${width} px (${overflow})`);
 
       // S3: who sees what you play reads "Only you"
+      // (a phone's bar has no zone button since the simpler phone UI: Now playing's zone label opens Play to)
       const zb = page.locator('#zonebtn');
-      assert.equal(await zb.isVisible(), true, 'the zone button is there');
-      await zb.click();
+      if (phone) { await page.click('#np'); await page.locator('#npzone').click(); } else { assert.equal(await zb.isVisible(), true, 'the zone button is there'); await zb.click(); }
       const vis = page.locator('#zpvisible');
       await vis.waitFor();
       assert.match(await vis.textContent(), /Who sees what you play\s*Only you/);
       await page.keyboard.press('Escape');
+      if (phone) { await page.keyboard.press('Escape'); await page.locator('#nowplaying').waitFor({ state: 'hidden' }); }
 
       // S4 and S5: the song page's tag chips are 40 px to touch, and adding one says it is public
       await page.route(/\/v1\/tags(\?.*)?$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { tags: [{ label: 'chill' }] } }) : r.fallback()));

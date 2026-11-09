@@ -4073,7 +4073,8 @@
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
     if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
-    if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
+    // (the search field is under an open Now playing, out of reach there: it closes first)
+    if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
     if (e.key === 'ArrowLeft' && !e.metaKey && !e.ctrlKey) transport({ action: 'previous' });

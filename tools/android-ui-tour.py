@@ -54,12 +54,23 @@ def run(h):
         # The page plays to that zone: Zones › its card's Play to
         tap(lambda n: 'text="Zones"' in n or 'content-desc="Zones"' in n, "the Zones tab")
         time.sleep(2)
-        tap(lambda n: ('text="Play to"' in n or 'content-desc="Play to"' in n) and 'clickable="true"' in n, "Play to on the phone's zone card")
+        # (the WebView exposes a button's words on a node of their own, not always the clickable one)
+        tap(lambda n: 'text="Play to"' in n or 'content-desc="Play to"' in n, "Play to on the phone's zone card")
         time.sleep(2)
         tap(lambda n: 'text="Home"' in n or 'content-desc="Home"' in n, "the Home tab")
         time.sleep(2)
-        mini = until("the mini player", lambda: find(lambda n: 'content-desc="Now playing"' in n or ('text="Now playing"' in n and 'clickable="true"' in n)), timeout=30)
+        # (the mini player: its label, else the song's title at the bottom of the screen)
+        title = items[0].get("title") or "tone"
+        def mini_node():
+            nodes = ui_nodes()
+            # (the lowest such node: the bar sits on the tabs)
+            low = [n for n in nodes if 'content-desc="Now playing"' in n or 'text="Now playing"' in n] or [n for n in nodes if f'text="{title}"' in n]
+            return max(low, key=lambda n: bounds(n)[1]) if low else None
+        mini = until("the mini player", mini_node, timeout=30)
         x1, y1, x2, y2 = bounds(mini)
+        # (the swipes go across the bar's width, at its height: the node found may be its title only)
+        W = int(re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).group(1))
+        x1, x2 = W // 8, W * 7 // 8
         shot("ui-1-mini-player")
         # Swipe left: the next song; right: the previous one (the node's queue says so)
         idx0 = api("GET", f"/v1/zones/{zid}").get("queue_index") or 0
@@ -92,7 +103,7 @@ def run(h):
         until("Now playing", lambda: has("Up next") and has("More") and has("Close Now playing"), timeout=15)
         shot("ui-3-now-playing")
         log("swipe up on the mini player opens Now playing")
-        tap(lambda n: 'text="Up next"' in n and 'clickable="true"' in n, "Up next")
+        tap(lambda n: 'text="Up next"' in n or 'content-desc="Up next"' in n, "Up next")
         until("the Up next sheet", lambda: has("Close the sheet"), timeout=15)
         time.sleep(1)
         shot("ui-4-sheet-up-next")
@@ -119,7 +130,9 @@ def run(h):
         until("Now playing closed by Back", lambda: not has("Close Now playing"), timeout=15)
         log("Back again closes Now playing")
         # Swipe left on the cover: the next song
-        tap(lambda n: 'content-desc="Now playing"' in n or ('text="Now playing"' in n and 'clickable="true"' in n), "the mini player")
+        x, y = center(mini_node())
+        adb("shell", "input", "tap", str(x), str(y))
+        log("tapped the mini player")
         until("Now playing again", lambda: has("Close Now playing"), timeout=15)
         idx4 = api("GET", f"/v1/zones/{zid}").get("queue_index") or 0
         swipe(sw * 3 // 4, sh // 3, sw // 6, sh // 3)
@@ -133,7 +146,7 @@ def run(h):
         try:
             tap(lambda n: 'text="Library"' in n or 'content-desc="Library"' in n, "the Library tab")
             time.sleep(2)
-            tap(lambda n: 'text="Albums"' in n and 'clickable="true"' in n, "Albums")
+            tap(lambda n: 'text="Albums"' in n or 'content-desc="Albums"' in n, "Albums")
             time.sleep(2)
             tile = find(lambda n: 'clickable="true"' in n and ('Album' in n or 'music' in n) and 'text="Albums"' not in n)
             if tile:

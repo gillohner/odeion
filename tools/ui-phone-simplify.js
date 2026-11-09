@@ -230,6 +230,7 @@ const overflow = (page) => page.evaluate(() => {
     const touch = async (pts, opts = {}) => {
       const [x0, y0] = pts[0];
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: x0, y: y0 }] });
+      if (opts.pre) await page.evaluate(opts.pre);
       if (opts.hold) await sleep(opts.hold);
       for (let i = 1; i < pts.length; i++) { await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: pts[i][0], y: pts[i][1] }] }); await sleep(16); if (i === 2 && opts.mid) await page.evaluate(opts.mid); }
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
@@ -250,6 +251,15 @@ const overflow = (page) => page.evaluate(() => {
     await touch(line(mx + 60, my, -170, 0), { mid: redraw }); await sleep(900);
     const after = await page.evaluate(() => ({ t: document.querySelector('#np').style.transform, cls: document.querySelector('#np').className }));
     check(sent(state, 'next') === n0 + 1 && !after.t && !/dragging/.test(after.cls), `${at}: a finger's swipe left on the mini player is the next song, also when the bar redraws during it (${sent(state, 'next') - n0}, transform "${after.t}")`);
+    // the pressed element replaced before the direction is known (before any capture): that swipe and
+    // the next one are one next song each, nothing stuck between them
+    const n1 = sent(state, 'next');
+    [mx, my] = await mid('#np .np-text');
+    await touch(line(mx + 60, my, -170, 0), { pre: redraw }); await sleep(900);
+    [mx, my] = await mid('#np .np-text');
+    await touch(line(mx + 60, my, -170, 0)); await sleep(900);
+    const after2 = await page.evaluate(() => document.querySelector('#np').style.transform);
+    check(sent(state, 'next') === n1 + 2 && !after2, `${at}: with the pressed element replaced before the swipe's direction is known, that swipe and the next are one song each (${sent(state, 'next') - n1})`);
     // a finger held on a row: selection with that row ticked
     const [rx, ry] = await mid('#isongs .srow:nth-child(2) .grow');
     await touch([[rx, ry], [rx, ry]], { hold: 900 }); await sleep(300);
@@ -331,6 +341,8 @@ const overflow = (page) => page.evaluate(() => {
     check(sb.s <= sb.bar + 0.5, `700x900 desktop: the sheet ends above the player bar (${Math.round(sb.s)} / ${Math.round(sb.bar)})`);
     await page.goBack(); await sleep(400);
     check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), '700x900 desktop: Back closes the sheet first');
+    await page.evaluate(() => document.activeElement && document.activeElement.blur()); await page.keyboard.press('/'); await sleep(300);
+    check(await page.evaluate(() => document.querySelector('#nowplaying').hidden && document.activeElement && document.activeElement.id === 'search'), '700x900 desktop: "/" closes Now playing and goes to the search field');
     check(!state.errors.length, `700x900 desktop: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     await context.close();
   }

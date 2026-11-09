@@ -409,10 +409,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check((await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).loudness === 'off', 'and back off');
       await p.click('#qpdsp'); await p.waitForSelector('#dspbox .card.dsp', { timeout: 10000 }).catch(() => {});
       check(await p.locator('#dspbox .card.dsp').count() === 1, 'All DSP settings opens this zone’s DSP editor');
-      // Phones: the pill shows the device and the badge, not the words
+      // Phones: the mini player is the song and play/pause only (owner, 2026-11-08); the sound panel
+      // opens from Now playing's ···, the quality shows there
       await p.setViewportSize({ width: 390, height: 844 }); await p.waitForTimeout(300);
-      const phone = await p.$eval('#quality', (q) => ({ shown: q.offsetWidth > 0 && getComputedStyle(q).display !== 'none', text: getComputedStyle(q.querySelector('.qtext')).display, short: getComputedStyle(q.querySelector('.qshort')).display, mark: !!q.querySelector('.qsrc svg'), width: q.offsetWidth }));
-      check(phone.shown && phone.text === 'none' && phone.short !== 'none' && phone.mark && phone.width <= 150, `on a phone the pill stays, short: the mark, the device and a badge (${phone.width}px)`);
+      const phone = await p.$eval('#quality', (q) => ({ shown: q.offsetWidth > 0 && getComputedStyle(q).display !== 'none' }));
+      check(!phone.shown, 'on a phone the bar has no sound pill (the song has the room)');
       await p.setViewportSize({ width: 1280, height: 900 });
       // Pressing play answers at once: a slow node, then a node that refuses
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
@@ -689,9 +690,10 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       if (w < 600) {
         const dup = await pp.evaluate(() => { const q = document.querySelector('#quality'); const dev = q && q.querySelector('.qdev'); return !!(dev && getComputedStyle(dev).display !== 'none'); });
         check(!dup, `${w}: the zone's name is not in the sound pill too`);
-        const zn = await pp.$eval('.player .zone-btn span', (e) => ({ shown: getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width >= 40, width: Math.round(e.getBoundingClientRect().width), text: e.textContent })).catch(() => null);
-        check(zn && zn.shown && zn.text, `${w}: the zone button names the zone (${JSON.stringify(zn)})`);
         await pp.click('#np .np-title'); const opened = await visible(pp, '#nowplaying', 8000);
+        // (the phone's bar has no zone button: Now playing names the zone at its top)
+        const zn = await pp.$eval('#npzone .np-zone-name', (e) => ({ width: Math.round(e.getBoundingClientRect().width), text: e.textContent })).catch(() => null);
+        check(zn && zn.width >= 40 && zn.text, `${w}: Now playing names the zone (${JSON.stringify(zn)})`);
         check(opened && await pp.evaluate(() => /^\/(song|item)/.test(location.pathname) === false), `${w}: tapping the bar's title opens Now playing, not the song page`);
         check(await pp.isVisible('#npvol'), `${w}: Now playing has a volume slider`);
         const npv = await pp.$eval('#npvol', (e) => [e.min, e.max, e.value].join(' ')).catch(() => '');
