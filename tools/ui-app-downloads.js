@@ -78,6 +78,29 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
   const browser = await chromium.launch();
   for (const w of [390, 1280]) {
     const at = `${w}px`;
+    // A state reply started before a download event must not erase its song marks.
+    {
+      const r = await open(browser, w, true); const p = r.page;
+      await p.evaluate(() => {
+        const invoke = window.__TAURI_INTERNALS__.invoke;
+        window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+          if (cmd !== 'downloads_state') return invoke(cmd, args);
+          const old = JSON.parse(JSON.stringify(window.__dl));
+          return new Promise((resolve) => { window.__finishState = () => resolve(old); });
+        };
+      });
+      await goto(p, '/downloads');
+      await p.waitForFunction(() => !!window.__finishState);
+      await p.evaluate(() => {
+        Object.assign(window.__dl, { items: [{ kind: 'track', id: '1', title: 'Song 1', here: 1, bytes: 100, songs: 1 }], songs: 1, bytes: 100, track_ids: [1] });
+        window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) }));
+        window.__finishState();
+      });
+      await sleep(200);
+      await goto(p, '/tracks');
+      check(await p.locator('.track[data-tid="1"] .dl-mark').count() === 1, `${at}: a late state reply preserves the newer downloaded mark`);
+      await r.context.close();
+    }
     const run = await open(browser, w, true);
     const { page, state } = run;
     // A library song: Download in its menu

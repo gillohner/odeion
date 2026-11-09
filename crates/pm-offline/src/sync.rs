@@ -157,8 +157,8 @@ pub struct SyncOptions {
     pub progress: Option<ProgressSink>,
     /// Bytes the device keeps for other nodes: they count against the limit too.
     pub other_bytes: u64,
-    /// Asked before each song: true when what to keep changed meanwhile (the sync stops there,
-    /// keeps what it has, and the next one goes on with the new list).
+    /// Asked before each song and body write: true when what to keep changed meanwhile (the
+    /// sync stops there, keeps what it has, and the next one goes on with the new list).
     pub stop: Option<StopCheck>,
 }
 
@@ -249,6 +249,19 @@ pub fn free_bytes(_: &std::path::Path) -> Option<u64> {
     None
 }
 
+/// Bytes held by completed and partial song files in one node's store. Partial downloads from
+/// earlier attempts consume the same limit as completed songs; ETag sidecars are not songs.
+pub fn download_bytes(dir: &std::path::Path) -> std::io::Result<u64> {
+    let mut bytes = 0u64;
+    for entry in std::fs::read_dir(dir.join("files"))? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() && !entry.file_name().to_string_lossy().ends_with(".etag") {
+            bytes = bytes.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(bytes)
+}
+
 /// Whether one more song of `bytes` fits: under the limit with what the device has, and leaving
 /// `keep_free` on the disk; else why not.
 pub fn fits(
@@ -259,14 +272,14 @@ pub fn fits(
     keep_free: u64,
 ) -> std::result::Result<(), String> {
     if let Some(c) = cap {
-        if have + bytes > c {
+        if have.checked_add(bytes).is_none_or(|sum| sum > c) {
             return Err(format!(
                 "Downloads stopped at the limit of {}: raise it or remove something.",
                 size_words(c)
             ));
         }
     }
-    if free.is_some_and(|f| f < bytes + keep_free) {
+    if free.is_some_and(|f| bytes.checked_add(keep_free).is_none_or(|need| f < need)) {
         return Err(format!(
             "Downloads stopped: this device would have less than {} free.",
             size_words(keep_free)
@@ -442,10 +455,18 @@ enum Got {
     Done(KeptTrack),
     /// 202: the node is still making the smaller copy.
     Preparing,
+    Full(String),
+    Stopped,
 }
 
 /// Download one song (resuming a partial file), with the node's answer for it.
-async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> Result<Got> {
+async fn download(
+    store: &Store,
+    node: &Node,
+    id: i64,
+    fmt: Option<&Format>,
+    opts: &SyncOptions,
+) -> Result<Got> {
     let mut track = node.get(&format!("/v1/library/tracks/{id}")).await?;
     // The device keeps the name, not where the owner keeps the file
     if let Some(Value::String(p)) = track.pointer_mut("/file/path") {
@@ -515,6 +536,33 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
             return Err(SyncError::Status(s.as_u16(), text.chars().take(200).collect()));
         }
     };
+    // The manifest's size can be stale, and a chunked response has no size at all. Check the
+    // actual response and every write. Count other partials, while replacing an old complete
+    // copy only once against the cap (both copies still count against actual free disk space).
+    let old_bytes = store
+        .track_file(id)
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map_or(0, |m| m.len());
+    let base_bytes = download_bytes(store.dir())?
+        .saturating_sub(have)
+        .saturating_sub(old_bytes)
+        .saturating_add(opts.other_bytes);
+    let mut written = if append { have } else { 0 };
+    let mut available = free_bytes(store.dir());
+    if let Err(why) = fits(base_bytes, total.unwrap_or(written), opts.cap_bytes, None, 0).and_then(|()| {
+        fits(
+            0,
+            total.unwrap_or(written).saturating_sub(written),
+            None,
+            available,
+            opts.keep_free,
+        )
+    }) {
+        return Ok(Got::Full(why));
+    }
+    if opts.should_stop() {
+        return Ok(Got::Stopped);
+    }
     if let Some(et) = resp.headers().get(header::ETAG).and_then(|v| v.to_str().ok()) {
         tokio::fs::write(&etag_file, et).await?;
     }
@@ -530,7 +578,28 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
             .await
             .map_err(|_| SyncError::TimedOut(format!("song {id} stalled")))?;
         let Some(chunk) = next? else { break };
+        if opts.should_stop() {
+            f.flush().await?;
+            return Ok(Got::Stopped);
+        }
+        let bytes = chunk.len() as u64;
+        let free = match (available, free_bytes(store.dir())) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if let Err(why) = fits(
+            base_bytes.saturating_add(written),
+            bytes,
+            opts.cap_bytes,
+            free,
+            opts.keep_free,
+        ) {
+            f.flush().await?;
+            return Ok(Got::Full(why));
+        }
         f.write_all(&chunk).await?;
+        written = written.saturating_add(bytes);
+        available = free.map(|n| n.saturating_sub(bytes));
     }
     f.flush().await?;
     f.sync_all().await?;
@@ -743,34 +812,16 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
         },
     };
     opts.tell(&fin.progress);
-    for (id, bytes, title) in wanted {
+    for (id, _, title) in wanted {
         // What to keep changed meanwhile (Remove, Remove all, another limit): the next sync goes
         // on with the new list
         if opts.should_stop() {
             tracing::info!("offline: what to keep changed; this sync stops here");
             break;
         }
-        // The limit (with what other nodes' downloads take) and the disk, before each song: what
-        // is there stays, the rest waits
-        if let Err(why) = fits(
-            // (a song fetched again replaces its copy: that copy's bytes don't count twice)
-            {
-                let ix = store.index();
-                ix.bytes() - ix.tracks.get(&id).map_or(0, |t| t.bytes) + opts.other_bytes
-            },
-            bytes,
-            opts.cap_bytes,
-            free_bytes(store.dir()),
-            opts.keep_free,
-        ) {
-            tracing::info!("offline: {why}");
-            fin.progress.full = Some(why.clone());
-            report.full = Some(why);
-            break;
-        }
         fin.progress.current = Some(title);
         opts.tell(&fin.progress);
-        let got = download(store, node, id, format.as_ref()).await;
+        let got = download(store, node, id, format.as_ref(), opts).await;
         fin.progress.current = None;
         match &got {
             Ok(Got::Done(k)) => {
@@ -778,9 +829,9 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
                 fin.progress.bytes_done += k.bytes;
             }
             Ok(Got::Preparing) => fin.progress.preparing += 1,
+            Ok(Got::Full(_)) | Ok(Got::Stopped) => {}
             Err(_) => fin.progress.failed += 1,
         }
-        opts.tell(&fin.progress);
         match got {
             Ok(Got::Done(kept)) => {
                 let album = kept.track.pointer("/album/id").and_then(Value::as_i64);
@@ -794,11 +845,17 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
                 report.downloaded.push(id);
             }
             Ok(Got::Preparing) => report.preparing.push(id),
+            Ok(Got::Full(why)) => {
+                fin.progress.full = Some(why.clone());
+                report.full = Some(why);
+                break;
+            }
+            Ok(Got::Stopped) => break,
             Err(e @ SyncError::Unreachable(_)) => return Err(e),
             Err(e) => report.failed.push((id, e.to_string())),
         }
+        opts.tell(&fin.progress);
     }
-    drop(fin);
     // Covers for songs kept before a cover could be fetched
     let albums: Vec<i64> = store
         .index()
@@ -844,6 +901,9 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
     // Tell the node what the device has now
     put_manifest(store, node).await?;
     store.update(|ix| ix.synced_at = Some(now()))?;
+    // The final notification sees the completed files AND collection metadata. The guard still
+    // reports completion on every early error, with whatever state was actually saved.
+    drop(fin);
     Ok(report)
 }
 

@@ -1666,7 +1666,8 @@
   // songs get no Download.
   const appDl = () => nativeOk() && !isOffline();
   const dlCall = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s downloads are off')); };
-  const dlSet = (d) => { state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };
+  let dlRevision = 0; let dlRead = 0;
+  const dlSet = (d) => { dlRevision += 1; state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };
   const dlMark = () => `<span class="dl-mark" role="img" aria-label="On this phone" title="On this phone">${icon('download')}</span>`;
   const dlHas = (id) => !!(state.dlTracks && state.dlTracks.has(Number(id)));
   const dlAlbum = (id) => !!(state.dlAlbums && state.dlAlbums.has(Number(id)));
@@ -1679,7 +1680,7 @@
     for (const r of $$('[data-srow][data-tid]', root)) put($('.name', r), dlHas(r.dataset.tid));
     for (const b of $$('.tile[data-album]', root)) put($('.t', b), dlAlbum(b.dataset.album));
   };
-  const dlLoad = () => { document.body.classList.toggle('app-dl', appDl()); return appDl() ? dlCall('downloads_state').then((d) => { dlSet(d); markDownloads(); return d; }).catch(() => null) : Promise.resolve(null); };
+  const dlLoad = () => { document.body.classList.toggle('app-dl', appDl()); const revision = dlRevision; const read = ++dlRead; return appDl() ? dlCall('downloads_state').then((d) => { if (revision === dlRevision && read === dlRead) { dlSet(d); markDownloads(); } return state.dl; }).catch(() => null) : Promise.resolve(null); };
   window.addEventListener('pmdesktop:downloads', (e) => { dlSet(e.detail); markDownloads(); if (state.view === 'downloads' && !isOffline() && e.detail) storageUpdate(e.detail); });
   // Download (or Remove download) for a song, a library album or a playlist, in its ⋯ menu
   const dlKeep = async (kind, id, on, title, sub, online, songs) => {

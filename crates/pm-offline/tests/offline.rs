@@ -24,6 +24,9 @@ struct Seen {
     playlist_status: Option<u16>,
     /// A song the node takes long to answer for (a slow transcode).
     slow: Option<i64>,
+    /// A stale manifest or an unknown-length file response.
+    manifest_bytes: Option<u64>,
+    chunked: bool,
 }
 
 type Fake = Arc<Mutex<Seen>>;
@@ -48,6 +51,7 @@ fn kept_by(keep: &Value) -> Vec<i64> {
 
 async fn manifest(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
     f.lock().unwrap().manifests.push(b.clone());
+    let manifest_bytes = f.lock().unwrap().manifest_bytes;
     let kept = kept_by(&b["keep"]);
     let have: Vec<i64> = b["have"]
         .as_array()
@@ -56,7 +60,7 @@ async fn manifest(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
     let wanted: Vec<Value> = kept
         .iter()
         .filter(|i| !have.contains(i))
-        .map(|i| json!({"track_id": i, "title": format!("Song {i}"), "bytes": song(*i).len()}))
+        .map(|i| json!({"track_id": i, "title": format!("Song {i}"), "bytes": manifest_bytes.unwrap_or(song(*i).len() as u64)}))
         .collect();
     let unkept: Vec<i64> = have.iter().copied().filter(|i| !kept.contains(i)).collect();
     Json(json!({"wanted": wanted, "unkept": unkept}))
@@ -106,6 +110,18 @@ async fn download(State(f): State<Fake>, Path(id): Path<i64>, h: HeaderMap) -> R
                 (header::CONTENT_RANGE, format!("bytes {said}-{}/{len}", len - 1)),
             ],
             body[from..].to_vec(),
+        )
+            .into_response();
+    }
+    if f.lock().unwrap().chunked {
+        let (mut writer, reader) = tokio::io::duplex(200);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let _ = writer.write_all(&body).await;
+        });
+        return (
+            [(header::ETAG, etag)],
+            axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(reader, 200)),
         )
             .into_response();
     }
@@ -725,4 +741,108 @@ async fn a_sync_stops_at_the_limit_and_says_so() {
     let last = seen.lock().unwrap().manifests.last().cloned().unwrap();
     assert_eq!(last["keep"]["albums"], json!([]));
     assert_eq!(last["keep"]["tracks"], json!([]));
+}
+
+#[tokio::test]
+async fn actual_download_bytes_obey_the_cap_even_with_a_stale_manifest() {
+    for chunked in [false, true] {
+        let seen: Fake = Arc::new(Mutex::new(Seen {
+            manifest_bytes: Some(1),
+            chunked,
+            ..Default::default()
+        }));
+        let base = start_node(seen).await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .set_keep(Keep {
+                tracks: vec![1],
+                ..Default::default()
+            })
+            .unwrap();
+        let cap = song(1).len() as u64 - 100;
+        let r = pm_offline::sync(
+            &store,
+            &Node::new(&base, "tok").unwrap(),
+            &SyncOptions {
+                cap_bytes: Some(cap),
+                ..opts()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            r.full.as_deref().is_some_and(|s| s.contains("limit")),
+            "chunked={chunked}: {r:?}"
+        );
+        assert!(r.downloaded.is_empty());
+        assert!(store.index().tracks.is_empty());
+        assert!(!dir.path().join("files/1.flac").exists());
+        assert!(pm_offline::sync::download_bytes(dir.path()).unwrap() <= cap);
+    }
+}
+
+#[tokio::test]
+async fn retained_partial_songs_count_against_the_cap() {
+    let base = start_node(Arc::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .set_keep(Keep {
+            albums: vec![7],
+            ..Default::default()
+        })
+        .unwrap();
+    let part = dir.path().join("files/2.flac.part");
+    std::fs::write(&part, &song(2)[..500]).unwrap();
+    std::fs::write(dir.path().join("files/2.flac.etag"), "\"e2\"").unwrap();
+    let r = pm_offline::sync(
+        &store,
+        &Node::new(&base, "tok").unwrap(),
+        &SyncOptions {
+            cap_bytes: Some(1000),
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(r.full.is_some(), "{r:?}");
+    assert!(r.downloaded.is_empty());
+    assert_eq!(std::fs::read(part).unwrap(), song(2)[..500]);
+    assert_eq!(pm_offline::sync::download_bytes(dir.path()).unwrap(), 500);
+}
+
+#[tokio::test]
+async fn final_progress_sees_the_downloaded_collection_metadata() {
+    let base = start_node(Arc::default()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path()).unwrap());
+    store
+        .set_keep(Keep {
+            tracks: vec![2],
+            playlists: vec!["p1".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    let completed: Arc<Mutex<Vec<pm_offline::Summary>>> = Arc::default();
+    let (observed, view) = (completed.clone(), store.clone());
+    let r = pm_offline::sync(
+        &store,
+        &Node::new(&base, "tok").unwrap(),
+        &SyncOptions {
+            progress: Some(pm_offline::ProgressSink(Arc::new(move |p| {
+                if !p.running {
+                    observed.lock().unwrap().push(pm_offline::summary(&view.index()));
+                }
+            }))),
+            ..opts()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.downloaded, [2]);
+    let done = completed.lock().unwrap();
+    assert_eq!(done.len(), 1);
+    let collection = done[0].items.iter().find(|i| i.kind == "playlist").unwrap();
+    assert_eq!((collection.here, collection.songs), (1, 2));
 }
