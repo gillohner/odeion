@@ -69,6 +69,7 @@ pub const VIEWS: &[&str] = &[
     "playlists",
     "queue",
     "radio",
+    "releases",
     "search",
     "settings",
     "shared",
