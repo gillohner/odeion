@@ -640,16 +640,35 @@ fn listener_of(s: &NodeState, token: &str) -> Option<String> {
     crate::people::may_use_music(s, &key).then_some(key)
 }
 
-/// The zones a listener may play on: the owner's list, or every zone when none is set.
-pub fn listener_zones(s: &NodeState) -> Option<Vec<String>> {
-    s.library
+/// The zones a listener may play on: the owner's list, or every zone when none is set
+/// (`None`). A list that can't be read, or isn't a list of zone ids, is an error: listeners
+/// are then kept off every zone until the owner sets the list again, never let onto all of them.
+pub fn listener_zones(s: &NodeState) -> Result<Option<Vec<String>>, ApiError> {
+    let raw = s
+        .library
         .lock()
         .expect("library poisoned")
         .get_setting(ZONES)
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-        .filter(|v| !v.is_empty())
+        .map_err(|e| broken_zone_list(e.to_string()))?;
+    let Some(j) = raw else {
+        return Ok(None);
+    };
+    let zones: Vec<String> = serde_json::from_str(&j).map_err(|e| broken_zone_list(e.to_string()))?;
+    Ok(Some(zones).filter(|v| !v.is_empty()))
+}
+
+/// The listener zone list can't be used: said once in the log, and to the owner on every read.
+fn broken_zone_list(why: String) -> ApiError {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::warn!(
+            "the listener zone list can't be read, so listeners get no zone until it is set again: {why}"
+        )
+    });
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("the listener zone list can't be read; set it again in People: {why}"),
+    )
 }
 
 /// Routes a listener may never use (reads included): the owner's settings and data.
@@ -776,11 +795,13 @@ fn under(path: &str, prefixes: &[&str]) -> bool {
         .any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
-/// Whether a listener may use this zone: the owner's list, or every zone when none is set.
+/// Whether a listener may use this zone: the owner's list, or every zone when none is set; none
+/// while the list can't be read.
 fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     match listener_zones(s) {
+        Err(_) => Some("the owner's zone list can't be read"),
         // A listen-along group is open when every zone it plays for is (presence.rs)
-        Some(allowed)
+        Ok(Some(allowed))
             if !allowed.iter().any(|z| z == zone)
                 && !s
                     .presence
@@ -916,7 +937,10 @@ pub(crate) async fn me(
     axum::Extension(c): axum::Extension<Caller>,
 ) -> ApiResult<Me> {
     Ok(Json(Me {
-        zones: (c.role == Role::Listener).then(|| listener_zones(&s)).flatten(),
+        // A list that can't be read opens no zone
+        zones: (c.role == Role::Listener)
+            .then(|| listener_zones(&s).unwrap_or(Some(Vec::new())))
+            .flatten(),
         role: c.role,
         key: c.key,
     }))
@@ -960,7 +984,7 @@ pub struct ListenerZones {
 /// `GET /v1/people/zones`: the zones open to listeners (empty = all).
 pub(crate) async fn get_zones(State(s): State<Arc<NodeState>>) -> ApiResult<ListenerZones> {
     Ok(Json(ListenerZones {
-        zones: listener_zones(&s).unwrap_or_default(),
+        zones: listener_zones(&s)?.unwrap_or_default(),
     }))
 }
 

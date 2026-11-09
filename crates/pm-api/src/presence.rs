@@ -434,7 +434,7 @@ async fn move_music(from: &Zone, to: &Zone, empty_from: bool) -> ZoneState {
 }
 
 /// The group zone for `a`: the host's speakers first (the leader), then each joiner's, through
-/// the host zone's DSP.
+/// the host zone's DSP, with the strictest volume limit among all of them.
 async fn build(s: &Arc<NodeState>, a: &Along) -> Result<Arc<Zone>, ApiError> {
     let mut name = a.host_name.clone();
     let mut ids = a.host_outputs.clone();
@@ -446,7 +446,8 @@ async fn build(s: &Arc<NodeState>, a: &Along) -> Result<Arc<Zone>, ApiError> {
         ids.extend(j.outputs.iter().cloned());
     }
     let output = crate::zone_output(s, &name, &ids).await?;
-    s.sources.carry_dsp(&a.host_output, &output.id());
+    let members: Vec<pm_zones::OutputId> = ids.iter().map(|i| pm_zones::OutputId(i.clone())).collect();
+    s.sources.carry_dsp(&a.host_output, &output.id(), &members);
     Ok(s.create_zone(&name, output))
 }
 

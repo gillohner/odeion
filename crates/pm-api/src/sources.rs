@@ -21,6 +21,9 @@ pub struct NodeSources {
     default_cfg: PipelineConfig,
     /// Per-output pipeline settings (DSP); the default applies otherwise.
     dsp: RwLock<HashMap<OutputId, PipelineConfig>>,
+    /// The speakers each group output plays on (a zone of several outputs), for the group's
+    /// volume limit: the strictest among them, read at every request.
+    groups: RwLock<HashMap<OutputId, Vec<OutputId>>>,
     /// TIDAL credentials and origins, for `tidal:track:` URIs on the audio thread.
     tidal: crate::tidal::SharedEndpoints,
     /// Deezer API origin, for `deezer:track:` URIs (previews).
@@ -73,6 +76,7 @@ impl NodeSources {
             files: LocalFiles::new(cfg.clone()),
             default_cfg: cfg,
             dsp: RwLock::new(dsp),
+            groups: RwLock::new(HashMap::new()),
             tidal,
             deezer,
             jamendo,
@@ -106,10 +110,53 @@ impl NodeSources {
             .unwrap_or_else(|| self.default_cfg.clone())
     }
 
+    /// `group` plays on `members` from now on ([`Self::forget_group`] when its zone goes): its
+    /// volume limit is the strictest among its own and theirs ([`Self::volume_limit`]).
+    pub fn note_group(&self, group: &OutputId, members: &[OutputId]) {
+        self.groups
+            .write()
+            .expect("groups lock")
+            .insert(group.clone(), members.to_vec());
+    }
+
+    /// The zone of `group` is gone.
+    pub fn forget_group(&self, group: &OutputId) {
+        self.groups.write().expect("groups lock").remove(group);
+    }
+
+    /// The volume limit in force for `output`: its own, and for a group of speakers the strictest
+    /// among theirs too, as they are now (each keeps its own limit in a group, and a limit lowered
+    /// while the group exists holds at its next request).
+    pub fn volume_limit(&self, output: &OutputId) -> Option<f32> {
+        let members = self
+            .groups
+            .read()
+            .expect("groups lock")
+            .get(output)
+            .cloned()
+            .unwrap_or_default();
+        std::iter::once(output)
+            .chain(members.iter())
+            .filter_map(|o| self.dsp_for(o).max_volume_db)
+            .reduce(f32::min)
+    }
+
     /// Play `to` with `from`'s settings until [`Self::forget_dsp`], without saving them: a listen-
-    /// along group sounds like the zone it came from (presence.rs).
-    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId) {
-        let cfg = self.dsp_for(from);
+    /// along group sounds like the zone it came from (presence.rs). Its volume limit is the
+    /// strictest among `members` (the speakers it plays on, `from`'s included): every speaker
+    /// keeps its own limit in the group, and the software volume stays under it.
+    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId, members: &[OutputId]) {
+        let mut cfg = self.dsp_for(from);
+        for m in members.iter().chain(std::iter::once(from)) {
+            if let Some(limit) = self.dsp_for(m).max_volume_db {
+                cfg.max_volume_db = Some(cfg.max_volume_db.map_or(limit, |l: f32| l.min(limit)));
+            }
+        }
+        if let (Some(v), Some(max)) = (cfg.volume_db, cfg.max_volume_db) {
+            if v > max {
+                cfg.volume_db = Some(max);
+            }
+        }
         self.dsp.write().expect("dsp lock").insert(to.clone(), cfg);
     }
 
