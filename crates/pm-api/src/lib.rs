@@ -24835,8 +24835,10 @@ exec sleep 300
     ) -> (
         Arc<tokio::sync::Semaphore>,
         Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        Arc<tokio::sync::Semaphore>,
     ) {
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
         let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
         // The account the senders send for (a sender checks it is still the one connected)
         s.library
@@ -24853,11 +24855,15 @@ exec sleep 300
         let mock = Router::new().route(
             "/1/submit-listens",
             post({
-                let (gate, got) = (gate.clone(), got.clone());
+                let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
                 move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
-                    let (gate, got) = (gate.clone(), got.clone());
+                    let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
                     async move {
-                        gate.acquire().await.unwrap().forget();
+                        entered.add_permits(1);
+                        let Ok(permit) = gate.acquire().await else {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        };
+                        permit.forget();
                         let payload = b["payload"].as_array().unwrap().clone();
                         if payload.iter().any(|l| l["listened_at"] == 0) {
                             return StatusCode::SERVICE_UNAVAILABLE;
@@ -24878,7 +24884,7 @@ exec sleep 300
             }),
         );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
-        (gate, got)
+        (gate, got, entered)
     }
 
     fn a_listen(n: u64) -> serde_json::Value {
@@ -24904,7 +24910,7 @@ exec sleep 300
     async fn a_listen_send_cut_short_loses_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (gate, got) = gated_listenbrainz(&s).await;
+        let (gate, got, entered) = gated_listenbrainz(&s).await;
         crate::send_queue::enqueue(
             &s.library.lock().unwrap(),
             "listenbrainz.pending",
@@ -24916,14 +24922,13 @@ exec sleep 300
             let s = s.clone();
             tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(4)]).await })
         };
-        // In flight: the waiting count is the whole list, the new listen included
-        for _ in 0..100 {
-            if waiting_listens(&s) == [1, 2, 3, 4] {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Prove the request reached the remote boundary before cancelling; it has not
+        // committed any listens while its gate is closed.
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
         assert_eq!(waiting_listens(&s), [1, 2, 3, 4], "counted while sending");
         send.abort();
         let _ = send.await;
@@ -24932,10 +24937,14 @@ exec sleep 300
             [1, 2, 3, 4],
             "nothing lost when the send stops"
         );
-        // The next send takes them all
-        gate.add_permits(10);
+        // Dropping a client does not cancel an Axum handler. Permanently refuse that
+        // abandoned request before allowing a retry to commit at a fresh endpoint.
+        gate.close();
+        assert!(got.lock().unwrap().is_empty());
+        let (retry_gate, retried, _) = gated_listenbrainz(&s).await;
+        retry_gate.add_permits(10);
         listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
-        let mut sent: Vec<u64> = got
+        let mut sent: Vec<u64> = retried
             .lock()
             .unwrap()
             .iter()
@@ -24944,6 +24953,10 @@ exec sleep 300
         sent.sort();
         assert_eq!(sent, [1, 2, 3, 4]);
         assert!(waiting_listens(&s).is_empty());
+        assert!(
+            got.lock().unwrap().is_empty(),
+            "abandoned request never committed"
+        );
     }
 
     /// A listen added while a send is under way waits on disk at once, isn't lost when the send
@@ -24952,7 +24965,7 @@ exec sleep 300
     async fn a_listen_added_during_a_send_waits_and_goes_next() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (gate, got) = gated_listenbrainz(&s).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
         let first = {
             let s = s.clone();
             tokio::spawn(async move { listenbrainz::send_listens(&s, "LBT", vec![a_listen(1)]).await })
@@ -25000,7 +25013,7 @@ exec sleep 300
     async fn only_the_listens_listenbrainz_refused_wait() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (gate, got) = gated_listenbrainz(&s).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
         gate.add_permits(10);
         crate::send_queue::enqueue(
             &s.library.lock().unwrap(),
@@ -25025,7 +25038,7 @@ exec sleep 300
     async fn a_waiting_sender_never_sends_the_next_accounts_listens() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (gate, got) = gated_listenbrainz(&s).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
         let account =
             |token: &str| serde_json::json!({"token": token, "user": token, "submit": true}).to_string();
         s.library
@@ -25081,7 +25094,7 @@ exec sleep 300
     async fn a_listen_that_cant_be_stored_is_still_sent() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
-        let (gate, got) = gated_listenbrainz(&s).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
         gate.add_permits(10);
         let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
         db.execute_batch(
