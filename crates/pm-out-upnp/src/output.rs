@@ -341,6 +341,48 @@ impl Output for UpnpOutput {
             .await
             .map_err(soap_err)
     }
+
+    /// The renderer's level and mute, as `GetVolume` and `GetMute` say (percent); a renderer
+    /// without RenderingControl can't say.
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        let Some(rc) = self.renderer.rendering_control.clone() else {
+            return Ok(None);
+        };
+        offload(move || read_volume_blocking(&rc))
+            .await
+            .map(Some)
+            .map_err(soap_err)
+    }
+}
+
+fn read_volume_blocking(rc: &str) -> Result<pm_model::ZoneVolume, UpnpError> {
+    let xml = soap::call(
+        rc,
+        RENDERING_CONTROL,
+        "GetVolume",
+        &[("InstanceID", "0"), ("Channel", "Master")],
+    )?;
+    let percent: u8 = soap::element_text(&xml, "CurrentVolume")
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .map(|v| v.min(100) as u8)
+        .ok_or_else(|| UpnpError::Soap {
+            action: "GetVolume".into(),
+            detail: "no CurrentVolume in the answer".into(),
+        })?;
+    // A renderer without GetMute (older ones) is simply not muted
+    let muted = soap::call(
+        rc,
+        RENDERING_CONTROL,
+        "GetMute",
+        &[("InstanceID", "0"), ("Channel", "Master")],
+    )
+    .ok()
+    .and_then(|xml| soap::element_text(&xml, "CurrentMute"))
+    .is_some_and(|m| matches!(m.trim(), "1" | "true"));
+    Ok(pm_model::ZoneVolume {
+        level: pm_model::VolumeLevel::Percent(percent),
+        muted,
+    })
 }
 
 /// Point the renderer at the stream and play it: Stop, SetAVTransportURI, Play, in that order
@@ -826,6 +868,8 @@ mod tests {
                 }
                 let body = if action == "GetVolume" {
                     "<s:Envelope><s:Body><u:GetVolumeResponse><CurrentVolume>40</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>"
+                } else if action == "GetMute" {
+                    "<s:Envelope><s:Body><u:GetMuteResponse><CurrentMute>1</CurrentMute></u:GetMuteResponse></s:Body></s:Envelope>"
                 } else {
                     "<s:Envelope><s:Body><u:Response/></s:Body></s:Envelope>"
                 };
@@ -847,6 +891,7 @@ mod tests {
             rendering_control: Some(format!("{base}/rc")),
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("fake"));
@@ -894,6 +939,14 @@ mod tests {
         let actions = log.lock().unwrap().clone();
         assert!(actions.iter().any(|a| a == "SetVolume"));
         assert!(actions.iter().any(|a| a == "GetVolume"));
+        // The level read back: what the renderer says, with its mute
+        assert_eq!(
+            out.volume().await.unwrap(),
+            Some(pm_model::ZoneVolume {
+                level: pm_model::VolumeLevel::Percent(40),
+                muted: true
+            })
+        );
 
         // A Linn gets the sized WAV, or the continuous one; others keep stream.wav
         let linn = Renderer {
@@ -905,6 +958,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let linn = UpnpOutput::new(
@@ -941,6 +995,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::controlled("pause"));
@@ -1002,6 +1057,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::controlled("refuse"));
@@ -1087,6 +1143,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::controlled("linnish"));
@@ -1165,6 +1222,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let out = UpnpOutput::new(
@@ -1236,6 +1294,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("linn-play"));
@@ -1364,6 +1423,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let out = UpnpOutput::new(
@@ -1478,6 +1538,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let pull = Arc::new(PullOutput::new("tv-refuses"));
@@ -1525,6 +1586,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         };
         let out = UpnpOutput::new(
@@ -1559,6 +1621,7 @@ mod tests {
             rendering_control: None,
             connection_manager: None,
             zone_group_topology: None,
+            events: Default::default(),
             location: format!("{base}/desc.xml"),
         }
     }

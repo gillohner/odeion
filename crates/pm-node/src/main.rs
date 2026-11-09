@@ -332,6 +332,33 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     if let api_token::Source::File(path) | api_token::Source::ReplacedPlaceholder(path) = &source {
         state.set_token_file(path.clone());
     }
+    // A saved queue never keeps a sign-in in one of its links (older browsers put one there)
+    match pm_api::accounts::clean_saved_queues(&state) {
+        Ok(c) if c.items > 0 => {
+            let mut what = Vec::new();
+            if c.owner_sessions_ended {
+                what.push("the owner's browsers and apps sign in again".to_string());
+            }
+            if c.listener_tokens_ended > 0 {
+                what.push(format!("{} listener sign-in(s) ended", c.listener_tokens_ended));
+            }
+            if what.is_empty() {
+                what.push("none of them was a sign-in of this node's".to_string());
+            }
+            tracing::warn!(
+                items = c.items,
+                "saved queue links carried a sign-in: removed; {}",
+                what.join("; ")
+            );
+            if c.api_token_found {
+                tracing::warn!(
+                    "the API token itself was in a saved queue link: make a new token (Settings › Access); Home and Settings say so until then"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("checking the saved queues failed: {}", e.message),
+    }
     state.zones_for_all_outputs();
     {
         let st = state.clone();
@@ -371,8 +398,19 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
         })
         .await?;
         if !found.is_empty() {
-            tracing::info!(count = found.len(), "UPnP renderers found");
+            let upnp = found
+                .iter()
+                .filter(|id| id.to_string().starts_with("upnp:"))
+                .count();
+            tracing::info!(count = found.len(), upnp, "outputs found");
         }
+        // Renderers that had a zone come back at their last address (in the background: the start
+        // doesn't wait on one that is off), and ones that answer late (a TV, a Linn waking its UPnP
+        // side) get their zones without a rescan
+        state.spawn_upnp_watch(
+            std::time::Duration::from_secs(20),
+            std::time::Duration::from_secs(300),
+        );
     }
     for z in state.zones.list() {
         tracing::info!(zone = %z.id, output = %z.output, "zone ready");
@@ -515,6 +553,7 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     pm_api::podcasts::spawn_background(&state);
     pm_api::gpodder::spawn_background(&state);
     pm_api::audiobookshelf::spawn_background(&state);
+    pm_api::identify::spawn_recheck(&state);
     let _announced = announce(cfg, &state);
     let _renderers = renderers(cfg, &state);
     pm_api::serve_listener(state, listener).await

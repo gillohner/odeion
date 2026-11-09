@@ -627,18 +627,6 @@ fn sections(text: &str) -> BTreeMap<String, BTreeMap<String, String>> {
     out
 }
 
-/// A TOML array `["a", "b"]` or an INI list `a,b` as its items.
-fn list(v: Option<&String>) -> Vec<String> {
-    v.map(|v| {
-        v.trim_matches(['[', ']'])
-            .split(',')
-            .map(|x| x.trim().trim_matches(['"', '\'']).to_string())
-            .filter(|x| !x.is_empty())
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 fn found(id: &str, app: &str, place: &str, user: Option<String>, reason: Option<String>) -> Found {
     Found {
         id: id.into(),
@@ -651,123 +639,6 @@ fn found(id: &str, app: &str, place: &str, user: Option<String>, reason: Option<
         usable: reason.is_none(),
         reason,
     }
-}
-
-// ---- Qobuz: streamrip's config.toml, qobuz-dl's config.ini ----
-
-const QOBUZ_PLACES: &[(&str, &str, &str)] = &[
-    ("streamrip", "streamrip", ".config/streamrip/config.toml"),
-    ("qobuz-dl", "qobuz-dl", ".config/qobuz-dl/config.ini"),
-];
-
-/// A Qobuz sign-in from another app's config: the app values it uses, and a session token or
-/// the email with the password's MD5 (what Qobuz's login takes; these files never hold the
-/// password itself).
-#[derive(Clone, Default)]
-pub(crate) struct QobuzImport {
-    pub app_id: String,
-    /// What the app keeps; the first is used (Qobuz's web player publishes several).
-    pub secrets: Vec<String>,
-    pub email: Option<String>,
-    pub password_md5: Option<String>,
-    pub token: Option<String>,
-    pub user_id: Option<String>,
-}
-
-impl std::fmt::Debug for QobuzImport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QobuzImport")
-            .field("app_id", &self.app_id)
-            .field("secrets", &self.secrets.len())
-            .field("email", &self.email)
-            .field("token", &self.token.as_ref().map(|_| "<set>"))
-            .finish_non_exhaustive()
-    }
-}
-
-pub(crate) fn parse_qobuz(text: &str) -> Result<QobuzImport, String> {
-    let secs = sections(text);
-    let (sec, streamrip) = if let Some(q) = secs.get("qobuz") {
-        (q, true)
-    } else if let Some(d) = secs.get("DEFAULT").filter(|d| d.contains_key("app_id")) {
-        (d, false)
-    } else {
-        return Err(
-            "not streamrip's config.toml ([qobuz]) nor qobuz-dl's config.ini ([DEFAULT] with app_id)".into(),
-        );
-    };
-    let app_id = sec.get("app_id").cloned().unwrap_or_default();
-    if app_id.is_empty() || app_id.len() > 20 || !app_id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("no Qobuz app id in it".into());
-    }
-    let secrets: Vec<String> = list(sec.get("secrets"))
-        .into_iter()
-        .filter(|s| s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric()))
-        .collect();
-    if secrets.is_empty() {
-        return Err("no Qobuz app secret in it".into());
-    }
-    let non_empty = |k: &str| sec.get(k).cloned().filter(|v| !v.is_empty());
-    let mut imp = QobuzImport {
-        app_id,
-        secrets,
-        ..Default::default()
-    };
-    if streamrip {
-        let who = non_empty("email_or_userid");
-        let what = non_empty("password_or_token");
-        if sec.get("use_auth_token").is_some_and(|v| v == "true") {
-            imp.token = what;
-            imp.user_id = who;
-        } else {
-            imp.email = who;
-            imp.password_md5 = what;
-        }
-    } else {
-        imp.email = non_empty("email");
-        imp.password_md5 = non_empty("password");
-    }
-    if imp.token.is_none() && (imp.email.is_none() || imp.password_md5.is_none()) {
-        return Err("no sign-in in it: neither a token nor an email with the password's MD5".into());
-    }
-    if let Some(h) = &imp.password_md5 {
-        if h.len() != 32 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(
-                "the password field is not an MD5 (these apps keep the MD5, never the password)".into(),
-            );
-        }
-    }
-    Ok(imp)
-}
-
-pub(crate) fn qobuz_places_text() -> Vec<String> {
-    places_text(QOBUZ_PLACES, &[])
-}
-
-/// Every Qobuz sign-in in the known places, usable or not.
-pub(crate) fn scan_qobuz() -> Vec<(Found, Option<QobuzImport>)> {
-    let Some(home) = home() else {
-        return Vec::new();
-    };
-    candidates(QOBUZ_PLACES, &home)
-        .into_iter()
-        .filter_map(|(id, app, c)| {
-            let (text, shown, _) = first_readable(c)?;
-            Some(match parse_qobuz(&text) {
-                Ok(imp) => (
-                    found(
-                        id,
-                        app,
-                        &shown,
-                        imp.email.clone().or_else(|| imp.user_id.clone()),
-                        None,
-                    ),
-                    Some(imp),
-                ),
-                Err(e) => (found(id, app, &shown, None, Some(e)), None),
-            })
-        })
-        .collect()
 }
 
 // ---- Last.fm: rescrobbled ----
@@ -1110,43 +981,6 @@ mod tests {
         assert_eq!(iso_to_unix("1970-01-02T01:00:00+01:00"), Some(86400));
         assert_eq!(iso_to_unix("1970-01-01 23:00:00-01:00"), Some(86400));
         assert_eq!(iso_to_unix("garbage"), None);
-    }
-
-    #[test]
-    fn qobuz_configs_from_streamrip_and_qobuz_dl_are_read() {
-        let sr = "[qobuz]\nuse_auth_token = false\nemail_or_userid = \"me@example.org\"\npassword_or_token = \"00000000000000000000000000000000\"\napp_id = \"100000000\"\nsecrets = [\"s3cret\", \"other1\"]\n[tidal]\nuser_id = \"1\"\n";
-        let q = parse_qobuz(sr).unwrap();
-        assert_eq!(
-            (
-                q.app_id.as_str(),
-                q.secrets.len(),
-                q.email.as_deref(),
-                q.token.is_none()
-            ),
-            ("100000000", 2, Some("me@example.org"), true)
-        );
-        let srt = sr
-            .replace("use_auth_token = false", "use_auth_token = true")
-            .replace("me@example.org", "42")
-            .replace("00000000000000000000000000000000", "tok-abc");
-        let q = parse_qobuz(&srt).unwrap();
-        assert_eq!(
-            (q.token.as_deref(), q.user_id.as_deref(), q.email.is_none()),
-            (Some("tok-abc"), Some("42"), true)
-        );
-        let ini = "[DEFAULT]\nemail = me@example.org\npassword = 00000000000000000000000000000000\napp_id = 100000000\nsecrets = s3cret,other1\ndefault_folder = Qobuz Downloads\n";
-        let q = parse_qobuz(ini).unwrap();
-        assert_eq!(
-            (q.secrets[0].as_str(), q.password_md5.is_some()),
-            ("s3cret", true)
-        );
-        for bad in [
-            "",
-            "[qobuz]\napp_id = \"1\"\n",
-            "[DEFAULT]\napp_id = 1\nsecrets = a\nemail = x\npassword = plain\n",
-        ] {
-            assert!(parse_qobuz(bad).is_err(), "{bad:?}");
-        }
     }
 
     #[test]

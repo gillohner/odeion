@@ -3887,6 +3887,7 @@ dependencies = [
  "base64 0.23.1",
  "chacha20poly1305 0.11.0",
  "curve25519-dalek 5.0.0",
+ "ed25519-dalek",
  "getrandom 0.3.4",
  "hkdf",
  "pubky 0.16.2",
@@ -4161,6 +4162,7 @@ dependencies = [
  "pm-zones",
  "serde_json",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
 ]
 
@@ -4259,6 +4261,7 @@ name = "pm-zones"
 version = "0.2.2"
 dependencies = [
  "async-trait",
+ "form_urlencoded",
  "hound",
  "pm-model",
  "serde",

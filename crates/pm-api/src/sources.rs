@@ -21,6 +21,9 @@ pub struct NodeSources {
     default_cfg: PipelineConfig,
     /// Per-output pipeline settings (DSP); the default applies otherwise.
     dsp: RwLock<HashMap<OutputId, PipelineConfig>>,
+    /// The speakers each group output plays on (a zone of several outputs), for the group's
+    /// volume limit: the strictest among them, read at every request.
+    groups: RwLock<HashMap<OutputId, Vec<OutputId>>>,
     /// TIDAL credentials and origins, for `tidal:track:` URIs on the audio thread.
     tidal: crate::tidal::SharedEndpoints,
     /// Deezer API origin, for `deezer:track:` URIs (previews).
@@ -73,6 +76,7 @@ impl NodeSources {
             files: LocalFiles::new(cfg.clone()),
             default_cfg: cfg,
             dsp: RwLock::new(dsp),
+            groups: RwLock::new(HashMap::new()),
             tidal,
             deezer,
             jamendo,
@@ -106,10 +110,53 @@ impl NodeSources {
             .unwrap_or_else(|| self.default_cfg.clone())
     }
 
+    /// `group` plays on `members` from now on ([`Self::forget_group`] when its zone goes): its
+    /// volume limit is the strictest among its own and theirs ([`Self::volume_limit`]).
+    pub fn note_group(&self, group: &OutputId, members: &[OutputId]) {
+        self.groups
+            .write()
+            .expect("groups lock")
+            .insert(group.clone(), members.to_vec());
+    }
+
+    /// The zone of `group` is gone.
+    pub fn forget_group(&self, group: &OutputId) {
+        self.groups.write().expect("groups lock").remove(group);
+    }
+
+    /// The volume limit in force for `output`: its own, and for a group of speakers the strictest
+    /// among theirs too, as they are now (each keeps its own limit in a group, and a limit lowered
+    /// while the group exists holds at its next request).
+    pub fn volume_limit(&self, output: &OutputId) -> Option<f32> {
+        let members = self
+            .groups
+            .read()
+            .expect("groups lock")
+            .get(output)
+            .cloned()
+            .unwrap_or_default();
+        std::iter::once(output)
+            .chain(members.iter())
+            .filter_map(|o| self.dsp_for(o).max_volume_db)
+            .reduce(f32::min)
+    }
+
     /// Play `to` with `from`'s settings until [`Self::forget_dsp`], without saving them: a listen-
-    /// along group sounds like the zone it came from (presence.rs).
-    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId) {
-        let cfg = self.dsp_for(from);
+    /// along group sounds like the zone it came from (presence.rs). Its volume limit is the
+    /// strictest among `members` (the speakers it plays on, `from`'s included): every speaker
+    /// keeps its own limit in the group, and the software volume stays under it.
+    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId, members: &[OutputId]) {
+        let mut cfg = self.dsp_for(from);
+        for m in members.iter().chain(std::iter::once(from)) {
+            if let Some(limit) = self.dsp_for(m).max_volume_db {
+                cfg.max_volume_db = Some(cfg.max_volume_db.map_or(limit, |l: f32| l.min(limit)));
+            }
+        }
+        if let (Some(v), Some(max)) = (cfg.volume_db, cfg.max_volume_db) {
+            if v > max {
+                cfg.volume_db = Some(max);
+            }
+        }
         self.dsp.write().expect("dsp lock").insert(to.clone(), cfg);
     }
 
@@ -174,22 +221,41 @@ impl NodeSources {
     }
 }
 
+/// How long a stream's server may take to answer, and to send the next bytes of its body,
+/// before the open or the read fails: a server that never answers ends the track with an error
+/// instead of holding the zone.
+pub(crate) const STREAM_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The stream wait (`STREAM_WAIT`) in milliseconds for tests (0: the real one), read when a client is built:
+/// a test of a zone that plays a stream which never answers needn't wait 20 s.
+pub static STREAM_WAIT_MS_FOR_TESTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn stream_wait() -> std::time::Duration {
+    match STREAM_WAIT_MS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => STREAM_WAIT,
+        ms => std::time::Duration::from_millis(ms),
+    }
+}
+
+/// The settings of every blocking stream client. reqwest's blocking `timeout` is not a total
+/// deadline: it bounds the wait for the response headers and then each body read on its own, so
+/// a live stream still plays for as long as it sends. (`bytes()`, `text()` and `json()` read the
+/// whole body under one wait; requests that read big bodies that way set their own.)
+fn stream_client_builder(wait: std::time::Duration) -> reqwest::blocking::ClientBuilder {
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Dead peers are noticed by keepalive; the body reader thread
+        // then ends instead of lingering until the OS gives up.
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .timeout(wait)
+}
+
 /// Blocking HTTP client for stream sources, built on first use on the audio
-/// thread (never inside a tokio runtime). No overall timeout: a live stream
-/// never ends. A stalled server keeps the zone waiting until it stops it.
+/// thread (never inside a tokio runtime), with [`STREAM_WAIT`].
 pub(crate) fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::blocking::Client::builder()
-            .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            // Dead peers are noticed by keepalive; the body reader thread
-            // then ends instead of lingering until the OS gives up.
-            .tcp_keepalive(std::time::Duration::from_secs(30))
-            .timeout(None)
-            .build()
-            .expect("http client")
-    })
+    CLIENT.get_or_init(|| stream_client_builder(stream_wait()).build().expect("http client"))
 }
 
 /// How long a live stream may go silent before the track ends with an error
@@ -526,11 +592,7 @@ fn literal_ok(url: &url::Url, reach: FetchLimit) -> bool {
 /// A client for one guarded stream: its resolver and every redirect keep to `reach`; no proxy
 /// (a proxy would resolve the name itself).
 fn guarded_client(reach: FetchLimit) -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
-        .user_agent(concat!("pubky-music-node/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .tcp_keepalive(std::time::Duration::from_secs(30))
-        .timeout(None)
+    stream_client_builder(stream_wait())
         .no_proxy()
         .dns_resolver(std::sync::Arc::new(GuardResolver(reach)))
         .redirect(reqwest::redirect::Policy::custom(move |a| {
@@ -570,18 +632,62 @@ pub fn open_http_stream_guarded(uri: &str, reach: FetchLimit) -> Result<Box<dyn 
 /// any public URL, whose "playlist" could be huge or never end.
 const PLAYLIST_MAX: u64 = 64 * 1024;
 
+/// The most time an M3U or PLS read gets, all reads together: a server that trickles a byte at
+/// a time within the stream wait would otherwise hold the open for as long as it likes.
+const PLAYLIST_FOR: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn playlist_for() -> std::time::Duration {
+    // Scaled with the test wait, so a test needn't wait 10 s either
+    match STREAM_WAIT_MS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => PLAYLIST_FOR,
+        ms => std::time::Duration::from_millis(ms / 2),
+    }
+}
+
 /// A playlist's text: refused when it says it is bigger than [`PLAYLIST_MAX`], else read up to
-/// that much (its stream URLs come first).
+/// that much (its stream URLs come first), within [`PLAYLIST_FOR`].
 fn read_playlist(resp: reqwest::blocking::Response) -> Result<String, String> {
+    read_playlist_within(resp, playlist_for())
+}
+
+fn read_playlist_within(
+    resp: reqwest::blocking::Response,
+    limit: std::time::Duration,
+) -> Result<String, String> {
     use std::io::Read;
     if resp.content_length().is_some_and(|n| n > PLAYLIST_MAX) {
         return Err("the playlist is too big (over 64 KiB)".into());
     }
-    let mut buf = Vec::new();
-    resp.take(PLAYLIST_MAX)
-        .read_to_end(&mut buf)
+    // Read on a thread of its own and wait for all of it at most `limit`: a read that sends
+    // nothing, a trickle, or an end that comes late are all given up then. The thread reads in
+    // chunks and stops (dropping the connection) once `limit` has passed, so it ends at most one
+    // stream wait (one read) after the deadline, however slowly the server trickles.
+    let started = std::time::Instant::now();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("playlist-read".into())
+        .spawn(move || {
+            let mut body = resp.take(PLAYLIST_MAX);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let r = loop {
+                match body.read(&mut chunk) {
+                    Ok(0) => break Ok(buf),
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) => break Err(e.to_string()),
+                }
+                if started.elapsed() > limit {
+                    break Err("past the deadline".into());
+                }
+            };
+            drop(body);
+            let _ = tx.send(r);
+        })
         .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    match rx.recv_timeout(limit) {
+        Ok(r) => Ok(String::from_utf8_lossy(&r?).into_owned()),
+        Err(_) => Err("the playlist took too long to arrive".into()),
+    }
 }
 
 /// `limit`: the playlist's stream is a second request, not a redirect: it is checked here too.
@@ -669,19 +775,137 @@ pub(crate) fn frame_source_from_reader(
     ext: Option<&str>,
     name: &str,
 ) -> Result<Box<dyn FrameSource>, SourceError> {
-    let body = HttpBody(std::sync::Mutex::new(TimeoutReader::new(reader, STREAM_STALL)));
-    let media = symphonia::core::io::ReadOnlySource::new(body);
-    let inner = pm_audio::play::Source::from_media_source(Box::new(media), ext, name).map_err(|e| {
-        SourceError::Open {
-            uri: name.to_string(),
-            reason: e.to_string(),
-        }
-    })?;
     Ok(Box::new(HttpStream {
-        inner,
+        inner: decoder_for(reader, ext, name)?,
         title: Arc::new(Mutex::new(None)),
         last: None,
     }))
+}
+
+/// A decoder over a byte stream that can't seek (with the stall watchdog).
+fn decoder_for(
+    reader: Box<dyn std::io::Read + Send>,
+    ext: Option<&str>,
+    name: &str,
+) -> Result<pm_audio::play::Source, SourceError> {
+    let body = HttpBody(std::sync::Mutex::new(TimeoutReader::new(reader, STREAM_STALL)));
+    let media = symphonia::core::io::ReadOnlySource::new(body);
+    pm_audio::play::Source::from_media_source(Box::new(media), ext, name).map_err(|e| SourceError::Open {
+        uri: name.to_string(),
+        reason: e.to_string(),
+    })
+}
+
+/// A segmented stream (DASH, HLS) as a zone source that can seek: a seek opens it again at the
+/// segment holding the position (init segment first) and drops the frames before the position.
+/// Without segment times it can't seek, and says so (the engine keeps playing).
+pub(crate) fn frame_source_from_segments(
+    segments: crate::segmented::Segments,
+    ext: Option<&'static str>,
+    name: &str,
+) -> Result<Box<dyn FrameSource>, SourceError> {
+    Ok(Box::new(SegmentedStream::open(
+        http_client(),
+        segments,
+        ext,
+        name,
+    )?))
+}
+
+pub(crate) struct SegmentedStream {
+    client: &'static reqwest::blocking::Client,
+    segments: crate::segmented::Segments,
+    ext: Option<&'static str>,
+    name: String,
+    inner: pm_audio::play::Source,
+    /// Frames still to drop after a seek (from the segment's start to the position).
+    drop: u64,
+    /// A seek happened: the codec's whole-file check (FLAC's MD5) no longer applies.
+    seeked: bool,
+}
+
+impl SegmentedStream {
+    pub(crate) fn open(
+        client: &'static reqwest::blocking::Client,
+        segments: crate::segmented::Segments,
+        ext: Option<&'static str>,
+        name: &str,
+    ) -> Result<Self, SourceError> {
+        let reader = crate::segmented::SegmentReader::new(client, segments.urls());
+        let inner = decoder_for(Box::new(reader), ext, name)?;
+        Ok(Self {
+            client,
+            segments,
+            ext,
+            name: name.to_string(),
+            inner,
+            drop: 0,
+            seeked: false,
+        })
+    }
+}
+
+impl FrameSource for SegmentedStream {
+    fn format(&self) -> AudioFormat {
+        self.inner.format()
+    }
+    fn duration_ms(&self) -> Option<u64> {
+        self.segments.end_ms.or_else(|| self.inner.duration_ms())
+    }
+    fn next_block(&mut self) -> Result<Option<AudioBlock>, SourceError> {
+        loop {
+            let Some(mut b) = self
+                .inner
+                .next_block()
+                .map_err(|e| SourceError::Decode(e.to_string()))?
+            else {
+                return Ok(None);
+            };
+            if self.drop > 0 {
+                let n = self.drop.min(b.frames() as u64);
+                b.drop_front(n as usize);
+                self.drop -= n;
+                if b.is_empty() {
+                    continue;
+                }
+            }
+            return Ok(Some(b));
+        }
+    }
+    fn seek_ms(&mut self, ms: u64) -> Result<(), SourceError> {
+        let Some((k, start)) = self.segments.at(ms) else {
+            return Err(SourceError::Seek("the stream gives no segment times".into()));
+        };
+        let reader = crate::segmented::SegmentReader::new(self.client, self.segments.urls_from(k));
+        // Opened before the old decoder is let go: a seek that fails leaves playback as it was
+        let inner = decoder_for(Box::new(reader), self.ext, &self.name)
+            .map_err(|e| SourceError::Seek(e.to_string()))?;
+        if inner.format() != self.inner.format() {
+            return Err(SourceError::Seek(format!(
+                "segment {} is in {}, not {}",
+                k + 1,
+                inner.format(),
+                self.inner.format()
+            )));
+        }
+        let rate = u64::from(inner.format().frames_per_second());
+        self.inner = inner;
+        self.drop = ms.saturating_sub(start) * rate / 1000;
+        self.seeked = true;
+        Ok(())
+    }
+    fn finalize(&mut self) -> Option<bool> {
+        if self.seeked {
+            return None;
+        }
+        self.inner.finalize()
+    }
+    fn lossy_source(&self) -> bool {
+        self.inner.is_lossy()
+    }
+    fn stream_info(&self) -> Option<pm_zones::StreamInfo> {
+        Some(self.inner.stream_info())
+    }
 }
 
 /// The URL of an API call: `path` on `base`, or `path` itself when it is a whole URL (a page's
@@ -926,6 +1150,208 @@ mod tests {
         let mut out = String::new();
         r.read_to_string(&mut out).unwrap();
         assert_eq!(out, "xyz");
+    }
+
+    /// A test server on 127.0.0.1: each connection gets `serve` on its own thread.
+    fn serve_each(serve: fn(std::net::TcpStream)) -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/live", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for c in l.incoming().flatten() {
+                std::thread::spawn(move || serve(c));
+            }
+        });
+        url
+    }
+
+    /// `f` on its own thread, failed after `limit` instead of hanging the test run.
+    fn within<T: Send + 'static>(limit: std::time::Duration, f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(limit).expect("still waiting: no deadline")
+    }
+
+    fn read_request(c: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let mut got = Vec::new();
+        while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+            match c.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_that_never_answers_fails_to_open() {
+        // Accepts, reads the request, never writes a byte
+        let url = serve_each(|mut c| {
+            read_request(&mut c);
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            drop(c);
+        });
+        let wait = std::time::Duration::from_millis(400);
+        let client = stream_client_builder(wait).build().unwrap();
+        let t = std::time::Instant::now();
+        let r = within(std::time::Duration::from_secs(10), move || {
+            open_http_stream_via(&client, &url, &[], None, None).map(|_| ())
+        });
+        assert!(r.is_err(), "no answer is an error");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn the_stream_wait_is_per_read_not_a_total() {
+        use std::io::{Read, Write};
+        let wait = std::time::Duration::from_millis(1500);
+        // Headers after a third of the wait, then a chunk every third of it for a few waits: it
+        // all arrives (a late wake-up on a loaded runner has a second of slack)
+        let url = serve_each(|mut c| {
+            read_request(&mut c);
+            let half = std::time::Duration::from_millis(500);
+            std::thread::sleep(half);
+            let _ = c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            for _ in 0..8 {
+                std::thread::sleep(half);
+                if c.write_all(b"4\r\nabcd\r\n").and_then(|_| c.flush()).is_err() {
+                    return;
+                }
+            }
+            let _ = c.write_all(b"0\r\n\r\n");
+        });
+        let client = stream_client_builder(wait).build().unwrap();
+        let (n, took) = within(std::time::Duration::from_secs(15), move || {
+            let t = std::time::Instant::now();
+            let mut resp = client.get(&url).send().expect("headers within the wait");
+            let mut body = Vec::new();
+            resp.read_to_end(&mut body).expect("each chunk within the wait");
+            (body.len(), t.elapsed())
+        });
+        assert_eq!(n, 32);
+        assert!(took > wait * 2, "longer than the wait in all: {took:?}");
+        // A body that stops for longer than the wait fails the read
+        let url = serve_each(|mut c| {
+            read_request(&mut c);
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n");
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        });
+        let client = stream_client_builder(wait).build().unwrap();
+        let r = within(std::time::Duration::from_secs(10), move || {
+            let mut resp = client.get(&url).send().unwrap();
+            let mut body = Vec::new();
+            resp.read_to_end(&mut body).map(|_| body.len())
+        });
+        assert!(r.is_err(), "a silent body fails after the wait: {r:?}");
+    }
+
+    /// A playlist whose server sends a byte at a time, each within the stream wait, is given
+    /// up after [`PLAYLIST_FOR`] in all: the open fails instead of waiting for the whole file,
+    /// and the reading thread lets go of the connection soon after (the server sees it close).
+    #[test]
+    fn a_trickling_playlist_is_given_up() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static CLOSED: AtomicBool = AtomicBool::new(false);
+        let url = serve_each(|mut c| {
+            struct Closed;
+            impl Drop for Closed {
+                fn drop(&mut self) {
+                    CLOSED.store(true, Ordering::SeqCst);
+                }
+            }
+            let _closed = Closed;
+            read_request(&mut c);
+            let _ = c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            for b in b"#EXTM3U\nhttp://127.0.0.1:9/never\n".iter().cycle() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if c.write_all(format!("1\r\n{}\r\n", *b as char).as_bytes())
+                    .and_then(|_| c.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        let client = stream_client_builder(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let resp = client.get(&url).send().unwrap();
+        let t = std::time::Instant::now();
+        let r = within(std::time::Duration::from_secs(10), move || {
+            read_playlist_within(resp, std::time::Duration::from_secs(1))
+        });
+        assert!(r.is_err(), "{r:?}");
+        assert!(r.unwrap_err().contains("too long"));
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            t.elapsed()
+        );
+        // The trickle never ends on its own: only the reader letting go ends the server's loop
+        let gone = std::time::Instant::now();
+        while !CLOSED.load(Ordering::SeqCst) {
+            assert!(
+                gone.elapsed() < std::time::Duration::from_secs(5),
+                "the reader still holds the connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// A playlist whose server sends its headers and then nothing, or all of it but its end only
+    /// after the deadline, is given up at the deadline too (not after the stream wait).
+    #[test]
+    fn a_silent_or_late_ending_playlist_is_given_up_at_the_deadline() {
+        use std::io::Write;
+        let silent = serve_each(|mut c| {
+            read_request(&mut c);
+            let _ = c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let late = serve_each(|mut c| {
+            read_request(&mut c);
+            let body = b"#EXTM3U\nhttp://127.0.0.1:9/a\n";
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\n\r\n",
+                    body.len() + 1
+                )
+                .as_bytes(),
+            );
+            let _ = c.write_all(body).and_then(|_| c.flush());
+            // The last byte (the end) after the deadline
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            let _ = c.write_all(b"\n");
+        });
+        for url in [silent, late] {
+            let client = stream_client_builder(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let resp = client.get(&url).send().unwrap();
+            let t = std::time::Instant::now();
+            let r = within(std::time::Duration::from_secs(10), move || {
+                read_playlist_within(resp, std::time::Duration::from_millis(600))
+            });
+            assert!(r.as_ref().is_err_and(|e| e.contains("too long")), "{url}: {r:?}");
+            assert!(
+                t.elapsed() < std::time::Duration::from_millis(1_400),
+                "{url}: {:?}",
+                t.elapsed()
+            );
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tokio = { workspace = true, features = ["rt"] }
 pm-model = { workspace = true }
 pm-zones = { workspace = true }
 async-trait = { workspace = true }

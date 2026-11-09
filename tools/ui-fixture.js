@@ -16,8 +16,9 @@ const pf = {order:{order:['library'],services:[{id:'library',name:'Your library'
 const json = (r, body, status=200) => r.fulfill({status,contentType:'application/json',body:JSON.stringify(body)});
 async function create(browser, width, opts={}) {
  const state = {role:'owner',token:'fixture-owner',offline:false,collections:[],favs:[],hits:[],errors:[],unhandled:[],...opts};
- const context = await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce',hasTouch:!!opts.touch});
- await context.addInitScript(([realAudio,token]) => {localStorage.setItem('pm.token',token);localStorage.setItem('pm.zone','browser');if(realAudio){document.addEventListener('play',e=>{if(e.target instanceof HTMLMediaElement){e.target.muted=true;e.target.volume=0;}},true);}else{HTMLMediaElement.prototype.play=async function(){};HTMLMediaElement.prototype.pause=function(){};}},[!!state.realAudio,state.token]);
+ // opts.mobile: a phone's viewport rules (a page wider than the screen is zoomed out to fit, as Android's WebView does)
+ const context = await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce',hasTouch:!!opts.touch||!!opts.mobile,...(opts.mobile?{isMobile:true,deviceScaleFactor:2.625}:{})});
+ await context.addInitScript(([realAudio,token,zone]) => {localStorage.setItem('pm.token',token);localStorage.setItem('pm.zone',zone);if(realAudio){document.addEventListener('play',e=>{if(e.target instanceof HTMLMediaElement){e.target.muted=true;e.target.volume=0;}},true);}else{HTMLMediaElement.prototype.play=async function(){};HTMLMediaElement.prototype.pause=function(){};}},[!!state.realAudio,state.token,state.zone||'browser']);
  await context.route('**/*', async r => {
   const req=r.request(), u=new URL(req.url()), p=u.pathname;
   if(u.origin!==ORIGIN) return r.abort();

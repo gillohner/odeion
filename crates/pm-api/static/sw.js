@@ -16,7 +16,7 @@ const CACHE = 'odeion-shell';
 const FILES = ['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feedback.js', '/feedback.css', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'];
 // The app's own pages, exactly the node's page routes (lib.rs `web` router and WEB_VIEWS; checked
 // by tools/pwa-check.js); a party link, a sign-in return or anything else is left to the network.
-const PAGES = /^\/(?:|app\/?|now-playing|discover(?:\/.+)?|search|library|add-music|downloads|favourites|albums|artists|genres|tracks|playlists|radio|sources|queue|zones|settings|identify|(?:settings|library|sources|home)\/[^/]+|(?:song|album|artist|playlist|person|smart|genre|source|tag)\/[^/]+|shared\/[^/]+(?:\/[^/]+)?)$/;
+const PAGES = /^\/(?:|app\/?|now-playing|discover(?:\/.+)?|search|library|add-music|downloads|favourites|albums|artists|genres|tracks|playlists|radio|sources|queue|zones|settings|identify|(?:settings|library|sources|home)\/[^/]+|(?:song|album|artist|playlist|person|smart|genre|source|tag)\/[^/]+|artist\/[^/]+\/releases\/[^/]+|shared\/[^/]+(?:\/[^/]+)?)$/;
 // How long a launch waits for the node before it opens the kept page (a node that is off
 // often doesn't refuse, it just never answers).
 const WAIT = 4000;

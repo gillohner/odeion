@@ -497,12 +497,25 @@ impl TrackMeta {
 /// library.
 pub type Describe = Arc<dyn Fn(&crate::QueueItem) -> TrackMeta + Send + Sync>;
 
+/// The highest percent level at or below `db` as an amplitude (`10^(dB/20)`), as BluOS, MPD and
+/// Cast map it. Rounded down: it caps a request at a volume limit.
+pub fn amplitude_percent(db: f32) -> u8 {
+    (10f64.powf(f64::from(db.clamp(-80.0, 0.0)) / 20.0) * 100.0).floor() as u8
+}
+
 /// One place audio can go (handoff §6.4).
 #[async_trait]
 pub trait Output: Send + Sync {
     fn id(&self) -> OutputId;
     fn name(&self) -> String;
     fn caps(&self) -> &OutputCaps;
+    /// Whether unmuting brings the device back to the level it had before the mute (a mute
+    /// switch: most outputs). `false` where the device has no mute of its own and unmuting is a
+    /// level the output chooses (AirPlay receivers, Squeezebox players): the zone then holds that
+    /// level to its limit itself.
+    fn unmute_restores_level(&self) -> bool {
+        true
+    }
 
     /// The device's maker and model in words, when the protocol tells (UPnP, AirPlay, Cast,
     /// BluOS); a UI shows it instead of the id.
@@ -555,6 +568,28 @@ pub trait Output: Send + Sync {
 
     async fn set_volume(&self, _v: Volume) -> Result<(), SinkError> {
         Err(SinkError::NoVolume(self.id()))
+    }
+
+    /// The highest percent level this output plays at or below `db` (a zone's volume limit caps
+    /// percent requests with it, so it rounds down). The default: linear over the output's own dB
+    /// range when it reports a plausible one (ALSA's mixer, an endpoint's output; a mixer whose
+    /// lowest step is mute reports about -99999 dB, which says nothing), else over -60…0 dB (UPnP,
+    /// Snapcast). Outputs that map dB as an amplitude (BluOS, MPD, Cast) use
+    /// [`amplitude_percent`]; Squeezebox (a squared gain) and AirPlay (-30…0 dB) their own; a
+    /// group its strictest member's.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        match self.caps().hw_volume {
+            Some(pm_model::VolumeKind::Db { min, max, .. }) if max > min && min > -200.0 => {
+                ((db.clamp(min, max) - min) / (max - min) * 100.0).floor() as u8
+            }
+            _ => ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).floor() as u8,
+        }
+    }
+
+    /// The level the output reports now, with its mute; `None` when it can't be read (the
+    /// pages say "level unknown" rather than guess).
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
     }
 
     async fn standby(&self, _on: bool) -> Result<(), SinkError> {

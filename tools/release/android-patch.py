@@ -40,6 +40,9 @@ silently cannot connect.
    MODIFY_AUDIO_SETTINGS (a normal permission, granted at install). Exclusive USB
    (tools/release/android/UsbExclusive.kt) asks USB permission for the DAC only when the listener
    chooses it in Settings, and hands the device to the app's own driver. ProGuard keep rules for all three.
+12. The window's own colour before the first page paints: the pages' background (light, and dark
+   in values-night) as the theme's windowBackground and Android 12's splash screen background, so a
+   cold start shows no black frame (owner's recording, 2026-11-06).
 
 Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """
@@ -114,7 +117,7 @@ rule = "-keep, includedescriptorclasses class org.rustls.platformverifier.** { *
 existing = proguard.read_text() if proguard.exists() else ""
 if rule not in existing:
     existing = existing.rstrip("\n") + "\n\n# rustls-platform-verifier (called over JNI)\n" + rule + "\n"
-player = "-keep class **.PlayerService { public static void start(...); public static void stop(...); }"
+player = "-keep class **.PlayerService { public static *; }"
 crash = "-keep class **.CrashReport { public static *; }\n-keep class **.PubkyMusicApp { *; }"
 updater = "-keep class **.AppUpdate { public static *; }"
 usb_audio = "-keep class **.UsbAudio { public static *; }"
@@ -320,7 +323,32 @@ if audio_perm not in mtext:
         die(f"expected one `{anchor}` in {manifest}")
     manifest.write_text(mtext.replace(anchor, anchor + "\n    " + audio_perm))
 
+# 12. the window's colour before the first paint, as the pages' --bg (app.css)
+res = app / "src" / "main" / "res"
+for qual, colour in (("values", "#f5f5f8"), ("values-night", "#0f1014")):
+    (res / qual).mkdir(parents=True, exist_ok=True)
+    (res / qual / "odeion_colors.xml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n'
+        f'    <color name="odeion_bg">{colour}</color>\n</resources>\n'
+    )
+themes = sorted(res.glob("values*/themes.xml"))
+if not themes:
+    die(f"no themes.xml under {res}")
+bg_items = (
+    '    <item name="android:windowBackground">@color/odeion_bg</item>\n'
+    '        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/odeion_bg</item>\n'
+    "    "
+)
+for t in themes:
+    ttext = t.read_text()
+    if "</style>" not in ttext:
+        die(f"no style in {t}")
+    ttext = ttext.replace("</style>", bg_items + "</style>")
+    if "xmlns:tools=" not in ttext:
+        ttext = re.sub(r"<resources(\s|>)", r'<resources xmlns:tools="http://schemas.android.com/tools"\1', ttext, count=1)
+    t.write_text(ttext)
+
 print(
     f"android-patch: multicast permission, cleartext on, rustls-platform-verifier {version}, keep rule, "
-    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB)"
+    f"player service ({pkg.group(1)}), network config, insets, crash report added, label Odeion, app updates, USB DACs (bit-perfect, exclusive USB), window colour"
 )

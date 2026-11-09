@@ -171,6 +171,25 @@ pub enum Volume {
     Mute(bool),
 }
 
+/// An output's level as it reports it now (a zone's `volume`): read back after every change
+/// and on the zone's poll, so a change made on the device itself shows. JSON
+/// `{"db": -20.0, "muted": false}` or `{"percent": 40, "muted": false}`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ZoneVolume {
+    #[serde(flatten)]
+    pub level: VolumeLevel,
+    #[serde(default)]
+    pub muted: bool,
+}
+
+/// A level on the output's own scale.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeLevel {
+    Db(f32),
+    Percent(u8),
+}
+
 /// The honest quality ceiling of a transport (handoff §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

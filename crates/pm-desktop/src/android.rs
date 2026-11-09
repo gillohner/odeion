@@ -173,21 +173,61 @@ fn take_lock(
     env.new_global_ref(lock)
 }
 
-/// Start the player's foreground service (`PlayerService.kt`, added to the
-/// generated project by tools/release/android-patch.py): it keeps the phone's
-/// zone playing while the app is in the background. Must run while the app
-/// is on screen; starting it again only updates its notification.
-pub fn start_player_service(app: &tauri::AppHandle, text: String) {
+/// What the player service should be: started with its text and whether the phone is a zone of
+/// the node, or stopped (`None`). Kept so the service can be started again when the app comes
+/// back (a start from the background is refused from Android 12, and the app's own-player mode
+/// ends itself when nothing plays), and read when each scheduled call runs on the activity's
+/// thread: calls run in order there and each applies the newest wish, so an older start or a
+/// resume never undoes a later change (a forget, a reconnect in the other mode).
+static WANTED: std::sync::Mutex<Option<(String, bool)>> = std::sync::Mutex::new(None);
+
+fn wanted() -> std::sync::MutexGuard<'static, Option<(String, bool)>> {
+    WANTED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Start the player's foreground service (`PlayerService.kt`, added to the generated project by
+/// tools/release/android-patch.py), which keeps the app playing while it is in the background.
+/// `zone`: the node reaches this phone's player, and the service runs as long as the app is
+/// connected; otherwise the app plays the music itself (through the tunnel, the offline app) and
+/// the service ends after a while with nothing playing out of sight. Both keep the CPU and Wi-Fi
+/// awake. Must run while the app is on screen; starting it again only updates its notification.
+pub fn start_player_service(app: &tauri::AppHandle, text: String, zone: bool) {
+    *wanted() = Some((text, zone));
+    run_service(app);
+}
+
+/// The app is back on screen: start the service again as wanted (a no-op when it still runs).
+pub fn resume_player_service(app: &tauri::AppHandle) {
+    if wanted().is_some() {
+        run_service(app);
+    }
+}
+
+/// No node any more (forgotten): the service ends, and is not started again on resume.
+pub fn stop_player_service(app: &tauri::AppHandle) {
+    *wanted() = None;
+    run_service(app);
+}
+
+/// Bring the service to what is wanted when this runs, on the activity's thread.
+fn run_service(app: &tauri::AppHandle) {
     use tauri::Manager;
     let Some(window) = app.get_webview_window(crate::MAIN) else {
         return;
     };
     let scheduled = window.with_webview(move |wv| {
         wv.jni_handle().exec(move |env, activity, _webview| {
-            let started = crate::crash::guarded("the player service", || start_service(env, activity, &text))
-                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
-            match started {
-                Ok(()) => tracing::info!("player service started"),
+            let how = wanted().clone();
+            let starting = how.is_some();
+            let done = crate::crash::guarded("the player service", || match &how {
+                Some((text, zone)) => start_service(env, activity, text, *zone),
+                None => stop_service(env, activity).map(|()| true),
+            })
+            .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            match done {
+                Ok(true) if starting => tracing::info!("player service started"),
+                Ok(false) => tracing::info!("player service: start refused; again when the app is back"),
+                Ok(_) => tracing::info!("player service stopped"),
                 Err(e) => {
                     // A Java exception stays pending until cleared.
                     if env.exception_check().unwrap_or(false) {
@@ -195,22 +235,24 @@ pub fn start_player_service(app: &tauri::AppHandle, text: String) {
                         let _ = env.exception_clear();
                     }
                     tracing::warn!(
-                        "no player service ({e}); the phone's zone stops when the app is in the background"
+                        "no player service ({e}); the app's music stops when it is in the background"
                     )
                 }
             }
         });
     });
     if let Err(e) = scheduled {
-        tracing::warn!("cannot reach the activity to start the player service: {e}");
+        tracing::warn!("cannot reach the activity for the player service: {e}");
     }
 }
 
+/// `PlayerService.start(activity, text, zone)`: whether Android took the start.
 fn start_service(
     env: &mut jni021::JNIEnv,
     activity: &jni021::objects::JObject,
     text: &str,
-) -> jni021::errors::Result<()> {
+    zone: bool,
+) -> jni021::errors::Result<bool> {
     use jni021::objects::{JClass, JValue};
     // The service sits next to MainActivity, in its package. Loaded through
     // the app's class loader: JNI's FindClass may only see system classes.
@@ -242,8 +284,48 @@ fn start_service(
     env.call_static_method(
         &cls,
         "start",
-        "(Landroid/app/Activity;Ljava/lang/String;)V",
-        &[JValue::Object(activity), JValue::Object(&jtext)],
+        "(Landroid/app/Activity;Ljava/lang/String;Z)Z",
+        &[
+            JValue::Object(activity),
+            JValue::Object(&jtext),
+            JValue::Bool(u8::from(zone)),
+        ],
+    )?
+    .z()
+}
+
+/// `PlayerService.stop(context)`, loaded like `start`.
+fn stop_service(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&class, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let service = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.PlayerService"),
+        None => "PlayerService".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&service)?;
+    let cls = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let cls = JClass::from(cls);
+    env.call_static_method(
+        &cls,
+        "stop",
+        "(Landroid/content/Context;)V",
+        &[JValue::Object(activity)],
     )?;
     Ok(())
 }
@@ -844,6 +926,52 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         if let Err(e) = r {
             tracing::warn!("Exclusive USB: forget the claim: {e}");
         }
+    }
+
+    fn held_identity(&self) -> Option<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "heldIdentity", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .and_then(|a| pm_out_local::exclusive::parse_identity(&a))
+    }
+
+    fn identity_of(
+        &self,
+        usb: pm_out_local::exclusive::UsbIds,
+    ) -> Option<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "identityOf", "(II)Ljava/lang/String;", &Self::ids(usb))?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .and_then(|a| pm_out_local::exclusive::parse_identity(&a))
+    }
+
+    fn take_detached(&self) -> Vec<pm_out_local::exclusive::DacIdentity> {
+        use jni021::objects::JClass;
+        let answer = with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            let s = env
+                .call_static_method(class, "takeDetached", "()Ljava/lang/String;", &[])?
+                .l()?;
+            Ok(String::from(env.get_string(&s.into())?))
+        });
+        answer
+            .ok()
+            .map(|a| pm_out_local::exclusive::parse_detached_devices(&a))
+            .unwrap_or_default()
     }
 
     fn claims(&self) -> pm_out_local::exclusive::Claims {

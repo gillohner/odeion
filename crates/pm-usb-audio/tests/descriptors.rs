@@ -356,3 +356,69 @@ fn a_unit_a_selector_can_bypass_is_not_the_playback_unit() {
     route_to(&mut both, 0x09);
     assert_eq!(both.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
 }
+
+/// Claude L1 (306f): a selector input the parser doesn't know (an unknown or truncated unit) can't
+/// be told: it might carry the stream around unit 5, so unit 5 isn't trusted.
+#[test]
+fn a_route_through_an_unknown_unit_cant_be_told() {
+    let mut d = parse(&uac2_headset());
+    d.entities.push(Entity::Unit {
+        id: 0x09,
+        sources: vec![0x05, 0x0e],
+    });
+    for e in d.entities.iter_mut() {
+        if let Entity::OutputTerminal { id: 0x06, source, .. } = e {
+            *source = 0x09;
+        }
+    }
+    assert_eq!(d.playback_path(0x04), Some(vec![0x06, 0x09, 0x05, 0x04]));
+    assert_eq!(d.playback_unit(0x04), None);
+    // A line input (a terminal the parser knows) is no route from the USB stream: unit 5 stays
+    d.entities.push(Entity::InputTerminal {
+        id: 0x0e,
+        terminal_type: 0x0603,
+        clock: Some(0x11),
+    });
+    assert_eq!(d.playback_unit(0x04).map(|u| u.unit_id), Some(0x05));
+}
+
+/// Claude L3 (306f): a hostile topology (a chain of mixers each fed twice by the one before, from
+/// a line input) is searched within a fixed number of steps: nothing is told, at once.
+#[test]
+fn a_hostile_topology_is_searched_in_bounded_steps() {
+    let base = parse(&uac2_headset());
+    for chain_first in [false, true] {
+        let mut d = base.clone();
+        d.entities.push(Entity::InputTerminal {
+            id: 0x30,
+            terminal_type: 0x0603,
+            clock: Some(0x11),
+        });
+        let mut prev = 0x30u8;
+        for i in 0..22u8 {
+            d.entities.push(Entity::Unit {
+                id: 0x40 + i,
+                sources: vec![prev, prev],
+            });
+            prev = 0x40 + i;
+        }
+        let sources = if chain_first {
+            vec![prev, 0x05]
+        } else {
+            vec![0x05, prev]
+        };
+        d.entities.push(Entity::Unit { id: 0x09, sources });
+        for e in d.entities.iter_mut() {
+            if let Entity::OutputTerminal { id: 0x06, source, .. } = e {
+                *source = 0x09;
+            }
+        }
+        let t = std::time::Instant::now();
+        assert_eq!(d.playback_unit(0x04), None, "chain first: {chain_first}");
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(200),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+}

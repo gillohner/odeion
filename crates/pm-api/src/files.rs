@@ -395,6 +395,34 @@ struct BringPlan {
     present: usize,
     present_bytes: u64,
     broken: usize,
+    /// Files whose size the homeserver didn't give in time: left out this time, not called
+    /// broken (the next bring looks again).
+    unchecked: usize,
+}
+
+/// The homeserver's files a bring plans with: (path, size, `split_remote_name` parts) of each
+/// one to look at, and how many are broken (empty, or a second copy under a doubled name) and
+/// unchecked (no size read: unknown, not empty).
+type Sorted = (Vec<(String, u64, Option<(String, String)>)>, usize, usize);
+
+fn sort_remote(remote: Vec<pm_pubky::homeserver::RemoteFile>) -> Sorted {
+    // Names on the homeserver, to spot a second copy under a doubled prefix
+    let names: std::collections::HashSet<String> = remote.iter().map(|f| f.name().to_string()).collect();
+    let (mut wanted, mut broken, mut unchecked) = (Vec::new(), 0, 0);
+    for f in remote {
+        let name = f.name().to_string();
+        let parts = split_remote_name(&name).map(|(h, rest)| (h.to_string(), rest.to_string()));
+        let doubled = parts.as_ref().is_some_and(|(h, rest)| {
+            split_remote_name(rest).is_some_and(|(h2, _)| h2 == h) && names.contains(rest.as_str())
+        });
+        match f.size {
+            _ if doubled => broken += 1,
+            Some(0) => broken += 1,
+            None => unchecked += 1,
+            Some(size) => wanted.push((f.path, size, parts)),
+        }
+    }
+    (wanted, broken, unchecked)
 }
 
 /// A file name from elsewhere (the homeserver) as one plain name in a folder: separators of
@@ -444,23 +472,11 @@ async fn plan_bring(
         present: 0,
         present_bytes: 0,
         broken: 0,
+        unchecked: 0,
     };
-    // Names on the homeserver, to spot a second copy under a doubled prefix
-    let names: std::collections::HashSet<String> = remote.iter().map(|f| f.name().to_string()).collect();
-    let mut wanted = Vec::new();
-    for f in remote {
-        let name = f.name().to_string();
-        let size = f.size.unwrap_or(0);
-        let parts = split_remote_name(&name).map(|(h, rest)| (h.to_string(), rest.to_string()));
-        let doubled = parts.as_ref().is_some_and(|(h, rest)| {
-            split_remote_name(rest).is_some_and(|(h2, _)| h2 == h) && names.contains(rest.as_str())
-        });
-        if size == 0 || doubled {
-            plan.broken += 1;
-            continue;
-        }
-        wanted.push((f.path, size, parts));
-    }
+    let (wanted, broken, unchecked) = sort_remote(remote);
+    plan.broken = broken;
+    plan.unchecked = unchecked;
     // Library files of the same sizes, hashed (kept, so only the first plan reads them)
     let sizes: std::collections::HashSet<u64> = wanted.iter().map(|(_, sz, _)| *sz).collect();
     let candidates = s
@@ -561,6 +577,7 @@ pub(crate) async fn mirror(
         bytes_total: plan.fetch.iter().map(|(_, b, _)| b).sum(),
         skipped: plan.present,
         broken: plan.broken,
+        unchecked: plan.unchecked,
         ..Default::default()
     };
     if req.dry_run || plan.fetch.is_empty() {
@@ -744,6 +761,7 @@ async fn resume_bring(s: &Arc<NodeState>, dest: PathBuf) {
             bytes_total: plan.fetch.iter().map(|(_, b, _)| b).sum(),
             skipped: plan.present,
             broken: plan.broken,
+            unchecked: plan.unchecked,
             ..Default::default()
         };
         if claim_job_as(&s, &progress, true).is_ok() {
@@ -822,5 +840,25 @@ mod tests {
             remote_name(b"abd", Path::new("x.flac")),
             remote_name(b"abc", Path::new("x.flac"))
         );
+    }
+
+    /// A size the homeserver didn't give in time is unknown, not empty: such a file is left out
+    /// for now, never called broken (Settings would offer to remove it); only a size of 0 is.
+    #[test]
+    fn a_file_with_no_size_read_is_unchecked_not_broken() {
+        use pm_pubky::homeserver::RemoteFile;
+        let f = |name: &str, size: Option<u64>| RemoteFile {
+            path: format!("/priv/pubky.music/files/{name}"),
+            size,
+        };
+        let (wanted, broken, unchecked) = sort_remote(vec![
+            f("0123456789abcdef-a.flac", Some(10)),
+            f("1123456789abcdef-b.flac", None),
+            f("2123456789abcdef-c.flac", Some(0)),
+            f("3123456789abcdef-d.flac", None),
+        ]);
+        let paths: Vec<&str> = wanted.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert_eq!(paths, ["/priv/pubky.music/files/0123456789abcdef-a.flac"]);
+        assert_eq!((broken, unchecked), (1, 2));
     }
 }

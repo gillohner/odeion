@@ -204,6 +204,15 @@ fn lower_ceiling(a: &QualityCeiling, b: &QualityCeiling) -> QualityCeiling {
 
 #[async_trait]
 impl Output for GroupOutput {
+    /// Every member gets the same percent: the strictest member's mapping caps it.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        self.members
+            .iter()
+            .map(|m| m.percent_for_db(db))
+            .min()
+            .unwrap_or(0)
+    }
+
     fn id(&self) -> OutputId {
         let ids: Vec<String> = self.members.iter().map(|m| m.id().0).collect();
         OutputId::new("group", &ids.join("+"))
@@ -296,10 +305,22 @@ impl Output for GroupOutput {
         if self.caps.hw_volume.is_none() {
             return Err(SinkError::NoVolume(self.id()));
         }
+        // Every member is set, whatever one of them answers: the others still get the level
+        // (and the zone's cap after an unmute); the first failure is reported after
+        let mut failed = None;
         for m in &self.members {
-            m.set_volume(v).await?;
+            if let Err(e) = m.set_volume(v).await {
+                failed.get_or_insert(e);
+            }
         }
-        Ok(())
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn unmute_restores_level(&self) -> bool {
+        self.members.iter().all(|m| m.unmute_restores_level())
     }
 
     async fn standby(&self, on: bool) -> Result<(), SinkError> {
@@ -697,6 +718,33 @@ impl AudioSink for GroupSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mixed_group_caps_percent_with_its_strictest_member() {
+        use crate::outputs::NullOutput;
+        use pm_model::VolumeKind;
+        // One member linear over -60..0 dB, one over its own -30..0 dB: at -45 dB the first allows
+        // 25 %, the second 0 %; the group sends one percent to both, so 0 %
+        let wide: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Percent));
+        let narrow: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Db {
+            min: -30.0,
+            max: 0.0,
+            step: 1.0,
+        }));
+        assert_eq!(wide.percent_for_db(-45.0), 25);
+        assert_eq!(narrow.percent_for_db(-45.0), 0);
+        assert_eq!(narrow.percent_for_db(-15.0), 50, "its own range, not -60..0");
+        // A mute step reported as the floor (-99999 dB, as ALSA mixers do) is no range: -60..0
+        let muted_floor = NullOutput::with_volume(VolumeKind::Db {
+            min: -99999.99,
+            max: 0.0,
+            step: 1.0,
+        });
+        assert_eq!(muted_floor.percent_for_db(-30.0), 50);
+        let g = GroupOutput::new("g", vec![wide, narrow]).unwrap();
+        assert_eq!(g.percent_for_db(-45.0), 0);
+        assert_eq!(g.percent_for_db(-15.0), 50);
+    }
     use crate::outputs::{read_wav, NullOutput, WavFileOutput};
 
     /// An output that only has an id (for the sync label).
