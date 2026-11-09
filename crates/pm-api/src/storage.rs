@@ -141,6 +141,8 @@ async fn save_now(s: &Arc<NodeState>) -> Result<(), String> {
             st.error = report.errors.first().cloned().map(|e| plain_error(s, e));
             Ok(())
         }
+        // Another sign-in replaced this session: its own sync saves; nothing went wrong
+        Err(crate::sync::SyncError::Replaced) => Ok(()),
         Err(e) => {
             let msg = plain_error(s, e.to_string());
             s.storage_save.lock().expect("save").error = Some(msg.clone());

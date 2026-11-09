@@ -51,6 +51,8 @@ fn signed_in(s: &NodeState) -> Result<Arc<crate::sync::PubkySync>, ApiError> {
 fn vault_error(e: VaultStoreError) -> ApiError {
     let status = match &e {
         VaultStoreError::Busy(_) => StatusCode::CONFLICT,
+        // Another sign-in replaced the session this ran under: not a homeserver failure
+        VaultStoreError::Replaced => StatusCode::CONFLICT,
         VaultStoreError::Revoked
         | VaultStoreError::NoGrant
         | VaultStoreError::NeedsVaultGrant
@@ -395,4 +397,18 @@ pub(crate) async fn new_key(
         .keep_marks(&marks);
     vault.register(&s.name).await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pass whose session another sign-in replaced is a conflict, not a homeserver failure.
+    #[test]
+    fn a_replaced_session_is_a_conflict() {
+        assert_eq!(
+            vault_error(VaultStoreError::Replaced).status,
+            StatusCode::CONFLICT
+        );
+    }
 }

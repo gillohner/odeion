@@ -104,6 +104,12 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
         step(&s, "Syncing your playlists, bookmarks and tags");
         let result = sync.sync(&s.library).await;
         let ms = started.elapsed().as_millis() as u64;
+        // Replaced: the new sign-in's first sync is the one the page follows, and it may be
+        // running right now; nothing of its activity is touched
+        if matches!(result, Err(SyncError::Replaced)) {
+            tracing::info!(ms, "first sync ended: another sign-in replaced this one");
+            return;
+        }
         {
             let mut a = s.sync_activity.lock().expect("sync activity");
             a.running = false;
@@ -115,8 +121,6 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
                     a.last = Some(r.clone());
                     a.error = None;
                 }
-                // The new sign-in's sync is the one to show
-                Err(SyncError::Replaced) => {}
                 Err(e) => a.error = Some(e.to_string()),
             }
         }
@@ -130,10 +134,6 @@ pub fn first_sync_in_background(s: &Arc<crate::state::NodeState>, sync: Arc<Pubk
                     "pubky sign-in: first sync done"
                 );
                 sync.carry_on(&s, &r);
-            }
-            Err(SyncError::Replaced) => {
-                tracing::info!(ms, "first sync ended: another sign-in replaced this one");
-                return;
             }
             Err(e) => tracing::warn!(ms, "first sync failed: {e}"),
         }
@@ -479,8 +479,10 @@ impl PubkySync {
                     format!("{}{}", pm_pubky::schemas::LEGACY_TAG_DIR, row.id),
                     pm_pubky::schemas::app_tag_path(&row.id),
                 ] {
+                    self.current()?;
                     let _ = self.delete_quietly(&old).await;
                 }
+                self.current()?;
                 let path = format!("{}{}.json", v1::tags_dir(), row.id);
                 match self.delete_quietly(&path).await {
                     Ok(()) => report.deleted += 1,
@@ -588,6 +590,8 @@ impl PubkySync {
             .homeserver
             .read_v1_bookmarks_except(&self.session, &known_favs)
             .await?;
+        // Tests stop here (every read done, no write yet) to replace the session mid-pass
+        crate::test_hooks::pause(|| format!("sync.after_reads:{}", self.z32)).await;
 
         // The migration: queue every object the homeserver has only in the old format.
         if !migrated {
@@ -1384,8 +1388,15 @@ impl PubkySync {
         // A history delete another node made since this one last synced is adopted first, so
         // this copy doesn't write over it
         let theirs = self.cleared_elsewhere().await;
+        // Tests stop here (the read done, nothing adopted) to replace the session meanwhile
+        crate::test_hooks::pause(|| format!("sync.backup_after_read:{}", self.z32)).await;
+        // That read was the old identity's when another sign-in replaced this one meanwhile:
+        // its history delete is not this node's to adopt (nor to write into the new identity's
+        // copy)
         let backup = {
-            let lib = s.library.lock().expect("library poisoned");
+            let Ok(lib) = self.lib(&s.library) else {
+                return;
+            };
             if let Some(theirs) = theirs {
                 if let Err(e) = crate::listens::adopt_cleared(&lib, theirs) {
                     tracing::warn!(error = %e.message, "history deleted on another node");

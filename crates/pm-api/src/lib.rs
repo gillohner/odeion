@@ -108,6 +108,8 @@ pub mod subsonic;
 pub mod sync;
 pub mod tag_fixes;
 pub mod tags;
+#[doc(hidden)]
+pub mod test_hooks;
 pub mod tidal;
 pub mod tidal_unofficial;
 pub mod tunnel;

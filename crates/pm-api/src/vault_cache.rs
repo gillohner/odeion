@@ -1003,6 +1003,8 @@ pub(crate) async fn sync_held(
         current()?;
         let service = b.service.to_string();
         let mut read = vault.read(b.service).await;
+        // Tests stop here (the vault read, nothing written) to replace the session mid-pass
+        crate::test_hooks::pause(|| format!("vault.after_read:{owner}:{}", b.service)).await;
         // The person takes the vault's copy by hand: a copy older than one seen (a sign-in made
         // anew elsewhere after a sign-out) is read past the node's record, for this pass alone.
         // The record changes only once the take has gone through (`reset_mark`), so a take
@@ -1284,6 +1286,8 @@ pub(crate) async fn sync_held(
                             Err(e) => tracing::warn!(service = b.service, "vault: not signed this time: {e}"),
                         }
                     }
+                    // The signing above awaited the homeserver: still this session's?
+                    current()?;
                     let lib = s.library.lock().expect("library poisoned");
                     // A source that changed its sign-in since this pass read it wins: next pass
                     if carried(&lib, b).ok().flatten().map(|x| hash(&x)) != Some(hash(m)) {
