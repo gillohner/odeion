@@ -1562,3 +1562,712 @@ async fn removing_a_listener_revokes_access_while_their_collection_write_is_held
         .unwrap()
         .is_empty());
 }
+
+fn stored_shelf(s: &pm_api::NodeState) -> serde_json::Value {
+    serde_json::from_str(
+        &s.library
+            .lock()
+            .unwrap()
+            .get_setting(&format!("person.{ANN}.collections"))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn store_shelf(s: &pm_api::NodeState, shelf: &serde_json::Value) {
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(&format!("person.{ANN}.collections"), &shelf.to_string())
+        .unwrap();
+}
+
+fn remote_version(fake: &Fake, id: &str, after: i64, post: &serde_json::Value, public: bool) -> String {
+    let edit = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + after);
+    let path = format!("{DRAFTS}{id}/{edit}.json");
+    let bytes = serde_json::to_vec(post).unwrap();
+    let mut files = fake.files.lock().unwrap();
+    let mine = files.entry(ANN.to_string()).or_default();
+    mine.insert(path.clone(), bytes.clone());
+    if public {
+        mine.insert(format!("{PUBLISHED}{id}/{edit}.json"), bytes);
+    }
+    path
+}
+
+fn no_public_writes(fake: &Fake) {
+    let calls = fake.calls.lock().unwrap().clone();
+    assert!(
+        calls.iter().all(|c| !c.contains(" write /pub/")),
+        "cancelled sharing must never be published, even briefly: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn pending_edits_classify_unseen_heads_before_full_or_targeted_replay() {
+    for fallback in [false, true] {
+        for bad_kind in ["malformed", "unsupported", "oversized"] {
+            let dir = tempfile::tempdir().unwrap();
+            let (s, fake, ann, _) = node(dir.path());
+            fake.connected.lock().unwrap().insert(ANN.to_string());
+            let app = router(s.clone());
+            let (_, made) = create(&app, &ann, "Before", &[SONG_A]).await;
+            let id = made["summary"]["id"].as_str().unwrap().to_string();
+            let uri = format!("/v1/collections/{id}");
+            let good = fake.json(ANN, &newest(&fake, ANN, &id).0);
+            fake.down.store(true, Ordering::SeqCst);
+            let (st, queued) = call(
+                &app,
+                &ann,
+                "PUT",
+                &uri,
+                Some(serde_json::json!({"name":"Queued"})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{queued}");
+            assert_eq!(queued["summary"]["synced"], false);
+            // This head did not exist when the pending intent was created.
+            let mut bad = good.clone();
+            match bad_kind {
+                "malformed" => bad["content"] = "{".into(),
+                "unsupported" => bad["kind"] = "future_post_kind".into(),
+                "oversized" => bad["future_data"] = "x".repeat(pm_pubky::homeserver::OBJECT_MAX).into(),
+                _ => unreachable!(),
+            }
+            let path = remote_version(&fake, &id, 60_000_000, &bad, false);
+            let before = fake.files.lock().unwrap()[ANN].clone();
+            fake.down.store(false, Ordering::SeqCst);
+            fake.whole_list_fails.store(fallback, Ordering::SeqCst);
+            fake.calls.lock().unwrap().clear();
+            for _ in 0..2 {
+                let (st, _) = call(&app, &ann, "GET", "/v1/collections", None).await;
+                assert_eq!(st, StatusCode::OK);
+                let shelf = stored_shelf(&s); // Every request reloads persisted state.
+                assert!(shelf["other"].as_array().unwrap().iter().any(|p| p == &path));
+                assert_eq!(shelf["items"][0]["pending"], true);
+                assert_eq!(fake.files.lock().unwrap()[ANN], before);
+            }
+            assert!(!fake.calls.lock().unwrap().iter().any(|c| c.contains(" write ")));
+            assert_eq!(
+                fake.calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c.ends_with(&format!("read {path}")))
+                    .count(),
+                1
+            );
+            // A supported later version releases the hold; the queued local intent still wins.
+            let supported = remote_version(&fake, &id, 120_000_000, &good, false);
+            let (st, _) = call(&app, &ann, "GET", "/v1/collections", None).await;
+            assert_eq!(st, StatusCode::OK);
+            let (head, content) = newest(&fake, ANN, &id);
+            assert!(head > supported);
+            assert_eq!(content["name"], "Queued");
+            assert_eq!(stored_shelf(&s)["items"][0]["pending"], false);
+        }
+    }
+}
+
+#[tokio::test]
+async fn private_or_delete_as_the_first_reconnected_request_never_flushes_a_queued_share() {
+    for delete in [false, true] {
+        for failure in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (s, fake, ann, _) = node(dir.path());
+            fake.connected.lock().unwrap().insert(ANN.to_string());
+            let app = router(s.clone());
+            let (_, made) = create(&app, &ann, "Private", &[SONG_A]).await;
+            let id = made["summary"]["id"].as_str().unwrap();
+            let uri = format!("/v1/collections/{id}");
+            fake.down.store(true, Ordering::SeqCst);
+            call(
+                &app,
+                &ann,
+                "PUT",
+                &format!("{uri}/visibility"),
+                Some(serde_json::json!({"public":true})),
+            )
+            .await;
+            assert_eq!(stored_shelf(&s)["items"][0]["public"], true);
+            fake.down.store(false, Ordering::SeqCst);
+            fake.calls.lock().unwrap().clear();
+            if failure {
+                if delete {
+                    fake.remove_fails.store(true, Ordering::SeqCst);
+                } else {
+                    fake.rejects.lock().unwrap().insert(ANN.to_string());
+                }
+            }
+            let (st, v) = if delete {
+                call(&app, &ann, "DELETE", &uri, None).await
+            } else {
+                call(
+                    &app,
+                    &ann,
+                    "PUT",
+                    &format!("{uri}/visibility"),
+                    Some(serde_json::json!({"public":false})),
+                )
+                .await
+            };
+            assert_eq!(
+                st,
+                if delete {
+                    StatusCode::NO_CONTENT
+                } else if failure {
+                    StatusCode::UNPROCESSABLE_ENTITY
+                } else {
+                    StatusCode::OK
+                },
+                "{v}"
+            );
+            no_public_writes(&fake);
+            assert!(fake.paths(ANN, PUBLISHED).is_empty());
+            fake.remove_fails.store(false, Ordering::SeqCst);
+            fake.rejects.lock().unwrap().clear();
+            call(&app, &ann, "GET", "/v1/collections", None).await;
+            no_public_writes(&fake);
+            if delete {
+                assert!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_privacy_request_after_io_starts_keeps_the_latest_intent() {
+    for delete in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let (_, made) = create(&app, &ann, "Private", &[SONG_A]).await;
+        let id = made["summary"]["id"].as_str().unwrap();
+        let uri = format!("/v1/collections/{id}");
+        // Consume the notification from creation before waiting for this request's write.
+        fake.write_started.notified().await;
+        fake.down.store(true, Ordering::SeqCst);
+        call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{uri}/visibility"),
+            Some(serde_json::json!({"public":true})),
+        )
+        .await;
+        fake.down.store(false, Ordering::SeqCst);
+        fake.calls.lock().unwrap().clear();
+        let write_hold = fake.gate.write().await;
+        let remove_hold = fake.removal_gate.write().await;
+        let task = tokio::spawn({
+            let app = app.clone();
+            let token = ann.clone();
+            let uri = uri.clone();
+            async move {
+                if delete {
+                    call(&app, &token, "DELETE", &uri, None).await
+                } else {
+                    call(
+                        &app,
+                        &token,
+                        "PUT",
+                        &format!("{uri}/visibility"),
+                        Some(serde_json::json!({"public":false})),
+                    )
+                    .await
+                }
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            if delete {
+                fake.remove_started.notified().await;
+            } else {
+                fake.write_started.notified().await;
+            }
+        })
+        .await
+        .expect("the new intent reaches its gated operation");
+        let shelf = stored_shelf(&s);
+        assert_eq!(shelf["items"][0]["pending"], true);
+        assert!(shelf["items"][0]["public"] == false || shelf["items"][0]["deleted"] == true);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(write_hold);
+        drop(remove_hold);
+        call(&app, &ann, "GET", "/v1/collections", None).await;
+        no_public_writes(&fake);
+        assert!(fake.paths(ANN, PUBLISHED).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn original_posts_with_unrepresentable_data_are_held_without_loss() {
+    for data in [
+        "note",
+        "item_extra",
+        "content_extra",
+        "post_extra",
+        "item_uri",
+        "layout",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let (_, made) = create(&app, &ann, "Original", &[SONG_A, SONG_B]).await;
+        let id = made["summary"]["id"].as_str().unwrap();
+        let uri = format!("/v1/collections/{id}");
+        let mut post = fake.json(ANN, &newest(&fake, ANN, id).0);
+        let mut content: serde_json::Value = serde_json::from_str(post["content"].as_str().unwrap()).unwrap();
+        match data {
+            "note" => content["items"][0]["note"] = "Play this at the wedding".into(),
+            "item_extra" => content["items"][0]["other_app"] = serde_json::json!({"colour":"blue"}),
+            "content_extra" => content["other_app"] = serde_json::json!({"sequence":[3,1,2]}),
+            "post_extra" => post["other_app"] = serde_json::json!({"saved":true}),
+            "item_uri" => content["items"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"uri":format!("pubky://{ANN}/pub/example.app/things/one")})),
+            "layout" => content["layout"] = "future_layout".into(),
+            _ => unreachable!(),
+        }
+        post["content"] = content.to_string().into();
+        let typed: pubky_social_specs::PubkySocialPost = serde_json::from_value(post.clone()).unwrap();
+        pm_pubky::v1::validate_social(
+            &typed,
+            id,
+            pm_pubky::v1::Root::Priv,
+            &pm_pubky::v1::PubkyId::try_from(ANN).unwrap(),
+        )
+        .unwrap_or_else(|e| panic!("valid remote {data} fixture: {e}"));
+        remote_version(&fake, id, 60_000_000, &post, true);
+        let before = fake.files.lock().unwrap()[ANN].clone();
+        for (method, path, body) in [
+            ("PUT", uri.clone(), serde_json::json!({"name":"Renamed"})),
+            (
+                "POST",
+                format!("{uri}/items"),
+                serde_json::json!({"uris":[SONG_C]}),
+            ),
+            ("PUT", uri.clone(), serde_json::json!({"uris":[SONG_B,SONG_A]})),
+        ] {
+            let (st, v) = call(&app, &ann, method, &path, Some(body)).await;
+            assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{data}: {v}");
+            assert_eq!(
+                fake.files.lock().unwrap()[ANN],
+                before,
+                "{data} must remain authoritative and byte-identical"
+            );
+        }
+        // Privacy still has an escape: no private post is re-encoded, and its opaque data stays.
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{uri}/visibility"),
+            Some(serde_json::json!({"public":false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{data}: {v}");
+        assert!(fake.paths(ANN, PUBLISHED).is_empty());
+        let private_before: std::collections::BTreeMap<_, _> = before
+            .into_iter()
+            .filter(|(p, _)| p.starts_with(DRAFTS))
+            .collect();
+        assert_eq!(fake.files.lock().unwrap()[ANN], private_before);
+    }
+}
+
+/// Seed many independent offline intents without spending the regression on HTTP setup.
+/// Each is a valid small collection; none has a remote version yet.
+fn seed_pending(s: &pm_api::NodeState, count: usize) {
+    let mut shelf = stored_shelf(s);
+    let template = shelf["items"][0].clone();
+    let base = pm_pubky::ids::now_micros() - 10_000_000;
+    for n in 0..count {
+        let mut k = template.clone();
+        k["id"] = pm_pubky::v1::id_of(base - n as i64).into();
+        k["head"] = "".into();
+        k["versions"] = serde_json::json!([]);
+        k["writing"] = serde_json::Value::Null;
+        k["pending"] = true.into();
+        k["playlist"]["name"] = format!("Waiting {n}").into();
+        shelf["items"].as_array_mut().unwrap().push(k);
+    }
+    store_shelf(s, &shelf);
+}
+
+fn pending_count(s: &pm_api::NodeState) -> usize {
+    stored_shelf(s)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|k| k["pending"] == true)
+        .count()
+}
+
+#[tokio::test]
+async fn replay_has_one_shared_budget_and_checkpoints_progress_in_both_listing_modes() {
+    for fallback in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        create(&app, &ann, "Template", &[SONG_A]).await;
+        seed_pending(&s, 45);
+        fake.whole_list_fails.store(fallback, Ordering::SeqCst);
+        fake.calls.lock().unwrap().clear();
+        call(&app, &ann, "GET", "/v1/collections", None).await;
+        let remaining = pending_count(&s);
+        assert!(
+            remaining > 0 && remaining < 45,
+            "one request must make bounded durable progress: {remaining}"
+        );
+        assert!(
+            fake.calls.lock().unwrap().len() <= 32,
+            "list/read/write all share the call budget"
+        );
+        // Subsequent requests reload the persisted pending work and finish only what remains.
+        for _ in 0..12 {
+            if pending_count(&s) == 0 {
+                break;
+            }
+            fake.calls.lock().unwrap().clear();
+            call(&app, &ann, "GET", "/v1/collections", None).await;
+            assert!(fake.calls.lock().unwrap().len() <= 32);
+        }
+        assert_eq!(pending_count(&s), 0);
+        assert_eq!(
+            fake.paths(ANN, DRAFTS).len(),
+            46,
+            "every pending collection written exactly once"
+        );
+    }
+}
+
+fn add_history(fake: &Fake, id: &str, count: usize, public: bool) {
+    let body = fake.json(ANN, &newest(fake, ANN, id).0);
+    let head = remote_version(fake, id, 60_000_000, &body, public);
+    let (_, edit) = pm_pubky::v1::parse_version(&head).unwrap();
+    let end = pm_pubky::v1::micros_of(&edit).unwrap();
+    let mut files = fake.files.lock().unwrap();
+    let mine = files.get_mut(ANN).unwrap();
+    for i in 1..=count {
+        let version = pm_pubky::v1::id_of(end - i as i64);
+        let root = if public { PUBLISHED } else { DRAFTS };
+        mine.insert(
+            format!("{root}{id}/{version}.json"),
+            serde_json::to_vec(&body).unwrap(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn delete_and_unshare_large_histories_finish_in_bounded_durable_batches() {
+    for delete in [false, true] {
+        for fallback in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (s, fake, ann, _) = node(dir.path());
+            fake.connected.lock().unwrap().insert(ANN.to_string());
+            let app = router(s.clone());
+            let (_, made) = create(&app, &ann, "History", &[SONG_A]).await;
+            let id = made["summary"]["id"].as_str().unwrap();
+            let uri = format!("/v1/collections/{id}");
+            add_history(&fake, id, 70, !delete);
+            let folder = if delete { DRAFTS } else { PUBLISHED };
+            let before = fake.paths(ANN, folder).len();
+            fake.whole_list_fails.store(fallback, Ordering::SeqCst);
+            fake.calls.lock().unwrap().clear();
+            let (st, v) = if delete {
+                call(&app, &ann, "DELETE", &uri, None).await
+            } else {
+                call(
+                    &app,
+                    &ann,
+                    "PUT",
+                    &format!("{uri}/visibility"),
+                    Some(serde_json::json!({"public":false})),
+                )
+                .await
+            };
+            assert_eq!(
+                st,
+                if delete {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::OK
+                },
+                "{v}"
+            );
+            let remaining = fake.paths(ANN, folder).len();
+            assert!(
+                remaining > 0 && remaining < before,
+                "a batch must stop with durable remaining work"
+            );
+            assert_eq!(pending_count(&s), 1);
+            assert!(fake.calls.lock().unwrap().len() <= 32);
+            assert!(
+                stored_shelf(&s)["items"][0]["versions"].as_array().unwrap().len() <= 2,
+                "the whole history is never stored"
+            );
+            for _ in 0..12 {
+                if pending_count(&s) == 0 {
+                    break;
+                }
+                fake.calls.lock().unwrap().clear();
+                call(&app, &ann, "GET", "/v1/collections", None).await;
+                assert!(fake.calls.lock().unwrap().len() <= 32);
+            }
+            assert_eq!(pending_count(&s), 0);
+            assert!(fake.paths(ANN, folder).is_empty());
+            if !delete {
+                assert!(!fake.paths(ANN, DRAFTS).is_empty(), "private content stays");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_held_replay_deadline_releases_cleanup_without_waiting_for_its_backlog() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    create(&app, &ann, "Template", &[SONG_A]).await;
+    fake.write_started.notified().await;
+    seed_pending(&s, 45);
+    let hold = fake.gate.write().await;
+    let reading = tokio::spawn({
+        let app = app.clone();
+        let token = ann.clone();
+        async move { call(&app, &token, "GET", "/v1/collections", None).await }
+    });
+    fake.write_started.notified().await;
+    assert_eq!(pending_count(&s), 45, "intent survives before the held write");
+    let removal = tokio::spawn({
+        let app = app.clone();
+        async move { call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while pm_api::people::may_use_music(&s, ANN) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation remains prompt while I/O is held");
+    assert_eq!(
+        call(&app, &ann, "GET", "/v1/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    // Keep the gate closed. The shared eight-second deadline, not the homeserver/test,
+    // releases the operation lock and allows removal's cleanup to finish.
+    let (st, v) = tokio::time::timeout(std::time::Duration::from_secs(12), removal)
+        .await
+        .expect("cleanup must not await the entire pending backlog")
+        .unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    reading.await.unwrap();
+    assert!(!fake.connected.lock().unwrap().contains(ANN));
+    assert!(s
+        .library
+        .lock()
+        .unwrap()
+        .settings_with_prefix(&format!("person.{ANN}."))
+        .unwrap()
+        .is_empty());
+    drop(hold);
+}
+
+#[tokio::test]
+async fn shelf_budget_includes_history_markers_and_reserved_publication_paths() {
+    const CAP: usize = 32 * 1024 * 1024;
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, made) = create(&app, &ann, "Small", &[SONG_A]).await;
+    let id = made["summary"]["id"].as_str().unwrap();
+    let uri = format!("/v1/collections/{id}");
+    let original = newest(&fake, ANN, id).0;
+    let body = fake.json(ANN, &original);
+    let bid = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() - 60_000_000);
+    let ballast_path = format!("{DRAFTS}{bid}/{bid}.json");
+    fake.files
+        .lock()
+        .unwrap()
+        .get_mut(ANN)
+        .unwrap()
+        .insert(ballast_path.clone(), serde_json::to_vec(&body).unwrap());
+    let mut shelf = stored_shelf(&s);
+    let mut ballast = shelf["items"][0].clone();
+    ballast["id"] = bid.clone().into();
+    ballast["head"] = bid.clone().into();
+    ballast["versions"] = serde_json::json!([ballast_path]);
+    ballast["playlist"]["description"] = "".into();
+    shelf["items"].as_array_mut().unwrap().push(ballast);
+    let set_free = |free: usize| {
+        let mut shelf = stored_shelf(&s);
+        let ballast = shelf["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|k| k["id"] == bid.as_str())
+            .unwrap();
+        ballast["playlist"]["description"] = "".into();
+        let overhead = serde_json::to_vec(&shelf).unwrap().len();
+        let ballast = shelf["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|k| k["id"] == bid.as_str())
+            .unwrap();
+        ballast["playlist"]["description"] = "x".repeat(CAP - free - overhead).into();
+        assert_eq!(serde_json::to_vec(&shelf).unwrap().len(), CAP - free);
+        store_shelf(&s, &shelf);
+    };
+    store_shelf(&s, &shelf);
+    // Move the real head ahead, then add many older paths without changing that cached head.
+    let head = remote_version(&fake, id, 60_000_000, &body, false);
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let (_, edit) = pm_pubky::v1::parse_version(&head).unwrap();
+    let end = pm_pubky::v1::micros_of(&edit).unwrap();
+    for n in 1..=80 {
+        let version = pm_pubky::v1::id_of(end - n);
+        fake.files.lock().unwrap().get_mut(ANN).unwrap().insert(
+            format!("{DRAFTS}{id}/{version}.json"),
+            serde_json::to_vec(&body).unwrap(),
+        );
+    }
+    set_free(8);
+    for fallback in [false, true] {
+        fake.whole_list_fails.store(fallback, Ordering::SeqCst);
+        fake.calls.lock().unwrap().clear();
+        let files = fake.files.lock().unwrap()[ANN].clone();
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{uri}/visibility"),
+            Some(serde_json::json!({"public":true})),
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "reserve progress and both paths before writing: {v}"
+        );
+        assert_eq!(fake.files.lock().unwrap()[ANN], files);
+        assert!(serde_json::to_vec(&stored_shelf(&s)).unwrap().len() <= CAP);
+        assert!(!fake.calls.lock().unwrap().iter().any(|c| c.contains(" write ")));
+    }
+    // An unfamiliar head's marker is also budgeted; lack of marker space cannot permit replay.
+    fake.whole_list_fails.store(false, Ordering::SeqCst);
+    let mut bad = body.clone();
+    bad["content"] = "{".into();
+    let invalid = remote_version(&fake, id, 120_000_000, &bad, false);
+    let files = fake.files.lock().unwrap()[ANN].clone();
+    let (st, _) = call(&app, &ann, "PUT", &uri, Some(serde_json::json!({"name":"Other"}))).await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(serde_json::to_vec(&stored_shelf(&s)).unwrap().len() <= CAP);
+    assert_eq!(fake.files.lock().unwrap()[ANN], files);
+    assert_eq!(
+        fake.paths(ANN, &format!("{DRAFTS}{id}/"))
+            .into_iter()
+            .max()
+            .unwrap(),
+        invalid
+    );
+    // Make room and provide a supported head: the same share can now complete within the cap.
+    set_free(4_000);
+    remote_version(&fake, id, 180_000_000, &body, false);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("{uri}/visibility"),
+        Some(serde_json::json!({"public":true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    for _ in 0..4 {
+        assert!(serde_json::to_vec(&stored_shelf(&s)).unwrap().len() <= CAP);
+        if pending_count(&s) == 0 {
+            break;
+        }
+        call(&app, &ann, "GET", "/v1/collections", None).await;
+    }
+    assert!(!fake.paths(ANN, PUBLISHED).is_empty());
+    assert_eq!(pending_count(&s), 0);
+    assert!(stored_shelf(&s)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|k| k["versions"].as_array().unwrap().len() <= 2));
+    // A full shelf cannot prevent an explicit privacy withdrawal. It can defer its new
+    // private version, but must retain the intent and remove the existing public copies.
+    set_free(0);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("{uri}/visibility"),
+        Some(serde_json::json!({"public":false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(fake.paths(ANN, PUBLISHED).is_empty());
+    assert!(serde_json::to_vec(&stored_shelf(&s)).unwrap().len() <= CAP);
+}
+
+#[tokio::test]
+async fn a_budget_boundary_between_draft_and_publication_keeps_the_completed_draft() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    create(&app, &ann, "Template", &[SONG_A]).await;
+    seed_pending(&s, 30);
+    let mut shelf = stored_shelf(&s);
+    // The full listing's two calls plus 29 private writes leave one call for this last
+    // collection's draft. Publication must wait for the next request.
+    let last = shelf["items"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .filter(|k| k["pending"] == true)
+        .max_by_key(|k| k["id"].as_str().unwrap().to_string())
+        .unwrap();
+    last["public"] = true.into();
+    let id = last["id"].as_str().unwrap().to_string();
+    store_shelf(&s, &shelf);
+    fake.calls.lock().unwrap().clear();
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(fake.calls.lock().unwrap().len(), 32);
+    let shelf = stored_shelf(&s);
+    let kept = shelf["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(kept["pending"], true);
+    assert_eq!(
+        kept["writing"]["drafted"], true,
+        "completed mutation checkpointed before yielding"
+    );
+    assert_eq!(kept["writing"]["published"], false);
+    let draft = newest(&fake, ANN, &id).0;
+    assert!(fake.paths(ANN, &format!("{PUBLISHED}{id}/")).is_empty());
+    fake.calls.lock().unwrap().clear();
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(pending_count(&s), 0);
+    assert_eq!(fake.paths(ANN, &format!("{DRAFTS}{id}/")), vec![draft]);
+    let calls = fake.calls.lock().unwrap();
+    assert!(
+        !calls.iter().any(|c| c.contains(&format!("write {DRAFTS}{id}/"))),
+        "resume publication without duplicating the draft: {calls:?}"
+    );
+    assert_eq!(fake.paths(ANN, &format!("{PUBLISHED}{id}/")).len(), 1);
+}

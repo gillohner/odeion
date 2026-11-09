@@ -31,11 +31,75 @@ use pm_library::Library;
 use pm_pubky::v1;
 use pm_pubky::{MusicContent, MusicPost, Playlist};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// At most this many of their collections are downloaded per request (a first connect with
 /// many); the rest come with the next.
 const READS_PER_REQUEST: usize = 16;
+
+/// Shared by listings, downloads, replay and removals, including the fallback. A slow
+/// homeserver cannot keep the person operation lock for a whole backlog. Each completed
+/// mutation is checkpointed; reaching either limit leaves the remaining intent pending.
+const CALLS_PER_REQUEST: usize = 32;
+const REQUEST_TIME: Duration = Duration::from_secs(8);
+
+struct Work {
+    left: usize,
+    reads: usize,
+    deadline: tokio::time::Instant,
+}
+
+impl Work {
+    fn new() -> Self {
+        Self {
+            left: CALLS_PER_REQUEST,
+            reads: READS_PER_REQUEST,
+            deadline: tokio::time::Instant::now() + REQUEST_TIME,
+        }
+    }
+
+    fn available(&self) -> bool {
+        self.left > 0 && tokio::time::Instant::now() < self.deadline
+    }
+
+    async fn call<T>(
+        &mut self,
+        f: impl Future<Output = Result<T, PersonalError>>,
+    ) -> Result<T, PersonalError> {
+        if !self.available() {
+            return Err(PersonalError::Unreachable(
+                "collection work will continue on the next request".into(),
+            ));
+        }
+        self.left -= 1;
+        tokio::time::timeout_at(self.deadline, f)
+            .await
+            .unwrap_or_else(|_| {
+                self.left = 0;
+                Err(PersonalError::Unreachable(
+                    "collection request deadline reached".into(),
+                ))
+            })
+    }
+
+    async fn read(
+        &mut self,
+        b: &dyn PersonalHomeserver,
+        key: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, PersonalError> {
+        if self.reads == 0 {
+            return Err(PersonalError::Unreachable(
+                "collection downloads will continue on the next request".into(),
+            ));
+        }
+        self.reads -= 1;
+        self.call(b.read(key, path)).await
+    }
+}
 
 /// At most this many of their collections are kept on the node; newer ones from their homeserver
 /// beyond it aren't taken, and making one more here is refused. Their listings are bounded too
@@ -118,7 +182,7 @@ enum Held {
 /// (`other`) or left unread for the copy's size (`too_big`), even when it can read nothing now.
 fn known_unread(other: &[String], too_big: &[TooBig], k: &Kept) -> Option<Held> {
     let newer = |path: &str| {
-        v1::parse_version(path).is_some_and(|(id, edit)| id == k.id && edit.as_bytes() > k.head.as_bytes())
+        v1::parse_version(path).is_some_and(|(id, edit)| id == k.id && edit.as_bytes() >= k.head.as_bytes())
     };
     if other.iter().any(|p| newer(p)) {
         Some(Held::Unreadable)
@@ -147,7 +211,8 @@ struct Kept {
     /// The newest version the node has, written or read (its edit id); empty before the first.
     #[serde(default)]
     head: String,
-    /// Every version path of it on their homeserver that the node knows: drafts and published copies.
+    /// Only current heads and an in-flight write's paths. Full histories are listed for each
+    /// deletion batch, never cached here: older remote paths cannot grow the shelf unboundedly.
     #[serde(default)]
     versions: Vec<String>,
     /// Changed here and not on their homeserver yet.
@@ -156,6 +221,20 @@ struct Kept {
     /// Deleted here: its versions go at the next write.
     #[serde(default)]
     deleted: bool,
+    /// An explicit make-private intent may remove published copies even while an unfamiliar
+    /// private head prevents rewriting the collection.
+    #[serde(default)]
+    unshare: bool,
+    /// The exact version being sent. Retrying an interrupted write uses the same path/body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    writing: Option<Writing>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Writing {
+    edit: String,
+    drafted: bool,
+    published: bool,
 }
 
 fn shelf_key(key: &str) -> String {
@@ -174,6 +253,10 @@ fn load(s: &NodeState, key: &str) -> Shelf {
 }
 
 fn save(s: &NodeState, key: &str, sh: &Shelf) -> Result<(), ApiError> {
+    let encoded = serde_json::to_string(sh).expect("serializes");
+    if encoded.len() > MAX_SHELF_BYTES {
+        return Err(shelf_full());
+    }
     let lib = s.library.lock().expect("library poisoned");
     // Removed (People › Remove) while this request waited on their homeserver: nothing of
     // theirs comes back. Checked under the same hold as the write, so a removal can't land
@@ -181,7 +264,7 @@ fn save(s: &NodeState, key: &str, sh: &Shelf) -> Result<(), ApiError> {
     if !crate::people::listed_for_music(&lib, key.trim_start_matches("pubky")) {
         return Ok(());
     }
-    lib.set_setting(&shelf_key(key), &serde_json::to_string(sh).expect("serializes"))?;
+    lib.set_setting(&shelf_key(key), &encoded)?;
     Ok(())
 }
 
@@ -199,54 +282,247 @@ fn rejected(e: impl std::fmt::Display) -> PersonalError {
     PersonalError::Rejected(e.to_string())
 }
 
-/// Writes `k` as the node has it: a delete removes every version; anything else becomes a new
-/// private version, also published when public (else every published copy goes). The versions
-/// written are recorded as they land, so a failure part way loses none of them.
-async fn push(b: &dyn PersonalHomeserver, key: &str, k: &mut Kept) -> Result<(), PersonalError> {
-    if k.deleted {
-        while let Some(path) = k.versions.last().cloned() {
-            b.remove(key, &path).await?;
-            k.versions.pop();
+fn shelf_full() -> ApiError {
+    ApiError::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!(
+            "Your collections on this node would be over {} MiB: delete or shorten some first",
+            MAX_SHELF_BYTES >> 20
+        ),
+    )
+}
+
+/// Keep only the two current heads. History remains on the homeserver and is listed afresh
+/// before every mutation. In-flight paths are reserved before their writes begin.
+fn compact_versions(paths: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut roots = BTreeMap::new();
+    for path in paths {
+        let root = if path.starts_with("/pub/") { "pub" } else { "priv" };
+        let entry = roots.entry(root).or_insert_with(String::new);
+        if path > *entry {
+            *entry = path;
         }
-        return Ok(());
     }
-    let owner = v1::PubkyId::try_from(key).map_err(rejected)?;
-    let v1::V1Post::Social(post) =
-        v1::to_v1(&MusicContent::Playlist(k.playlist.clone())).map_err(rejected)?
-    else {
-        return Err(rejected("not a collection"));
-    };
-    let head = (!k.head.is_empty()).then_some(k.head.as_str());
-    let path = v1::V1Post::Social(post.clone())
-        .version_path(&k.id, head, v1::Root::Priv, &owner)
-        .map_err(PersonalError::Rejected)?;
-    let (_, edit_id) = v1::parse_version(&path).ok_or_else(|| rejected("not a version path"))?;
-    b.write(key, &path, &serde_json::to_value(&post).map_err(rejected)?)
-        .await?;
-    k.versions.push(path);
-    k.head = edit_id.clone();
-    if k.public {
-        let (dest, body) =
-            v1::publish_plan(&post, &k.id, &edit_id, &owner).map_err(PersonalError::Rejected)?;
-        b.write(key, &dest, &body).await?;
-        k.versions.push(dest);
-    } else {
-        let published: Vec<String> = k
-            .versions
-            .iter()
-            .filter(|p| p.starts_with("/pub/"))
-            .cloned()
-            .collect();
-        for path in published {
-            b.remove(key, &path).await?;
-            k.versions.retain(|p| p != &path);
+    roots.into_values().collect()
+}
+
+/// Old releases could persist an oversized cache through history growth. Only remotely backed,
+/// non-pending cache entries may be evicted to recover that legacy state. Pending user intent
+/// and the collection being edited are retained. Evicted data is fetched again from its source.
+fn bound_existing(sh: &mut Shelf, keep: Option<&str>) -> Result<(), ApiError> {
+    for k in &mut sh.items {
+        k.versions = compact_versions(std::mem::take(&mut k.versions));
+    }
+    while bytes_of(sh) > MAX_SHELF_BYTES {
+        sh.behind = true;
+        if sh.other.pop().is_some() || sh.too_big.pop().is_some() {
+            continue;
         }
+        let Some(i) = sh
+            .items
+            .iter()
+            .rposition(|k| !k.pending && !k.head.is_empty() && Some(k.id.as_str()) != keep)
+        else {
+            return Err(shelf_full());
+        };
+        sh.items.remove(i);
     }
     Ok(())
 }
 
-/// What a homeserver answer means for a read: `Ok(true)` it didn't answer (the copy is stale),
-/// a refusal marks the grant lost.
+fn replace(sh: &mut Shelf, k: Kept) -> Result<(), ApiError> {
+    let mut candidate = sh.clone();
+    if let Some(i) = candidate.items.iter().position(|x| x.id == k.id) {
+        candidate.items[i] = k;
+    } else {
+        candidate.items.push(k);
+    }
+    if bytes_of(&candidate) > MAX_SHELF_BYTES {
+        return Err(shelf_full());
+    }
+    *sh = candidate;
+    Ok(())
+}
+
+#[derive(Default)]
+struct Remote {
+    private: Option<v1::Head>,
+    public: Option<v1::Head>,
+}
+
+impl Remote {
+    fn heads(&self) -> impl Iterator<Item = &v1::Head> {
+        [&self.private, &self.public].into_iter().flatten()
+    }
+    fn versions(&self) -> Vec<String> {
+        // Public copies go first: an interrupted delete still reduces exposure.
+        [&self.public, &self.private]
+            .into_iter()
+            .flatten()
+            .flat_map(|h| h.versions.iter().cloned())
+            .collect()
+    }
+}
+
+enum Pushed {
+    Done,
+    Held,
+    Waiting(PersonalError),
+    Full,
+}
+
+type Prepared = (String, serde_json::Value, Option<(String, serde_json::Value)>);
+
+fn prepare(key: &str, k: &mut Kept) -> Result<Prepared, PersonalError> {
+    let id = k.id.clone();
+    let owner = match v1::PubkyId::try_from(key) {
+        Ok(o) => o,
+        Err(e) => return Err(rejected(e)),
+    };
+    let post = match v1::to_v1(&MusicContent::Playlist(k.playlist.clone())) {
+        Ok(v1::V1Post::Social(p)) => p,
+        other => return Err(rejected(format!("not a collection: {other:?}"))),
+    };
+    if k.writing.is_none() {
+        let path = match v1::V1Post::Social(post.clone()).version_path(
+            &k.id,
+            (!k.head.is_empty()).then_some(k.head.as_str()),
+            v1::Root::Priv,
+            &owner,
+        ) {
+            Ok(p) => p,
+            Err(e) => return Err(rejected(e)),
+        };
+        let (_, edit) = v1::parse_version(&path).expect("a version path");
+        k.writing = Some(Writing {
+            edit,
+            drafted: false,
+            published: false,
+        });
+    }
+    let writing = k.writing.clone().expect("prepared write");
+    let path = format!(
+        "{}{id}/{}.json",
+        v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE),
+        writing.edit
+    );
+    let publication = if k.public {
+        match v1::publish_plan(&post, &id, &writing.edit, &owner) {
+            Ok(p) => Some(p),
+            Err(e) => return Err(rejected(e)),
+        }
+    } else {
+        None
+    };
+    k.versions.push(path.clone());
+    if let Some((dest, _)) = &publication {
+        k.versions.push(dest.clone());
+    }
+    k.versions = compact_versions(std::mem::take(&mut k.versions));
+    Ok((
+        path,
+        serde_json::to_value(post).expect("a post serializes"),
+        publication,
+    ))
+}
+
+/// Durable intent precedes I/O. Each returned success is checkpointed before the next await;
+/// a cancelled/expired write is retried at its reserved path, and removals are idempotent.
+async fn push(
+    s: &NodeState,
+    b: &dyn PersonalHomeserver,
+    key: &str,
+    sh: &mut Shelf,
+    id: &str,
+    remote: &Remote,
+    held: Option<Held>,
+    work: &mut Work,
+) -> Result<Pushed, ApiError> {
+    let mut k = sh
+        .items
+        .iter()
+        .find(|k| k.id == id)
+        .expect("pending collection")
+        .clone();
+    if !crate::people::may_use_music(s, key) {
+        return Ok(Pushed::Waiting(PersonalError::NoGrant));
+    }
+    let prepared = if !k.deleted && held.is_none() {
+        let prepared = match prepare(key, &mut k) {
+            Ok(p) => p,
+            Err(e) => return Ok(Pushed::Waiting(e)),
+        };
+        // Budget the complete shelf, including resulting paths and progress, before ANY
+        // remote mutation. A refusal here leaves remote files untouched.
+        if replace(sh, k.clone()).is_err() {
+            return Ok(Pushed::Full);
+        }
+        save(s, key, sh)?;
+        Some(prepared)
+    } else {
+        None
+    };
+    if k.deleted || k.unshare || (held.is_none() && !k.public) {
+        for path in remote
+            .versions()
+            .into_iter()
+            .filter(|p| k.deleted || p.starts_with("/pub/"))
+        {
+            if !crate::people::may_use_music(s, key) {
+                return Ok(Pushed::Waiting(PersonalError::NoGrant));
+            }
+            if let Err(e) = work.call(b.remove(key, &path)).await {
+                return Ok(Pushed::Waiting(e));
+            }
+            k.versions.retain(|p| p != &path);
+            replace(sh, k.clone())?;
+            save(s, key, sh)?;
+        }
+    }
+    if k.deleted {
+        sh.items.retain(|x| x.id != id);
+        save(s, key, sh)?;
+        return Ok(Pushed::Done);
+    }
+    if held.is_some() {
+        return Ok(Pushed::Held);
+    }
+    let (path, body, publication) = prepared.expect("a writable collection was prepared");
+    let writing = k.writing.clone().expect("prepared write");
+    if !writing.drafted {
+        if !crate::people::may_use_music(s, key) {
+            return Ok(Pushed::Waiting(PersonalError::NoGrant));
+        }
+        if let Err(e) = work.call(b.write(key, &path, &body)).await {
+            return Ok(Pushed::Waiting(e));
+        }
+        k.head = writing.edit.clone();
+        k.writing.as_mut().expect("prepared write").drafted = true;
+        replace(sh, k.clone())?;
+        save(s, key, sh)?;
+    }
+    if let Some((dest, body)) = publication {
+        if !writing.published {
+            if !crate::people::may_use_music(s, key) {
+                return Ok(Pushed::Waiting(PersonalError::NoGrant));
+            }
+            if let Err(e) = work.call(b.write(key, &dest, &body)).await {
+                return Ok(Pushed::Waiting(e));
+            }
+            k.writing.as_mut().expect("prepared write").published = true;
+            replace(sh, k.clone())?;
+            save(s, key, sh)?;
+        }
+    }
+    k.pending = false;
+    k.unshare = false;
+    k.writing = None;
+    replace(sh, k)?;
+    save(s, key, sh)?;
+    Ok(Pushed::Done)
+}
+
+/// What a homeserver answer means for a read: a refusal marks the grant lost.
 fn read_outcome(s: &NodeState, key: &str, e: PersonalError) -> Result<bool, ApiError> {
     match e {
         PersonalError::Refused(m) => {
@@ -257,401 +533,386 @@ fn read_outcome(s: &NodeState, key: &str, e: PersonalError) -> Result<bool, ApiE
     }
 }
 
-/// Writes what waited, then takes what their homeserver has that the copy doesn't, `first` (the
-/// collection about to be changed) before any other. Answers whether their homeserver didn't
-/// answer (the copy is what the node had). A listing it can't make whole changes nothing.
-async fn refresh(
+fn hold(sh: &mut Shelf, id: &str, head: &v1::Head, why: Held, bytes: usize, caught: &mut Caught) {
+    caught.held_back.insert(id.to_string(), why);
+    let mut candidate = sh.clone();
+    candidate.other.retain(|p| p != &head.path);
+    candidate.too_big.retain(|t| t.path != head.path);
+    match why {
+        Held::Unreadable => candidate.other.push(head.path.clone()),
+        Held::Size => candidate.too_big.push(TooBig {
+            path: head.path.clone(),
+            bytes,
+        }),
+    }
+    if bytes_of(&candidate) <= MAX_SHELF_BYTES {
+        *sh = candidate;
+    } else {
+        // No space even for a marker: don't write or advance the head. The next request must
+        // classify it again. A marker is only a download optimization, never write authority.
+        sh.behind = true;
+    }
+}
+
+/// Classify new heads BEFORE replay, on both listing paths. An edit also validates the cached
+/// head: older releases may have cached a lossy display projection. Pending intent is retained
+/// while all newly seen original posts are checked, including a newer public copy.
+async fn observe(
     s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
-    first: Option<&str>,
+    id: &str,
+    remote: &Remote,
+    force: bool,
+    work: &mut Work,
 ) -> Result<Caught, ApiError> {
-    // What the node knows there: an empty listing then is checked again (a gone user lists as empty)
-    let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
-    let had_public = sh.items.iter().any(|k| !k.pending && k.public);
-    let mut private = match b
-        .list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE), had)
-        .await
-    {
-        Ok(paths) => v1::heads(paths),
-        Err(e) => return read_outcome(s, key, e).map(Caught::stale),
-    };
-    let mut public = match b
-        .list(
-            key,
-            &v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE),
-            had_public,
-        )
-        .await
-    {
-        Ok(paths) => v1::heads(paths),
-        Err(e) => return read_outcome(s, key, e).map(Caught::stale),
-    };
-    // What waited is written over every version there is (another device's too: a delete or
-    // "private again" removes those as well)
-    let mut written = std::collections::HashSet::new();
-    for k in sh.items.iter_mut().filter(|k| k.pending) {
-        // A version the node knows it couldn't read or keep is newer: what waits here would go
-        // over it unread, so it keeps waiting (its versions are still followed; a delete goes)
-        let held = !k.deleted && known_unread(&sh.other, &sh.too_big, k).is_some();
-        for h in [private.get(&k.id), public.get(&k.id)].into_iter().flatten() {
-            for v in &h.versions {
-                if !k.versions.contains(v) {
-                    k.versions.push(v.clone());
-                }
-            }
-            // Above every version there (another device's, even one dated ahead of this
-            // node's clock), so the change waiting here is the newest
-            if !held && h.edit_id.as_bytes() > k.head.as_bytes() {
-                k.head = h.edit_id.clone();
-            }
+    let mut caught = Caught::default();
+    let old = sh.items.iter().find(|k| k.id == id).cloned();
+    if old.as_ref().is_some_and(|k| k.deleted) {
+        return Ok(caught);
+    }
+    if remote.private.is_none() && remote.public.is_none() {
+        if old.as_ref().is_some_and(|k| !k.pending) {
+            sh.items.retain(|k| k.id != id);
         }
-        if held {
+        return Ok(caught);
+    }
+    if old.is_none() && remote.private.is_none() {
+        return Ok(caught);
+    }
+    if old.is_none() && sh.items.len() >= MAX_COLLECTIONS {
+        return Ok(caught);
+    }
+    let paths: Vec<String> = remote.heads().map(|h| h.path.clone()).collect();
+    sh.other
+        .retain(|p| v1::parse_version(p).is_none_or(|(i, _)| i != id) || paths.contains(p));
+    sh.too_big
+        .retain(|t| v1::parse_version(&t.path).is_none_or(|(i, _)| i != id) || paths.contains(&t.path));
+    let mut candidate = old.clone();
+    for head in remote.heads() {
+        let needs_read = old
+            .as_ref()
+            .is_none_or(|k| force || k.pending || head.edit_id > k.head);
+        if !needs_read {
             continue;
         }
-        match push(b, key, k).await {
-            Ok(()) => {
-                k.pending = false;
-                written.insert(k.id.clone());
-                if k.deleted {
-                    private.remove(&k.id);
-                    public.remove(&k.id);
-                }
-            }
-            // Never taken: dropped. What their homeserver has comes back below (the head is
-            // read again); one it never had goes
-            Err(PersonalError::Rejected(m)) => {
-                tracing::warn!(%key, id = %k.id, "a listener's homeserver won't take a waiting collection; dropped: {m}");
-                k.pending = false;
-                k.head.clear();
-            }
-            Err(e) => return read_outcome(s, key, e).map(Caught::stale),
+        if sh.other.contains(&head.path) {
+            caught.held_back.insert(id.to_string(), Held::Unreadable);
+            continue;
         }
-    }
-    sh.items.retain(|k| !(k.deleted && !k.pending));
-    // Deleted on another device: gone here too, unless changed or written here since. A public
-    // post is theirs only as the published copy of a draft (the rest of /pub/social/v1/ is their
-    // other posts)
-    sh.items
-        .retain(|k| k.pending || written.contains(&k.id) || private.contains_key(&k.id));
-    let heads: std::collections::HashSet<&str> = private.values().map(|h| h.path.as_str()).collect();
-    sh.other.retain(|p| heads.contains(p.as_str()));
-    sh.too_big.retain(|t| heads.contains(t.path.as_str()));
-    let other: std::collections::HashSet<String> = sh.other.iter().cloned().collect();
-    let too_big: std::collections::HashSet<String> = sh.too_big.iter().map(|t| t.path.clone()).collect();
-    let mut caught = Caught::default();
-    let size_now = bytes_of(&*sh);
-
-    let mut wanted: Vec<(&String, &v1::Head)> = Vec::new();
-    // New ones are downloaded only while the node keeps fewer than MAX_COLLECTIONS
-    let mut room = MAX_COLLECTIONS.saturating_sub(sh.items.len());
-    for (id, head) in &private {
-        let mut versions = head.versions.clone();
-        versions.extend(public.get(id).map(|h| h.versions.clone()).unwrap_or_default());
-        match sh.items.iter_mut().find(|k| &k.id == id) {
-            // Still waiting (their homeserver stopped answering), or just written: the node's is newer
-            Some(k) if k.pending || written.contains(&k.id) => {}
-            // Its newest version is no collection the node can hold (another app's, or one it can
-            // never read): not read again, but still followed, so a delete reaches it; a change
-            // here would write over it unread, so it is refused
-            Some(k) if other.contains(&head.path) => {
-                k.versions = versions;
-                k.public = public.contains_key(id);
-                if head.edit_id.as_bytes() > k.head.as_bytes() {
-                    caught.held_back.insert(id.clone(), Held::Unreadable);
-                }
-            }
-            Some(k) => {
-                k.versions = versions;
-                k.public = public.contains_key(id);
-                if head.edit_id.as_bytes() > k.head.as_bytes() {
-                    // Left unread to stay within MAX_SHELF_BYTES: not downloaded again until it
-                    // fits, and a change of it meanwhile is refused rather than written over it
-                    if too_big.contains(&head.path) {
-                        let was = bytes_of(&*k);
-                        let held = sh
-                            .too_big
-                            .iter()
-                            .find(|t| t.path == head.path)
-                            .map_or(usize::MAX, |t| t.bytes);
-                        if size_now.saturating_sub(was).saturating_add(held) > MAX_SHELF_BYTES {
-                            caught.held_back.insert(id.clone(), Held::Size);
-                        } else {
-                            wanted.push((id, head));
-                        }
-                    } else {
-                        wanted.push((id, head));
-                    }
-                }
-            }
-            None if other.contains(&head.path) => {}
-            // Left unread for the copy's size: read once it fits (others deleted or shortened)
-            None if too_big.contains(&head.path)
-                && (room == 0
-                    || size_now.saturating_add(
-                        sh.too_big
-                            .iter()
-                            .find(|t| t.path == head.path)
-                            .map_or(usize::MAX, |t| t.bytes),
-                    ) > MAX_SHELF_BYTES) => {}
-            None if room == 0 => {
-                tracing::warn!(%key, %id, "a listener has more than {MAX_COLLECTIONS} collections; this one isn't kept on the node");
-            }
-            None => {
-                room -= 1;
-                wanted.push((id, head));
-            }
+        let was = old.as_ref().map_or(0, bytes_of);
+        if sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was) {
+            caught.held_back.insert(id.to_string(), Held::Size);
+            continue;
         }
-    }
-    // The newest first: a listener with many other drafts sees their latest collections soonest;
-    // the one about to be changed before all
-    wanted.sort_by(|a, b| {
-        let is_first = |w: &(&String, &v1::Head)| Some(w.0.as_str()) == first;
-        is_first(b)
-            .cmp(&is_first(a))
-            .then_with(|| b.1.edit_id.cmp(&a.1.edit_id))
-    });
-    let mut size = bytes_of(&*sh);
-    for (id, head) in wanted.into_iter().take(READS_PER_REQUEST) {
-        let bytes = match b.read(key, &head.path).await {
-            Ok(Some(b)) => b,
-            // Gone a moment ago
-            Ok(None) => continue,
-            // It will never be read (too big, or refused for good): left aside like another app's
-            // post, so the ones after it still come in
-            Err(PersonalError::Rejected(m)) => {
-                tracing::warn!(%key, %id, "a listener's collection version can't be read; left aside: {m}");
-                set_aside(sh, id, head, &mut caught);
+        let bytes = match work.read(b, key, &head.path).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                caught.stale = true;
+                continue;
+            }
+            Err(PersonalError::Rejected(_)) => {
+                hold(sh, id, head, Held::Unreadable, 0, &mut caught);
                 continue;
             }
             Err(e) => {
                 caught.stale = read_outcome(s, key, e)?;
-                break;
+                return Ok(caught);
             }
         };
-        let Some(playlist) = their_collection(&bytes, id, &head.edit_id) else {
-            set_aside(sh, id, head, &mut caught);
+        let root = if head.path.starts_with("/pub/") {
+            v1::Root::Pub
+        } else {
+            v1::Root::Priv
+        };
+        let Some(playlist) = their_collection(&bytes, key, id, &head.edit_id, root) else {
+            hold(sh, id, head, Held::Unreadable, 0, &mut caught);
             continue;
         };
-        let mut versions = head.versions.clone();
-        versions.extend(public.get(id).map(|h| h.versions.clone()).unwrap_or_default());
-        let k = Kept {
-            id: id.clone(),
+        let remote_k = Kept {
+            id: id.to_string(),
             playlist,
-            public: public.contains_key(id),
+            public: remote.public.is_some(),
             head: head.edit_id.clone(),
-            versions,
+            versions: paths.clone(),
             pending: false,
             deleted: false,
+            unshare: false,
+            writing: None,
         };
-        // The node's copy stays within MAX_SHELF_BYTES: what would go past it isn't kept
-        let was = sh.items.iter().find(|x| x.id == *id).map_or(0, bytes_of);
-        let grown = size.saturating_sub(was).saturating_add(bytes_of(&k));
-        if grown > MAX_SHELF_BYTES {
-            tracing::warn!(%key, %id, "a listener's collections are over {MAX_SHELF_BYTES} bytes on the node; this version isn't kept");
-            sh.too_big.retain(|t| t.path != head.path);
-            sh.too_big.push(TooBig {
-                path: head.path.clone(),
-                bytes: bytes_of(&k),
-            });
-            caught.held_back.insert(id.clone(), Held::Size);
+        let mut trial = sh.clone();
+        if replace(&mut trial, remote_k.clone()).is_err() {
+            hold(sh, id, head, Held::Size, bytes_of(&remote_k), &mut caught);
             continue;
         }
-        size = grown;
         sh.too_big.retain(|t| t.path != head.path);
-        match sh.items.iter_mut().find(|x| x.id == *id) {
-            Some(x) => *x = k,
-            None => sh.items.push(k),
+        // Drafts are authoritative for display. A public head is checked for safe rewriting,
+        // but cannot replace the private collection's content.
+        if root == v1::Root::Priv && !old.as_ref().is_some_and(|k| k.pending) {
+            candidate = Some(remote_k);
+        }
+    }
+    if caught.stale || caught.held_back.contains_key(id) {
+        return Ok(caught);
+    }
+    if let Some(mut k) = candidate {
+        k.versions = paths;
+        if !k.pending {
+            k.public = remote.public.is_some();
+        }
+        if let Some(newest) = remote.heads().map(|h| &h.edit_id).max() {
+            if k.writing.as_ref().is_some_and(|w| newest > &w.edit) {
+                k.writing = None;
+            }
+            if newest > &k.head {
+                k.head = newest.clone();
+            }
+        }
+        if let Some(w) = &k.writing {
+            k.versions.push(format!(
+                "{}{id}/{}.json",
+                v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE),
+                w.edit
+            ));
+            if k.public {
+                k.versions.push(format!(
+                    "{}{id}/{}.json",
+                    v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE),
+                    w.edit
+                ));
+            }
+        }
+        k.versions = compact_versions(k.versions);
+        if replace(sh, k).is_err() {
+            caught.held_back.insert(id.to_string(), Held::Size);
         }
     }
     Ok(caught)
 }
 
-/// A newest version the node can't hold (another app's post, or one it can never read) is left
-/// aside: not downloaded again. When it is a newer version of a collection the node has, that
-/// collection is held back: a change here would write over it unread, so it is refused (a
-/// delete still goes).
-fn set_aside(sh: &mut Shelf, id: &str, head: &v1::Head, caught: &mut Caught) {
-    sh.other.push(head.path.clone());
-    if sh
-        .items
-        .iter()
-        .any(|k| k.id == id && !k.pending && head.edit_id.as_bytes() > k.head.as_bytes())
-    {
-        caught.held_back.insert(id.to_string(), Held::Unreadable);
-    }
+async fn list_one(
+    b: &dyn PersonalHomeserver,
+    key: &str,
+    id: &str,
+    expected: (bool, bool),
+    work: &mut Work,
+) -> Result<Remote, PersonalError> {
+    let dir = |root| format!("{}{id}/", v1::posts_dir(root, v1::SOCIAL_NAMESPACE));
+    let private = v1::heads(work.call(b.list(key, &dir(v1::Root::Priv), expected.0)).await?).remove(id);
+    let public = v1::heads(work.call(b.list(key, &dir(v1::Root::Pub), expected.1)).await?).remove(id);
+    Ok(Remote { private, public })
 }
 
-/// Catches one collection up from its own folders, which list small even when all of their posts
-/// are more than the node lists: its versions, its sharing and its newest version. `stale` when
-/// even those couldn't be read; a newer version it leaves unread for the size of the copy is
-/// `held_back`.
 async fn catch_up_one(
     s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
     id: &str,
-) -> Result<Caught, ApiError> {
-    let mut caught = Caught::default();
-    let Some(i) = sh.items.iter().position(|k| k.id == id) else {
-        return Ok(caught);
-    };
-    let dir = |root| format!("{}{id}/", v1::posts_dir(root, v1::SOCIAL_NAMESPACE));
-    let (had, had_public) = {
-        let k = &sh.items[i];
+    work: &mut Work,
+) -> Result<(Caught, Remote), ApiError> {
+    let expected = sh.items.iter().find(|k| k.id == id).map_or((false, false), |k| {
         (!k.pending && !k.versions.is_empty(), !k.pending && k.public)
+    });
+    let remote = match list_one(b, key, id, expected, work).await {
+        Ok(r) => r,
+        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e)?), Remote::default())),
     };
-    let private = match b.list(key, &dir(v1::Root::Priv), had).await {
-        Ok(paths) => v1::heads(paths).remove(id),
-        Err(e) => return read_outcome(s, key, e).map(Caught::stale),
-    };
-    let public = match b.list(key, &dir(v1::Root::Pub), had_public).await {
-        Ok(paths) => v1::heads(paths).remove(id),
-        Err(e) => return read_outcome(s, key, e).map(Caught::stale),
-    };
-    let mut versions = private.as_ref().map(|h| h.versions.clone()).unwrap_or_default();
-    versions.extend(public.as_ref().map(|h| h.versions.clone()).unwrap_or_default());
-    let k = &mut sh.items[i];
-    // What waits here goes over every version there, above the newest: unless the node knows one
-    // there it couldn't read or keep (then it keeps waiting; a delete still goes)
-    if k.pending {
-        for v in versions {
-            if !k.versions.contains(&v) {
-                k.versions.push(v);
-            }
-        }
-        if !k.deleted {
-            if let Some(why) = known_unread(&sh.other, &sh.too_big, k) {
-                caught.held_back.insert(id.to_string(), why);
-                return Ok(caught);
-            }
-        }
-        for h in [&private, &public].into_iter().flatten() {
-            if h.edit_id.as_bytes() > k.head.as_bytes() {
-                k.head = h.edit_id.clone();
-            }
-        }
-        return Ok(caught);
-    }
-    let Some(head) = private else {
-        // Deleted in another app of theirs: gone here too
-        sh.items.remove(i);
-        return Ok(caught);
-    };
-    k.versions = versions;
-    k.public = public.is_some();
-    if head.edit_id.as_bytes() <= k.head.as_bytes() {
-        return Ok(caught);
-    }
-    // Newer, and one the node can't hold, or left unread for the copy's size (and still too big
-    // for it): held back, never written over
-    let was = bytes_of(&sh.items[i]);
-    if sh.other.contains(&head.path) {
-        caught.held_back.insert(id.to_string(), Held::Unreadable);
-        return Ok(caught);
-    }
-    if sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was) {
-        caught.held_back.insert(id.to_string(), Held::Size);
-        return Ok(caught);
-    }
-    match b.read(key, &head.path).await {
-        Ok(Some(bytes)) => match their_collection(&bytes, id, &head.edit_id) {
-            Some(playlist) => {
-                let mut newer = sh.items[i].clone();
-                newer.playlist = playlist;
-                newer.head = head.edit_id.clone();
-                let grown = bytes_of(&*sh)
-                    .saturating_sub(bytes_of(&sh.items[i]))
-                    .saturating_add(bytes_of(&newer));
-                sh.too_big.retain(|t| t.path != head.path);
-                if grown > MAX_SHELF_BYTES {
-                    sh.too_big.push(TooBig {
-                        path: head.path.clone(),
-                        bytes: bytes_of(&newer),
-                    });
-                    caught.held_back.insert(id.to_string(), Held::Size);
-                } else {
-                    sh.items[i] = newer;
-                }
-            }
-            None => set_aside(sh, id, &head, &mut caught),
-        },
-        // Gone a moment ago: the next read sees it
-        Ok(None) => {}
-        Err(PersonalError::Rejected(_)) => set_aside(sh, id, &head, &mut caught),
-        Err(e) => caught.stale = read_outcome(s, key, e)?,
-    }
-    Ok(caught)
+    let caught = observe(s, b, key, sh, id, &remote, true, work).await?;
+    save(s, key, sh)?;
+    Ok((caught, remote))
 }
 
-/// After a read that couldn't list all of their posts: what waits goes one collection at a
-/// time, each caught up from its own folders first (at most [`READS_PER_REQUEST`] a request).
+fn discard_rejected(sh: &mut Shelf, id: &str) {
+    if let Some(k) = sh.items.iter_mut().find(|k| k.id == id) {
+        // A reserved path is not proof that a draft landed. For an existing collection,
+        // re-read its actual remote state; a rejected never-written new one is dropped.
+        if k.head.is_empty() {
+            sh.items.retain(|k| k.id != id);
+        } else {
+            k.pending = false;
+            k.writing = None;
+            k.unshare = false;
+            k.head.clear();
+        }
+    }
+}
+
+async fn replay(
+    s: &NodeState,
+    b: &dyn PersonalHomeserver,
+    key: &str,
+    sh: &mut Shelf,
+    id: &str,
+    remote: &Remote,
+    caught: &mut Caught,
+    work: &mut Work,
+) -> Result<(), ApiError> {
+    if !sh.items.iter().any(|k| k.id == id && k.pending) {
+        return Ok(());
+    }
+    save(s, key, sh)?;
+    match push(s, b, key, sh, id, remote, caught.held_back.get(id).copied(), work).await? {
+        Pushed::Done | Pushed::Held => {}
+        Pushed::Full => {
+            caught.held_back.insert(id.to_string(), Held::Size);
+        }
+        Pushed::Waiting(PersonalError::Rejected(_)) => {
+            if sh.items.iter().any(|k| k.id == id && (k.deleted || k.unshare)) {
+                caught.stale = true;
+                return Ok(());
+            }
+            discard_rejected(sh, id);
+            let read = observe(s, b, key, sh, id, remote, true, work).await?;
+            caught.stale |= read.stale;
+            caught.held_back.extend(read.held_back);
+            save(s, key, sh)?;
+        }
+        Pushed::Waiting(e) => caught.stale |= read_outcome(s, key, e)?,
+    }
+    Ok(())
+}
+
+/// Full and targeted listings share the same budget and classification/replay code. During an
+/// edit refresh, no pending target is replayed. Unrelated replay follows the durable new edit.
+async fn refresh(
+    s: &NodeState,
+    b: &dyn PersonalHomeserver,
+    key: &str,
+    sh: &mut Shelf,
+    first: Option<&str>,
+    editing: bool,
+    work: &mut Work,
+) -> Result<(Caught, HashMap<String, Remote>), ApiError> {
+    let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
+    let had_public = sh.items.iter().any(|k| !k.pending && k.public);
+    let private = match work
+        .call(b.list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE), had))
+        .await
+    {
+        Ok(paths) => v1::heads(paths),
+        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e)?), HashMap::new())),
+    };
+    let public = match work
+        .call(b.list(
+            key,
+            &v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE),
+            had_public,
+        ))
+        .await
+    {
+        Ok(paths) => v1::heads(paths),
+        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e)?), HashMap::new())),
+    };
+    let heads: std::collections::HashSet<&str> = private
+        .values()
+        .chain(public.values())
+        .map(|h| h.path.as_str())
+        .collect();
+    sh.other.retain(|p| heads.contains(p.as_str()));
+    sh.too_big.retain(|t| heads.contains(t.path.as_str()));
+    let mut ids: Vec<String> = private.keys().cloned().collect();
+    ids.extend(sh.items.iter().map(|k| k.id.clone()));
+    ids.sort();
+    ids.dedup();
+    ids.sort_by(|a, b| {
+        (Some(b.as_str()) == first)
+            .cmp(&(Some(a.as_str()) == first))
+            .then_with(|| {
+                private
+                    .get(b)
+                    .map(|h| &h.edit_id)
+                    .cmp(&private.get(a).map(|h| &h.edit_id))
+            })
+    });
+    let mut caught = Caught::default();
+    let mut remotes = HashMap::new();
+    let mut downloads = 0;
+    for id in ids {
+        if !work.available() {
+            caught.stale = true;
+            break;
+        }
+        let remote = Remote {
+            private: private.get(&id).cloned(),
+            public: public.get(&id).cloned(),
+        };
+        let known = sh.items.iter().any(|k| k.id == id);
+        if !known && downloads >= READS_PER_REQUEST {
+            caught.stale = true;
+            continue;
+        }
+        if !known {
+            downloads += 1;
+        }
+        let mut one = observe(s, b, key, sh, &id, &remote, Some(id.as_str()) == first, work).await?;
+        if !editing && !one.stale && !personal::is_lost(s, key) {
+            replay(s, b, key, sh, &id, &remote, &mut one, work).await?;
+        }
+        let stopped = one.stale || personal::is_lost(s, key);
+        caught.stale |= one.stale;
+        caught.held_back.extend(one.held_back);
+        remotes.insert(id, remote);
+        if stopped {
+            break;
+        }
+    }
+    save(s, key, sh)?;
+    Ok((caught, remotes))
+}
+
 async fn drain_one_by_one(
     s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
+    skip: Option<&str>,
+    work: &mut Work,
 ) -> Result<(), ApiError> {
     let ids: Vec<String> = sh
         .items
         .iter()
-        .filter(|k| k.pending)
+        .filter(|k| k.pending && Some(k.id.as_str()) != skip)
         .map(|k| k.id.clone())
         .take(READS_PER_REQUEST)
         .collect();
     for id in ids {
-        let caught = catch_up_one(s, b, key, sh, &id).await?;
+        if !work.available() {
+            sh.behind = true;
+            break;
+        }
+        let (mut caught, remote) = catch_up_one(s, b, key, sh, &id, work).await?;
         if caught.stale || personal::is_lost(s, key) {
             break;
         }
-        // It would go over a version the node couldn't read or keep: it keeps waiting
-        if caught.held_back.contains_key(&id) {
-            continue;
-        }
-        let Some(i) = sh.items.iter().position(|k| k.id == id) else {
-            continue;
-        };
-        let mut k = sh.items[i].clone();
-        match push(b, key, &mut k).await {
-            Ok(()) => {
-                k.pending = false;
-                sh.items[i] = k;
-            }
-            Err(PersonalError::Rejected(m)) => {
-                tracing::warn!(%key, %id, "a listener's homeserver won't take a waiting collection; dropped: {m}");
-                if k.versions.is_empty() {
-                    // Never on their homeserver (a new one): it goes, rather than showing as kept
-                    sh.items.remove(i);
-                } else {
-                    // What their homeserver has comes back: it is read again now
-                    k.pending = false;
-                    k.head.clear();
-                    sh.items[i] = k;
-                    catch_up_one(s, b, key, sh, &id).await?;
-                }
-            }
-            Err(e) => {
-                // The versions written before it failed are kept
-                sh.items[i] = k;
-                read_outcome(s, key, e)?;
-                break;
-            }
+        replay(s, b, key, sh, &id, &remote, &mut caught, work).await?;
+        if caught.stale || personal::is_lost(s, key) {
+            break;
         }
     }
-    sh.items.retain(|k| !(k.deleted && !k.pending));
     Ok(())
 }
 
-/// One version of a private social post of theirs, as a collection the node can hold: a music
-/// collection that passes the node's checks. `None` for anything else.
-fn their_collection(bytes: &[u8], id: &str, edit_id: &str) -> Option<Playlist> {
-    let post: pubky_social_specs::PubkySocialPost = serde_json::from_slice(bytes).ok()?;
+/// The display projection is editable only when it is lossless. Validate the ORIGINAL post,
+/// then compare its full JSON (including opaque members and the parsed content envelope) to
+/// what the node would write. Notes, unsupported URIs/layouts and unknown extensions are held.
+fn their_collection(bytes: &[u8], key: &str, id: &str, edit_id: &str, root: v1::Root) -> Option<Playlist> {
+    if bytes.len() > MAX_COLLECTION_BYTES {
+        return None;
+    }
+    let mut original: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let post: pubky_social_specs::PubkySocialPost = serde_json::from_value(original.clone()).ok()?;
+    let owner = v1::PubkyId::try_from(key).ok()?;
+    v1::validate_social(&post, id, root, &owner).ok()?;
     let MusicContent::Playlist(p) = v1::from_social(&post, id, edit_id)? else {
         return None;
     };
-    checked(id, p).ok()
+    let p = checked(id, p).ok()?;
+    let mut encoded = v1::to_v1(&MusicContent::Playlist(p.clone())).ok()?.to_json();
+    original["content"] = serde_json::from_str(original["content"].as_str()?).ok()?;
+    encoded["content"] = serde_json::from_str(encoded["content"].as_str()?).ok()?;
+    (original == encoded).then_some(p)
 }
 
 /// A collection as the node keeps one, or 422 with why not.
@@ -698,18 +959,15 @@ async fn read(s: &NodeState, key: &str) -> Result<Option<Shelf>, ApiError> {
         return Ok(None);
     }
     let mut sh = load(s, key);
+    bound_existing(&mut sh, None)?;
+    let mut work = Work::new();
     if !personal::is_lost(s, key) {
-        let before = serde_json::to_string(&sh).expect("serializes");
-        let caught = refresh(s, b.as_ref(), key, &mut sh, None).await?;
+        let (caught, _) = refresh(s, b.as_ref(), key, &mut sh, None, false, &mut work).await?;
         sh.behind = caught.stale;
-        // All of their posts couldn't be listed: what waits still goes, one collection at a time
         if caught.stale && !personal::is_lost(s, key) {
-            drain_one_by_one(s, b.as_ref(), key, &mut sh).await?;
+            drain_one_by_one(s, b.as_ref(), key, &mut sh, None, &mut work).await?;
         }
-        // Unchanged (the usual read): not written again
-        if serde_json::to_string(&sh).expect("serializes") != before {
-            save(s, key, &sh)?;
-        }
+        save(s, key, &sh)?;
     }
     Ok(Some(sh))
 }
@@ -736,24 +994,21 @@ async fn change(
         return Ok(personal::needs_connect(true));
     }
     let mut sh = load(s, key);
-    // What their homeserver has now (another device's newer version, this one first), so the
-    // change starts from it, and a delete or "private again" reaches every version there
-    let before = serde_json::to_string(&sh).expect("serializes");
-    let mut caught = refresh(s, b.as_ref(), key, &mut sh, id).await?;
+    bound_existing(&mut sh, id)?;
+    let mut work = Work::new();
+    // The target's old queued publication must never precede this request's newer intent.
+    // Refresh validates it but replays nothing until the new edit has been saved durably.
+    let (mut caught, mut remotes) = refresh(s, b.as_ref(), key, &mut sh, id, true, &mut work).await?;
     sh.behind = caught.stale;
-    // All of their posts couldn't be listed (more than the node lists, say): this one is caught
-    // up from its own folders, so changing it doesn't wait on the rest
     if let (true, Some(id)) = (caught.stale, id) {
-        if !personal::is_lost(s, key) {
-            let one = catch_up_one(s, b.as_ref(), key, &mut sh, id).await?;
+        if !personal::is_lost(s, key) && work.available() {
+            let (one, remote) = catch_up_one(s, b.as_ref(), key, &mut sh, id, &mut work).await?;
             caught.stale = one.stale;
             caught.held_back.extend(one.held_back);
+            remotes.insert(id.to_string(), remote);
         }
     }
-    let stale = caught.stale;
-    if serde_json::to_string(&sh).expect("serializes") != before {
-        save(s, key, &sh)?;
-    }
+    save(s, key, &sh)?;
     if personal::is_lost(s, key) {
         return Ok(personal::needs_connect(true));
     }
@@ -763,39 +1018,35 @@ async fn change(
             format!("You have {MAX_COLLECTIONS} collections here: delete one first"),
         ));
     }
-    let at = match id {
+    let old = match id {
         Some(id) => Some(
             sh.items
                 .iter()
-                .position(|k| k.id == id && !k.deleted)
+                .find(|k| k.id == id && !k.deleted)
+                .cloned()
                 .ok_or_else(|| not_found(id))?,
         ),
         None => None,
     };
     let mut k = {
         let lib = s.library.lock().expect("library poisoned");
-        edit(&lib, at.map(|i| sh.items[i].clone()))?
+        edit(&lib, old.clone())?
     };
-    // A newer version from another app that the node couldn't read or keep (found now, or known
-    // from before, also when nothing can be read now): changing it here would write over that
-    // version unread, so it is refused (a delete reaches every version, and goes)
-    let held = caught
+    let mut held = caught
         .held_back
         .get(&k.id)
         .copied()
-        .or_else(|| at.and_then(|i| known_unread(&sh.other, &sh.too_big, &sh.items[i])));
-    if let (false, Some(why)) = (k.deleted, held) {
-        let message = match why {
-            Held::Size => format!(
-                "This collection has a newer version from another app that would take this node past the {} MiB of collections it keeps for you: delete or shorten others here and try again, or change it there",
-                MAX_SHELF_BYTES >> 20
-            ),
-            Held::Unreadable => "This collection has a newer version from another app that this node can't read (over 1 MiB, or not one it can hold): change it there. Deleting it here still works".to_string(),
-        };
-        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, message));
+        .or_else(|| old.as_ref().and_then(|k| known_unread(&sh.other, &sh.too_big, k)));
+    if !k.deleted && !k.unshare {
+        if let Some(why) = held {
+            let message = match why {
+                Held::Size => format!("This collection has a newer version from another app that would take this node past the {} MiB of collections it keeps for you: delete or shorten others here and try again, or change it there", MAX_SHELF_BYTES >> 20),
+                Held::Unreadable => "This collection has a version from another app that this node can't read or safely rewrite (over 1 MiB, invalid, or containing data it cannot preserve): change it there. Deleting it or making it private here still works".to_string(),
+            };
+            return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, message));
+        }
     }
-    // Within what the node can read back, and what it keeps for one listener
-    if !k.deleted && post_size(&k.playlist) > MAX_COLLECTION_BYTES {
+    if !k.deleted && !k.unshare && post_size(&k.playlist) > MAX_COLLECTION_BYTES {
         return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(
@@ -804,82 +1055,92 @@ async fn change(
             ),
         ));
     }
-    // (A delete, or a change that doesn't grow it, always goes, even over the cap)
-    let was = at.map_or(0, |i| bytes_of(&sh.items[i]));
-    if !k.deleted
-        && bytes_of(&k) > was
-        && bytes_of(&sh).saturating_sub(was).saturating_add(bytes_of(&k)) > MAX_SHELF_BYTES
-    {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "Your collections on this node would be over {} MiB: delete or shorten some first",
-                MAX_SHELF_BYTES >> 20
-            ),
-        ));
-    }
     k.pending = true;
-    // Their homeserver didn't let the node catch up (it didn't answer, or its listing was more
-    // than the node reads): a change of one they have waits, rather than going out over a newer
-    // version it couldn't see. It goes once the node has read what is there.
-    if stale && id.is_some() {
-        tracing::info!(%key, id = %k.id, "a listener's homeserver couldn't be read first; the change waits");
-        match at {
-            Some(i) => sh.items[i] = k.clone(),
-            None => sh.items.push(k.clone()),
-        }
-        save(s, key, &sh)?;
-        if k.deleted {
-            return Ok(StatusCode::NO_CONTENT.into_response());
-        }
-        let lib = s.library.lock().expect("library poisoned");
-        return Ok(Json(playlists::detail_of(&lib, &k.id, &k.playlist, k.public, false)).into_response());
+    // This request supersedes the complete previous edit, including its share.
+    k.writing = None;
+    // A delete no longer needs its cached payload; this also makes space for durable intent
+    // at a full shelf. Remote history is discovered again before every deletion batch.
+    if k.deleted {
+        k.playlist = Playlist::new(String::new(), None, None, Vec::new());
+        k.versions.clear();
     }
-    let before = k.versions.clone();
-    let push = push(b.as_ref(), key, &mut k).await;
-    // Whether part of it reached their homeserver before it failed
-    let landed = k.versions != before;
-    match push {
-        Ok(()) => k.pending = false,
-        Err(PersonalError::NoGrant) => return Ok(personal::needs_connect(false)),
-        // Nothing written: approve the node again, then the change is sent again. Once part of it
-        // landed (the draft, before its published copy) it is kept and waits, so a resend can't
-        // make it twice
-        Err(PersonalError::Refused(m)) => {
-            personal::mark_lost(s, key, &m)?;
-            if !landed {
-                return Ok(personal::needs_connect(true));
-            }
+    if !k.deleted && held.is_none() {
+        prepare(key, &mut k).map_err(|e| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Your homeserver won't keep this collection: {e}"),
+            )
+        })?;
+    }
+    if k.unshare {
+        let mut candidate = sh.clone();
+        if replace(&mut candidate, k.clone()).is_err() {
+            // At a full shelf, retain the smaller privacy intent without reserving a new
+            // draft. Published versions can be removed now; the write resumes with room.
+            k.writing = None;
+            k.versions = old
+                .as_ref()
+                .map(|k| {
+                    k.versions
+                        .iter()
+                        .filter(|p| !p.starts_with("/pub/"))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            held = Some(Held::Size);
         }
-        Err(PersonalError::Rejected(m)) => {
-            if landed {
-                // Part of it landed: the node reads what their homeserver has next time
-                k.pending = false;
-                k.head.clear();
-                match at {
-                    Some(i) => sh.items[i] = k.clone(),
-                    None => sh.items.push(k.clone()),
+    }
+    replace(&mut sh, k.clone())?;
+    save(s, key, &sh)?;
+    let remote = remotes.remove(&k.id).unwrap_or_default();
+    // An existing collection waits if it couldn't be listed/read first. A new collection has
+    // no unseen head to overwrite. All remaining work uses the SAME deadline/call allowance.
+    if !caught.stale || id.is_none() {
+        match push(s, b.as_ref(), key, &mut sh, &k.id, &remote, held, &mut work).await? {
+            Pushed::Done | Pushed::Held => {}
+            Pushed::Full if k.unshare => {} // The privacy intent remains durable for the next batch.
+            Pushed::Full => return Err(shelf_full()),
+            Pushed::Waiting(PersonalError::NoGrant) => return Ok(personal::needs_connect(false)),
+            Pushed::Waiting(PersonalError::Refused(m)) => {
+                personal::mark_lost(s, key, &m)?;
+                let landed = sh
+                    .items
+                    .iter()
+                    .find(|x| x.id == k.id)
+                    .and_then(|x| x.writing.as_ref())
+                    .is_some_and(|w| w.drafted);
+                if !landed {
+                    return Ok(personal::needs_connect(true));
+                }
+            }
+            Pushed::Waiting(PersonalError::Rejected(m)) => {
+                if !k.deleted && !k.unshare {
+                    discard_rejected(&mut sh, &k.id);
                 }
                 save(s, key, &sh)?;
+                return Err(ApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    format!("Your homeserver won't keep this collection: {m}"),
+                ));
             }
-            return Err(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Your homeserver won't keep this collection: {m}"),
-            ));
-        }
-        Err(PersonalError::Unreachable(m)) => {
-            tracing::info!(%key, id = %k.id, "a listener's homeserver didn't answer; the change waits: {m}");
+            Pushed::Waiting(PersonalError::Unreachable(_)) => {
+                sh.behind = true;
+            }
         }
     }
-    match at {
-        Some(i) => sh.items[i] = k.clone(),
-        None => sh.items.push(k.clone()),
+    if work.available() && !personal::is_lost(s, key) {
+        drain_one_by_one(s, b.as_ref(), key, &mut sh, Some(&k.id), &mut work).await?;
     }
-    sh.items.retain(|x| !(x.deleted && !x.pending));
     save(s, key, &sh)?;
     if k.deleted {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
+    let k = sh
+        .items
+        .iter()
+        .find(|x| x.id == k.id)
+        .expect("the edited collection is kept");
     let lib = s.library.lock().expect("library poisoned");
     Ok(Json(playlists::detail_of(
         &lib,
@@ -899,13 +1160,12 @@ fn edited<'a>(
     move |lib, k| {
         let mut k = k.ok_or_else(|| not_found(id))?;
         f(lib, &mut k.playlist)?;
+        k.unshare = false;
         k.playlist.touch();
         k.playlist = checked(id, k.playlist)?;
         Ok(k)
     }
 }
-
-// ---- handlers: each caller's own --------------------------------------------------------------
 
 /// `GET /v1/collections`: the owner's, or a listener's own (none before they connect their homeserver).
 pub(crate) async fn list(
@@ -992,6 +1252,8 @@ pub(crate) async fn create(
             versions: Vec::new(),
             pending: true,
             deleted: false,
+            unshare: false,
+            writing: None,
         })
     })
     .await
@@ -1104,6 +1366,7 @@ pub(crate) async fn set_visibility(
     change(&s, &key, Some(&id), |_, k| {
         let mut k = k.ok_or_else(|| not_found(&id))?;
         k.public = public;
+        k.unshare = !public;
         k.playlist.touch();
         Ok(k)
     })

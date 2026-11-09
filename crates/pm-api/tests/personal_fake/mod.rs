@@ -44,6 +44,9 @@ pub struct Fake {
     pub gate: tokio::sync::RwLock<()>,
     pub put_started: tokio::sync::Notify,
     pub write_started: tokio::sync::Notify,
+    pub removal_gate: tokio::sync::RwLock<()>,
+    pub remove_started: tokio::sync::Notify,
+    pub remove_fails: AtomicBool,
     /// Listings fail (more than the node reads, or too slow): the node can't catch up.
     pub list_fails: AtomicBool,
     /// Only listings of all their posts fail (more than the node lists); one collection's own
@@ -199,8 +202,13 @@ impl PersonalHomeserver for Fake {
         Ok(())
     }
     async fn remove(&self, key: &str, path: &str) -> Result<(), PersonalError> {
+        self.remove_started.notify_one();
+        let _open = self.removal_gate.read().await;
         Self::moment().await;
         self.check(key, "remove", path)?;
+        if self.remove_fails.load(Ordering::SeqCst) {
+            return Err(PersonalError::Unreachable("fixture: removal interrupted".into()));
+        }
         if let Some(f) = self.files.lock().unwrap().get_mut(key) {
             f.remove(path);
         }
