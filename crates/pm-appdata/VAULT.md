@@ -222,7 +222,8 @@ and a reader takes a blob only from one of the person's devices.
   the device's it never verified, or one older than a copy it has seen (put back), is left as it is and
   reported as not readable here; the client's own copy goes over it at its next sync. A client that
   rewrites a blob (a device added) checks the very envelope it rewrites, never a second copy the homeserver
-  served.
+  served. The client's own writes count as verified copies too, and a blob of the device's that is older than
+  the newest copy the client has seen (one replayed over the client's own write) is never rotated either.
 - **Writing over a blob nobody trusted signed:** a client that holds a sign-in of its own writes it over such
   a blob (a node does so at its next sync) with a new data key, the next epoch and a revision above the
   blob's, so what the blob held is never taken and never comes back as newer; a blob at the last epoch or

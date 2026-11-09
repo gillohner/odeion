@@ -960,27 +960,6 @@ pub(crate) fn record_last_sync(s: &NodeState, r: &CacheReport) {
     );
 }
 
-/// The mark a take by hand set aside ([`Vault::forget_mark`]), put back when the service's turn
-/// ends unless the take went through (`mark = None` then), whichever way it ended.
-struct MarkBack<'v, 'a> {
-    vault: &'v Vault<'a>,
-    service: &'static str,
-    mark: Option<(u64, u64)>,
-}
-
-impl Drop for MarkBack<'_, '_> {
-    fn drop(&mut self) {
-        if let Some(mark) = self.mark.take() {
-            if let Err(e) = self.vault.restore_mark(self.service, mark) {
-                tracing::warn!(
-                    service = self.service,
-                    "vault: the node's record wasn't put back: {e}"
-                );
-            }
-        }
-    }
-}
-
 /// [`sync`] with [`NodeState::vault_pass`] already held. `take` settles one service's conflict
 /// (or takes a copy that isn't usable as it is) the way it says. `wiping`: this node just signed
 /// out everywhere, so every copy here goes aside.
@@ -1007,25 +986,13 @@ pub(crate) async fn sync_held(
         let service = b.service.to_string();
         let mut read = vault.read(b.service).await;
         // The person takes the vault's copy by hand: a copy older than one seen (a sign-in made
-        // anew elsewhere after a sign-out) is taken as new. The node's record of the newest copy
-        // seen goes only for that, once there is such a copy, and comes back unless the take goes
-        // through (`mark_back`): a take refused or failed leaves the older copy refused as before
-        let mut mark_back = MarkBack {
-            vault,
-            service: b.service,
-            mark: None,
-        };
+        // anew elsewhere after a sign-out) is read past the node's record, for this pass alone.
+        // The record changes only once the take has gone through (`reset_mark`), so a take
+        // refused or failed, or a crash on the way, leaves the older copy refused as before
+        let mut past_mark = false;
         if take == Some((b.service, Take::Vault)) && matches!(read, Err(VaultStoreError::Stale { .. })) {
-            match vault
-                .mark_of(b.service)
-                .and_then(|m| vault.forget_mark(b.service).map(|()| m))
-            {
-                Ok(mark) => {
-                    mark_back.mark = mark;
-                    read = vault.read(b.service).await;
-                }
-                Err(e) => tracing::warn!(service = b.service, "vault: the node's record wasn't reset: {e}"),
-            }
+            read = vault.read_past_mark(b.service).await;
+            past_mark = true;
         }
         // A copy signed by nobody the person trusts (an older client, a device signed out since),
         // or one older than a copy this node has seen (put back, or unsigned after a signed one),
@@ -1412,7 +1379,13 @@ pub(crate) async fn sync_held(
                 if taking.is_some() {
                     report.settled = Some(settled_as("pulled"));
                     // The take went through: the copy taken is the newest seen from now on
-                    mark_back.mark = None;
+                    if past_mark {
+                        if let Err(e) =
+                            vault.reset_mark(b.service, o.epoch, o.sign_in.revision, &o.envelope_hash)
+                        {
+                            tracing::warn!(service = b.service, "vault: the node's record wasn't reset: {e}");
+                        }
+                    }
                 }
             }
             Do::MoveAside => {

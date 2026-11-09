@@ -1573,3 +1573,55 @@ async fn signing_a_device_out_rotates_only_what_this_node_verified() {
     assert_eq!(v[0].envelope("qobuz").await.unwrap().unwrap(), qobuz_verified);
     assert_eq!(v[0].envelope("spotify").await.unwrap().unwrap(), spotify_first);
 }
+
+/// A device's envelope this node once verified, replayed over the node's own newer write before
+/// the device is signed out, is not rotated past it: the node's own write is the newest verified
+/// copy, and an older one is never written again from its content.
+#[tokio::test]
+async fn a_replayed_envelope_of_a_device_is_not_rotated_past_it() {
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 2).await;
+    let (ka, kb) = (ClientSecret::generate(), ClientSecret::generate());
+    let dir = tempfile::tempdir().unwrap();
+    let marks = dir.path().join("a.json");
+    let va = Vault::new(&sessions[0], &ka).keep_marks(&marks);
+    let vb = Vault::new(&sessions[1], &kb);
+    va.register("Node").await.unwrap();
+    vb.register("Laptop").await.unwrap();
+    // The laptop writes a sign-in, which the node reads and so verifies...
+    vb.write_shared("tidal", &sign_in("laptop")).await.unwrap();
+    assert_eq!(
+        va.read("tidal").await.unwrap().unwrap().sign_in.tokens["access_token"],
+        "laptop"
+    );
+    let laptops = va.envelope("tidal").await.unwrap().unwrap();
+    // ...then writes a newer one itself, and the laptop's old envelope comes back (a replay)
+    va.write_shared("tidal", &sign_in("node")).await.unwrap();
+    let path = blob_path("tidal").unwrap();
+    sessions[0]
+        .storage()
+        .put(path.as_str(), serde_json::to_vec(&laptops).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        va.read("tidal").await,
+        Err(VaultStoreError::Stale { .. })
+    ));
+    // Signing the laptop out leaves it as it is: the node's own copy goes over it at its sync
+    let r = va
+        .sign_out_device(&vb.client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    assert_eq!(r.rotated, Vec::<String>::new(), "{r:?}");
+    assert_eq!(r.not_readable_here, ["tidal"], "{r:?}");
+    assert_eq!(va.envelope("tidal").await.unwrap().unwrap(), laptops);
+    // The node writes past it as at any sync: a new key, the next epoch, its own content
+    va.write_shared("tidal", &sign_in("node-again")).await.unwrap();
+    let now = va.read("tidal").await.unwrap().unwrap();
+    assert!(now.epoch > laptops.epoch);
+    assert_eq!(now.sign_in.tokens["access_token"], "node-again");
+    assert!(vb.read("tidal").await.is_err(), "the laptop reads nothing new");
+}

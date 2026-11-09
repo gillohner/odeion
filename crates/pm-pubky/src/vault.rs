@@ -327,6 +327,9 @@ fn envelope_hash(env: &Envelope) -> String {
         .to_string()
 }
 
+/// Why a copy is refused as stale when it is older than the newest this node has seen.
+const OLDER_THAN_SEEN: &str = "it is older than one this node has seen";
+
 fn marks_file_lock() -> std::sync::MutexGuard<'static, ()> {
     static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
     L.lock().unwrap_or_else(|e| e.into_inner())
@@ -401,6 +404,8 @@ pub struct Opened {
     /// The trusted device that signed it; `None` for a blob from before v2 (read only while
     /// this node has seen no signed copy of the service).
     pub signed_by: Option<ClientKey>,
+    /// The hash of the envelope as read ([`Vault::reset_mark`] after a take by hand).
+    pub envelope_hash: String,
     data_key: DataKey,
 }
 
@@ -454,18 +459,6 @@ impl<'a> Vault<'a> {
         }
     }
 
-    /// Forget the newest copy seen of `service`: only when the person takes the vault's copy by
-    /// hand. A blob gone keeps its mark, so an older copy put back later is still refused; a
-    /// sign-in written anew starts above it ([`Vault::write`]).
-    pub fn forget_mark(&self, service: &str) -> Result<()> {
-        if let Some(p) = self.marks {
-            update_marks(p, |m| {
-                m.blobs.remove(service);
-            })?;
-        }
-        Ok(())
-    }
-
     /// A signed copy of `service` at `epoch`/`revision` was read or written: the newest seen.
     /// `verified`: the envelope read, whose writer was a trusted device at the time.
     fn note_blob(&self, service: &str, epoch: u64, revision: u64, verified: Option<&Envelope>) -> Result<()> {
@@ -492,20 +485,6 @@ impl<'a> Vault<'a> {
         }
     }
 
-    /// Put back a mark [`Vault::forget_mark`] took (a take by hand that didn't go through): the
-    /// newest copy seen is `mark` again, unless a newer one was seen since.
-    pub fn restore_mark(&self, service: &str, mark: (u64, u64)) -> Result<()> {
-        if let Some(p) = self.marks {
-            update_marks(p, |m| {
-                let e = m.blobs.entry(service.to_string()).or_insert((0, 0));
-                if mark > *e {
-                    *e = mark;
-                }
-            })?;
-        }
-        Ok(())
-    }
-
     /// Note which of `trusted` sign (their proof verified now); the keys ever seen signing,
     /// these included.
     fn note_signing(&self, trusted: &[TrustedClient]) -> Result<std::collections::BTreeSet<String>> {
@@ -525,11 +504,24 @@ impl<'a> Vault<'a> {
     }
 
     /// The newest copy of `service` seen (`[epoch, revision]`), if any.
-    pub fn mark_of(&self, service: &str) -> Result<Option<(u64, u64)>> {
+    fn mark_of(&self, service: &str) -> Result<Option<(u64, u64)>> {
         match self.marks {
             Some(p) => Ok(read_marks(p)?.blobs.get(service).copied()),
             None => Ok(None),
         }
+    }
+
+    /// The person took the vault's copy by hand ([`Vault::read_past_mark`]) and it went through:
+    /// that copy is the newest seen from now on, whatever was seen before.
+    pub fn reset_mark(&self, service: &str, epoch: u64, revision: u64, envelope_hash: &str) -> Result<()> {
+        if let Some(p) = self.marks {
+            update_marks(p, |m| {
+                m.blobs.insert(service.to_string(), (epoch, revision));
+                m.signed_seen.insert(service.to_string());
+                m.verified.insert(service.to_string(), envelope_hash.to_string());
+            })?;
+        }
+        Ok(())
     }
 
     /// Refuse a copy older than the newest seen, or an unsigned one where a signed one was seen.
@@ -547,7 +539,7 @@ impl<'a> Vault<'a> {
         if m.blobs.get(service).is_some_and(|seen| (epoch, revision) < *seen) {
             return Err(VaultStoreError::Stale {
                 service: service.to_string(),
-                why: "it is older than one this node has seen",
+                why: OLDER_THAN_SEEN,
             });
         }
         Ok(())
@@ -682,9 +674,25 @@ impl<'a> Vault<'a> {
         self.open_env(service, &env).await.map(Some)
     }
 
+    /// [`Vault::read`] for the person taking the vault's copy by hand: a copy older than the
+    /// newest this node has seen is opened all the same, for this read only. Nothing is noted:
+    /// the node's record changes only once the take has gone through ([`Vault::reset_mark`]), so
+    /// a take refused or failed, or a crash on the way, leaves the older copy refused as before.
+    pub async fn read_past_mark(&self, service: &str) -> Result<Option<Opened>> {
+        let Some(env) = self.envelope(service).await? else {
+            return Ok(None);
+        };
+        self.open_env_with(service, &env, true).await.map(Some)
+    }
+
     /// [`Vault::read`] of an envelope already fetched: a caller that goes on to write `env` again
     /// checks the very bytes it writes, never a second copy the homeserver served.
     async fn open_env(&self, service: &str, env: &Envelope) -> Result<Opened> {
+        self.open_env_with(service, env, false).await
+    }
+
+    /// `past_mark`: a copy older than the newest seen is opened too, and nothing is noted.
+    async fn open_env_with(&self, service: &str, env: &Envelope, past_mark: bool) -> Result<Opened> {
         let path = Self::blob_path(service)?;
         let (data_key, sign_in) = spec::open_sign_in(&self.owner, &path, env, self.secret)?;
         let signed_by = match &env.writer {
@@ -707,7 +715,11 @@ impl<'a> Vault<'a> {
             }
             None => None,
         };
-        self.check_blob(service, env.epoch, sign_in.revision, signed_by.is_some())?;
+        match self.check_blob(service, env.epoch, sign_in.revision, signed_by.is_some()) {
+            // Older than the newest seen: let through for a take by hand only
+            Err(VaultStoreError::Stale { why, .. }) if past_mark && why == OLDER_THAN_SEEN => {}
+            other => other?,
+        }
         if signed_by.is_none() {
             // Unsigned is the migration window only: while some trusted device signs nothing.
             // One this node has seen sign counts as signing when its proof is missing now
@@ -730,7 +742,7 @@ impl<'a> Vault<'a> {
                 return Err(VaultStoreError::NotADevice(service.to_string()));
             }
         }
-        if signed_by.is_some() {
+        if signed_by.is_some() && !past_mark {
             self.note_blob(service, env.epoch, sign_in.revision, Some(env))?;
         }
         Ok(Opened {
@@ -738,6 +750,7 @@ impl<'a> Vault<'a> {
             epoch: env.epoch,
             recipients: env.recipients.iter().map(|r| r.client_key).collect(),
             signed_by,
+            envelope_hash: envelope_hash(env),
             data_key,
         })
     }
@@ -865,7 +878,9 @@ impl<'a> Vault<'a> {
         spec::sign_envelope(&self.owner, path, &mut env, me, &self.signing_key())?;
         let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
         self.put_locked(held, path, body).await?;
-        self.note_blob(service, epoch, revision, None)?;
+        // The node's own copy is the newest verified one: a device's older envelope replayed
+        // over it is never taken for the one verified before (`rotate_past`)
+        self.note_blob(service, epoch, revision, Some(&env))?;
         Ok(revision)
     }
 
@@ -2061,6 +2076,13 @@ impl Vault<'_> {
                         .is_some_and(|h| h == envelope_hash(&env));
                     if !by_device || !verified {
                         return Ok(Rotation::NotReadableHere);
+                    }
+                    // Verified once, but older than a copy seen since (replayed over the node's
+                    // own write): never written again from its content either
+                    match self.check_blob(service, env.epoch, sign_in.revision, true) {
+                        Ok(()) => {}
+                        Err(VaultStoreError::Stale { .. }) => return Ok(Rotation::NotReadableHere),
+                        Err(e) => return Err(e),
                     }
                 }
                 Err(VaultStoreError::Stale { .. }) => return Ok(Rotation::NotReadableHere),
