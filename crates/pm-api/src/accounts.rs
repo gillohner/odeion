@@ -41,6 +41,11 @@ pub(crate) const OWNER_SESSIONS_TOKEN: &str = "accounts.owner_sessions_token";
 /// The start of an owner's browser session token.
 pub const OWNER_PREFIX: &str = "pmo_";
 const ZONES: &str = "accounts.listener_zones";
+/// The hashes of this node's own sign-ins found in saved queues at a start whose cleaning didn't
+/// finish: still counted as this node's own when the queues are looked at again, after the
+/// sign-ins themselves have ended (`clean_saved_queues`). This node's only, never in a backup
+/// (`backup::NODE_OWN`): a hash of the API token is a way to guess a short one offline.
+pub(crate) const QUEUE_CLEANUP_PENDING: &str = "accounts.queue_cleanup_pending";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -640,16 +645,35 @@ fn listener_of(s: &NodeState, token: &str) -> Option<String> {
     crate::people::may_use_music(s, &key).then_some(key)
 }
 
-/// The zones a listener may play on: the owner's list, or every zone when none is set.
-pub fn listener_zones(s: &NodeState) -> Option<Vec<String>> {
-    s.library
+/// The zones a listener may play on: the owner's list, or every zone when none is set
+/// (`None`). A list that can't be read, or isn't a list of zone ids, is an error: listeners
+/// are then kept off every zone until the owner sets the list again, never let onto all of them.
+pub fn listener_zones(s: &NodeState) -> Result<Option<Vec<String>>, ApiError> {
+    let raw = s
+        .library
         .lock()
         .expect("library poisoned")
         .get_setting(ZONES)
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-        .filter(|v| !v.is_empty())
+        .map_err(|e| broken_zone_list(e.to_string()))?;
+    let Some(j) = raw else {
+        return Ok(None);
+    };
+    let zones: Vec<String> = serde_json::from_str(&j).map_err(|e| broken_zone_list(e.to_string()))?;
+    Ok(Some(zones).filter(|v| !v.is_empty()))
+}
+
+/// The listener zone list can't be used: said once in the log, and to the owner on every read.
+fn broken_zone_list(why: String) -> ApiError {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        tracing::warn!(
+            "the listener zone list can't be read, so listeners get no zone until it is set again: {why}"
+        )
+    });
+    ApiError::new(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("the listener zone list can't be read; set it again in People: {why}"),
+    )
 }
 
 /// Routes a listener may never use (reads included): the owner's settings and data.
@@ -776,11 +800,13 @@ fn under(path: &str, prefixes: &[&str]) -> bool {
         .any(|p| path == *p || path.starts_with(&format!("{p}/")))
 }
 
-/// Whether a listener may use this zone: the owner's list, or every zone when none is set.
+/// Whether a listener may use this zone: the owner's list, or every zone when none is set; none
+/// while the list can't be read.
 fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     match listener_zones(s) {
+        Err(_) => Some("the owner's zone list can't be read"),
         // A listen-along group is open when every zone it plays for is (presence.rs)
-        Some(allowed)
+        Ok(Some(allowed))
             if !allowed.iter().any(|z| z == zone)
                 && !s
                     .presence
@@ -916,7 +942,10 @@ pub(crate) async fn me(
     axum::Extension(c): axum::Extension<Caller>,
 ) -> ApiResult<Me> {
     Ok(Json(Me {
-        zones: (c.role == Role::Listener).then(|| listener_zones(&s)).flatten(),
+        // A list that can't be read opens no zone
+        zones: (c.role == Role::Listener)
+            .then(|| listener_zones(&s).unwrap_or(Some(Vec::new())))
+            .flatten(),
         role: c.role,
         key: c.key,
     }))
@@ -960,7 +989,7 @@ pub struct ListenerZones {
 /// `GET /v1/people/zones`: the zones open to listeners (empty = all).
 pub(crate) async fn get_zones(State(s): State<Arc<NodeState>>) -> ApiResult<ListenerZones> {
     Ok(Json(ListenerZones {
-        zones: listener_zones(&s).unwrap_or_default(),
+        zones: listener_zones(&s)?.unwrap_or_default(),
     }))
 }
 
@@ -1326,16 +1355,27 @@ pub struct CleanedQueues {
 ///
 /// What ends, and the API token's warning, is saved before any queue is cleaned: a failure on
 /// the way leaves the sign-ins in the queues, so the next start finds them and does it again
-/// (each step can be done twice).
+/// (each step can be done twice). The node's own sign-ins found are noted first of all: once
+/// they have ended they are no longer this node's own, and a link under another of the node's
+/// names loses only those, so the note keeps them known until every queue has been written. A
+/// token this node doesn't know isn't noted: its own links lose every token anyway, and noting it
+/// would strip the same token from a link to another server at the next start.
 pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut out = CleanedQueues::default();
     let origins = s.node_origins();
     let mut found: Vec<String> = Vec::new();
     let mut cleaned: Vec<(String, String)> = Vec::new();
     let lib = s.library.lock().expect("library poisoned");
-    // A link under another of the node's names loses the node's own sign-ins too
+    // A link under another of the node's names loses the node's own sign-ins too, and those
+    // a start before this one found and ended but didn't finish cleaning
     let known_set = KnownSet::load(&lib, s.token());
-    let known = |t: &str| known_set.has(t);
+    let pending: std::collections::BTreeSet<String> = lib
+        .get_setting(QUEUE_CLEANUP_PENDING)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    let known = |t: &str| known_set.has(t) || pending.contains(&hash(t));
     for (key, json) in lib.settings_with_prefix("queue.")? {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) else {
             continue;
@@ -1363,6 +1403,17 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
             out.items += n;
             cleaned.push((key, v.to_string()));
         }
+    }
+    // Before anything ends: the node's own that were found, so a start after a failure still
+    // knows them (a token that isn't the node's is dropped from its own links whatever it is)
+    let own: Vec<&String> = found.iter().filter(|t| known_set.has(t)).collect();
+    if !own.is_empty() {
+        let mut noted = pending.clone();
+        noted.extend(own.iter().map(|t| hash(t)));
+        lib.set_setting(
+            QUEUE_CLEANUP_PENDING,
+            &serde_json::to_string(&noted).expect("serializes"),
+        )?;
     }
     let api = s.token();
     let owners: Vec<String> = [OWNER_SESSIONS, DEVICE_SESSIONS]
@@ -1420,10 +1471,14 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     for key in &listener_keys {
         s.usage.revoke_listener(key);
     }
-    // Only now the queues lose the sign-ins: what they showed has ended
+    // Only now the queues lose the sign-ins: what they showed has ended; the note goes once
+    // every queue is written
     let lib = s.library.lock().expect("library poisoned");
     for (key, json) in &cleaned {
         lib.set_setting(key, json)?;
+    }
+    if !pending.is_empty() || !found.is_empty() {
+        lib.delete_setting(QUEUE_CLEANUP_PENDING)?;
     }
     Ok(out)
 }
