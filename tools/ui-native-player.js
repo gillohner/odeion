@@ -37,7 +37,7 @@ const FAKE_APP = ({ nativePlayer, len, slow }) => {
   const play0 = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () { window.__audioPlays.push(this.src); return play0.call(this); };
   const fmt = { kind: 'pcm', rate_hz: 44100, bits: 16, channels: 2 };
-  const s = window.__app = { url: null, transport: 'stopped', position_ms: 0, duration_ms: null, ended: 0, advanced: 0, error: null, refused: null, taken: false, now_playing: null, output: 'cpal:Speaker or headphones', device: null, ahead: null };
+  const s = window.__app = { url: null, transport: 'stopped', position_ms: 0, duration_ms: null, ended: 0, advanced: 0, error: null, refused: null, taken: false, broke: false, now_playing: null, output: 'cpal:Speaker or headphones', device: null, ahead: null };
   const send = () => { const { ahead, ...st } = s; window.dispatchEvent(new CustomEvent('pmdesktop:native', { detail: JSON.parse(JSON.stringify(st)) })); };
   window.__send = send;
   const path = { stages: [{ name: 'decode', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }, { name: 'output', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }] };
@@ -63,7 +63,7 @@ const FAKE_APP = ({ nativePlayer, len, slow }) => {
       s.ahead = args.ahead || null; start(args.url, args.atMs || 0); return null;
     }
     if (cmd === 'native_ahead') { s.ahead = args.url || null; return null; }
-    if (cmd === 'native_play') { if (s.transport !== 'playing') { s.transport = 'playing'; s.taken = false; s.error = null; send(); } return null; }
+    if (cmd === 'native_play') { if (window.__failPlay) throw { refused: false, overtaken: false, message: 'HTTP 503' }; if (s.transport !== 'playing') { s.transport = 'playing'; s.taken = false; s.broke = false; s.error = null; send(); } return null; }
     if (cmd === 'native_pause') { if (s.transport === 'playing') { s.transport = 'paused'; send(); } return null; }
     if (cmd === 'native_seek') { s.position_ms = args.ms; send(); return null; }
     if (cmd === 'native_stop') { Object.assign(s, { url: null, transport: 'stopped', position_ms: 0, now_playing: null, ahead: null }); send(); return null; }
@@ -196,6 +196,28 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check(ah && ah[1].ahead === fileUrl(1), `${at}: repeat one hands the same song ahead at once (${JSON.stringify(ah && ah[1].ahead)})`);
       await sleep(2200);
       check((await calls(p, 'native_load')).length === loads0 && !(await now(p)).paused, `${at}: and goes on with it without opening it again`);
+      // A DAC unplugged (paused with the reason, no break): said, and not reopened
+      await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
+      let before = (await calls(p, 'native_load')).length;
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', error: 'FiiO KA17 was unplugged: paused' }); window.__send(); }); await sleep(2200);
+      const bar1 = await p.evaluate(() => document.querySelector('#np').innerText);
+      const after = (await calls(p, 'native_load')).length;
+      check(after === before && /unplugged/.test(bar1), `${at}: a DAC gone: paused with the reason, not reopened (${before} -> ${after} loads; ${JSON.stringify(bar1.slice(0, 120))})`);
+      // A break mid-song: opened again where it broke (the page's mid-song retry)
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'playing', position_ms: 800 }); window.__send(); }); await sleep(150);
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 800, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(2200);
+      const again = (await calls(p, 'native_load')).pop();
+      check(again && again[1].atMs >= 700, `${at}: a break mid-song is opened again where it broke (${JSON.stringify(again && again[1].atMs)})`);
+      // Play after the node took the output, the node out of reach: said, and tried once more
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', taken: true, broke: false, error: "the node plays on this device's zone now" }); window.__send(); }); await sleep(300);
+      before = (await calls(p, 'native_load')).length;
+      await p.evaluate(() => { window.__failPlay = true; document.querySelector('#toggle').click(); }); await sleep(500);
+      const t2 = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
+      check(/did not start: HTTP 503/.test(t2) && (await now(p)).paused, `${at}: play failing after the node took it: said, not shown playing (${t2})`);
+      await p.evaluate(() => { window.__failPlay = false; }); await sleep(2200);
+      check((await calls(p, 'native_load')).length > before, `${at}: and tried once more`);
       check(!r.state.errors.length, `${at}: review checks: no page errors (${r.state.errors.join(' | ')})`);
       await r.context.close();
       // A restored song opens where it was

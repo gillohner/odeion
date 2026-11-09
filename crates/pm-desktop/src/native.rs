@@ -64,7 +64,7 @@ static PLAYING: AtomicBool = AtomicBool::new(false);
 /// Whether the app plays the page's music itself on this platform (Android only for now; the
 /// desktop app's page keeps `<audio>`).
 pub fn on() -> bool {
-    cfg!(target_os = "android")
+    cfg!(target_os = "android") && PLAYER.get().is_some()
 }
 
 /// The player on the endpoint's output (the phone has one), with the endpoint's owner.
@@ -230,6 +230,16 @@ fn failed(message: impl Into<String>) -> LoadError {
     }
 }
 
+/// Not for the app's player at all (it is off, or the URL isn't the page's node's): the page
+/// plays it itself.
+fn not_here(message: impl Into<String>) -> LoadError {
+    LoadError {
+        refused: true,
+        overtaken: false,
+        message: message.into(),
+    }
+}
+
 /// Play `url` from `at_ms`, `ahead` after it. `Err` with `refused`: something the app can't play
 /// itself (the page plays it); else why it didn't start (the page tries again).
 #[tauri::command]
@@ -239,9 +249,9 @@ pub async fn native_load(
     at_ms: Option<u64>,
     ahead: Option<String>,
 ) -> Result<(), LoadError> {
-    checked(&url, &webview).map_err(failed)?;
+    checked(&url, &webview).map_err(not_here)?;
     let ahead = ahead.filter(|a| checked(a, &webview).is_ok());
-    let p = player().map_err(failed)?.clone();
+    let p = player().map_err(not_here)?.clone();
     tauri::async_runtime::spawn_blocking(move || p.load(&url, at_ms.unwrap_or(0), ahead.as_deref()))
         .await
         .map_err(|e| failed(e.to_string()))?
@@ -348,6 +358,7 @@ mod tests {
             error: None,
             refused: None,
             taken: false,
+            broke: false,
             now_playing: None,
             output: pm_app_player::OutputId::new("cpal", "Speaker or headphones"),
             device: None,
@@ -373,6 +384,7 @@ mod tests {
             error: None,
             refused: None,
             taken: false,
+            broke: false,
             now_playing: Some(pm_app_player::Playing {
                 source_format: f,
                 output_format: f,
