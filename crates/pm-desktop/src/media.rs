@@ -13,7 +13,8 @@
 //! One volume (odeion-control-consistency): a network zone's session volume is the zone's own (the
 //! same `POST /zones/{id}/volume` the slider uses; the node's read-back is what it shows); the
 //! phone's own zone and the WebView player use Android's media volume, which the keys move
-//! themselves (a local session); in Exclusive USB the phone's zone is the DAC's own volume (dB).
+//! themselves (a local session); in Exclusive USB the native player and phone's zone use the
+//! DAC's own volume (dB), or fixed volume when the output provides no attenuation.
 
 // The runtime that uses all of it (`media_live`) is Android's; elsewhere only the tests build this
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -295,6 +296,7 @@ pub struct PagePlayer {
     pub position_ms: u64,
     pub duration_ms: u64,
     pub paused: bool,
+    pub native: bool,
     pub handlers: Vec<String>,
 }
 
@@ -331,6 +333,67 @@ pub fn session_for_page(p: &PagePlayer, zone_name: &str) -> Session {
         volume: SessionVolume::Local,
         art: p.art.clone(),
     }
+}
+
+/// Native timing is authoritative even when the DOM audio element remains paused, or the
+/// WebView is suspended. Metadata and next/previous handlers still belong to the page's queue.
+#[derive(Debug, Clone, Copy)]
+pub struct NativePlayback {
+    pub playing: bool,
+    pub position_ms: u64,
+    pub duration_ms: u64,
+}
+
+pub fn session_for_native(p: &PagePlayer, n: NativePlayback, volume: &Value) -> Session {
+    let mut page = p.clone();
+    page.paused = !n.playing;
+    page.position_ms = n.position_ms;
+    page.duration_ms = n.duration_ms;
+    let mut s = session_for_page(&page, "This phone");
+    s.can_seek = s.active && n.duration_ms > 0;
+    s.volume = match volume.get("kind").and_then(Value::as_str) {
+        Some("percent") => SessionVolume::Local,
+        Some("db") => Scale::from_caps(volume)
+            .and_then(|scale| {
+                let level = serde_json::json!({"db": volume.get("value")?});
+                Some(SessionVolume::Remote {
+                    max: scale.steps(),
+                    current: scale.step_of(&level)?,
+                })
+            })
+            .unwrap_or(SessionVolume::Fixed),
+        _ => SessionVolume::Fixed,
+    };
+    s
+}
+
+/// One read-back shape for the native slider and session; no volume means no slider.
+pub fn phone_volume_value(kind: Option<pm_model::VolumeKind>, level: Option<pm_model::ZoneVolume>) -> Value {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let (kind, min, max, step, value) = match kind {
+        Some(VolumeKind::Percent) => (
+            "percent",
+            0.0,
+            100.0,
+            1.0,
+            level.and_then(|v| match v.level {
+                VolumeLevel::Percent(p) => Some(f32::from(p)),
+                _ => None,
+            }),
+        ),
+        Some(VolumeKind::Db { min, max, step }) => (
+            "db",
+            min,
+            max,
+            step,
+            level.and_then(|v| match v.level {
+                VolumeLevel::Db(db) => Some(db),
+                _ => None,
+            }),
+        ),
+        _ => return Value::Null,
+    };
+    serde_json::json!({"kind":kind, "min":min, "max":max, "step":step, "value":value, "muted":level.is_some_and(|v|v.muted)})
 }
 
 /// A button of the session (the notification, the lock screen, a headset).
@@ -457,6 +520,8 @@ pub enum PageMsg {
     Controlling(String),
     /// `OdeionAndroid.setMediaVolume(percent)`: the WebView player's slider.
     SetMediaVolume(u8),
+    /// The native player's actual output volume: STREAM_MUSIC or the DAC feature unit.
+    SetPhoneVolume(pm_model::Volume),
     /// The page's Media Session API, mirrored (the WebView player).
     Player(PagePlayer),
 }
@@ -480,6 +545,24 @@ pub fn parse_page(data: &str) -> Option<PageMsg> {
             (z.len() <= ZONE_MAX && !z.chars().any(char::is_control)).then(|| PageMsg::Controlling(z.into()))
         }
         "volume" => {
+            if v.get("native").and_then(Value::as_bool) == Some(true) {
+                use pm_model::Volume;
+                let value = if let Some(m) = v.get("mute").and_then(Value::as_bool) {
+                    Volume::Mute(m)
+                } else if let Some(db) = v.get("db").and_then(Value::as_f64) {
+                    if !db.is_finite() || !(-200.0..=60.0).contains(&db) {
+                        return None;
+                    }
+                    Volume::Db(db as f32)
+                } else {
+                    let p = v.get("percent")?.as_f64()?;
+                    if !p.is_finite() {
+                        return None;
+                    }
+                    Volume::Percent(p.round().clamp(0.0, 100.0) as u8)
+                };
+                return Some(PageMsg::SetPhoneVolume(value));
+            }
             let p = v.get("percent")?.as_f64()?;
             p.is_finite()
                 .then(|| PageMsg::SetMediaVolume(p.round().clamp(0.0, 100.0) as u8))
@@ -517,6 +600,7 @@ pub fn parse_page(data: &str) -> Option<PageMsg> {
                 position_ms: secs("pos"),
                 duration_ms: secs("dur"),
                 paused: v.get("paused").and_then(Value::as_bool).unwrap_or(true),
+                native: v.get("native").and_then(Value::as_bool).unwrap_or(false),
                 handlers,
             }))
         }
@@ -574,12 +658,12 @@ pub fn focus_action(change: i64, ducks: bool) -> FocusAction {
 
 /// The page's script for the app's side of the bridge, run before every page (the app's init
 /// script, on Android only): `window.OdeionAndroid` with exactly `controlling(zoneId)` and
-/// `setMediaVolume(percent)`, over the app's message port (`OdeionAndroidPort`, which Android puts
+/// `setMediaVolume(value, kind?)`, over the app's message port (`OdeionAndroidPort`, which Android puts
 /// in the main frame of the node's page); and the page's own Media Session API mirrored to the
 /// app (metadata, state, which actions it handles, the `<audio>` element's play, pause, seek and
-/// duration), as Chrome does for a site. The app's buttons come back as `pmdesktop:media` and call
+/// duration, or native engine timing), as Chrome does for a site. The app's buttons come back as `pmdesktop:media` and call
 /// the page's own action handlers. Nothing else crosses.
-pub const BRIDGE_JS: &str = r#"(function(){if(window.OdeionAndroid)return;var post=function(m){try{var p=window.OdeionAndroidPort;if(p)p.postMessage(JSON.stringify(m));}catch(e){}};window.OdeionAndroid=Object.freeze({controlling:function(z){post({t:'controlling',zone:String(z==null?'':z)});},setMediaVolume:function(p){post({t:'volume',percent:Number(p)});}});var ms=navigator.mediaSession;if(!ms||typeof MediaSession!=='function')return;var meta=null,st='none',hs={},timer=null;var audio=function(){return document.querySelector('audio#browser')||document.querySelector('audio');};var send=function(){timer=null;var a=audio();post({t:'session',meta:meta,state:st,pos:a?a.currentTime:0,dur:a&&isFinite(a.duration)?a.duration:0,paused:a?a.paused:true,handlers:Object.keys(hs)});};var soon=function(){if(!timer)timer=setTimeout(send,50);};var P=MediaSession.prototype,md=Object.getOwnPropertyDescriptor(P,'metadata'),sd=Object.getOwnPropertyDescriptor(P,'playbackState'),sa=P.setActionHandler;try{if(md&&md.set)Object.defineProperty(ms,'metadata',{configurable:true,get:function(){return md.get.call(ms);},set:function(m){md.set.call(ms,m);meta=m?{title:m.title||'',artist:m.artist||'',album:m.album||'',artwork:(m.artwork||[]).map(function(x){return x&&x.src;})}:null;soon();}});if(sd&&sd.set)Object.defineProperty(ms,'playbackState',{configurable:true,get:function(){return sd.get.call(ms);},set:function(s){sd.set.call(ms,s);st=String(s);soon();}});if(sa)ms.setActionHandler=function(a,f){sa.call(ms,a,f);if(f)hs[a]=f;else delete hs[a];soon();};}catch(e){}['play','pause','seeked','durationchange','ended','emptied'].forEach(function(n){document.addEventListener(n,function(e){if(e.target&&e.target.tagName==='AUDIO')soon();},true);});window.addEventListener('pmdesktop:media',function(e){var d=e.detail||{},h=hs[d.action];if(h)try{h(d.seekTime!=null?{action:d.action,seekTime:d.seekTime}:{action:d.action});}catch(_){}});})();"#;
+pub const BRIDGE_JS: &str = r#"(function(){if(window.OdeionAndroid)return;var post=function(m){try{var p=window.OdeionAndroidPort;if(p)p.postMessage(JSON.stringify(m));}catch(e){}};window.OdeionAndroid=Object.freeze({controlling:function(z){post({t:'controlling',zone:String(z==null?'':z)});},setMediaVolume:function(p,k){var m={t:'volume'};if(k){m.native=true;m[k]=k==='mute'?!!p:Number(p);}else m.percent=Number(p);post(m);}});var ms=navigator.mediaSession;if(!ms||typeof MediaSession!=='function')return;var meta=null,st='none',hs={},timer=null,ns=null;var audio=function(){return document.querySelector('audio#browser')||document.querySelector('audio');};var send=function(){timer=null;var a=audio();post({t:'session',meta:meta,native:!!ns,state:ns?(ns.transport==='playing'?'playing':'paused'):st,pos:ns?ns.position_ms/1000:(a?a.currentTime:0),dur:ns?(ns.duration_ms||0)/1000:(a&&isFinite(a.duration)?a.duration:0),paused:ns?ns.transport!=='playing':(a?a.paused:true),handlers:Object.keys(hs)});};var soon=function(){if(!timer)timer=setTimeout(send,50);};var P=MediaSession.prototype,md=Object.getOwnPropertyDescriptor(P,'metadata'),sd=Object.getOwnPropertyDescriptor(P,'playbackState'),sa=P.setActionHandler;try{if(md&&md.set)Object.defineProperty(ms,'metadata',{configurable:true,get:function(){return md.get.call(ms);},set:function(m){md.set.call(ms,m);meta=m?{title:m.title||'',artist:m.artist||'',album:m.album||'',artwork:(m.artwork||[]).map(function(x){return x&&x.src;})}:null;soon();}});if(sd&&sd.set)Object.defineProperty(ms,'playbackState',{configurable:true,get:function(){return sd.get.call(ms);},set:function(s){sd.set.call(ms,s);st=String(s);soon();}});if(sa)ms.setActionHandler=function(a,f){sa.call(ms,a,f);if(f)hs[a]=f;else delete hs[a];soon();};}catch(e){}['play','pause','seeked','durationchange','ended','emptied'].forEach(function(n){document.addEventListener(n,function(e){if(e.target&&e.target.tagName==='AUDIO')soon();},true);});window.addEventListener('pmdesktop:native',function(e){var n=e.detail;ns=n&&n.url&&!n.refused?n:null;soon();});window.addEventListener('pmdesktop:media',function(e){var d=e.detail||{},h=hs[d.action];if(h)try{h(d.seekTime!=null?{action:d.action,seekTime:d.seekTime}:{action:d.action});}catch(_){}});})();"#;
 
 /// `{base}/v1/zones/{id}/{what}`, the id as one path segment.
 pub fn zone_url(base: &str, id: &str, what: &str) -> Option<String> {
@@ -609,6 +693,55 @@ pub fn page_action_script(action: &str, seek: Option<f64>) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn native_timing_overrides_paused_dom_audio_in_the_single_session() {
+        let p = PagePlayer {
+            title: "Native song".into(),
+            paused: true,
+            handlers: vec!["nexttrack".into(), "previoustrack".into(), "seekto".into()],
+            ..Default::default()
+        };
+        let n = NativePlayback {
+            playing: true,
+            position_ms: 42_000,
+            duration_ms: 180_000,
+        };
+        let volume = phone_volume_value(
+            Some(pm_model::VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            Some(pm_model::ZoneVolume {
+                level: pm_model::VolumeLevel::Db(-24.0),
+                muted: false,
+            }),
+        );
+        let s = session_for_native(&p, n, &volume);
+        assert_eq!(
+            (s.state, s.position_ms, s.duration_ms, s.speed),
+            ("playing", 42_000, 180_000, 1.0)
+        );
+        assert!(s.active && s.can_next && s.can_prev && s.can_seek);
+        assert_eq!(s.volume, SessionVolume::Remote { max: 60, current: 36 });
+        let paused = session_for_native(&p, NativePlayback { playing: false, ..n }, &Value::Null);
+        assert_eq!(
+            (paused.state, paused.speed, paused.position_ms),
+            ("paused", 0.0, 42_000)
+        );
+        assert_eq!(paused.volume, SessionVolume::Fixed);
+        assert_eq!(phone_volume_value(None, None), Value::Null);
+        assert_eq!(
+            parse_page(r#"{"t":"volume","native":true,"db":-24}"#),
+            Some(PageMsg::SetPhoneVolume(pm_model::Volume::Db(-24.0)))
+        );
+        assert_eq!(
+            parse_page(r#"{"t":"volume","native":true,"mute":true}"#),
+            Some(PageMsg::SetPhoneVolume(pm_model::Volume::Mute(true)))
+        );
+        assert_eq!(parse_page(r#"{"t":"volume","native":true,"db":1e99}"#), None);
+    }
 
     fn zone(transport: &str, volume: Value) -> Value {
         json!({

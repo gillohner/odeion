@@ -123,8 +123,10 @@ struct Page {
     generation: u64,
     /// A load is opening its URL (the zone still holds the previous song).
     loading: bool,
-    /// Pause pressed while a load opened: the song starts paused.
+    /// The listener/focus policy wants a pause (also holds a load still opening its URL).
     hold: bool,
+    /// A transient focus loss may resume only until the next listener transport command.
+    focus_resume: bool,
     /// The current song's stream broke (a decode error): the zone's next TrackEnded is no end.
     breaking: bool,
     /// Where the current song was last heard to be (the zone may already name the next one when
@@ -302,8 +304,12 @@ struct Inner {
     page: Mutex<Page>,
     notify: Mutex<Option<Notify>>,
     last: Mutex<Option<(Status, Instant)>>,
+    /// Serialize snapshots and delivery: an older callback cannot replace newer session state.
+    delivery: Mutex<()>,
     /// The USB DAC the player paused on (see [`same_dac`]); a stop or a failed open forgets it.
     paused_dac: Arc<Mutex<Option<String>>>,
+    /// Automatic focus resume cannot preempt an owner who used the output since the pause.
+    resume_owner: Arc<Mutex<Option<u64>>>,
 }
 
 /// The app's own player on one output. Cloning shares it.
@@ -325,7 +331,9 @@ impl AppPlayer {
                 page: Mutex::default(),
                 notify: Mutex::default(),
                 last: Mutex::default(),
+                delivery: Mutex::default(),
                 paused_dac: Arc::default(),
+                resume_owner: Arc::default(),
             }),
         }
     }
@@ -368,6 +376,7 @@ impl AppPlayer {
         let owned: Arc<dyn Output> = Arc::new(Owned {
             inner: self.inner.output.clone(),
             paused_dac: self.inner.paused_dac.clone(),
+            resume_owner: self.inner.resume_owner.clone(),
             owner: self.inner.owner.clone(),
             player: weak.clone(),
         });
@@ -390,6 +399,8 @@ impl AppPlayer {
     pub fn load(&self, url: &str, at_ms: u64, ahead: Option<&str>) -> Result<(), LoadError> {
         let mine = {
             let mut p = self.page();
+            p.focus_resume = false;
+            *self.inner.resume_owner.lock().unwrap_or_else(|e| e.into_inner()) = None;
             p.generation += 1;
             p.loading = true;
             p.hold = false;
@@ -457,7 +468,7 @@ impl AppPlayer {
         if at_ms > 1_000 {
             zone.seek_ms(at_ms);
         }
-        if std::mem::take(&mut p.hold) {
+        if p.hold {
             zone.pause();
         }
         drop(p);
@@ -495,6 +506,8 @@ impl AppPlayer {
         // under way starts it; the old song isn't resumed meanwhile)
         {
             let mut p = self.page();
+            p.focus_resume = false;
+            *self.inner.resume_owner.lock().unwrap_or_else(|e| e.into_inner()) = None;
             p.hold = false;
             if p.loading {
                 return Ok(());
@@ -530,14 +543,70 @@ impl AppPlayer {
     }
 
     pub fn pause(&self) {
-        {
-            let mut p = self.page();
-            if p.loading {
-                p.hold = true;
-            }
-        }
+        let mut p = self.page();
+        p.focus_resume = false;
+        p.hold = true;
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             z.pause();
+        }
+    }
+
+    /// Android's focus/noisy policy uses the engine directly, even while the WebView sleeps.
+    pub fn pause_for_focus(&self, transient: bool) {
+        let mut p = self.page();
+        let playing = self
+            .zone_state()
+            .is_some_and(|s| s.transport == Transport::Playing);
+        p.focus_resume = transient
+            && (p.focus_resume || (!p.hold && (playing || p.loading)))
+            && (p.url.is_some() || p.loading)
+            && p.taken_at.is_none()
+            && p.broke_at.is_none()
+            && p.error.is_none();
+        p.hold = true;
+        let mut guard = self.inner.resume_owner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(self.inner.owner.generation(&self.inner.output.id()));
+        }
+        drop(guard);
+        if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            z.pause();
+        }
+    }
+
+    pub fn focus_pending(&self) -> bool {
+        self.page().focus_resume
+    }
+
+    pub fn cancel_focus_resume(&self) {
+        self.page().focus_resume = false;
+    }
+
+    pub fn resume_after_focus(&self) {
+        let mut p = self.page();
+        if !std::mem::take(&mut p.focus_resume)
+            || p.taken_at.is_some()
+            || p.broke_at.is_some()
+            || p.error.is_some()
+        {
+            return;
+        }
+        let generation = *self.inner.resume_owner.lock().unwrap_or_else(|e| e.into_inner());
+        if generation != Some(self.inner.owner.generation(&self.inner.output.id())) {
+            return;
+        }
+        p.hold = false;
+        if p.loading {
+            return;
+        }
+        if p.url.is_none() {
+            return;
+        }
+        p.resuming = Some(p.heard_at);
+        // Queue under the same lock as listener commands. A later Pause/Seek/Stop revokes
+        // entitlement before a later focus gain, and its command stays after this Play.
+        if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            z.play();
         }
     }
 
@@ -546,6 +615,7 @@ impl AppPlayer {
         let parked = {
             let mut g = self.page();
             let p = &mut *g;
+            p.focus_resume = false;
             match p.taken_at.as_mut().or(p.broke_at.as_mut()) {
                 Some(at) => {
                     *at = ms;
@@ -569,6 +639,7 @@ impl AppPlayer {
         {
             let mut p = self.page();
             p.generation += 1;
+            p.focus_resume = false;
             p.loading = false;
             p.hold = false;
             p.want_ahead = None;
@@ -597,6 +668,7 @@ impl AppPlayer {
                 return;
             }
             p.taken_at = Some(at);
+            p.focus_resume = false;
             p.error = Some(TAKEN_BY_NODE.into());
         }
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
@@ -607,6 +679,7 @@ impl AppPlayer {
 
     /// Tell the page, now (`urgent`) or when the position alone moved and it is time.
     fn changed(&self, urgent: bool) {
+        let _delivery = self.inner.delivery.lock().unwrap_or_else(|e| e.into_inner());
         let st = self.status();
         let mut last = self.inner.last.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((was, at)) = last.as_ref() {
@@ -725,6 +798,7 @@ struct Owned {
     inner: Arc<dyn Output>,
     /// The USB DAC the player paused on, until the next open or resume checks it is still there.
     paused_dac: Arc<Mutex<Option<String>>>,
+    resume_owner: Arc<Mutex<Option<u64>>>,
     owner: OutputOwner,
     player: Weak<Inner>,
 }
@@ -768,10 +842,19 @@ impl Output for Owned {
                 }
             })
         };
-        let claim = self
-            .owner
-            .take(&self.id(), Holder::App, stop, TAKE_WAIT)
-            .map_err(|why| SinkError::Unavailable(self.id(), why))?;
+        let automatic = *self.resume_owner.lock().unwrap_or_else(|e| e.into_inner());
+        let claim = match automatic {
+            Some(g) => self.owner.take_unchanged(&self.id(), Holder::App, stop, g),
+            None => self.owner.take(&self.id(), Holder::App, stop, TAKE_WAIT),
+        }
+        .map_err(|why| SinkError::Unavailable(self.id(), why))?;
+        {
+            let (previous, granted) = claim.generations();
+            let mut guard = self.resume_owner.lock().unwrap_or_else(|e| e.into_inner());
+            if *guard == Some(previous) {
+                *guard = Some(granted);
+            }
+        }
         let sink = self.inner.open(fmt).await?;
         Ok(Box::new(OwnedSink {
             inner: Some(sink),
@@ -1072,6 +1155,78 @@ mod tests {
         assert_eq!(st.url, None);
     }
 
+    #[test]
+    fn focus_resume_needs_entitlement_and_the_same_output_owner() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 6, 1);
+        let (url, _) = serve(a, "audio/wav", Mode::default());
+        let out = Arc::new(NullOutput::realtime());
+        let owner = OutputOwner::new();
+        let p = AppPlayer::new(out.clone(), owner.clone());
+        p.load(&url, 0, None).unwrap();
+        wait(&p, "playing", |s| s.transport == Transport::Playing);
+        p.pause_for_focus(true);
+        wait(&p, "focus paused", |s| s.transport == Transport::Paused);
+        assert!(p.focus_pending());
+        p.resume_after_focus();
+        wait(&p, "focus resumed", |s| s.transport == Transport::Playing);
+        assert!(!p.focus_pending());
+        for user_action in [0, 1, 2] {
+            p.pause_for_focus(true);
+            wait(&p, "focus paused again", |s| s.transport == Transport::Paused);
+            match user_action {
+                0 => p.pause(),
+                1 => p.seek(500),
+                _ => p.cancel_focus_resume(),
+            }
+            assert!(!p.focus_pending());
+            p.resume_after_focus();
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(p.status().transport, Transport::Paused);
+            p.play().unwrap();
+            wait(&p, "explicit play", |s| s.transport == Transport::Playing);
+        }
+        p.pause_for_focus(true);
+        wait(&p, "paused before another owner", |s| {
+            s.transport == Transport::Paused
+        });
+        let node = owner
+            .take(
+                &out.id(),
+                Holder::Node,
+                Arc::new(|| panic!("automatic resume stopped the node")),
+                Duration::ZERO,
+            )
+            .unwrap();
+        drop(node);
+        p.resume_after_focus();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            p.status().transport,
+            Transport::Paused,
+            "even a released intervening owner revokes resume"
+        );
+        p.play().unwrap();
+        wait(&p, "explicit play after takeover", |s| {
+            s.transport == Transport::Playing
+        });
+        p.pause_for_focus(false);
+        wait(&p, "permanent/noisy pause", |s| s.transport == Transport::Paused);
+        p.resume_after_focus();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(p.status().transport, Transport::Paused);
+        p.play().unwrap();
+        wait(&p, "playing before manual pause race", |s| {
+            s.transport == Transport::Playing
+        });
+        p.pause();
+        // The zone may not have processed Pause yet; its old Playing state cannot re-arm it.
+        p.pause_for_focus(true);
+        assert!(!p.focus_pending());
+        p.resume_after_focus();
+        wait(&p, "manual pause stays", |s| s.transport == Transport::Paused);
+        p.stop();
+    }
+
     /// Paused, the device's stream closes (nothing open for Android to count as music); play
     /// opens it again and goes on where it paused.
     #[test]
@@ -1110,6 +1265,30 @@ mod tests {
     struct DacOut {
         inner: NullOutput,
         dac: Mutex<Option<String>>,
+    }
+
+    #[test]
+    fn automatic_focus_resume_never_falls_back_after_paused_dac_unplug() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 6, 1);
+        let (url, _) = serve(a, "audio/wav", Mode::default());
+        let out = Arc::new(DacOut {
+            inner: NullOutput::realtime(),
+            dac: Mutex::new(Some("FiiO KA17".into())),
+        });
+        let p = AppPlayer::new(out.clone(), OutputOwner::new());
+        p.load(&url, 0, None).unwrap();
+        wait(&p, "playing on DAC", |s| s.transport == Transport::Playing);
+        p.pause_for_focus(true);
+        wait(&p, "paused on DAC", |s| s.transport == Transport::Paused);
+        *out.dac.lock().unwrap() = None;
+        p.resume_after_focus();
+        let s = wait(&p, "DAC refusal", |s| {
+            s.error.as_deref().is_some_and(|e| e.contains("no longer where"))
+        });
+        assert_eq!(s.transport, Transport::Paused);
+        assert!(!s.broke && !p.focus_pending());
+        assert_eq!(out.inner.opens_total(), 1, "never opened the phone speaker");
+        p.stop();
     }
 
     #[async_trait::async_trait]

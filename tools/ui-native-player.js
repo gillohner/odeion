@@ -17,6 +17,7 @@
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const fs = require('node:fs'); const path = require('node:path');
 const fx = require('./ui-fixture');
+const MIRROR = fs.readFileSync(path.join(path.resolve(process.argv[2] || '.'), 'crates/pm-desktop/src/media.rs'), 'utf8').match(/pub const BRIDGE_JS: &str = r#"([\s\S]*?)"#;/)[1];
 const SHOTS = path.resolve(process.argv[3] || path.join(process.env.TMPDIR || '.', 'native-player-shots'));
 fs.mkdirSync(SHOTS, { recursive: true });
 let failed = 0;
@@ -79,6 +80,10 @@ async function open(browser, w, app) {
   const run = await fx.create(browser, w, { tracks, fixtures: { '/zones': { body: [ownZone] }, '/outputs': { body: [{ id: OUT, name: ownZone.name, protocol: 'net', caps: { pcm_rates: [44100, 48000] } }] } } });
   if (app) await run.context.addInitScript(FAKE_APP, app);
   else await run.context.addInitScript(() => { window.__calls = []; window.__audioPlays = []; const p0 = HTMLMediaElement.prototype.play; HTMLMediaElement.prototype.play = function () { window.__audioPlays.push(this.src); return p0.call(this); }; });
+  if (app && app.mirror) {
+    await run.context.addInitScript(() => { window.__media = []; window.OdeionAndroidPort = { postMessage: (m) => window.__media.push(JSON.parse(m)) }; });
+    await run.context.addInitScript(MIRROR);
+  }
   await fx.go(run.page, '/');
   await run.page.waitForFunction(() => !!window.pmPlayer);
   await sleep(400);
@@ -99,6 +104,35 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
   const browser = await chromium.launch();
   for (const w of [390, 1280]) {
     const at = `${w}px`;
+    {
+      const r = await open(browser, w, { nativePlayer: true, len: 60000, mirror: true });
+      const p = r.page;
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(3)); await sleep(500);
+      let mirror = await p.evaluate(() => window.__media.filter((m) => m.t === 'session').at(-1));
+      check(await p.evaluate(() => document.querySelector('#browser').paused) && mirror && !mirror.paused && mirror.native && mirror.state === 'playing' && mirror.pos > 0 && mirror.dur === 60, `${at}: the actual bridge mirrors native timing while DOM audio stays paused (${JSON.stringify(mirror)})`);
+      await p.evaluate(() => window.dispatchEvent(new CustomEvent('pmdesktop:media', { detail: { action: 'seekto', seekTime: 12 } }))); await sleep(200);
+      check((await calls(p, 'native_seek')).some((c) => c[1].ms === 12000), `${at}: the session seek reaches the native engine`);
+      await p.evaluate(() => window.dispatchEvent(new CustomEvent('pmdesktop:media', { detail: { action: 'pause' } }))); await sleep(200);
+      mirror = await p.evaluate(() => window.__media.filter((m) => m.t === 'session').at(-1));
+      check(mirror.paused && mirror.state === 'paused' && (await calls(p, 'native_pause')).length > 0, `${at}: session pause reaches the engine and mirror`);
+      await p.evaluate(() => window.dispatchEvent(new CustomEvent('pmdesktop:media', { detail: { action: 'nexttrack' } }))); await sleep(300);
+      check((await now(p)).index === 1 && (await calls(p, 'native_load')).at(-1)[1].url === fileUrl(2), `${at}: session Next retains the page queue and native decoder`);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(150);
+      r.state.fixtures['/outputs'] = { body: [{ id: OUT, name: ownZone.name, protocol: 'net', caps: { pcm_rates: [44100,48000] }, device: KA17 }] };
+      await p.evaluate(() => window.dispatchEvent(new Event('pmdesktop:output'))); await sleep(400);
+      check(await p.evaluate(() => (localStorage.getItem('pm.zone') || 'browser') === 'browser'), `${at}: paused native DAC arrival keeps This phone selected`);
+      await p.evaluate(() => { window.pmDesktop.phoneVolume = { kind: 'db', min: -60, max: 0, step: 1, value: -24, muted: false }; window.dispatchEvent(new Event('pmdesktop:mediavolume')); });
+      const volume = await p.evaluate(() => { const s = document.querySelector('#vol'); return { min: +s.min, max: +s.max, value: +s.value }; });
+      check(volume.min === -60 && volume.max === 0 && volume.value === -24, `${at}: native slider reads the DAC dB level (${JSON.stringify(volume)})`);
+      await p.evaluate(() => { const s = document.querySelector('#vol'); s.value = '-30'; s.dispatchEvent(new Event('change', { bubbles: true })); });
+      check(await p.evaluate(() => window.__media.some((m) => m.t === 'volume' && m.native && m.db === -30) && document.querySelector('#browser').volume === 1), `${at}: native slider sends actual DAC volume, with no PCM gain`);
+      await p.evaluate(() => { window.pmDesktop.phoneVolume = null; window.dispatchEvent(new Event('pmdesktop:mediavolume')); });
+      check(await p.evaluate(() => document.querySelector('.player').classList.contains('novol')), `${at}: fixed native output has no ineffective STREAM_MUSIC slider`);
+      check(!r.state.hits.some((h) => /\/zones\/.*\/volume/.test(h.v || '')), `${at}: native volume does not set a node zone`);
+      check(!r.state.errors.length, `${at}: combined media/native bridge has no page errors (${r.state.errors.join(' | ')})`);
+      await p.screenshot({ path: path.join(SHOTS, `native-media-${w}.png`) });
+      await r.context.close();
+    }
     // The app with its player; each song lasts 1.5 s here
     const run = await open(browser, w, { nativePlayer: true, len: 1500 });
     const { page, state } = run;

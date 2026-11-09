@@ -6,15 +6,17 @@
 //!   fetched here (the node's own with the app's token; another site's over https only).
 //! * The session's buttons (notification, lock screen, headset, Bluetooth) and the volume keys
 //!   call the node as the page does (`POST /v1/zones/{id}/transport`, `/volume`); for the page's
-//!   own player they come back to the page as `pmdesktop:media`.
+//!   native player transport reaches the engine directly; next/previous still use the page's
+//!   queue through `pmdesktop:media`. The WebView fallback keeps its page action handlers.
 //! * Android's media volume (the WebView player's slider, `OdeionAndroid.setMediaVolume`) is set
 //!   and read through pm-out-local's `media_volume`; every change goes to the page as
 //!   `window.pmDesktop.mediaVolume` + `pmdesktop:mediavolume`, and the phone's own zone tells the
 //!   node at once (the slider on every controller follows).
-//! * Audio focus for the phone's own zone (the WebView takes its own for the page's player; a
-//!   second holder in the app would pause it): a call pauses it and it plays on afterwards; another
+//! * Audio focus for the native player and phone's own zone (the WebView fallback takes its own):
+//!   a call pauses playback and it plays on afterwards only while still entitled; another
 //!   app taking over pauses it; Android ducks shared playback itself, bit-perfect and Exclusive USB
-//!   pause instead. "Becoming noisy" (headphones out) pauses both of the phone's players.
+//!   pause instead. "Becoming noisy" (headphones out) pauses both of the phone's players. Native
+//!   timing and actual output-volume readback reach the same session without WebView timers.
 
 use crate::media::{self, Command, Event, FocusAction, PageMsg, Session};
 use crate::settings::Settings;
@@ -58,6 +60,10 @@ struct State {
     /// Each output's volume scale (`GET /v1/outputs`, the owner's).
     scales: HashMap<String, media::Scale>,
     page: media::PagePlayer,
+    native_player: Option<media::NativePlayback>,
+    phone_volume: Value,
+    /// Changing the output mode/consent or DAC during a call revokes automatic resume.
+    native_focus_route: Option<u64>,
     pushed: String,
     art: Option<String>,
     /// The audio focus as last asked: held, and whether Android may duck it.
@@ -163,6 +169,22 @@ impl Media {
         };
     }
 
+    /// Called by the engine, independently of WebView timers/events (also in the background).
+    pub fn native_changed(self: &Arc<Self>, n: &pm_app_player::Status) {
+        {
+            let mut st = self.state();
+            if (n.url.is_some() && n.refused.is_none()) || st.native_player.is_some() {
+                st.native_player = Some(media::NativePlayback {
+                    playing: n.transport == pm_app_player::Transport::Playing,
+                    position_ms: n.position_ms,
+                    duration_ms: n.duration_ms.unwrap_or(0),
+                });
+            }
+        }
+        self.push();
+        self.volume_soon();
+    }
+
     /// Connected to a node (again): follow its zones.
     pub fn connected(self: &Arc<Self>, s: Settings) {
         let gen = {
@@ -205,7 +227,7 @@ impl Media {
     /// phone plays, started from another controller).
     fn target(st: &State) -> String {
         let zone = st.controlled.as_deref().unwrap_or(media::BROWSER);
-        if zone == media::BROWSER && st.page.title.is_empty() {
+        if zone == media::BROWSER && st.page.title.is_empty() && st.native_player.is_none() {
             if let Some(z) = Self::phone_zone(st) {
                 let queued = z
                     .get("queue")
@@ -225,6 +247,9 @@ impl Media {
         let zone = Self::target(st);
         let zone = zone.as_str();
         if zone == media::BROWSER {
+            if let Some(n) = st.native_player {
+                return media::session_for_native(&st.page, n, &st.phone_volume);
+            }
             return media::session_for_page(&st.page, "This phone");
         }
         let Some(z) = st.zones.get(zone) else {
@@ -257,7 +282,7 @@ impl Media {
     /// The phone's own players playing now: its zone's id, and `browser` for the WebView player.
     fn phone_playing(st: &State) -> Vec<String> {
         let mut v: Vec<String> = Self::phone_zone_playing(st).into_iter().collect();
-        if st.page.playing() {
+        if st.native_player.map_or_else(|| st.page.playing(), |n| n.playing) {
             v.push(media::BROWSER.into());
         }
         v
@@ -305,7 +330,9 @@ impl Media {
             if let Some(a) = &art {
                 st.art = a.clone();
             }
-            let want = Self::phone_zone_playing(&st).is_some() || !st.paused_for_now.is_empty();
+            let native = st.native_player.is_some_and(|n| n.playing)
+                || crate::native::media_player().is_some_and(|p| p.focus_pending());
+            let want = native || Self::phone_zone_playing(&st).is_some() || !st.paused_for_now.is_empty();
             let now = (want, want && Self::ducks());
             let focus = (now != st.focus).then_some(now);
             if let Some(f) = focus {
@@ -367,6 +394,9 @@ impl Media {
             Event::Page { origin, data } => self.page(&origin, &data).await,
             Event::Focus(change) => self.focus_changed(change).await,
             Event::Noisy => {
+                if let Some(p) = crate::native::media_player() {
+                    p.pause_for_focus(false);
+                }
                 let playing = Self::phone_playing(&self.state());
                 self.state().paused_for_now.clear();
                 for z in playing {
@@ -415,6 +445,12 @@ impl Media {
 
     async fn pause(&self, zone: &str) -> Result<Value, ()> {
         if zone == media::BROWSER {
+            if self.state().native_player.is_some() {
+                if let Some(p) = crate::native::media_player() {
+                    p.pause();
+                }
+                return Ok(Value::Null);
+            }
             self.eval(media::page_action_script("pause", None));
             Ok(Value::Null)
         } else {
@@ -424,6 +460,12 @@ impl Media {
 
     async fn play(&self, zone: &str) {
         if zone == media::BROWSER {
+            if self.state().native_player.is_some() {
+                if let Some(p) = crate::native::media_player() {
+                    let _ = tauri::async_runtime::spawn_blocking(move || p.play()).await;
+                }
+                return;
+            }
             self.eval(media::page_action_script("play", None));
         } else {
             let _ = self.transport(zone, serde_json::json!({"action": "play"})).await;
@@ -433,6 +475,11 @@ impl Media {
     async fn command(&self, c: Command) {
         let zone = Self::target(&self.state());
         if zone == media::BROWSER {
+            if self.state().native_player.is_some() {
+                self.native_command(c).await;
+                self.push();
+                return;
+            }
             if let Some((a, t)) = c.page_action() {
                 self.eval(media::page_action_script(a, t));
             }
@@ -521,6 +568,88 @@ impl Media {
         }
     }
 
+    async fn set_phone_volume(&self, v: pm_model::Volume) {
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let kind = pm_out_local::media_volume::phone_kind();
+            pm_out_local::media_volume::phone_set(kind, v)
+        })
+        .await;
+        if let Ok(Err(e)) = result {
+            tracing::info!(?e, "native media volume was not set");
+        }
+        self.send(Event::MediaVolume);
+    }
+
+    async fn native_command(&self, c: Command) {
+        use pm_model::Volume;
+        let Some(p) = crate::native::media_player() else {
+            return;
+        };
+        // Metadata/queue actions still belong to the page; immediate transport and focus
+        // entitlement belong to the engine and work with a suspended WebView.
+        match c {
+            Command::Play => {
+                let _ = tauri::async_runtime::spawn_blocking(move || p.play()).await;
+            }
+            Command::Pause => p.pause(),
+            Command::Stop => p.stop(),
+            Command::Seek(ms) => p.seek(ms),
+            Command::Toggle => {
+                if p.status().transport == pm_app_player::Transport::Playing {
+                    p.pause();
+                } else {
+                    let _ = tauri::async_runtime::spawn_blocking(move || p.play()).await;
+                }
+            }
+            Command::Next | Command::Previous => {
+                p.cancel_focus_resume();
+                if let Some((action, time)) = c.page_action() {
+                    self.eval(media::page_action_script(action, time));
+                }
+            }
+            Command::VolumeTo(_) | Command::VolumeBy(_) => {
+                // A fresh hardware read before an adjustment: successive key presses cannot
+                // repeatedly adjust a stale UI cache. Android moves shared STREAM_MUSIC itself.
+                let v = tauri::async_runtime::spawn_blocking(move || {
+                    let kind = pm_out_local::media_volume::phone_kind();
+                    let level = pm_out_local::media_volume::phone_read(kind)?;
+                    let pm_model::VolumeKind::Db { min, max, step } = kind? else {
+                        return None;
+                    };
+                    let scale = media::Scale::Db { min, max, step };
+                    let level = serde_json::to_value(level).ok()?;
+                    let body = match c {
+                        Command::VolumeTo(n) => Some(scale.volume_at(n)),
+                        Command::VolumeBy(d) => scale.adjust(&level, d),
+                        _ => None,
+                    }?;
+                    serde_json::from_value::<Volume>(body).ok()
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(v) = v {
+                    self.set_phone_volume(v).await;
+                }
+            }
+            Command::Mute(m) => {
+                let mute = match m {
+                    Some(m) => Some(m),
+                    None => tauri::async_runtime::spawn_blocking(|| {
+                        pm_out_local::media_volume::phone_read(pm_out_local::media_volume::phone_kind())
+                            .map(|v| !v.muted)
+                    })
+                    .await
+                    .ok()
+                    .flatten(),
+                };
+                if let Some(m) = mute {
+                    self.set_phone_volume(Volume::Mute(m)).await;
+                }
+            }
+        }
+    }
+
     async fn page(&self, origin: &str, data: &str) {
         let allowed = {
             let st = self.state();
@@ -542,7 +671,16 @@ impl Media {
         match media::parse_page(data) {
             Some(PageMsg::Controlling(z)) => {
                 tracing::info!(zone = %z, "media controls: the page controls this zone");
-                self.state().controlled = Some(z);
+                {
+                    let mut st = self.state();
+                    if st.controlled.as_deref().unwrap_or(media::BROWSER) != z {
+                        if let Some(p) = crate::native::media_player() {
+                            p.cancel_focus_resume();
+                        }
+                        st.native_focus_route = None;
+                    }
+                    st.controlled = Some(z);
+                }
                 self.push();
             }
             Some(PageMsg::SetMediaVolume(p)) => {
@@ -556,8 +694,20 @@ impl Media {
                 // The level Android took (its own steps), in its turn
                 self.send(Event::MediaVolume);
             }
+            Some(PageMsg::SetPhoneVolume(v)) => {
+                if crate::native::on() {
+                    self.set_phone_volume(v).await;
+                }
+            }
             Some(PageMsg::Player(p)) => {
-                self.state().page = p;
+                let mut st = self.state();
+                // An actual WebView fallback clears the native snapshot only once its page
+                // state arrives; a stopped native engine cannot expose stale PLAYING meanwhile.
+                if !p.native && crate::native::media_player().is_none_or(|p| p.status().url.is_none()) {
+                    st.native_player = None;
+                }
+                st.page = p;
+                drop(st);
                 self.push();
             }
             None => tracing::debug!("media controls: a page message that isn't one of ours"),
@@ -570,6 +720,16 @@ impl Media {
         tracing::info!(change, ?action, "audio focus");
         match action {
             FocusAction::PauseForNow | FocusAction::Pause => {
+                if action == FocusAction::Pause {
+                    self.state().native_focus_route = None;
+                } else {
+                    self.state()
+                        .native_focus_route
+                        .get_or_insert_with(pm_out_local::usb_dac::generation);
+                }
+                if let Some(p) = crate::native::media_player() {
+                    p.pause_for_focus(action == FocusAction::PauseForNow);
+                }
                 let playing: Vec<String> = Self::phone_zone_playing(&self.state()).into_iter().collect();
                 {
                     let mut st = self.state();
@@ -601,6 +761,14 @@ impl Media {
                 }
             }
             FocusAction::Resume => {
+                if let Some(p) = crate::native::media_player() {
+                    let route = self.state().native_focus_route.take();
+                    if route == Some(pm_out_local::usb_dac::generation()) {
+                        p.resume_after_focus();
+                    } else {
+                        p.cancel_focus_resume();
+                    }
+                }
                 let again = std::mem::take(&mut self.state().paused_for_now);
                 for (z, _) in again {
                     self.play(&z).await;
@@ -631,10 +799,25 @@ impl Media {
         if self.state().volume_seq != seq {
             return;
         }
-        let read = tauri::async_runtime::spawn_blocking(pm_out_local::media_volume::read)
-            .await
-            .ok()
-            .flatten();
+        let read = tauri::async_runtime::spawn_blocking(|| {
+            let kind = pm_out_local::media_volume::phone_kind();
+            (
+                pm_out_local::media_volume::read(),
+                media::phone_volume_value(kind, pm_out_local::media_volume::phone_read(kind)),
+            )
+        })
+        .await
+        .ok();
+        let Some((read, phone)) = read else { return };
+        {
+            let mut st = self.state();
+            if st.volume_seq != seq {
+                return;
+            }
+            st.phone_volume = phone.clone();
+        }
+        self.eval(format!("if(window.pmDesktop){{window.pmDesktop.phoneVolume={phone};window.dispatchEvent(new Event('pmdesktop:mediavolume'));}}"));
+        self.push();
         let Some(v) = read else { return };
         let pm_model::VolumeLevel::Percent(p) = v.level else {
             return;

@@ -454,6 +454,18 @@ def in_app_player(address, track):
     assert m.group(2).startswith("/v1/library/tracks/"), f"it plays the node's file: {m.group(2)}"
     assert "path " in m.group(3), f"it says the path: {m.group(3)}"
     assert "token" not in m.group(0), "the log line carries no token"
+    def native_session(playing):
+        s = our_session()
+        state = r"(?:3\b|PLAYING)" if playing else r"(?:2\b|PAUSED)"
+        if "active=true" in s and re.search(r"state=PlaybackState \{state=" + state, s):
+            return s
+        return None
+    def native_session_moving():
+        s = native_session(True)
+        return s if s and re.search(r"position=[1-9][0-9]*", s) else None
+    session = until("native playback in the single framework MediaSession", native_session_moving, timeout=30)
+    assert re.search(r"position=[1-9][0-9]*", session), f"native session has no position: {session}"
+    (out / "native-media-session-playing.txt").write_text(session)
     shot("6-in-app-player")
     rate, n = until("the app's own player's pace", lambda: native_pace(start)[0] and native_pace(start), timeout=60, every=5)
     log(f"the app's own player: {rate:.2f}x real time over {n} logged positions")
@@ -471,6 +483,15 @@ def in_app_player(address, track):
     adb("shell", "wm", "dismiss-keyguard", check=False)
     assert rate is not None and 0.8 < rate < 1.2, f"in the background, screen off: {rate} over {n} positions"
     log(f"the app's own player in the background, screen off: {rate:.2f}x real time")
+    # These buttons must reach the engine with the WebView in the background, and the same
+    # session must follow the real engine state. No second player or node-zone transport.
+    adb("shell", "input", "keyevent", "KEYCODE_MEDIA_PAUSE")
+    session = until("background native session paused", lambda: native_session(False), timeout=15)
+    (out / "native-media-session-paused.txt").write_text(session)
+    adb("shell", "input", "keyevent", "KEYCODE_MEDIA_PLAY")
+    session = until("background native session resumed", lambda: native_session(True), timeout=15)
+    (out / "native-media-session-resumed.txt").write_text(session)
+    log("native session pause/play works in background; original pace/handover assertions retained")
     # One stream per output: the node plays its zone on the phone, the app's player pauses
     if phone:
         mark = len(logcat())

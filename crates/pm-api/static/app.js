@@ -1762,6 +1762,7 @@
   const tellAppZone = (id) => { if (!window.OdeionAndroid || id === appZoneSaid) return; appZoneSaid = id; try { window.OdeionAndroid.controlling(id); } catch { /* the app's side is gone */ } };
   const zoneVolume = (z) => {
     if (!z) return null;
+    if (z.id === BROWSER && appVolume() && state.natOn) return window.pmDesktop.phoneVolume || null;
     if (z.id === BROWSER && appVolume()) return { kind: 'percent', min: 0, max: 100, step: 1, value: appMediaVolume(), muted: !!audio.muted };
     if (z.id === BROWSER) return { kind: 'db', min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))), muted: !!audio.muted };
     const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume; const hk = typeof hv === 'string' ? hv : hv && hv.kind;
@@ -1801,6 +1802,7 @@
   const setZoneVol = async (z, value, from) => {
     const r = zoneVolume(z); if (!r) return;
     const num = Number(value);
+    if (z.id === BROWSER && appVolume() && state.natOn) { try { window.OdeionAndroid.setMediaVolume(r.kind === 'percent' ? Math.round(num) : num, r.kind); } catch { /* the app's side is gone */ } return; }
     if (z.id === BROWSER && appVolume()) { const p = Math.round(num); audio.volume = 1; window.pmDesktop.mediaVolume = p; try { window.OdeionAndroid.setMediaVolume(p); } catch { /* the app's side is gone */ } syncVolumeSliders(z, from); return; }
     if (z.id === BROWSER) { audio.volume = Math.pow(10, num / 20); syncVolumeSliders(z, from); return; }
     const body = r.kind === 'percent' ? { percent: Math.round(num) } : { db: num };
@@ -1813,6 +1815,7 @@
   };
   const setZoneMute = async (z, m) => {
     if (!z) return;
+    if (z.id === BROWSER && appVolume() && state.natOn) { try { window.OdeionAndroid.setMediaVolume(m, 'mute'); } catch { /* the app's side is gone */ } return; }
     if (z.id === BROWSER) { audio.muted = m; syncVolumeSliders(z); return; }
     const was = z.volume;
     z.volume = { ...(z.volume || {}), muted: m };
@@ -2648,6 +2651,8 @@
   // always goes through Android's mixer. Once per DAC, and never while the page's player plays.
   let dacZoneFor = null;
   const preferPhoneZone = () => {
+    // The native engine already owns this output. A paused DAC must not change the route.
+    if (window.pmDesktop && window.pmDesktop.nativePlayer) return;
     const o = appOutput();
     if (!o || appPlatform() !== 'android') { dacZoneFor = null; return; }
     const key = `${o.id}|${o.device.name}`; if (dacZoneFor === key) return;
