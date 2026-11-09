@@ -196,6 +196,13 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check(ah && ah[1].ahead === fileUrl(1), `${at}: repeat one hands the same song ahead at once (${JSON.stringify(ah && ah[1].ahead)})`);
       await sleep(2200);
       check((await calls(p, 'native_load')).length === loads0 && !(await now(p)).paused, `${at}: and goes on with it without opening it again`);
+      // A break at the very start: the song's one retry (a new load)
+      await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
+      let b0 = (await calls(p, 'native_load')).length;
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 0, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(2600);
+      check((await calls(p, 'native_load')).length > b0, `${at}: a break at the very start is tried once more`);
+      await p.evaluate(() => { Object.assign(window.__app, { broke: false, error: null }); });
       // A DAC unplugged (paused with the reason, no break): said, and not reopened
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);

@@ -1442,6 +1442,7 @@
     const has = (f) => player && typeof player[f] === 'function';
     return {
       addEventListener: (t, f) => ev.addEventListener(t, f),
+      removeEventListener: (t, f) => ev.removeEventListener(t, f),
       get paused() { return st !== 1 && st !== 3; },
       get ended() { return st === 0; },
       get currentTime() { return has('getCurrentTime') ? player.getCurrentTime() || 0 : 0; },
@@ -1492,7 +1493,7 @@
       if (!live) return;
       // The song opens again (the same one tapped while it played): the old copy's updates and
       // its end wait
-      if (opening && st.url === src) return;
+      if (opening && (st.url === src || (was && was.url === src))) return;
       // (an end of the song before this one, still playing while this one opens, is not this one's)
       const ended = was && st.ended > was.ended && was.url === src;
       if (ended) {
@@ -1521,6 +1522,7 @@
     });
     return {
       addEventListener: (t, f, o) => ev.addEventListener(t, f, o),
+      removeEventListener: (t, f) => ev.removeEventListener(t, f),
       get paused() { return !(want || playing()); },
       get ended() { return done; },
       // A pause pressed since the last play (a retry doesn't start it again)
@@ -1591,6 +1593,7 @@
         opening = false;
         // Its start, as the app says it now (the updates waited while it opened)
         if (src === u && st && st.url === u && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
+        else if (src === u && st && st.url === u && st.transport === 'stopped' && st.error && !st.broke) { want = false; live = false; fire('pause'); fire('nativefailed', { why: st.error, at: at }); return; }
         // Paused while it opened
         if (held && src === u) call('native_pause').catch(() => {});
       },
@@ -1603,7 +1606,12 @@
   })();
   const audio = new Proxy({}, {
     get: (_, k) => {
-      if (k === 'addEventListener') return (t, f, o) => { audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); nat.addEventListener(t, f, o); };
+      if (k === 'addEventListener') return (t, f, o) => {
+        // Once: on the engine that loads the song, and then gone from the other two (it would
+        // seek a later song there)
+        if (o && o.once) { const off = () => { audioEl.removeEventListener(t, w); yt.removeEventListener(t, w); nat.removeEventListener(t, w); }; const w = (e) => { off(); f(e); }; audioEl.addEventListener(t, w); yt.addEventListener(t, w); nat.addEventListener(t, w); return; }
+        audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); nat.addEventListener(t, f, o);
+      };
       const e = state.ytOn ? yt : state.natOn ? nat : audioEl; const v = e[k];
       return typeof v === 'function' ? v.bind(e) : v;
     },
@@ -1706,7 +1714,7 @@
     state.browserIndex = at.index;
     audio.preload = 'metadata';
     browserSrc(it);
-    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
+    if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== at.index) return; try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
     renderBar();
   };
   const ensureZone = () => { if (!isBrowser() && !state.zones[state.zone]) state.zone = BROWSER; };
@@ -2271,7 +2279,7 @@
     audio.play().catch(async (e) => {
       // The app can't play it itself (a playlist stream, another codec): the page plays it
       if (e.name === 'NativeRefused') { it.nativeNo = true; if (state.browserIndex === i) browserPlay(i); return; }
-      if (e.name === 'NativeFailed') { startFail(e.message, true); nativeRetry(i, e.message); return; }
+      if (e.name === 'NativeFailed') { startFail(e.message, true); nativeRetry(i, e.message, audio.currentTime); return; }
       if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
       startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }

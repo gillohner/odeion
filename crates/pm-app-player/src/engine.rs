@@ -454,8 +454,15 @@ impl AppPlayer {
     /// Carry on: from the pause; after the node took the output, or once the zone stopped, from
     /// where it was (again through [`Self::load`], so call it from a blocking thread too).
     pub fn play(&self) -> Result<(), LoadError> {
-        // Play after a pause pressed while a song opened: it starts playing after all
-        self.page().hold = false;
+        // Play after a pause pressed while a song opened: it starts playing after all (the load
+        // under way starts it; the old song isn't resumed meanwhile)
+        {
+            let mut p = self.page();
+            p.hold = false;
+            if p.loading {
+                return Ok(());
+            }
+        }
         let (url, at, ahead, taken) = {
             let p = self.page();
             let at = p.taken_at.or(p.broke_at);
