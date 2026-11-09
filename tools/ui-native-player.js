@@ -57,7 +57,9 @@ const FAKE_APP = ({ nativePlayer, len, slow }) => {
       if (/refuse/.test(args.url)) throw { refused: true, message: "the app can't play this itself: unsupported codec" };
       if (/busy/.test(args.url)) throw { refused: false, message: 'HTTP 503' };
       const gen = s.gen = (s.gen || 0) + 1;
+      s.loading = true;
       if (slow) await new Promise((r) => setTimeout(r, slow));
+      if (gen === s.gen) s.loading = false;
       // A later load overtook this one (as the app's generation does)
       if (gen !== s.gen) throw { refused: false, overtaken: true, message: 'another song or a stop came first' };
       if (window.__failLoad) { Object.assign(s, { url: null }); send(); throw { refused: false, overtaken: false, message: 'the node did not answer' }; }
@@ -208,12 +210,12 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       // bar doesn't stay "playing"
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
-      await p.evaluate(() => { window.__failLoad = true; }); 
+      await p.evaluate(() => { window.__failLoad = true; });
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(60);
       await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(120);
       await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(900);
       const fl = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
-      check(/did not start|can't play here/.test(fl) && (await now(p)).paused, `${at}: a reopen that fails after pause and play is said, not left "playing" (${fl}; ${JSON.stringify(await now(p))}; ${JSON.stringify((await calls(p)).slice(-6).map((c) => c[0]))}; ${JSON.stringify(r.state.errors)})`);
+      check(/the node did not answer/.test(fl) && (await now(p)).paused, `${at}: a reopen that fails after pause and play is said, not left "playing" (${fl}; ${JSON.stringify(await now(p))}; ${JSON.stringify((await calls(p)).slice(-6).map((c) => c[0]))}; ${JSON.stringify(r.state.errors)})`);
       await p.evaluate(() => { window.__failLoad = false; }); await sleep(2500);
 
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
@@ -230,7 +232,7 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'stopped', position_ms: 0 }); window.__send(); }); await sleep(100);
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 800, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(2200);
       const again = (await calls(p, 'native_load')).pop();
-      check(again && again[1].atMs >= 700, `${at}: a break mid-song is opened again where it broke (${JSON.stringify(again && again[1].atMs)})`);
+      check(again && again[1].atMs >= 700, `${at}: a break mid-song is opened again where it broke (${JSON.stringify(again && again[1].atMs)}; ${JSON.stringify((await calls(p)).slice(-8).map((c) => c[0] + (c[1].atMs != null ? ':' + c[1].atMs : '')))})`);
       // Play after the node took the output, the node out of reach: said, and tried once more
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', taken: true, broke: false, error: "the node plays on this device's zone now" }); window.__send(); }); await sleep(300);
       before = (await calls(p, 'native_load')).length;
@@ -239,6 +241,16 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check(/did not start: HTTP 503/.test(t2) && (await now(p)).paused, `${at}: play failing after the node took it: said, not shown playing (${t2})`);
       await p.evaluate(() => { window.__failPlay = false; }); await sleep(2200);
       check((await calls(p, 'native_load')).length > before, `${at}: and tried once more`);
+      // A mid-song break whose retry fails after pause and play: said too (not only browserPlay's)
+      await p.evaluate(() => { window.__failLoad = false; });
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(2)); await sleep(100); await p.evaluate(() => document.querySelector('#next').click()); await sleep(800);
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'playing', position_ms: 900 }); window.__send(); }); await sleep(150);
+      await p.evaluate(() => { window.__failLoad = true; Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 900, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(1700);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(120);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(1500);
+      const fl2 = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
+      check(/the node did not answer/.test(fl2) && (await now(p)).paused, `${at}: a failed mid-song retry after pause and play is said, not left "playing" (${fl2})`);
+      await p.evaluate(() => { window.__failLoad = false; Object.assign(window.__app, { broke: false, error: null }); }); await sleep(2500);
       check(!r.state.errors.length, `${at}: review checks: no page errors (${r.state.errors.join(' | ')})`);
       await r.context.close();
       // A restored song opens where it was
