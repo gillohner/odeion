@@ -91,6 +91,9 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
         fixtures['/discover/play'] = { body: { plays_from: { service: 'library', label: 'Your library' }, track_ids: [1, 2, 3] } };
         fixtures['/item/album/mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e'] = { body: { kind: 'album', id: 'mb-1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e', title: 'Found elsewhere', section: 'albums', source: 'musicbrainz', target: { uri: 'https://musicbrainz.org/release-group/1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e' }, uri: 'https://example.com/album', open_on: [{ url: 'https://example.com/album' }], songs: [], releases: [], links: [], also_on: [], tags: [] } };
         let slowLoad = 0; let refuseShuffle = false; let loadGate = null; // (a load held until the test lets it go)
+        let remoteRepeat = null; // (another app sets repeat after this one's PUT; its event comes before the 204)
+        // The playing song's page: another copy of it in the library, for the Sources sheet's "Play from here"
+        fixtures['/item/song/lib-1'] = { body: { kind: 'song', id: 'lib-1', title: 'Song 1', section: 'songs', source: 'library', also_on: [{ source: 'library', uri: 'track:9', label: 'Your library (other copy)' }], releases: [], links: [], tags: [] } };
         const { page, context, state } = await fx.create(browser, w, { mobile: w < 600, fixtures });
         await page.setViewportSize({ width: w, height: w < 600 ? 800 : 900 });
         await page.emulateMedia({ colorScheme: scheme });
@@ -107,7 +110,7 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
           if (/\/shuffle$/.test(v) && req.method() === 'PUT' && refuseShuffle) { refuseShuffle = false; return json(r, { error: 'refused for the test' }, 500); }
           if (/\/shuffle$/.test(v) && req.method() === 'PUT') { Z.shuffle = !!body.shuffle; Z.queue_version++; event(); await sleep(50); return json(r, Z); }
           if (/\/shuffle$/.test(v)) { Z.shuffle = true; return r.fulfill({ status: 204, body: '' }); }
-          if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; return r.fulfill({ status: 204, body: '' }); }
+          if (/\/repeat$/.test(v)) { Z.repeat = body.repeat; if (remoteRepeat) { Z.repeat = remoteRepeat; remoteRepeat = null; event(); await sleep(50); } entry.done = Date.now(); return r.fulfill({ status: 204, body: '' }); }
           if (/\/queue$/.test(v)) { if (req.method() === 'DELETE') { Z.queue = []; Z.now_playing = null; Z.transport = 'stopped'; return r.fulfill({ status: 204, body: '' }); } return json(r, Z.queue); }
           // (a slow one delays only its answer and event; after a reload they'd be another page's)
           if (/\/load$/.test(v)) { Z.shuffle = !!body.shuffle; Z.queue = body.items.map((it, k) => ({ ...it, id: 100 + k })); Z.queue_version++; Z.now_playing = { item: Z.queue[body.index || 0], index: body.index || 0, position_ms: 0, duration_ms: 200000 }; const asked = sock; if (slowLoad) { const d = slowLoad; slowLoad = 0; await sleep(d); } if (loadGate) await loadGate; if (sock === asked) event(); await sleep(50); entry.done = Date.now(); return json(r, Z); }
@@ -153,6 +156,38 @@ const isPermutation = (q) => q.length === N && [...q].sort().join() === [...inOr
           const last = asked('PUT', /\/zones\/z1\/repeat$/).pop();
           check(!!last && last.body.repeat === want, `${T} …with ${want} (${JSON.stringify(last && last.body)})`);
           check(await until(async () => { const r = (await modes(page)).repeat; return allAre(r, want !== 'off', words[want]) && r.every((c) => (want === 'one') === /repeat-one/.test(c.ic)); }), `${T} every repeat copy shows ${want}${want === 'one' ? ' (the "1" icon)' : ''}: ${say((await modes(page)).repeat)}`);
+        }
+        // The node answers 204, but another app set repeat after this PUT (its event came first): the
+        // newer one stays, and a load after it would carry it (the 204 isn't taken as the last word)
+        {
+          remoteRepeat = 'one'; const before = asked('PUT', /\/zones\/z1\/repeat$/).length;
+          await pressMode(page, 'repeat');
+          await until(async () => { const e = asked('PUT', /\/zones\/z1\/repeat$/)[before]; return !!e && !!e.done; });
+          await sleep(500);
+          check(allAre((await modes(page)).repeat, true, words.one), `${T} repeat answered 204 after another app's newer change keeps that change: ${say((await modes(page)).repeat)}`);
+          Z.repeat = 'off'; snapshot();
+          await until(async () => allAre((await modes(page)).repeat, false, words.off));
+        }
+        // Now playing › Sources › Play from here on a playing zone: one load, and the start's wait ends
+        // with the node's answer (not 20 s later with "did not start playing"). From 600 px, where Now
+        // playing has its sheet tabs (the switch itself is the same at every width)
+        if (w >= 600) {
+          const loads0 = asked('POST', /\/zones\/z1\/load$/).length;
+          await until(async () => { const t = page.locator('#nowplaying [data-npsheet="sources"]:visible').first(); if (!(await t.count())) return false; await t.click({ timeout: 1000 }); return true; }, 5000);
+          const sw = await page.waitForSelector('[data-npswitch]', { timeout: 8000 }).catch(() => null);
+          check(!!sw, `${T} Sources offers "Play from here" on the other copy`);
+          if (sw) {
+            await page.locator('[data-npswitch]').first().click();
+            check(await until(async () => asked('POST', /\/zones\/z1\/load$/).length === loads0 + 1, 6000), `${T} …which loads the zone once`);
+            const ld = asked('POST', /\/zones\/z1\/load$/)[loads0];
+            check(!!ld && ld.body.index === 0 && ld.body.items[0].uri === 'track:9' && ld.body.items.length === N && !('shuffle' in ld.body), `${T} …with the song swapped in its place and no reshuffle (${ld && JSON.stringify({ index: ld.body.index, first: ld.body.items[0].uri, n: ld.body.items.length, shuffle: ld.body.shuffle })})`);
+            check(await until(async () => !(await page.locator('#np .np-wait').count()), 3000), `${T} …and "Starting on…" ends with the node's answer (${await page.locator('#np .np-wait').count()} left)`);
+            check(!/did not start/.test(await toasted() || ''), `${T} …with no "did not start" error (${await toasted()})`);
+          }
+          const back = page.locator('#npsheetclose'); if (await back.isVisible().catch(() => false)) await back.click();
+          Object.assign(Z, zoneOf()); snapshot(); await sleep(300);
+          // (the checks below count the zone's loads from their own first one)
+          const rest = sent.filter((x) => !(x.m === 'POST' && /\/zones\/z1\/load$/.test(x.v))); sent.length = 0; sent.push(...rest);
         }
         await closeNp(page);
 

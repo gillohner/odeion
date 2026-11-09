@@ -2386,9 +2386,18 @@
     const zid = state.zone; const cur = repeatPending.has(zid) ? repeatPending.get(zid).value : zoneRepeat();
     const next = REPEATS[(REPEATS.indexOf(cur) + 1) % REPEATS.length];
     const mine = askMode(repeatPending, zid, next);
-    // (a 204 says the node took it: the zone's repeat is that now, whatever event came meanwhile, so
-    // a load after it carries it; a newer change from elsewhere comes with its own event)
-    try { await zoneOp(zid, async (t) => { const ev0 = evOf(zid); const st = await api('PUT', `/zones/${encodeURIComponent(zid)}/repeat`, { repeat: next }, { signal: t.signal }); if (st && st.id) applyAnswer(st, ev0); else if (state.zones[zid]) state.zones[zid].repeat = next; }); } catch (e) { toast(e.message, 'error'); } finally { doneMode(repeatPending, zid, mine); }
+    // (a 204 says the node took it, not that nothing changed since: another app may have set repeat
+    // after it, its event already here. The zone is read again in the same turn, so a load after it
+    // carries the node's repeat; the read is kept only if no event came while it was on its way)
+    try {
+      await zoneOp(zid, async (t) => {
+        const ev0 = evOf(zid); const st = await api('PUT', `/zones/${encodeURIComponent(zid)}/repeat`, { repeat: next }, { signal: t.signal });
+        if (st && st.id) { applyAnswer(st, ev0); return; }
+        // (a read that fails leaves the change made: it is taken here unless an event came since the PUT)
+        const ev1 = evOf(zid); const zs = await api('GET', `/zones/${encodeURIComponent(zid)}`, undefined, { signal: t.signal }).catch(() => null);
+        if (zs && zs.id) applyAnswer(zs, ev1); else if (state.zones[zid] && evOf(zid) === ev0) state.zones[zid].repeat = next;
+      });
+    } catch (e) { toast(e.message, 'error'); } finally { doneMode(repeatPending, zid, mine); }
   };
   // The node's mode, set (a node from before modes answers 404/405: it says to update)
   const setZoneShuffle = async (on, zid = state.zone, signal) => {
@@ -3636,7 +3645,6 @@
     try {
       // (read and loaded in one turn of the zone, so nothing of its queue changes in between)
       const zs = await zoneOp(zone, async (t) => {
-        if (wait) startSending(wait, zone);
         let queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
         // The queue changed meanwhile (a song added elsewhere): read it again, so nothing is lost
         if (state.zones[zone] && state.zones[zone].queue_version !== version) queue = await api('GET', `/zones/${encodeURIComponent(zone)}/queue`, undefined, { signal: t.signal });
@@ -3647,6 +3655,8 @@
         // of the same service (a library file shows its album's); the length comes with the source
         const scheme = (u) => String(u || '').split(':')[0];
         const items = queue.map((q, k) => (k === at ? { ...q, uri, image: scheme(uri) !== 'track' && scheme(uri) === scheme(q.uri) ? q.image || null : null, duration_ms: null } : q));
+        // (the start's 20 s run from here, after the reads; the song it replaces is the one playing now)
+        if (wait) startSending(wait, zone);
         return api('POST', `/zones/${encodeURIComponent(zone)}/load`, { items, index: at, position_ms: z.now_playing.position_ms || 0, transport: z.transport === 'paused' ? 'paused' : 'playing', repeat: z.repeat || 'off', radio: !!z.radio }, { signal: t.signal });
         // (no shuffle: the node would draw the queue again from its play order, songs heard included;
         // keeping the mode with its order needs a node call that swaps one item's source in place)
@@ -3654,9 +3664,11 @@
       // The zone's answer says whether the new source plays (a paused zone sends no event to wait for)
       if (zs && zs.id) state.zones[zs.id] = zs;
       if (zs && zs.error) throw new Error(zs.error);
+      // (the node took the load: a zone playing another song now ends the wait, here or by its event)
+      if (wait) startSent(wait);
       toast(`Playing from ${name}`);
       refreshQueue();
-    } catch (e) { startFail(e.message, true); toast(e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = `${icon('play')} Play from here`; } }
+    } catch (e) { if (wait) startFail(e.message, true, wait); toast(e.message, 'error'); if (b.isConnected) { b.disabled = false; b.innerHTML = `${icon('play')} Play from here`; } }
   };
   // Sleep timer per zone (node zones through the API, the browser zone locally).
   const sleepLabel = () => { const at = state.sleepAt[state.zone]; if (!at || at <= Date.now()) return 'Sleep'; const m = Math.ceil((at - Date.now()) / 60000); return `Sleep in ${m} min`; };
