@@ -497,6 +497,19 @@ pub(crate) fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+/// Membership changes and approval starts use a separate lock from homeserver operations.
+/// Remove takes this before revoking access, then keeps it until cleanup ends. A slow operation
+/// can delay cleanup, but cannot delay revocation or let a re-add overtake that cleanup.
+pub(crate) fn membership_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static L: OnceLock<PersonLocks> = OnceLock::new();
+    L.get_or_init(Default::default)
+        .lock()
+        .expect("membership locks")
+        .entry(key.trim_start_matches("pubky").to_string())
+        .or_default()
+        .clone()
+}
+
 fn save(s: &NodeState, key: &str, c: &Copy) -> Result<(), ApiError> {
     let lib = s.library.lock().expect("library poisoned");
     // Removed (People › Remove) while this request waited on their homeserver: nothing of
@@ -944,20 +957,7 @@ pub(crate) async fn connect_start(
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = crate::tidal::random_urlsafe(24);
-    {
-        let mut all = connects().lock().await;
-        all.retain(|_, c| c.started.elapsed() < CONNECT_TTL);
-        // One at a time per listener: a new one replaces theirs (its task ends)
-        all.retain(|_, c| c.who != key);
-        all.insert(
-            id.clone(),
-            Connect {
-                started: Instant::now(),
-                who: key.clone(),
-                answer: None,
-            },
-        );
-    }
+    begin_approval(&s, &id, &key).await?;
     let flow = Arc::new(flow);
     tokio::spawn(ask(
         id.clone(),
@@ -974,6 +974,26 @@ pub(crate) async fn connect_start(
     Ok(Json(
         serde_json::json!({"id": id, "qr_svg": crate::qr_svg(&url), "url": url}),
     ))
+}
+
+async fn begin_approval(s: &NodeState, id: &str, key: &str) -> Result<(), ApiError> {
+    let lock = membership_lock(key);
+    let _membership = lock.lock().await;
+    // A request admitted before Remove must not start a new approval during its cleanup.
+    if !crate::people::may_use_music(s, key) {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "music access has ended"));
+    }
+    let mut all = connects().lock().await;
+    all.retain(|_, c| c.started.elapsed() < CONNECT_TTL && c.who != key);
+    all.insert(
+        id.to_string(),
+        Connect {
+            started: Instant::now(),
+            who: key.to_string(),
+            answer: None,
+        },
+    );
+    Ok(())
 }
 
 /// `GET /v1/me/homeserver/connect/poll?id=`: `pending`, `ok` (the grant is kept), `denied`
@@ -1017,9 +1037,10 @@ async fn answer_of(key: &str, id: &str, ttl: Duration) -> Result<serde_json::Val
 }
 
 /// People › Remove: the grant of `key` goes. Called under their person lock (see
-/// [`crate::accounts::forget_person`]), which People › Remove holds across the roster change and
-/// this, and a re-add takes too: an approval past the relay either kept its grant before (and it
-/// is deleted here) or finds itself ended, and nothing of the removal runs later, after a re-add.
+/// [`crate::accounts::forget_person`]). Remove already revoked access under the separate
+/// membership lock, which it keeps through cleanup: an approval past the relay either kept its
+/// grant before (and it is deleted here) or finds itself ended. A re-add and a fresh approval
+/// start both wait for that cleanup, even when the owner's request was cancelled.
 /// An error says the grant is still on the node (it couldn't be deleted): the removal answers it
 /// after the rest of its cleanup, and removing them again finishes it ([`leftover`]).
 pub(crate) async fn forget(s: &NodeState, key: &str) -> Result<(), String> {
@@ -1030,12 +1051,12 @@ pub(crate) async fn forget(s: &NodeState, key: &str) -> Result<(), String> {
 /// file in `dir` goes too (the node's own store is that file; one standing in for it isn't).
 async fn forget_with(b: &dyn PersonalHomeserver, dir: &std::path::Path, key: &str) -> Result<(), String> {
     let key = key.trim_start_matches("pubky");
-    end_approvals_of(key).await;
     sessions().lock().expect("sessions").remove(key);
     let file = match grant_file(dir, key).map(std::fs::remove_file) {
         Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
         _ => Ok(()),
     };
+    end_approvals_of(key).await;
     b.disconnect(key).await.and(file).map_err(|e| {
         tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
         format!("their homeserver approval is still on the node ({e}): remove them again")
@@ -1046,13 +1067,26 @@ async fn forget_with(b: &dyn PersonalHomeserver, dir: &std::path::Path, key: &st
 /// (a removal that failed part way). Removing them again finishes it.
 pub(crate) fn leftover(s: &NodeState, key: &str) -> bool {
     let key = key.trim_start_matches("pubky");
-    grant_file(&grants_dir(s), key).is_some_and(|f| f.exists())
+    if backend(s).connected(key)
+        || grant_file(&grants_dir(s), key).is_some_and(|f| f.exists())
         || crate::accounts::sessions_of(s, key) > 0
-        || s.library
-            .lock()
-            .expect("library poisoned")
-            .settings_with_prefix(&format!("{}{key}.", crate::accounts::PERSON_PREFIX))
-            .is_ok_and(|all| !all.is_empty())
+    {
+        return true;
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    [
+        crate::prefs::storage_key_of(key),
+        crate::presence::visible_key(key),
+    ]
+    .iter()
+    .any(|k| lib.get_setting(k).is_ok_and(|v| v.is_some()))
+        || [
+            format!("{}{key}.", crate::accounts::PERSON_PREFIX),
+            crate::discover::contents_prefix_of(key),
+            crate::discover::contents_prefix_of(&crate::accounts::Who::ListenerOnNode(key.to_string()).tag()),
+        ]
+        .iter()
+        .any(|prefix| lib.settings_with_prefix(prefix).is_ok_and(|all| !all.is_empty()))
 }
 
 #[cfg(test)]
@@ -1540,15 +1574,141 @@ mod tests {
         // People › Remove holds her lock: an approval past the relay waits for it
         let lock = person_lock("rm-ann");
         let removal = lock.lock().await;
-        let keeping = tokio::spawn(keep_if_current("t-rm-old", "rm-ann", || -> serde_json::Value {
+        let keeping = keep_if_current("t-rm-old", "rm-ann", || -> serde_json::Value {
             panic!("a grant kept after her removal")
-        }));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        tokio::pin!(keeping);
+        assert!(futures_util::poll!(&mut keeping).is_pending());
         let store = Forgets::default();
         let dir = tempfile::tempdir().unwrap();
         forget_with(&store, dir.path(), "rm-ann").await.unwrap();
         drop(removal);
-        assert_eq!(keeping.await.unwrap()["state"], "expired");
+        assert_eq!(keeping.await["state"], "expired");
         assert!(!store.connected("rm-ann"), "and the store forgot her");
+    }
+
+    async fn listener_state(dir: &std::path::Path, key: &str) -> Arc<NodeState> {
+        let s = crate::tests::state(dir, Some("fixture-owner")).await;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({"people": [
+                    {"key": key, "access": "music", "music_enabled": true, "added_at": 1}
+                ]})
+                .to_string(),
+            )
+            .unwrap();
+        s.set_personal_homeserver(Arc::new(Forgets::default()));
+        crate::accounts::mint(&s, key).unwrap();
+        s
+    }
+
+    async fn revoked(s: &NodeState, key: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while crate::people::may_use_music(s, key) || crate::accounts::sessions_of(s, key) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("revocation waited for a homeserver operation");
+    }
+
+    #[tokio::test]
+    async fn remove_ends_old_approvals_and_a_post_readd_approval_keeps_its_grant() {
+        use axum::extract::{Path, State};
+        let dir = tempfile::tempdir().unwrap();
+        let key = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy";
+        let s = listener_state(dir.path(), key).await;
+        let file = grant_file(&grants_dir(&s), key).unwrap();
+        begin_approval(&s, "rm-kept", key).await.unwrap();
+        assert_eq!(
+            keep_if_current("rm-kept", key, || {
+                crate::imports::write_private(&file, b"old-fixture-grant").unwrap();
+                serde_json::json!({"state": "ok"})
+            })
+            .await["state"],
+            "ok"
+        );
+
+        // An older approval queued on the operation lock before Remove. The roster is already
+        // revoked when it resumes, exactly as keep_grant checks before writing a credential.
+        begin_approval(&s, "rm-waiting", key).await.unwrap();
+        let operation = person_lock(key);
+        let held = operation.lock().await;
+        let old = keep_if_current("rm-waiting", key, || {
+            assert!(!crate::people::may_use_music(&s, key));
+            serde_json::json!({"state": "denied"})
+        });
+        tokio::pin!(old);
+        assert!(futures_util::poll!(&mut old).is_pending());
+        let removal = tokio::spawn(crate::people::remove(State(s.clone()), Path(key.to_string())));
+        revoked(&s, key).await;
+        assert!(file.exists(), "the earlier kept grant awaits cleanup");
+        let too_early = begin_approval(&s, "rm-too-early", key);
+        tokio::pin!(too_early);
+        assert!(futures_util::poll!(&mut too_early).is_pending());
+        let re_add = crate::people::invite(
+            State(s.clone()),
+            Json(crate::people::NewInvite {
+                access: crate::people::Access::Music,
+                key: Some(key.into()),
+                name: None,
+                storage_quota_mb: None,
+            }),
+        );
+        tokio::pin!(re_add);
+        assert!(futures_util::poll!(&mut re_add).is_pending());
+        drop(held);
+        assert_eq!(old.await["state"], "denied");
+        removal.await.unwrap().unwrap();
+        assert!(!file.exists(), "Remove deleted the grant kept before it");
+        assert!(!still_asked("rm-waiting").await);
+        assert!(
+            too_early.await.is_err(),
+            "an admitted old request cannot create a fresh approval"
+        );
+        re_add.await.unwrap();
+        begin_approval(&s, "rm-fresh", key).await.unwrap();
+        assert_eq!(
+            keep_if_current("rm-waiting", key, || panic!("old approval revived")).await["state"],
+            "expired"
+        );
+        assert_eq!(
+            keep_if_current("rm-fresh", key, || {
+                crate::imports::write_private(&file, b"fresh-fixture-grant").unwrap();
+                serde_json::json!({"state": "ok"})
+            })
+            .await["state"],
+            "ok"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"fresh-fixture-grant");
+        assert!(still_asked("rm-fresh").await);
+        end_approvals_of(key).await;
+    }
+
+    #[tokio::test]
+    async fn restore_waits_for_cleanup_without_holding_up_another_revocation() {
+        use axum::extract::{Path, State};
+        let dir = tempfile::tempdir().unwrap();
+        let key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let s = listener_state(dir.path(), key).await;
+        let operation = person_lock(key);
+        let held = operation.lock().await;
+        let removal = tokio::spawn(crate::people::remove(State(s.clone()), Path(key.to_string())));
+        revoked(&s, key).await;
+        let restore = crate::people::roster_for_restore(&s);
+        tokio::pin!(restore);
+        assert!(futures_util::poll!(&mut restore).is_pending());
+        assert!(
+            s.roster.try_lock().is_ok(),
+            "restore must not block other roster changes while waiting"
+        );
+        drop(held);
+        removal.await.unwrap().unwrap();
+        let roster = restore.await;
+        assert!(s.removing_people.lock().unwrap().is_empty());
+        drop(roster);
     }
 }

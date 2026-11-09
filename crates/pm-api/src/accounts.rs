@@ -1040,23 +1040,14 @@ pub async fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     forget_person_locked(s, key).await
 }
 
-/// [`forget_person`] with their person lock already held (People › Remove holds it across the
-/// roster change too, so a re-add waits for all of this).
+/// [`forget_person`] with their operation lock already held. People › Remove has already
+/// revoked access and holds the separate membership lock until all of this finishes.
 pub(crate) async fn forget_person_locked(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let signed_out = sign_out_everywhere(s, key);
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
-    // So do their homeserver grant and the node's copy of their bookmarks (personal.rs): a key to
-    // their homeserver and their data must not stay for when that identity is added again
-    let personal = {
-        let lib = s.library.lock().expect("library poisoned");
-        lib.settings_with_prefix(&format!("{PERSON_PREFIX}{key}."))
-            .and_then(|all| {
-                all.into_iter()
-                    .try_for_each(|(k, _)| lib.delete_setting(&k).map(drop))
-            })
-    };
+    // Their grant and copies must not stay for when that identity is added again.
     let grant = crate::personal::forget(s, key).await;
     // Everything else goes too before a failure above is answered (removing them again finishes
     // what is left)
@@ -1070,22 +1061,32 @@ pub(crate) async fn forget_person_locked(s: &NodeState, key: &str) -> Result<(),
         .lock()
         .expect("pending")
         .retain(|_, p| p.who != theirs);
-    let rest = (|| -> Result<(), ApiError> {
+    let settings_problems = {
         let lib = s.library.lock().expect("library poisoned");
-        for (k, _) in lib.settings_with_prefix(&format!("{PERSON_PREFIX}{key}."))? {
-            lib.delete_setting(&k)?;
-        }
-        lib.delete_setting(&crate::prefs::storage_key_of(key))?;
-        lib.delete_setting(&crate::presence::visible_key(key))?;
+        let mut problems = Vec::new();
+        let mut keys = vec![
+            crate::prefs::storage_key_of(key),
+            crate::presence::visible_key(key),
+        ];
         // What they read with their own sign-ins, and with the node's ([`Who::tag`])
         let on_node = Who::ListenerOnNode(key.to_string()).tag();
-        for tag in [key, on_node.as_str()] {
-            for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(tag))? {
-                lib.delete_setting(&k)?;
+        for prefix in [
+            format!("{PERSON_PREFIX}{key}."),
+            crate::discover::contents_prefix_of(key),
+            crate::discover::contents_prefix_of(&on_node),
+        ] {
+            match lib.settings_with_prefix(&prefix) {
+                Ok(all) => keys.extend(all.into_iter().map(|(k, _)| k)),
+                Err(e) => problems.push(e.to_string()),
             }
         }
-        Ok(())
-    })();
+        for key in keys {
+            if let Err(e) = lib.delete_setting(&key) {
+                problems.push(e.to_string());
+            }
+        }
+        problems
+    };
     let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
     crate::tidal::forget_streams_of(&on_node);
@@ -1094,15 +1095,11 @@ pub(crate) async fn forget_person_locked(s: &NodeState, key: &str) -> Result<(),
     crate::devices::forget_all_of(s, key);
     // Every failure is answered, a grant still on the node first (a key to their homeserver,
     // and what removing them again is for)
-    let problems: Vec<String> = [
-        grant.err(),
-        signed_out.err().map(|e| e.message),
-        personal.err().map(|e| e.to_string()),
-        rest.err().map(|e| e.message),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let problems: Vec<String> = [grant.err(), signed_out.err().map(|e| e.message)]
+        .into_iter()
+        .flatten()
+        .chain(settings_problems)
+        .collect();
     if !problems.is_empty() {
         return Err(ApiError::new(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,

@@ -8,7 +8,7 @@ mod personal_fake;
 use axum::http::StatusCode;
 use personal_fake::*;
 use pm_api::personal::PersonalHomeserver;
-use pm_api::router;
+use pm_api::{router, NodeState};
 use std::sync::atomic::Ordering;
 
 #[tokio::test]
@@ -242,13 +242,6 @@ async fn disconnecting_and_removing_a_person() {
     // People › Remove: her grant goes too
     fake.connected.lock().unwrap().insert(ANN.to_string());
     pm_api::accounts::forget_person(&s, ANN).await.unwrap();
-    // (forget_person is sync; the grant goes with it, the fake hears it in the background)
-    for _ in 0..50 {
-        if !fake.connected(ANN) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
     assert!(!fake.connected(ANN), "removed people keep no grant");
 }
 
@@ -772,12 +765,6 @@ async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
         s.library.lock().unwrap().get_setting(&copy).unwrap().is_none(),
         "her copy went all the same"
     );
-    for _ in 0..100 {
-        if !fake.connected.lock().unwrap().contains(ANN) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
     assert!(!fake.connected.lock().unwrap().contains(ANN), "and her grant");
     assert!(
         s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none(),
@@ -785,6 +772,24 @@ async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
     );
     // Her sessions are still listed (the write failed): removing her again signs them out
     assert!(pm_api::accounts::sessions_of(&s, ANN) > 0);
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/people/invites",
+        Some(serde_json::json!({"access": "music", "key": ANN})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "re-add must finish the failed cleanup first: {v}"
+    );
+    assert!(!pm_api::people::may_use_music(&s, ANN));
+    assert_eq!(
+        call(&app, &ann, "GET", "/v1/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
     db.execute_batch("DROP TRIGGER no_tokens_u; DROP TRIGGER no_tokens_i;")
         .unwrap();
     let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
@@ -800,6 +805,8 @@ async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
     let (s, fake, _ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
     let app = router(s.clone());
+    // A deterministic retained-grant failure also exercises the message when run as root.
+    fake.disconnect_fails.store(true, Ordering::SeqCst);
     // Her grant, as the node keeps it (next to the library), on a folder it can't change
     let grants = dir.path().join("grants");
     std::fs::create_dir_all(&grants).unwrap();
@@ -818,7 +825,6 @@ async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
     )
     .unwrap();
     let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
-    let stuck = file.exists();
     std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o700)).unwrap();
     db.execute_batch("DROP TRIGGER no_tokens_u; DROP TRIGGER no_tokens_i;")
         .unwrap();
@@ -831,28 +837,16 @@ async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
             .unwrap_or_default()
             .contains(ANN)
     };
-    // (As root the folder can't refuse: nothing to show there)
-    if stuck {
-        assert_eq!(
-            st,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "never a success with her grant left: {v}"
-        );
-        assert!(!listed(&s), "she is off the roster all the same");
-        let said = v["error"].as_str().unwrap_or_default();
-        assert!(
-            said.starts_with("their homeserver approval is still on the node"),
-            "the grant left behind is said first: {v}"
-        );
-        assert!(said.contains("no token writes"), "and the token write too: {v}");
-        assert!(
-            s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none(),
-            "the rest of what the node keeps for her went before the error was answered"
-        );
-    }
-    // (The token write failed either way, so the first removal answered an error.) Removing her
-    // again finishes it
     assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert!(!listed(&s), "she is off the roster all the same");
+    let said = v["error"].as_str().unwrap_or_default();
+    assert!(
+        said.starts_with("their homeserver approval is still on the node"),
+        "the retained grant is named first, including as root: {v}"
+    );
+    assert!(said.contains("no token writes"), "and the token write too: {v}");
+    assert!(s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none());
+    fake.disconnect_fails.store(false, Ordering::SeqCst);
     let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert!(!file.exists(), "her grant is gone");
@@ -862,13 +856,92 @@ async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
     assert_eq!(st, StatusCode::NOT_FOUND);
 }
 
+async fn wait_until_removed(s: &NodeState) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while pm_api::people::may_use_music(s, ANN) || pm_api::accounts::sessions_of(s, ANN) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation must not wait for the held homeserver operation");
+}
+
 #[tokio::test]
-async fn a_removal_waits_for_her_change_on_its_way_and_leaves_no_grant() {
+async fn removal_revokes_before_io_and_finishes_even_if_the_owner_request_is_cancelled() {
+    for cancel in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, bo) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let hold = fake.gate.write().await;
+        let (a, t) = (app.clone(), ann.clone());
+        let heart = tokio::spawn(async move {
+            call(
+                &a,
+                &t,
+                "PUT",
+                "/v1/bookmarks",
+                Some(serde_json::json!({"uri": SONG_B})),
+            )
+            .await
+        });
+        fake.put_started.notified().await;
+        let a = app.clone();
+        let removal =
+            tokio::spawn(async move { call(&a, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await });
+        wait_until_removed(&s).await;
+        assert!(
+            !removal.is_finished(),
+            "cleanup still waits on the held operation"
+        );
+        assert_eq!(
+            call(&app, &ann, "GET", "/v1/me", None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(call(&app, &bo, "GET", "/v1/me", None).await.0, StatusCode::OK);
+        if cancel {
+            removal.abort();
+        }
+        let body = Some(serde_json::json!({"access": "music", "key": ANN}));
+        let re_add = call(&app, OWNER, "POST", "/v1/people/invites", body);
+        tokio::pin!(re_add);
+        assert!(
+            futures_util::poll!(&mut re_add).is_pending(),
+            "re-add waits for cleanup"
+        );
+        assert!(!pm_api::people::may_use_music(&s, ANN));
+        drop(hold);
+        let (st, v) = re_add.await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        if cancel {
+            assert!(removal.await.unwrap_err().is_cancelled());
+        } else {
+            let (st, v) = removal.await.unwrap();
+            assert_eq!(st, StatusCode::OK, "{v}");
+        }
+        heart.await.unwrap();
+        assert!(!fake.connected(ANN), "the old grant went before the re-add");
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(&format!("person.{ANN}.bookmarks"))
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            call(&app, &ann, "GET", "/v1/me", None).await.0,
+            StatusCode::UNAUTHORIZED,
+            "re-adding her never revives the old token"
+        );
+    }
+}
+
+#[tokio::test]
+async fn music_off_revokes_while_a_homeserver_operation_is_held() {
     let dir = tempfile::tempdir().unwrap();
     let (s, fake, ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
     let app = router(s.clone());
-    // Her heart is on its way to her homeserver (her person lock is held meanwhile)
     let hold = fake.gate.write().await;
     let (a, t) = (app.clone(), ann.clone());
     let heart = tokio::spawn(async move {
@@ -881,18 +954,28 @@ async fn a_removal_waits_for_her_change_on_its_way_and_leaves_no_grant() {
         )
         .await
     });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let a = app.clone();
-    let removal =
-        tokio::spawn(async move { call(&a, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(!removal.is_finished(), "Remove waits for what is on its way");
-    drop(hold);
-    let (st, v) = removal.await.unwrap();
+    fake.put_started.notified().await;
+    let path = format!("/v1/people/{ANN}");
+    let (st, v) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        call(
+            &app,
+            OWNER,
+            "PATCH",
+            &path,
+            Some(serde_json::json!({"music": false})),
+        ),
+    )
+    .await
+    .expect("Music off must not wait for the held homeserver operation");
     assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        call(&app, &ann, "GET", "/v1/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(!heart.is_finished());
+    drop(hold);
     heart.await.unwrap();
-    // Once it has answered, nothing of hers is left
-    assert!(!fake.connected.lock().unwrap().contains(ANN), "her grant is gone");
     assert!(s
         .library
         .lock()
@@ -903,60 +986,41 @@ async fn a_removal_waits_for_her_change_on_its_way_and_leaves_no_grant() {
 }
 
 #[tokio::test]
-async fn a_re_add_waits_for_the_removal_and_her_new_approval_stays() {
+async fn a_failed_settings_delete_does_not_skip_other_cleanup_and_can_be_retried() {
     let dir = tempfile::tempdir().unwrap();
-    let (s, fake, ann, _) = node(dir.path());
+    let (s, fake, _ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
+    let prefs = format!("me.prefs.{ANN}");
+    let presence = format!("presence.visible.{ANN}");
+    let contents = format!("item.contents.{ANN}.fixture");
+    for k in [&prefs, &presence, &contents] {
+        s.library.lock().unwrap().set_setting(k, "{}").unwrap();
+    }
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(&format!(
+        "CREATE TRIGGER no_prefs BEFORE DELETE ON settings WHEN OLD.key = '{prefs}'
+         BEGIN SELECT RAISE(ABORT, 'test: no preference deletes'); END;"
+    ))
+    .unwrap();
     let app = router(s.clone());
-    let hold = fake.gate.write().await;
-    let (a, t) = (app.clone(), ann.clone());
-    let heart = tokio::spawn(async move {
-        call(
-            &a,
-            &t,
-            "PUT",
-            "/v1/bookmarks",
-            Some(serde_json::json!({"uri": SONG_B})),
-        )
-        .await
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let a = app.clone();
-    let removal =
-        tokio::spawn(async move { call(&a, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    // The owner adds her again right away
-    let a = app.clone();
-    let re_add = tokio::spawn(async move {
-        call(
-            &a,
-            OWNER,
-            "POST",
-            "/v1/people/invites",
-            Some(serde_json::json!({"access": "music", "key": ANN})),
-        )
-        .await
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(!re_add.is_finished(), "the re-add waits for the removal");
-    drop(hold);
-    let (st, v) = removal.await.unwrap();
-    assert_eq!(st, StatusCode::OK, "{v}");
-    let (st, v) = re_add.await.unwrap();
-    assert_eq!(st, StatusCode::OK, "{v}");
-    heart.await.unwrap();
-    // She approves the node again: nothing of the earlier removal takes that away
-    fake.connected.lock().unwrap().insert(ANN.to_string());
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(fake.connected.lock().unwrap().contains(ANN));
-    assert!(s
-        .library
-        .lock()
-        .unwrap()
-        .get_setting("people")
-        .unwrap()
-        .unwrap()
-        .contains(ANN));
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert!(s.library.lock().unwrap().get_setting(&prefs).unwrap().is_some());
+    for k in [&presence, &contents] {
+        assert!(
+            s.library.lock().unwrap().get_setting(k).unwrap().is_none(),
+            "{k} was still deleted"
+        );
+    }
+    assert!(!fake.connected(ANN));
+    db.execute_batch("DROP TRIGGER no_prefs").unwrap();
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "the leftover preferences make this retry possible: {v}"
+    );
+    assert!(s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none());
 }
 
 fn urlencode(s: &str) -> String {

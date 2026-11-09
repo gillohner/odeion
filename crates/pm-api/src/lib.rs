@@ -3792,7 +3792,7 @@ mod tests {
         w.finalize().unwrap();
     }
 
-    async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
+    pub(crate) async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
         state_with(dir, token, Default::default()).await
     }
 
