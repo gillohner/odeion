@@ -57,8 +57,20 @@ const lyricBox = (page) => page.evaluate(() => {
   const on = box.querySelector('.lyric-line.on'); const lines = [...box.querySelectorAll('.lyric-line')];
   const size = (el) => { const r = el.getBoundingClientRect(); return { h: r.height, w: r.width, top: r.top - b.top, op: parseFloat(getComputedStyle(el).opacity), fs: parseFloat(getComputedStyle(el).fontSize), scale: el.getBoundingClientRect().width / el.offsetWidth }; };
   const k = lines.indexOf(on);
-  return { scrollbar: box.offsetWidth - box.clientWidth, sidew: box.scrollWidth - box.clientWidth, synced: box.classList.contains('synced'), n: lines.length, k, scrollTop: box.scrollTop, boxH: box.clientHeight, on: on && size(on), prev: k > 0 && size(lines[k - 1]), prev2: k > 1 && size(lines[k - 2]), far: k > 5 && size(lines[k - 5]), longWraps: lines[33].getBoundingClientRect().height > lines[0].getBoundingClientRect().height * 1.6, role: on && on.getAttribute('role') };
+  return { scrollbar: box.offsetWidth - box.clientWidth, sidew: box.scrollWidth - box.clientWidth, synced: box.classList.contains('synced'), n: lines.length, k, scrollTop: box.scrollTop, maxScroll: box.scrollHeight - box.clientHeight, boxH: box.clientHeight, on: on && size(on), prev: k > 0 && size(lines[k - 1]), prev2: k > 1 && size(lines[k - 2]), far: k > 5 && size(lines[k - 5]), longWraps: lines[33].getBoundingClientRect().height > lines[0].getBoundingClientRect().height * 1.6, role: on && on.getAttribute('role') };
 });
+// Wheel input scrolls asynchronously. Record where it actually stopped, without moving it again.
+const settledLyricsScroll = (page) => page.$eval('#nplyrics .lyric-lines', (box) => new Promise((resolve, reject) => {
+  let last = box.scrollTop; let since = performance.now(); let raf;
+  const timeout = setTimeout(() => { cancelAnimationFrame(raf); reject(new Error('Lyrics scrolling did not settle')); }, 2500);
+  const frame = () => {
+    if (!box.isConnected) { clearTimeout(timeout); reject(new Error('Lyrics replaced during wheel input')); return; }
+    const now = performance.now();
+    if (box.scrollTop !== last) { last = box.scrollTop; since = now; }
+    if (now - since >= 120) { clearTimeout(timeout); resolve(last); } else raf = requestAnimationFrame(frame);
+  };
+  raf = requestAnimationFrame(frame);
+}));
 
 (async () => {
   const browser = await chromium.launch();
@@ -91,17 +103,35 @@ const lyricBox = (page) => page.evaluate(() => {
     state.send({ ...zone, now_playing: { ...np, position_ms: 20500 } }); await sleep(1000);
     const followed = await page.evaluate(() => { const box = document.querySelector('#nplyrics .lyric-lines'); const on = box.querySelector('.lyric-line.on'); const b = box.getBoundingClientRect(); const o = on && on.getBoundingClientRect(); return { ms: on && on.dataset.ms, frac: on ? (o.top - b.top + o.height / 2) / b.height : null }; });
     check(followed.ms === '20000' && followed.frac != null && followed.frac > 0.15 && followed.frac < 0.55, `${at}: the tapped line is followed at once (${followed.ms}, ${followed.frac != null ? Math.round(followed.frac * 100) : '?'}% down the panel)`);
-    state.send({ ...zone, now_playing: { ...np, position_ms: 61000 } }); await sleep(900);
+    state.send({ ...zone, now_playing: { ...np, position_ms: 61000 } });
+    await page.waitForFunction(() => {
+      const box = document.querySelector('#nplyrics .lyric-lines');
+      return box?.querySelector('.on')?.dataset.ms === '60000' && !box.dataset.auto && box.scrollTop > 400;
+    });
+    const beforeWheel = await settledLyricsScroll(page);
     // A scroll by hand holds the following off: the box stays where the finger left it
-    // (the song moves on to line 51 meanwhile: the panel must not follow it during the hold, and
-    // must follow the next line once the hold is over)
-    await page.$eval('#nplyrics .lyric-lines', (box) => { box.dispatchEvent(new WheelEvent('wheel', { deltaY: 1, bubbles: true })); box.scrollTop = 0; });
+    // (the song moves on to line 36 meanwhile). Use real input: dispatchEvent plus scrollTop = 0
+    // can leave a compositor delta from the preceding smooth scroll on a busy browser.
+    const wheelPoint = await page.$eval('#nplyrics .lyric-lines', (box) => { const r = box.getBoundingClientRect(); return { x: r.left + 40, y: r.top + r.height / 2 }; });
+    await page.mouse.move(wheelPoint.x, wheelPoint.y);
+    await page.mouse.wheel(0, -400);
+    await page.waitForFunction((top) => document.querySelector('#nplyrics .lyric-lines').scrollTop < top, beforeWheel);
+    const manualTop = await settledLyricsScroll(page);
+    check(manualTop > 0 && manualTop < beforeWheel, `${at}: real wheel input moves the lyrics to an interior position (${beforeWheel} → ${manualTop})`);
     state.send({ ...zone, now_playing: { ...np, position_ms: 70000 } }); await sleep(1600);
     const held = await page.evaluate(() => ({ top: document.querySelector('#nplyrics .lyric-lines').scrollTop, on: document.querySelector('#nplyrics .lyric-line.on')?.dataset.ms }));
-    check(held.top === 0 && held.on === '70000', `${at}: after a scroll by hand the panel stays put for a while (at ${held.top}, the current line moved on to ${held.on})`);
-    await sleep(2600); state.send({ ...zone, now_playing: { ...np, position_ms: 74000 } }); await sleep(900);
-    const resumed = await page.$eval('#nplyrics .lyric-lines', (box) => box.scrollTop);
-    check(resumed > 0, `${at}: once the hold is over the panel follows again (at ${resumed})`);
+    check(held.top === manualTop && held.on === '70000', `${at}: after a scroll by hand the panel stays put for a while (${manualTop} → ${held.top}, the current line moved on to ${held.on})`);
+    await page.screenshot({ path: path.join(SHOTS, `lyrics-held-${w}.png`) });
+    await sleep(2600); state.send({ ...zone, now_playing: { ...np, position_ms: 74000 } });
+    await page.waitForFunction(() => {
+      const box = document.querySelector('#nplyrics .lyric-lines');
+      return box?.querySelector('.on')?.dataset.ms === '74000' && !box.dataset.auto;
+    });
+    await settledLyricsScroll(page);
+    const resumed = await lyricBox(page);
+    // Line 38 of 40 cannot reach the usual third-of-panel band: following clamps at the end.
+    check(resumed.scrollTop > manualTop && resumed.scrollTop === resumed.maxScroll && resumed.k === 37, `${at}: once the hold is over the panel follows again (at ${resumed.scrollTop} of ${resumed.maxScroll}, line ${resumed.k + 1})`);
+    await page.screenshot({ path: path.join(SHOTS, `lyrics-resumed-${w}.png`) });
     // A pause: the cover settles back and the play icon pops
     state.send({ ...zone, transport: 'paused' }); await sleep(900);
     const paused = await page.evaluate(() => { const ov = document.querySelector('#nowplaying'); const big = ov.querySelector('.np-big'); const m = new DOMMatrix(getComputedStyle(big).transform); const b = ov.querySelector('.np-transport [data-npt="toggle"]'); return { t: ov.dataset.transport, scale: m.a, label: b.getAttribute('aria-label'), swapped: !!b.querySelector('.ic.swap') }; });
