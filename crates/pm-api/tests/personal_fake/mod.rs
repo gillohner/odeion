@@ -38,6 +38,8 @@ pub struct Fake {
     pub rejects: Mutex<HashSet<String>>,
     /// Writes under /pub/ refused (a grant that lost its public folder).
     pub refuse_pub: AtomicBool,
+    /// The node can't delete its copy of the grant.
+    pub disconnect_fails: AtomicBool,
     /// Listings fail (more than the node reads, or too slow): the node can't catch up.
     pub list_fails: AtomicBool,
     /// Only listings of all their posts fail (more than the node lists); one collection's own
@@ -109,8 +111,12 @@ impl PersonalHomeserver for Fake {
     fn connected(&self, key: &str) -> bool {
         self.connected.lock().unwrap().contains(key)
     }
-    async fn disconnect(&self, key: &str) {
+    async fn disconnect(&self, key: &str) -> Result<(), String> {
+        if self.disconnect_fails.load(Ordering::SeqCst) {
+            return Err("read-only".into());
+        }
         self.connected.lock().unwrap().remove(key);
+        Ok(())
     }
     async fn bookmarks(
         &self,

@@ -72,8 +72,9 @@ pub enum PersonalError {
 pub trait PersonalHomeserver: Send + Sync {
     /// Whether the node holds a grant from `key`.
     fn connected(&self, key: &str) -> bool;
-    /// Forgets the grant of `key` (their homeserver keeps everything).
-    async fn disconnect(&self, key: &str);
+    /// Forgets the grant of `key` (their homeserver keeps everything). An error when it is still
+    /// there (it couldn't be deleted).
+    async fn disconnect(&self, key: &str) -> Result<(), String>;
     /// Every bookmark of `key`: the stored URI and when it was made (Unix microseconds).
     /// `known` is what the node has already: those aren't downloaded again.
     async fn bookmarks(
@@ -302,15 +303,17 @@ impl PersonalHomeserver for Grants {
         grant_file(&self.dir, key).is_some_and(|f| f.is_file())
     }
 
-    async fn disconnect(&self, key: &str) {
+    async fn disconnect(&self, key: &str) -> Result<(), String> {
         sessions().lock().expect("sessions").remove(key);
         if let Some(f) = grant_file(&self.dir, key) {
             if let Err(e) = std::fs::remove_file(&f) {
                 if e.kind() != std::io::ErrorKind::NotFound {
                     tracing::warn!(path = %f.display(), "cannot remove a grant: {e}");
+                    return Err(format!("the node couldn't delete its copy of your approval: {e}"));
                 }
             }
         }
+        Ok(())
     }
 
     async fn bookmarks(
@@ -538,19 +541,22 @@ impl Copy {
         }
     }
 
-    /// Whether a change of `uri` made at `at` is older than the last one the node knows of the
-    /// other kind (by a second or more, so clocks a little apart don't matter): a clear older
-    /// than the bookmark, or a bookmark older than the clear.
+    /// Whether a change of `uri` made at `at` is older than the last one the node knows of it:
+    /// one of the same kind made later (a late duplicate), or one of the other kind made a second
+    /// or more later (clocks a little apart don't matter). A clear older than the bookmark, a
+    /// bookmark older than the clear, or an older repeat, changes nothing.
     fn outdated(&self, uri: &str, on: bool, at: i64) -> bool {
-        let newer = |list: &[Item]| {
-            list.iter()
-                .any(|i| i.uri == uri && i.at >= at.saturating_add(1_000_000))
-        };
-        if on {
-            newer(&self.cleared)
+        let last = |list: &[Item]| list.iter().filter(|i| i.uri == uri).map(|i| i.at).max();
+        let (same, other) = if on {
+            (&self.items, &self.cleared)
         } else {
-            newer(&self.items)
-        }
+            (&self.cleared, &self.items)
+        };
+        last(same).is_some_and(|l| l > at) || last(other).is_some_and(|l| l >= at.saturating_add(1_000_000))
+    }
+
+    fn bookmarked(&self, uri: &str) -> bool {
+        self.items.iter().any(|i| i.uri == uri)
     }
 }
 
@@ -660,10 +666,11 @@ pub(crate) async fn set_bookmark(
     }
     let now = pm_pubky::ids::now_micros();
     let at = at.map_or(now, |a| a.clamp(0, now / 1_000_000).saturating_mul(1_000_000));
-    // Made before the last change of the other kind (another device's, sent late): that one
+    // Made before the last change of it (another device's, or a repeat, sent late): that one
     // stands, and neither their homeserver nor what waits for it is touched
     if c.outdated(&uri, on, at) {
-        return Ok(Json(BookmarkChanged::new(uri, !on)).into_response());
+        let now_on = c.bookmarked(&uri);
+        return Ok(Json(BookmarkChanged::new(uri, now_on)).into_response());
     }
     let r = if on {
         b.put_bookmark(key, &uri, at).await
@@ -908,7 +915,11 @@ pub(crate) async fn disconnect(
     let _one = lock.lock().await;
     // An approval still on its way would bring the grant back after this answer
     end_approvals_of(&key).await;
-    backend(&s).disconnect(&key).await;
+    // Still there (it couldn't be deleted): not answered as disconnected
+    backend(&s)
+        .disconnect(&key)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let copy = load(&s, &key);
     Ok(Json(PersonalState {
         connected: false,
@@ -974,25 +985,34 @@ pub(crate) async fn connect_poll(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let key = listener_key(&c)?;
     let id = q.get("id").cloned().unwrap_or_default();
+    answer_of(&key, &id, CONNECT_TTL).await.map(Json)
+}
+
+/// Where approval `id` of `key` stands, for a poll; one older than `ttl` is gone.
+async fn answer_of(key: &str, id: &str, ttl: Duration) -> Result<serde_json::Value, ApiError> {
     let mut all = connects().lock().await;
     // Only the listener who started it may read it
-    let Some(c) = all.get(&id).filter(|c| c.who == key) else {
-        return Ok(Json(serde_json::json!({"state": "expired"})));
+    let Some(c) = all.get(id).filter(|c| c.who == key) else {
+        return Ok(serde_json::json!({"state": "expired"}));
     };
+    // Past its time, answered or not: gone
+    if c.started.elapsed() > ttl {
+        all.remove(id);
+        return Ok(serde_json::json!({"state": "expired"}));
+    }
     match &c.answer {
-        None if c.started.elapsed() > CONNECT_TTL => Ok(Json(serde_json::json!({"state": "expired"}))),
-        None => Ok(Json(serde_json::json!({"state": "pending"}))),
+        None => Ok(serde_json::json!({"state": "pending"})),
         // A failure is answered once; then it is gone, so the page's next poll starts afresh
         Some(a) if a["state"] == "error" => {
             let why = a["reason"]
                 .as_str()
                 .unwrap_or("Ring's approval failed")
                 .to_string();
-            all.remove(&id);
+            all.remove(id);
             Err(ApiError::new(StatusCode::BAD_GATEWAY, why))
         }
         // Kept until it expires: another tab of theirs reads the same answer
-        Some(a) => Ok(Json(a.clone())),
+        Some(a) => Ok(a.clone()),
     }
 }
 
@@ -1007,7 +1027,9 @@ pub(crate) fn forget(s: &NodeState, key: &str) {
                 let lock = person_lock(&key);
                 let _one = lock.lock().await;
                 end_approvals_of(&key).await;
-                b.disconnect(&key).await;
+                if let Err(e) = b.disconnect(&key).await {
+                    tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
+                }
             });
         }
         Err(_) => {
@@ -1416,5 +1438,56 @@ mod tests {
             classify_call(&HomeserverError::Timeout),
             PersonalError::Unreachable(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn an_answered_approval_expires_with_its_time() {
+        connects().lock().await.insert(
+            "t-old-ok".into(),
+            Connect {
+                started: Instant::now(),
+                who: "old-ann".into(),
+                answer: Some(serde_json::json!({"state": "ok"})),
+            },
+        );
+        assert_eq!(
+            poll_as("old-ann", "t-old-ok").await.unwrap()["state"],
+            "ok",
+            "within its time"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            answer_of("old-ann", "t-old-ok", Duration::from_millis(10))
+                .await
+                .unwrap()["state"],
+            "expired",
+            "answered, and past its time"
+        );
+        assert!(!still_asked("t-old-ok").await, "and it is gone");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_grant_that_cant_be_deleted_isnt_forgotten() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let grants = dir.path().join("grants");
+        let g = Grants {
+            dir: grants.clone(),
+            hs: None,
+        };
+        let k = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let file = grant_file(&grants, k).unwrap();
+        crate::imports::write_private(&file, b"fixture-secret").unwrap();
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let r = g.disconnect(k).await;
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // (As root the folder can't refuse: nothing to show there)
+        if file.exists() {
+            assert!(r.is_err(), "still there: an error, not a disconnect");
+            assert!(g.connected(k));
+        }
+        assert!(g.disconnect(k).await.is_ok());
+        assert!(!g.connected(k));
     }
 }

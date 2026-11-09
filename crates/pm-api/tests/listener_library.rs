@@ -679,6 +679,97 @@ async fn a_listener_removed_while_her_change_is_on_its_way_leaves_no_copy() {
     );
 }
 
+#[tokio::test]
+async fn a_late_repeat_never_moves_a_bookmark_back_in_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let heart = |uri: &str, at: i64| Some(serde_json::json!({"uri": uri, "at": at}));
+    let clear = |uri: &str, at: i64| format!("/v1/bookmarks?uri={}&at={at}", urlencode(uri));
+    // A heart at 200 s, a late repeat of it from 100 s, then a clear from 150 s: the heart stands
+    call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_B, 200)).await;
+    let (_, v) = call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_B, 100)).await;
+    assert_eq!(v["bookmarked"], true, "{v}");
+    let (_, v) = call(&app, &ann, "DELETE", &clear(SONG_B, 150), None).await;
+    assert_eq!(v["bookmarked"], true, "the newest is the heart at 200 s: {v}");
+    assert_eq!(fake.at(ANN, SONG_B), Some(200_000_000), "its time not moved back");
+    // The other way round, while her homeserver is away: a clear at 200 s, a repeat from 100 s,
+    // a heart from 150 s: it stays cleared, and only the clear waits
+    call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_C, 50)).await;
+    fake.down.store(true, Ordering::SeqCst);
+    call(&app, &ann, "DELETE", &clear(SONG_C, 200), None).await;
+    let (_, v) = call(&app, &ann, "DELETE", &clear(SONG_C, 100), None).await;
+    assert_eq!(v["bookmarked"], false, "{v}");
+    let (_, v) = call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_C, 150)).await;
+    assert_eq!(v["bookmarked"], false, "the newest is the clear at 200 s: {v}");
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(v["homeserver"]["pending"], 1, "{v}");
+    fake.down.store(false, Ordering::SeqCst);
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(uris(&v), vec![SONG_B], "{v}");
+    assert_eq!(fake.of(ANN), vec![SONG_B]);
+}
+
+#[tokio::test]
+async fn a_disconnect_that_couldnt_forget_the_grant_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    fake.disconnect_fails.store(true, Ordering::SeqCst);
+    let (st, v) = call(&app, &ann, "DELETE", "/v1/me/homeserver", None).await;
+    assert_eq!(
+        st,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "never answered as disconnected: {v}"
+    );
+    let (_, v) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+    assert_eq!(v["connected"], true, "{v}");
+}
+
+#[tokio::test]
+async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    call(
+        &app,
+        &ann,
+        "PUT",
+        "/v1/bookmarks",
+        Some(serde_json::json!({"uri": SONG_B})),
+    )
+    .await;
+    let copy = format!("person.{ANN}.bookmarks");
+    assert!(s.library.lock().unwrap().get_setting(&copy).unwrap().is_some());
+    // The library refuses the token list from here on
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_tokens_u BEFORE UPDATE ON settings WHEN NEW.key = 'accounts.tokens'
+           BEGIN SELECT RAISE(ABORT, 'test: no token writes'); END;
+         CREATE TRIGGER no_tokens_i BEFORE INSERT ON settings WHEN NEW.key = 'accounts.tokens'
+           BEGIN SELECT RAISE(ABORT, 'test: no token writes'); END;",
+    )
+    .unwrap();
+    assert!(
+        pm_api::accounts::forget_person(&s, ANN).is_err(),
+        "the token write failed"
+    );
+    assert!(
+        s.library.lock().unwrap().get_setting(&copy).unwrap().is_none(),
+        "her copy went all the same"
+    );
+    for _ in 0..100 {
+        if !fake.connected.lock().unwrap().contains(ANN) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(!fake.connected.lock().unwrap().contains(ANN), "and her grant");
+}
+
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
