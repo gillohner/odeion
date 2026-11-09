@@ -96,15 +96,17 @@ jobs:
     name: phone as a zone (API ${{ matrix.api }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Android 17 runs on the reduced google_atd image: reported, not required ("as available")
+    continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {api: "30", target: google_apis}
-          - {api: "35", target: google_apis}
+          - {api: "30", target: google_apis, optional: false}
+          - {api: "35", target: google_apis, optional: false}
           # Android 17 on the google_atd image (the google_apis 37 images crash-loop on the runners,
           # see android-ring-transport.yml); its default data partition can't take the APK
-          - {api: "37.0", target: google_atd}
+          - {api: "37.0", target: google_atd, optional: true}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:

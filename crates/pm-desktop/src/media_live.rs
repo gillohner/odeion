@@ -536,11 +536,12 @@ impl Media {
             a
         };
         if !media::page_allowed(origin, &allowed) {
-            tracing::debug!(%origin, "media controls: a message from another page, ignored");
+            tracing::info!(%origin, ?allowed, "media controls: a message from another page, ignored");
             return;
         }
         match media::parse_page(data) {
             Some(PageMsg::Controlling(z)) => {
+                tracing::info!(zone = %z, "media controls: the page controls this zone");
                 self.state().controlled = Some(z);
                 self.push();
             }
