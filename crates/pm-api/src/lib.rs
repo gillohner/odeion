@@ -25103,10 +25103,10 @@ exec sleep 300
             let (gate, got, _) = gated_listenbrainz(&s).await;
             gate.add_permits(10);
             let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
-            listenbrainz::disconnect(axum::extract::State(s.clone()))
+            let _ = listenbrainz::disconnect(axum::extract::State(s.clone()))
                 .await
                 .unwrap();
-            listenbrainz::connect(
+            let _ = listenbrainz::connect(
                 axum::extract::State(s.clone()),
                 Json(ListenBrainzForm {
                     token: Some(next_token.into()),
