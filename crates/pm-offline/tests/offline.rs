@@ -643,6 +643,7 @@ async fn a_sync_stops_at_the_limit_and_says_so() {
     let label = Label {
         title: "Album".into(),
         sub: "Artist".into(),
+        songs: Some(2),
     };
     assert!(store.keep(&KeepItem::Album(7), true, Some(label)).unwrap());
     let told: Arc<Mutex<Vec<Progress>>> = Arc::default();
@@ -687,12 +688,41 @@ async fn a_sync_stops_at_the_limit_and_says_so() {
         assert!(r.downloaded.is_empty());
     }
 
-    // Let it go: the device's copy goes at the next sync, and only the device's record changed
+    // Room made by letting go: the album goes (its song first, before any download), and a song
+    // kept on its own then fits under the same limit
     assert!(store.keep(&KeepItem::Album(7), false, None).unwrap());
+    assert!(store.keep(&KeepItem::Track(2), true, None).unwrap());
     let r = pm_offline::sync(&store, &node, &capped).await.unwrap();
-    assert_eq!(r.removed, [1]);
-    assert!(store.index().tracks.is_empty() && store.index().labels.is_empty());
+    assert_eq!(
+        (r.removed.clone(), r.downloaded.clone(), r.full.clone()),
+        (vec![1], vec![2], None)
+    );
     assert!(!dir.path().join("files/1.flac").exists());
+    assert!(store.index().labels.is_empty() || !store.index().labels.contains_key("album:7"));
+
+    // What to keep changed while a sync runs (Remove all, another limit): it stops before the
+    // next song, and says it is over
+    assert!(store.keep(&KeepItem::Track(2), false, None).unwrap());
+    assert!(store.keep(&KeepItem::Album(7), true, None).unwrap());
+    let t3: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let t4 = t3.clone();
+    let stopping = SyncOptions {
+        stop: Some(pm_offline::StopCheck(Arc::new(|| true))),
+        progress: Some(ProgressSink(Arc::new(move |p| {
+            t4.lock().unwrap().push(p.clone())
+        }))),
+        ..opts()
+    };
+    let r = pm_offline::sync(&store, &node, &stopping).await.unwrap();
+    assert!(r.downloaded.is_empty(), "{r:?}");
+    assert!(!t3.lock().unwrap().last().unwrap().running);
+
+    // Remove all: the device's copies go, and only the device's record changed on the node
+    store.keep_nothing().unwrap();
+    let r = pm_offline::sync(&store, &node, &capped).await.unwrap();
+    assert_eq!(r.removed, [2]);
+    assert!(store.index().tracks.is_empty() && store.index().labels.is_empty());
     let last = seen.lock().unwrap().manifests.last().cloned().unwrap();
     assert_eq!(last["keep"]["albums"], json!([]));
+    assert_eq!(last["keep"]["tracks"], json!([]));
 }

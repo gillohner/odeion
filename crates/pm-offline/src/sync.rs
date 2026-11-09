@@ -155,6 +155,21 @@ pub struct SyncOptions {
     pub keep_free: u64,
     /// Told where the sync stands after each song (a storage screen shows it).
     pub progress: Option<ProgressSink>,
+    /// Bytes the device keeps for other nodes: they count against the limit too.
+    pub other_bytes: u64,
+    /// Asked before each song: true when what to keep changed meanwhile (the sync stops there,
+    /// keeps what it has, and the next one goes on with the new list).
+    pub stop: Option<StopCheck>,
+}
+
+/// See [`SyncOptions::stop`].
+#[derive(Clone)]
+pub struct StopCheck(pub std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl std::fmt::Debug for StopCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StopCheck")
+    }
 }
 
 /// Where a sync stands.
@@ -167,6 +182,8 @@ pub struct Progress {
     pub done: usize,
     pub bytes_done: u64,
     pub failed: usize,
+    /// Smaller copies the node is still making (fetched at a later sync).
+    pub preparing: usize,
     /// The song downloading now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
@@ -189,6 +206,26 @@ impl SyncOptions {
     fn tell(&self, p: &Progress) {
         if let Some(s) = &self.progress {
             (s.0)(p);
+        }
+    }
+
+    fn should_stop(&self) -> bool {
+        self.stop.as_ref().is_some_and(|s| (s.0)())
+    }
+}
+
+/// Says the sync is over (running: false) however it ends.
+struct Finish<'a> {
+    opts: &'a SyncOptions,
+    progress: Progress,
+}
+
+impl Drop for Finish<'_> {
+    fn drop(&mut self) {
+        if self.progress.running {
+            self.progress.running = false;
+            self.progress.current = None;
+            self.opts.tell(&self.progress);
         }
     }
 }
@@ -525,6 +562,23 @@ async fn download(store: &Store, node: &Node, id: i64, fmt: Option<&Format>) -> 
     }))
 }
 
+/// Partial downloads (`<id>.<ext>.part`, `.etag`) of songs not in `wanted`.
+async fn remove_stray_parts(store: &Store, wanted: &std::collections::BTreeSet<i64>) {
+    let Ok(mut dir) = tokio::fs::read_dir(store.files_dir()).await else {
+        return;
+    };
+    while let Ok(Some(e)) = dir.next_entry().await {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".part") || name.ends_with(".etag")) {
+            continue;
+        }
+        let id = name.split('.').next().and_then(|n| n.parse::<i64>().ok());
+        if id.is_some_and(|id| !wanted.contains(&id)) {
+            let _ = tokio::fs::remove_file(e.path()).await;
+        }
+    }
+}
+
 /// An album's cover, once per album; none is fine.
 async fn fetch_cover(store: &Store, node: &Node, album: i64) -> Result<()> {
     if store.index().covers.contains_key(&album) {
@@ -600,7 +654,15 @@ async fn put_manifest(store: &Store, node: &Node) -> Result<Value> {
     let have: Vec<Value> = ix
         .tracks
         .iter()
-        .map(|(id, t)| json!({"track_id": id, "bytes": t.bytes, "format": t.format}))
+        .map(|(id, t)| {
+            // The node's record of the file when it was fetched: the node compares it with its
+            // record now, so a replaced or re-tagged file is fetched again
+            json!({
+                "track_id": id, "bytes": t.bytes, "format": t.format,
+                "src_size": t.track.pointer("/file/size_bytes").and_then(Value::as_u64),
+                "src_mtime": t.track.pointer("/file/mtime_unix").and_then(Value::as_i64),
+            })
+        })
         .collect();
     node.json(
         Method::PUT,
@@ -669,40 +731,52 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
                 .collect()
         })
         .unwrap_or_default();
-    let mut progress = Progress {
-        running: true,
-        wanted: wanted.len(),
-        bytes_wanted: wanted.iter().map(|w| w.1).sum(),
-        ..Progress::default()
+    // Partial downloads of songs no longer wanted (let go, or kept no more) go
+    remove_stray_parts(store, &wanted.iter().map(|w| w.0).collect()).await;
+    let mut fin = Finish {
+        opts,
+        progress: Progress {
+            running: true,
+            wanted: wanted.len(),
+            bytes_wanted: wanted.iter().map(|w| w.1).sum(),
+            ..Progress::default()
+        },
     };
-    opts.tell(&progress);
+    opts.tell(&fin.progress);
     for (id, bytes, title) in wanted {
-        // The limit and the disk, before each song: what is there stays, the rest waits
+        // What to keep changed meanwhile (Remove, Remove all, another limit): the next sync goes
+        // on with the new list
+        if opts.should_stop() {
+            tracing::info!("offline: what to keep changed; this sync stops here");
+            break;
+        }
+        // The limit (with what other nodes' downloads take) and the disk, before each song: what
+        // is there stays, the rest waits
         if let Err(why) = fits(
-            store.index().bytes(),
+            store.index().bytes() + opts.other_bytes,
             bytes,
             opts.cap_bytes,
             free_bytes(store.dir()),
             opts.keep_free,
         ) {
             tracing::info!("offline: {why}");
-            progress.full = Some(why.clone());
+            fin.progress.full = Some(why.clone());
             report.full = Some(why);
             break;
         }
-        progress.current = Some(title);
-        opts.tell(&progress);
+        fin.progress.current = Some(title);
+        opts.tell(&fin.progress);
         let got = download(store, node, id, format.as_ref()).await;
-        progress.current = None;
+        fin.progress.current = None;
         match &got {
             Ok(Got::Done(k)) => {
-                progress.done += 1;
-                progress.bytes_done += k.bytes;
+                fin.progress.done += 1;
+                fin.progress.bytes_done += k.bytes;
             }
-            Ok(Got::Preparing) => {}
-            Err(_) => progress.failed += 1,
+            Ok(Got::Preparing) => fin.progress.preparing += 1,
+            Err(_) => fin.progress.failed += 1,
         }
-        opts.tell(&progress);
+        opts.tell(&fin.progress);
         match got {
             Ok(Got::Done(kept)) => {
                 let album = kept.track.pointer("/album/id").and_then(Value::as_i64);
@@ -716,18 +790,11 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
                 report.downloaded.push(id);
             }
             Ok(Got::Preparing) => report.preparing.push(id),
-            Err(e @ SyncError::Unreachable(_)) => {
-                opts.tell(&Progress {
-                    running: false,
-                    ..progress
-                });
-                return Err(e);
-            }
+            Err(e @ SyncError::Unreachable(_)) => return Err(e),
             Err(e) => report.failed.push((id, e.to_string())),
         }
     }
-    progress.running = false;
-    opts.tell(&progress);
+    drop(fin);
     // Covers for songs kept before a cover could be fetched
     let albums: Vec<i64> = store
         .index()

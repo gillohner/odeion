@@ -19,4 +19,4 @@ pub mod sync;
 
 pub use downloads::{summary, Summary};
 pub use store::{node_dir, Event, Format, Index, Keep, KeepItem, KeptTrack, Label, Store};
-pub use sync::{flush, sync, Node, Progress, ProgressSink, SyncError, SyncOptions, SyncReport};
+pub use sync::{flush, sync, Node, Progress, ProgressSink, StopCheck, SyncError, SyncOptions, SyncReport};

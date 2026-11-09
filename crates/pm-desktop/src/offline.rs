@@ -34,11 +34,12 @@ pub struct Offline {
     /// `http://127.0.0.1:<port>` while the local server runs; the navigation guard reads it.
     origin: Arc<Mutex<Option<String>>>,
     /// Raised by every [`Offline::spawn_sync`]: an older loop sees it and stops.
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
     /// One sync at a time, also while a replaced loop finishes its last one.
     syncing: tokio::sync::Mutex<()>,
     /// Where the current (or last) sync stands, for the storage screen.
-    progress: Arc<Mutex<pm_offline::Progress>>,
+    /// (with the id of the node it syncs with)
+    progress: Arc<Mutex<(String, pm_offline::Progress)>>,
     /// Told when what the device keeps or the sync's progress changed (the page hears it).
     changed: Arc<Mutex<Option<Hook>>>,
 }
@@ -64,6 +65,8 @@ pub struct DownloadsState {
     #[serde(flatten)]
     pub summary: pm_offline::Summary,
     pub limit: Option<u64>,
+    /// What the device keeps for other nodes (it counts against the limit too).
+    pub other_bytes: u64,
     pub free: Option<u64>,
     pub keep_free: u64,
     pub progress: pm_offline::Progress,
@@ -82,7 +85,7 @@ impl Offline {
             open: Mutex::default(),
             server: Default::default(),
             origin,
-            generation: AtomicU64::new(0),
+            generation: Arc::default(),
             syncing: Default::default(),
             progress: Arc::default(),
             changed: Arc::default(),
@@ -128,9 +131,18 @@ impl Offline {
         DownloadsState {
             summary,
             limit: self.prefs().limit,
+            other_bytes: self.other_bytes(node_id),
             free: pm_offline::sync::free_bytes(&self.base),
             keep_free: KEEP_FREE,
-            progress: self.progress.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            // Another node's sync is not this one's
+            progress: {
+                let p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+                if p.0 == node_id {
+                    p.1.clone()
+                } else {
+                    pm_offline::Progress::default()
+                }
+            },
         }
     }
 
@@ -221,13 +233,36 @@ impl Offline {
         Ok(format!("{origin}/downloads"))
     }
 
-    fn options(&self) -> pm_offline::SyncOptions {
+    /// Bytes the device keeps for nodes other than this one (their `index.json`s).
+    fn other_bytes(&self, node_id: &str) -> u64 {
+        let mine = pm_offline::node_dir(&self.base, node_id);
+        let Ok(dirs) = std::fs::read_dir(&self.base) else {
+            return 0;
+        };
+        dirs.flatten()
+            .map(|d| d.path())
+            .filter(|p| p.is_dir() && *p != mine)
+            .filter_map(|p| std::fs::read(p.join("index.json")).ok())
+            .filter_map(|b| serde_json::from_slice::<pm_offline::Index>(&b).ok())
+            .map(|ix| ix.bytes())
+            .sum()
+    }
+
+    /// How a sync of the node with this id runs: the limit, the other nodes' bytes, its progress
+    /// for the page, and a stop once a newer sync was asked for (what to keep changed).
+    fn options(&self, node_id: &str, generation: u64) -> pm_offline::SyncOptions {
         let (progress, changed) = (self.progress.clone(), self.changed.clone());
+        let node = node_id.to_string();
+        let current = self.generation.clone();
         pm_offline::SyncOptions {
             cap_bytes: self.prefs().limit,
             keep_free: KEEP_FREE,
+            other_bytes: self.other_bytes(node_id),
+            stop: Some(pm_offline::StopCheck(Arc::new(move || {
+                current.load(Ordering::SeqCst) != generation
+            }))),
             progress: Some(pm_offline::ProgressSink(Arc::new(move |p| {
-                *progress.lock().unwrap_or_else(|e| e.into_inner()) = p.clone();
+                *progress.lock().unwrap_or_else(|e| e.into_inner()) = (node.clone(), p.clone());
                 let f = changed.lock().unwrap_or_else(|e| e.into_inner()).clone();
                 if let Some(f) = f {
                     f();
@@ -264,7 +299,7 @@ impl Offline {
                         break;
                     }
                     let Some(s) = current() else { break };
-                    me.sync_once(&s).await;
+                    me.sync_once(&s, mine).await;
                 }
                 tokio::time::sleep(SYNC_EVERY).await;
                 if me.generation.load(Ordering::SeqCst) != mine {
@@ -274,13 +309,13 @@ impl Offline {
         });
     }
 
-    async fn sync_once(&self, s: &Settings) {
+    async fn sync_once(&self, s: &Settings, generation: u64) {
         let Some(store) = self.store(&s.node_id) else {
             tracing::info!("offline: no sync without the node's id");
             return;
         };
         match pm_offline::Node::new(s.base(), &s.token) {
-            Ok(node) => match pm_offline::sync(&store, &node, &self.options()).await {
+            Ok(node) => match pm_offline::sync(&store, &node, &self.options(&s.node_id, generation)).await {
                 Ok(r) => tracing::info!(
                     downloaded = r.downloaded.len(),
                     removed = r.removed.len(),
@@ -313,17 +348,28 @@ fn sync_now(app: &tauri::AppHandle, o: &Arc<Offline>) {
     o.spawn_sync(move || app.state::<crate::AppState>().current());
 }
 
+/// Run file work off the app's main thread.
+async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// The storage screen: what this device keeps from the node in use, the limit, the sync.
 #[tauri::command]
-pub fn downloads_state(state: tauri::State<'_, crate::AppState>) -> Result<DownloadsState, String> {
+pub async fn downloads_state(state: tauri::State<'_, crate::AppState>) -> Result<DownloadsState, String> {
     let (o, node_id) = offline_of(&state)?;
-    Ok(o.state(&node_id))
+    blocking(move || Ok(o.state(&node_id))).await
 }
 
 /// Download (`on`) a song, a library album or a playlist to this device, or remove its download;
-/// `title` and `sub` name it on the storage screen until its songs arrive. A sync starts now.
+/// `title`, `sub` and `songs` (an album's count) name it on the storage screen until its songs
+/// arrive. A sync starts now (a running one stops before its next song).
 #[tauri::command]
-pub fn downloads_keep(
+#[allow(clippy::too_many_arguments)]
+pub async fn downloads_keep(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
     kind: String,
@@ -331,6 +377,7 @@ pub fn downloads_keep(
     on: bool,
     title: Option<String>,
     sub: Option<String>,
+    songs: Option<u32>,
 ) -> Result<DownloadsState, String> {
     let (o, node_id) = offline_of(&state)?;
     let item =
@@ -338,36 +385,49 @@ pub fn downloads_keep(
     let label = title.map(|t| pm_offline::Label {
         title: t.chars().take(200).collect(),
         sub: sub.unwrap_or_default().chars().take(200).collect(),
+        songs,
     });
-    o.keep(&node_id, &item, on, label)?;
+    let o2 = o.clone();
+    let st = blocking(move || {
+        o2.keep(&node_id, &item, on, label)?;
+        Ok(o2.state(&node_id))
+    })
+    .await?;
     sync_now(&app, &o);
-    Ok(o.state(&node_id))
+    Ok(st)
 }
 
-/// Remove every download from this device (its copies only; the library is not touched).
 #[tauri::command]
-pub fn downloads_remove_all(
+pub async fn downloads_remove_all(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<DownloadsState, String> {
     let (o, node_id) = offline_of(&state)?;
-    o.keep_nothing(&node_id)?;
+    let o2 = o.clone();
+    let st = blocking(move || {
+        o2.keep_nothing(&node_id)?;
+        Ok(o2.state(&node_id))
+    })
+    .await?;
     sync_now(&app, &o);
-    Ok(o.state(&node_id))
+    Ok(st)
 }
 
-/// The downloads' limit in bytes (`None`: no limit of their own). A sync starts now, so what was
-/// waiting for room comes.
 #[tauri::command]
-pub fn downloads_limit(
+pub async fn downloads_limit(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
     bytes: Option<u64>,
 ) -> Result<DownloadsState, String> {
     let (o, node_id) = offline_of(&state)?;
-    o.set_limit(bytes.map(|b| b.max(100_000_000)))?;
+    let o2 = o.clone();
+    let st = blocking(move || {
+        o2.set_limit(bytes.map(|b| b.max(100_000_000)))?;
+        Ok(o2.state(&node_id))
+    })
+    .await?;
     sync_now(&app, &o);
-    Ok(o.state(&node_id))
+    Ok(st)
 }
 
 /// The page hears the downloads changed (`pmdesktop:downloads`, with the storage screen's state).
@@ -400,7 +460,7 @@ mod tests {
         assert_eq!(again.prefs().limit, Some(5_000_000_000));
         again.set_limit(None).unwrap();
         assert_eq!(again.prefs().limit, None);
-        let opts = again.options();
+        let opts = again.options("node-1", 0);
         assert_eq!((opts.cap_bytes, opts.keep_free), (None, KEEP_FREE));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -417,12 +477,16 @@ mod tests {
         let label = pm_offline::Label {
             title: "Journey".into(),
             sub: "Sefa".into(),
+            songs: Some(9),
         };
         o.keep("node-1", &pm_offline::KeepItem::Album(7), true, Some(label))
             .unwrap();
         let st = o.state("node-1");
-        assert_eq!(st.summary.album_ids, [7]);
-        assert_eq!(st.summary.items[0].title, "Journey");
+        assert!(st.summary.album_ids.is_empty(), "nothing here yet");
+        assert_eq!(
+            (st.summary.items[0].title.as_str(), st.summary.items[0].songs),
+            ("Journey", 9)
+        );
         assert_eq!(st.limit, Some(DEFAULT_LIMIT));
         o.keep_nothing("node-1").unwrap();
         assert!(o.state("node-1").summary.items.is_empty());

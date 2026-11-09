@@ -107,8 +107,12 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     check(labels.includes('Download'), `${at}: a library album's ⋯ menu has Download (${labels.join(' | ')})`);
     if (labels.includes('Download')) { await pick(page, 'Download'); await sleep(400); }
     keep = (await calls(page, 'downloads_keep')).pop();
-    check(keep && keep[1].kind === 'album' && keep[1].id === '8', `${at}: it keeps the album (${JSON.stringify(keep && keep[1])})`);
+    check(keep && keep[1].kind === 'album' && keep[1].id === '8' && keep[1].songs === 1, `${at}: it keeps the album, with its song count (${JSON.stringify(keep && keep[1])})`);
     await closeMenu(page);
+    // Its song rows get the mark once the song is on the phone (the page's song rows too)
+    await page.evaluate(() => { Object.assign(window.__dl, { track_ids: [1, 2] }); window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(400);
+    const rowMark = await page.evaluate(() => { const r = document.querySelector('[data-srow][data-tid="2"]'); return r ? !!r.querySelector('.dl-mark') : null; });
+    check(rowMark === true, `${at}: the album page's song row carries the mark (${rowMark})`);
     // A playlist: Download says what stays online; the streaming song has no Download
     await goto(page, '/playlist/c1');
     await page.click('#plmore').catch(() => {}); await sleep(400);
@@ -127,7 +131,7 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
       await closeMenu(page);
     } else check(false, `${at}: the playlist's song rows (${smore.length})`);
     // The storage screen, from Your library
-    await page.evaluate(() => { Object.assign(window.__dl, { items: [{ kind: 'album', id: '7', title: 'Journey', sub: 'Sefa', here: 2, bytes: 61e6, songs: 2, online: 0 }, { kind: 'playlist', id: 'c1', title: 'Music and notes', sub: '', here: 1, bytes: 30e6, songs: 1, online: 1 }, { kind: 'track', id: '2', title: 'Song 2', sub: 'Sefa', here: 0, bytes: 0, songs: 1, online: 0 }], songs: 3, bytes: 91e6, progress: { running: true, wanted: 3, bytes_wanted: 90e6, done: 1, bytes_done: 30e6, failed: 0, current: 'Song 2' } }); });
+    await page.evaluate(() => { Object.assign(window.__dl, { items: [{ kind: 'album', id: '7', title: 'Journey', sub: 'Sefa', here: 2, bytes: 61e6, songs: 3, online: 0 }, { kind: 'playlist', id: 'c1', title: 'Music and notes', sub: '', here: 1, bytes: 30e6, songs: 1, online: 1 }, { kind: 'track', id: '2', title: 'Song 2', sub: 'Sefa', here: 0, bytes: 0, songs: 1, online: 0 }], songs: 3, bytes: 91e6, progress: { running: true, wanted: 3, bytes_wanted: 90e6, done: 1, bytes_done: 30e6, failed: 0, current: 'Song 2' } }); });
     await goto(page, '/library');
     const go = await page.$('[data-dlgo]');
     check(!!go, `${at}: Your library has a way to Downloads`);
@@ -135,8 +139,14 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     const text = await page.evaluate(() => document.querySelector('main').innerText);
     check(/91\.0 MB of 10\.0 GB on this phone/.test(text) && /3 songs/.test(text), `${at}: the total against the limit (${text.split('\n').slice(0, 3).join(' / ')})`);
     check(/Downloading 2 of 3: Song 2/.test(text), `${at}: the download under way`);
-    check(/Journey/.test(text) && /2 of 2 songs here/.test(text) && /61\.0 MB/.test(text) && /1 stay online/.test(text) && /waiting/.test(text), `${at}: each kept thing with its songs here and size`);
+    // Progress alone: the status line changes in place, the lists and the limit stay as they are
+    await page.evaluate(() => { const sel = document.querySelector('#dllimit'); sel.__kept = true; Object.assign(window.__dl.progress, { done: 1, failed: 1, current: 'Song 3' }); window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(300);
+    const inPlace = await page.evaluate(() => [!!document.querySelector('#dllimit').__kept, document.querySelector('.dl-note').innerText]);
+    check(inPlace[0] && /Downloading 3 of 3: Song 3/.test(inPlace[1]), `${at}: a progress event updates the status line in place (${JSON.stringify(inPlace)})`);
+    const fetched = (await calls(page, 'downloads_state')).length;
+    check(/Journey/.test(text) && /2 of 3 songs here/.test(text) && /61\.0 MB/.test(text) && /1 stay online/.test(text) && /waiting/.test(text), `${at}: each kept thing with its songs here and size`);
     await page.screenshot({ path: path.join(SHOTS, `storage-${w}.png`), fullPage: true });
+    check((await calls(page, 'downloads_state')).length === fetched, `${at}: and asks the app nothing more`);
     await page.click('[data-dlrm="0"]'); await sleep(400);
     keep = (await calls(page, 'downloads_keep')).pop();
     check(keep && keep[1].kind === 'album' && keep[1].id === '7' && keep[1].on === false, `${at}: Remove takes one thing off (${JSON.stringify(keep && keep[1])})`);

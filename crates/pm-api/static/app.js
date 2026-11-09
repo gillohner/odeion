@@ -1604,42 +1604,62 @@
   const dlCall = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s downloads are off')); };
   const dlSet = (d) => { state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };
   const dlMark = () => `<span class="dl-mark" role="img" aria-label="On this phone" title="On this phone">${icon('download')}</span>`;
-  // The mark on song rows and album tiles kept on this phone
-  const markDownloads = () => {
+  const dlHas = (id) => !!(state.dlTracks && state.dlTracks.has(Number(id)));
+  const dlAlbum = (id) => !!(state.dlAlbums && state.dlAlbums.has(Number(id)));
+  // The mark on song rows and album tiles on this phone: drawn with them, and kept up to date here
+  // when what the phone has changes
+  const markDownloads = (root = document) => {
     if (!state.dl) return;
     const put = (el, on) => { const m = el && $('.dl-mark', el); if (on && el && !m) el.insertAdjacentHTML('beforeend', dlMark()); else if (!on && m) m.remove(); };
-    for (const r of $$('.track[data-tid]')) put($('.title', r), state.dlTracks.has(Number(r.dataset.tid)));
-    for (const b of $$('.tile[data-album]')) put($('.t', b), state.dlAlbums.has(Number(b.dataset.album)));
+    for (const r of $$('.track[data-tid]', root)) put($('.title', r), dlHas(r.dataset.tid));
+    for (const r of $$('[data-srow][data-tid]', root)) put($('.name', r), dlHas(r.dataset.tid));
+    for (const b of $$('.tile[data-album]', root)) put($('.t', b), dlAlbum(b.dataset.album));
   };
   const dlLoad = () => { document.body.classList.toggle('app-dl', appDl()); return appDl() ? dlCall('downloads_state').then((d) => { dlSet(d); markDownloads(); return d; }).catch(() => null) : Promise.resolve(null); };
-  window.addEventListener('pmdesktop:downloads', (e) => { dlSet(e.detail); markDownloads(); if (state.view === 'downloads' && !isOffline()) render(); });
+  window.addEventListener('pmdesktop:downloads', (e) => { dlSet(e.detail); markDownloads(); if (state.view === 'downloads' && !isOffline() && e.detail) storageUpdate(e.detail); });
   // Download (or Remove download) for a song, a library album or a playlist, in its ⋯ menu
-  const dlKeep = async (kind, id, on, title, sub, online) => {
+  const dlKeep = async (kind, id, on, title, sub, online, songs) => {
     try {
-      dlSet(await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null })); markDownloads();
+      dlSet(await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null, songs: songs || null })); markDownloads();
+      if (state.view === 'downloads' && state.dl) storageUpdate(state.dl);
+      // A song also kept with its album or a playlist stays
+      if (!on && kind === 'track' && dlHas(id)) { toast(`“${title}” stays on this phone with an album or playlist kept there`); return; }
       toast(on ? `Downloading “${title}” to this phone${online ? `; ${online === 1 ? '1 song not in your library stays' : `${online} songs not in your library stay`} online` : ''}` : `“${title}” removed from this phone`);
     } catch (e) { toast(String((e && e.message) || e), 'error'); }
   };
-  const dlItem = (kind, id, title, sub, online) => {
+  const dlItem = (kind, id, title, sub, online, songs) => {
     if (!appDl() || id == null || id === '' || (kind === 'playlist' && !isOwner())) return [];
     const kept = !!(state.dl && state.dl.items.some((x) => x.kind === kind && x.id === String(id)));
     // On the phone through its album or a playlist: removed there
     if (!kept && kind === 'track' && state.dlTracks && state.dlTracks.has(Number(id))) return [];
-    return [{ label: kept ? 'Remove download' : 'Download', icon: kept ? 'trash' : 'download', run: () => dlKeep(kind, id, !kept, title, sub, online) }];
+    return [{ label: kept ? 'Remove download' : 'Download', icon: kept ? 'trash' : 'download', run: () => dlKeep(kind, id, !kept, title, sub, online, songs) }];
   };
   document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-dlgo]'); if (b) setView('downloads'); });
   setTimeout(dlLoad, 0);
   // The storage screen (Downloads in the app, online): what this phone keeps, its size against
   // the limit, the downloads under way, Remove per item and Remove all (the phone's copies only)
   const DL_LIMITS = [2e9, 5e9, 10e9, 20e9, 50e9, null];
-  const drawStorage = async (main) => {
-    const d = await dlLoad();
+  // What the screen's lists show (redrawn only when this changes)
+  const storageKey = (d) => JSON.stringify([d.items, d.bytes, d.other_bytes, d.limit, d.songs]);
+  const storageFacts = (d) => {
+    const p = d.progress || {};
+    const facts = [`${fileSize(d.bytes + (d.other_bytes || 0)) || '0 bytes'}${d.limit ? ` of ${fileSize(d.limit)}` : ''} on this phone${d.other_bytes ? ` (${fileSize(d.other_bytes)} from another node)` : ''}`, countOf(d.songs, 'songs'), d.free != null ? `${fileSize(d.free)} free` : ''].filter(Boolean).join(' · ');
+    const at = (p.done || 0) + (p.failed || 0) + (p.preparing || 0);
+    const now = p.running ? `Downloading ${Math.min(at + 1, p.wanted)} of ${p.wanted}${p.current ? `: ${esc(p.current)}` : ''}` : p.full ? esc(p.full) : p.failed ? `${countOf(p.failed, 'songs')} didn’t download; they are tried again at the next sync.` : '';
+    return `${esc(facts)}${now ? `<br>${now}` : ''}`;
+  };
+  // An event while the screen shows: the status line in place; the lists only when they changed
+  const storageUpdate = (d) => {
+    const main = $('#main'); const line = main && $('.dl-note', main);
+    if (!line || main.dataset.dlKey !== storageKey(d)) { if (main) drawStorage(main, d); return; }
+    line.innerHTML = storageFacts(d);
+  };
+  const drawStorage = async (main, given) => {
+    const d = given || await dlLoad();
     if (state.view !== 'downloads') return;
     if (!d) { main.innerHTML = pageHead('Downloads', null) + '<div class="notice">The app’s downloads can’t be read just now. Try again in a moment.</div>'; return; }
-    const p = d.progress || {};
-    const facts = [`${fileSize(d.bytes) || '0 bytes'}${d.limit ? ` of ${fileSize(d.limit)}` : ''} on this phone`, countOf(d.songs, 'songs'), d.free != null ? `${fileSize(d.free)} free` : ''].filter(Boolean).join(' · ');
-    const now = p.running ? `Downloading ${Math.min(p.done + 1, p.wanted)} of ${p.wanted}${p.current ? `: ${esc(p.current)}` : ''}` : p.full ? esc(p.full) : p.failed ? `${countOf(p.failed, 'songs')} didn’t download; they are tried again at the next sync.` : '';
-    const sub = (i) => [i.sub, i.kind === 'track' ? '' : `${i.here} of ${countOf(i.songs, 'songs')} here`, i.online ? `${i.online} stay online` : '', i.bytes ? fileSize(i.bytes) : i.here ? '' : 'waiting'].filter(Boolean).map(esc).join(' · ');
+    main.dataset.dlKey = storageKey(d);
+    const sub = (i) => [i.sub, i.kind === 'track' ? '' : i.songs ? `${i.here} of ${countOf(i.songs, 'songs')} here` : `${countOf(i.here, 'songs')} here`, i.online ? `${i.online} stay online` : '', i.bytes ? fileSize(i.bytes) : i.here ? '' : 'waiting'].filter(Boolean).map(esc).join(' · ');
     const rows = (kind) => d.items.map((x, k) => [x, k]).filter(([x]) => x.kind === kind).map(([x, k]) => `<div class="list-row"><div class="grow"><div class="name">${esc(x.title)}</div><div class="sub">${sub(x)}</div></div><button class="btn sm ghost" data-dlrm="${k}">Remove</button></div>`).join('');
     const section = (kind, title) => { const r = rows(kind); return r ? `<section class="section"><div class="section-head"><h3>${title}</h3></div><div class="list">${r}</div></section>` : ''; };
     const limit = `<label class="set-row"><span class="set-label"><span class="set-name">Limit</span><span class="set-help">Downloads stop there, and always leave ${fileSize(d.keep_free)} free on this phone.</span></span><select class="input" id="dllimit" aria-label="Downloads limit">${DL_LIMITS.map((v) => `<option value="${v == null ? '' : v}" ${(d.limit == null ? v == null : v === d.limit) ? 'selected' : ''}>${v == null ? 'No limit' : fileSize(v)}</option>`).join('')}</select></label>`;
@@ -1647,10 +1667,10 @@
       ? section('album', 'Albums') + section('playlist', 'Playlists') + section('track', 'Songs')
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
       : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
-    main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${esc(facts)}${now ? `<br>${now}` : ''}</p>` + body + `<div class="set-group">${limit}</div>`;
+    main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p>` + body + `<div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; if (x) dlKeep(x.kind, x.id, false, x.title); });
-    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); toast('Downloads removed from this phone'); render(); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
-    $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); render(); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
+    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
   };
   // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays
   const ytPanel = (it) => { const p = $('#ytpanel'); if (!p) return; if (it) { $('#yttitle').textContent = it.title || 'YouTube'; p.hidden = false; } else p.hidden = true; };
@@ -4256,7 +4276,7 @@
       const fav = isFav(t); const can = trackHasId(t);
       return `<div class="track ${showAlbum ? '' : 'compact'} ${cur ? 'cur' : ''}" data-i="${i}" data-tid="${t.id}">
         <div class="no"><span class="num">${numbers === 'track' ? (t.track_no ?? '') : i + 1}</span><button class="rowplay" data-act="play" title="Play from here">${icon('play')}</button></div>
-        <div class="main-col"><div class="title"><a class="lnk" data-act="song">${esc(t.title)}</a>${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
+        <div class="main-col"><div class="title"><a class="lnk" data-act="song">${esc(t.title)}</a>${dlHas(t.id) ? dlMark() : ''}${can ? '' : `<button class="idmark" data-act="identify" title="Not matched to a known song yet. Matching lets other apps and people on Pubky recognise it; it plays fine either way">Match</button>`}</div><div class="by">${artistLinksHtml({ ...t, track_id: t.id })}</div></div>
         ${showAlbum ? `<div class="album-col">${t.album ? `<button class="lnk" data-act="album" data-album="${t.album.id}">${esc(t.album.title)}</button>` : ''}</div>` : ''}
         <div class="fmt-col"><span class="fmt ${LOSSY[t.file && t.file.container] ? 'lossy' : ''}">${esc(fileFormat(t.file))}</span></div>
         <div class="dur">${fmt(t.duration_ms)}</div>
@@ -4309,7 +4329,7 @@
   };
   const fmtOf = (id) => (state.formats && state.formats.get(id)) || null;
   const fmtBadge = (id) => { const f = fmtOf(id); return f ? `<span class="fmt ${f.dsd || f.hi_res ? 'hi' : f.lossless ? '' : 'lossy'}" title="Best file on this album">${esc(f.label)}</span>` : ''; };
-  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
+  const tile = (a) => `<button class="tile" data-album="${a.id}" title="${esc(a.title)}">${art(a.id, a.title, '', 'library', true)}<span class="tile-play" data-tileplay="${a.id}" role="button" title="Play album">${icon('play')}</span><div class="t">${esc(a.title)}${dlAlbum(a.id) ? dlMark() : ''}</div><div class="a">${esc(a.album_artist || '')}${a.year ? ` · ${a.year}` : ''}${fmtBadge(a.id)}</div>${coverFrom('library')}</button>`;
   // People on Pubky (STEWARD-UX-PEOPLE.md): profiles from Nexus via the node, cached here too.
   const profileCache = new Map();
   const loadProfiles = async (ids) => {
@@ -4949,7 +4969,7 @@
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', trackIds.length === (o.songs || []).length && trackIds.length ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } }) },
-      ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
+      ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online, o.dl.songs) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
       ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav); render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); toast('Radio: similar music follows when the queue ends'); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
@@ -5069,6 +5089,8 @@
     io.observe(hero);
   };
   const bindSongRows = (box, all, ctx = {}) => {
+    $$('[data-srow]', box).forEach((r) => { const t = all[Number(r.dataset.srow)]; if (t && t.track_id != null) r.dataset.tid = t.track_id; });
+    markDownloads(box);
     // Cards (web pages, posts) and unmatched lines don't play: play the songs only, from the one
     // clicked; a click on one that doesn't play does nothing
     const songs = all.filter((t) => !t.card); const at = (k) => Math.max(0, songs.indexOf(all[k]));
@@ -7072,7 +7094,7 @@
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
-          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, dl: kind === 'album' && /^lib-\d+$/.test(String(id)) ? { kind: 'album', id: String(id).slice(4), sub: pg.artist && pg.artist.name } : null, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
+          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, dl: kind === 'album' && /^lib-\d+$/.test(String(id)) ? { kind: 'album', id: String(id).slice(4), sub: pg.artist && pg.artist.name, songs: (songs || []).length } : null, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));

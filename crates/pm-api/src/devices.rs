@@ -78,6 +78,12 @@ pub struct Have {
     /// `original`, `aac`, `mp3` or `opus`.
     #[serde(default = "original")]
     pub format: String,
+    /// The node's record of the file when the device fetched it (its size and mtime): a file
+    /// changed since is wanted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_mtime: Option<i64>,
 }
 
 fn original() -> String {
@@ -384,15 +390,26 @@ fn manifest(s: &NodeState, d: &Device) -> Result<Manifest, ApiError> {
         ids: kept_set,
     } = kept_tracks(s, &d.keep)?;
     let have: BTreeSet<i64> = d.have.iter().map(|h| h.track_id).collect();
-    // An original whose size on the node changed since the device fetched it (the file was
-    // replaced or re-tagged) is wanted again; the device's new copy replaces its old one
+    // A song whose file on the node changed since the device fetched it (replaced or re-tagged)
+    // is wanted again; the device's new copy replaces its old one. The device says the node's
+    // record of the file it fetched (`src_size`, `src_mtime`): compared with the record now, so a
+    // copy never differs from its source by nature. A device that doesn't say: an original's
+    // own size
+    let now: std::collections::HashMap<i64, (u64, i64)> = kept
+        .iter()
+        .filter_map(|t| Some((t.id?.0, (t.file.size_bytes, t.file.mtime_unix))))
+        .collect();
     let changed: BTreeSet<i64> = d
         .have
         .iter()
-        .filter(|h| h.format == "original")
         .filter(|h| {
-            kept.iter()
-                .any(|t| t.id.is_some_and(|i| i.0 == h.track_id) && t.file.size_bytes != h.bytes)
+            let Some(&(size, mtime)) = now.get(&h.track_id) else {
+                return false;
+            };
+            match (h.src_size, h.src_mtime) {
+                (Some(was), m) => was != size || m.is_some_and(|m| m != mtime),
+                (None, _) => h.format == "original" && h.bytes != size,
+            }
         })
         .map(|h| h.track_id)
         .collect();

@@ -108,6 +108,9 @@ pub struct Label {
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sub: String,
+    /// Its songs in all, as the page counted them (an album's), when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub songs: Option<u32>,
 }
 
 /// One thing a person keeps on the device, or stops keeping.
@@ -320,7 +323,6 @@ impl Store {
         Some(self.art_dir().join(name))
     }
 
-    /// Choose what to keep (sent to the node at the next sync).
     /// Keep `item` or stop keeping it, with what the page called it; the next sync fetches or
     /// drops its songs. True when that changed anything.
     pub fn keep(&self, item: &KeepItem, on: bool, label: Option<Label>) -> std::io::Result<bool> {
@@ -347,6 +349,7 @@ impl Store {
         })
     }
 
+    /// Choose what to keep (sent to the node at the next sync).
     pub fn set_keep(&self, keep: Keep) -> std::io::Result<()> {
         self.update(|ix| ix.keep = keep)
     }

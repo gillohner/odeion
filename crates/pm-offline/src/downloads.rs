@@ -66,9 +66,8 @@ pub fn summary(ix: &Index) -> Summary {
             .collect();
         let l = label(&KeepItem::Album(*a));
         let first = songs.first().map(|(_, t)| &t.track);
-        let total = first
-            .and_then(|t| t.pointer("/album/track_count").and_then(Value::as_u64))
-            .map_or(songs.len(), |n| n as usize);
+        // Its songs in all as the page counted them when it was kept; unknown: 0
+        let total = l.songs.map_or(0, |n| n as usize);
         items.push(Item {
             kind: "album",
             id: a.to_string(),
@@ -86,7 +85,7 @@ pub fn summary(ix: &Index) -> Summary {
             sub: first.map(artist_of).filter(|s| !s.is_empty()).unwrap_or(l.sub),
             here: songs.len(),
             bytes: songs.iter().map(|(_, t)| t.bytes).sum(),
-            songs: total.max(songs.len()),
+            songs: if total > 0 { total.max(songs.len()) } else { 0 },
             online: 0,
         });
     }
@@ -155,7 +154,14 @@ pub fn summary(ix: &Index) -> Summary {
             online: 0,
         });
     }
-    let album_ids: BTreeSet<i64> = ix.keep.albums.iter().copied().collect();
+    // Kept albums with songs here (one still waiting gets no mark yet)
+    let album_ids: BTreeSet<i64> = ix
+        .keep
+        .albums
+        .iter()
+        .copied()
+        .filter(|a| ix.tracks.values().any(|t| album_of(&t.track) == Some(*a)))
+        .collect();
     Summary {
         items,
         songs: ix.tracks.len(),
@@ -202,12 +208,21 @@ mod tests {
             "p1".into(),
             json!({"summary": {"name": "Mix"}, "tracks": [{"id": 2}, {"id": 3}, null], "entries": [{}, {}, {}]}),
         );
+        ix.labels.insert(
+            "album:7".into(),
+            Label {
+                title: "Journey".into(),
+                sub: "Sefa".into(),
+                songs: Some(12),
+            },
+        );
         // Kept before any of its songs arrived: the page's name for it
         ix.labels.insert(
             "album:8".into(),
             Label {
                 title: "Later".into(),
                 sub: "Dr. Peacock".into(),
+                songs: None,
             },
         );
         let s = summary(&ix);
@@ -223,6 +238,7 @@ mod tests {
             (a.title.as_str(), a.sub.as_str(), a.here, a.bytes),
             ("Journey", "Sefa", 2, 300)
         );
+        assert_eq!(a.songs, 12, "its songs in all, as the page counted them");
         let later = by("album", "8");
         assert_eq!(
             (later.title.as_str(), later.sub.as_str(), later.here),
@@ -243,7 +259,7 @@ mod tests {
         );
         assert_eq!((s.songs, s.bytes), (3, 350));
         assert_eq!(s.track_ids, [1, 2, 4]);
-        assert_eq!(s.album_ids, [7, 8]);
+        assert_eq!(s.album_ids, [7], "album 8 has no song here yet");
     }
 
     #[test]
