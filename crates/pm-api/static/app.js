@@ -4088,10 +4088,10 @@
     return `#${[`FF00${hex}`, `FF${hex}00`, `${hex}FF00`, `${hex}00FF`, `00${hex}FF`, `00FF${hex}`][n]}`;
   };
   // A listener connects their own homeserver (personal.rs): one approval in Pubky Ring for their
-  // bookmarks and collections folders, nothing else. Resolves true once the node holds it.
+  // bookmarks folder, nothing else. Resolves true once the node holds it.
   const homeserverDialog = (lost) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
-    d.innerHTML = `<h2>${lost ? 'Approve this node again' : 'Connect your homeserver'}</h2><p class="muted">${lost ? 'Your homeserver no longer lets this node in (it was revoked in Pubky Ring, say). Approve it again to keep your bookmarks there.' : 'Your bookmarks are kept on your own homeserver, not the node’s. Approve this node once in Pubky Ring, for your bookmarks and collections folders only.'}</p><div id="hsbody"><p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p></div><div class="toolbar"><button class="btn ghost" data-hsclose>Not now</button></div>`;
+    d.innerHTML = `<h2>${lost ? 'Approve this node again' : 'Connect your homeserver'}</h2><p class="muted">${lost ? 'Your homeserver no longer lets this node in (it was revoked in Pubky Ring, say). Approve it again to keep your bookmarks there.' : 'Your bookmarks are kept on your own homeserver, not the node’s. Approve this node once in Pubky Ring, for your bookmarks folder only.'}</p><div id="hsbody"><p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p></div><div class="toolbar"><button class="btn ghost" data-hsclose>Not now</button></div>`;
     document.body.appendChild(d);
     let timer = null; let ended = false;
     const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
@@ -7239,8 +7239,8 @@
             // Their own homeserver, for their bookmarks (personal.rs)
             const [hs, svcs] = await Promise.all([api('GET', '/me/homeserver').catch(() => null), api('GET', '/me/services').catch(() => null)]);
             const hsRow = !hs ? row('My homeserver', 'The node can’t say right now.', '')
-              : hs.connected && !hs.lost ? row('My homeserver', `Connected: your bookmarks are kept there${hs.pending ? `, ${countOf(hs.pending, 'changes')} waiting on this node until it answers` : ''}. The node may write your bookmarks and collections folders, nothing else.`, '<button class="btn ghost" id="hsoff">Disconnect</button>')
-                : row('My homeserver', hs.lost ? '<span class="warn-text">It no longer lets this node in.</span> Approve it again to keep your bookmarks there.' : 'Not connected. Your bookmarks are kept on your own homeserver once you approve this node in Pubky Ring (your bookmarks and collections folders only).', `<button class="btn primary" id="hson">${hs.lost ? 'Approve again' : 'Connect'}</button>`);
+              : hs.connected && !hs.lost ? row('My homeserver', `Connected: your bookmarks are kept there${hs.pending ? `, ${countOf(hs.pending, 'changes')} waiting on this node until it answers` : ''}. The node may write your bookmarks folder, nothing else.`, '<button class="btn ghost" id="hsoff">Disconnect</button>')
+                : row('My homeserver', hs.lost ? '<span class="warn-text">It no longer lets this node in.</span> Approve it again to keep your bookmarks there.' : 'Not connected. Your bookmarks are kept on your own homeserver once you approve this node in Pubky Ring (your bookmarks folder only).', `<button class="btn primary" id="hson">${hs.lost ? 'Approve again' : 'Connect'}</button>`);
             const srcNote = !ms ? '' : ms.plays_with === 'node' ? 'TIDAL, Qobuz and Spotify play through this node’s sign-ins.' : 'TIDAL, Qobuz and Spotify play with your own sign-ins.';
             const srcCtl = ms && ms.may_choose ? `<div class="chips" role="radiogroup" aria-label="Whose sign-ins">${[['node', 'This node’s'], ['own', 'My own']].map(([v, l]) => `<button class="chip scope ${ms.use === v ? 'on' : ''}" role="radio" aria-checked="${ms.use === v}" data-mysrc="${v}">${l}</button>`).join('')}</div>` : '';
             main.innerHTML = pageHead('Settings', null)

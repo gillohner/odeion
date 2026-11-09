@@ -2,7 +2,7 @@
 //! 0016 step 5). The owner's stay what they were: rows in the library, pushed by the owner's sync.
 //!
 //! - **The grant.** A listener approves the node in Ring a second time, for
-//!   [`PERSONAL_CAPABILITIES`] only (their bookmarks and collections folders: no vault, no files).
+//!   [`PERSONAL_CAPABILITIES`] only (their bookmarks folder: no posts, no vault, no files).
 //!   The node keeps that session only when the approver is the listener asking, in
 //!   `<data>/grants/<z32>.session` (created 0600, never in a backup), and it goes when they
 //!   disconnect or People › Remove removes them. It is never used for anyone else.
@@ -29,10 +29,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// What a listener approves so the node may keep their bookmarks and collections on their own
-/// homeserver: those folders, nothing else.
-pub const PERSONAL_CAPABILITIES: &str =
-    "/priv/social/v1/bookmarks/:rw,/priv/social/v1/posts/:rw,/pub/social/v1/posts/:rw";
+/// What a listener approves so the node may keep their bookmarks on their own homeserver: that
+/// folder, nothing else (not their posts: nothing here writes them).
+pub const PERSONAL_CAPABILITIES: &str = "/priv/social/v1/bookmarks/:rw";
 
 /// How long one call to a listener's homeserver may take before the node answers from its copy.
 const CALL_LIMIT: Duration = Duration::from_secs(8);
@@ -282,8 +281,7 @@ impl PersonalHomeserver for Grants {
     }
 
     async fn put_bookmark(&self, key: &str, uri: &str, created_at: i64) -> Result<(), PersonalError> {
-        let (object, path) =
-            pm_pubky::v1::bookmark_of(uri, created_at).map_err(PersonalError::Unreachable)?;
+        let (object, path) = pm_pubky::v1::bookmark_of(uri, created_at).map_err(unbuildable)?;
         let hs = self.client()?;
         let (object, path) = (&object, path.as_str());
         self.attempt(
@@ -297,7 +295,7 @@ impl PersonalHomeserver for Grants {
     }
 
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError> {
-        let path = pm_pubky::v1::bookmark_path(uri).map_err(PersonalError::Unreachable)?;
+        let path = pm_pubky::v1::bookmark_path(uri).map_err(unbuildable)?;
         let hs = self.client()?;
         let path = path.as_str();
         // One that isn't there is no error
@@ -310,6 +308,12 @@ impl PersonalHomeserver for Grants {
         .await
         .map(|_| ())
     }
+}
+
+/// A bookmark the node can't even build (a target no homeserver would hold) is never taken: dropped
+/// like a change their homeserver refuses, never waited on as if their homeserver were away.
+fn unbuildable(why: String) -> PersonalError {
+    PersonalError::Rejected(why)
 }
 
 /// The listener's homeserver as this node reaches it: a test's stand-in, else the grants.
@@ -383,15 +387,14 @@ fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
 }
 
 fn save(s: &NodeState, key: &str, c: &Copy) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
     // Removed (People › Remove) while this request waited on their homeserver: nothing of
-    // theirs comes back
-    if !crate::people::may_use_music(s, key) {
+    // theirs comes back. Checked under the same hold as the write, so a removal can't land
+    // between the two
+    if !crate::people::listed_for_music(&lib, key.trim_start_matches("pubky")) {
         return Ok(());
     }
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(&copy_key(key), &serde_json::to_string(c).expect("serializes"))?;
+    lib.set_setting(&copy_key(key), &serde_json::to_string(c).expect("serializes"))?;
     Ok(())
 }
 
@@ -593,10 +596,10 @@ pub(crate) fn may_keep(key: &str, approver: &str, granted: &[String]) -> Result<
         return Err("approved by another identity than yours");
     }
     if !pm_pubky::homeserver::missing_capabilities(granted, PERSONAL_CAPABILITIES).is_empty() {
-        return Err("not approved for your bookmarks and collections folders");
+        return Err("not approved for your bookmarks folder");
     }
     if granted.iter().any(|g| !within(g, PERSONAL_CAPABILITIES)) {
-        return Err("approved for more than your bookmarks and collections folders: approve only what the node asks for");
+        return Err("approved for more than your bookmarks folder: approve only what the node asks for");
     }
     Ok(())
 }
@@ -646,6 +649,17 @@ fn connects() -> &'static Connects {
 /// Whether approval `id` is still asked for: not replaced, expired away or ended by a Disconnect.
 async fn still_asked(id: &str) -> bool {
     connects().lock().await.contains_key(id)
+}
+
+/// Under `key`'s lock, `keep` runs only while approval `id` is still asked for. A Disconnect ends
+/// it under the same lock, so a grant is never kept after a Disconnect has answered.
+async fn keep_if_current(id: &str, key: &str, keep: impl FnOnce() -> serde_json::Value) -> serde_json::Value {
+    let lock = person_lock(key);
+    let _one = lock.lock().await;
+    if !still_asked(id).await {
+        return serde_json::json!({"state": "expired"});
+    }
+    keep()
 }
 
 /// Ends every approval `key` has in progress (Disconnect, People › Remove): none of them can
@@ -708,33 +722,32 @@ async fn keep_grant(s: Arc<NodeState>, id: String, key: String, session: PubkySe
     let Some(secret) = pm_pubky::homeserver::export_session_secret(&session).await else {
         return serde_json::json!({"state": "error", "reason": "Ring approved, but the session can't be kept: try again"});
     };
-    let lock = person_lock(&key);
-    let _one = lock.lock().await;
     // They disconnected (or started another approval) while this one was exchanged: nothing is
     // kept, so a Disconnect that has answered stays done
-    if !still_asked(&id).await {
-        return serde_json::json!({"state": "expired"});
-    }
-    // Their music access went meanwhile: nothing is kept
-    if !crate::people::may_use_music(&s, &key) {
-        return serde_json::json!({"state": "denied", "reason": "you have no music access on this node any more"});
-    }
-    let Some(file) = grant_file(&grants_dir(&s), &key) else {
-        return serde_json::json!({"state": "denied", "reason": "not a Pubky key"});
-    };
-    let _ = std::fs::remove_file(&file);
-    if let Err(e) = crate::imports::write_private(&file, secret.as_bytes()) {
-        return serde_json::json!({"state": "error", "reason": format!("cannot keep the grant: {e}")});
-    }
-    sessions().lock().expect("sessions").insert(key.clone(), session);
-    // Approved again: the node tries their homeserver again
-    let mut copy = load(&s, &key);
-    copy.lost = false;
-    if let Err(e) = save(&s, &key, &copy) {
-        tracing::warn!(%key, "a listener's grant is kept, but not that it works again: {}", e.message);
-    }
-    tracing::info!(%key, "a listener connected their homeserver");
-    serde_json::json!({"state": "ok"})
+    keep_if_current(&id, &key, || {
+        // Their music access went meanwhile: nothing is kept
+        if !crate::people::may_use_music(&s, &key) {
+            return serde_json::json!({"state": "denied", "reason": "you have no music access on this node any more"});
+        }
+        let Some(file) = grant_file(&grants_dir(&s), &key) else {
+            return serde_json::json!({"state": "denied", "reason": "not a Pubky key"});
+        };
+        // Replaced in one step (a new file renamed over the old): a write that fails keeps the
+        // grant they had
+        if let Err(e) = crate::imports::write_private(&file, secret.as_bytes()) {
+            return serde_json::json!({"state": "error", "reason": format!("cannot keep the grant: {e}")});
+        }
+        sessions().lock().expect("sessions").insert(key.clone(), session);
+        // Approved again: the node tries their homeserver again
+        let mut copy = load(&s, &key);
+        copy.lost = false;
+        if let Err(e) = save(&s, &key, &copy) {
+            tracing::warn!(%key, "a listener's grant is kept, but not that it works again: {}", e.message);
+        }
+        tracing::info!(%key, "a listener connected their homeserver");
+        serde_json::json!({"state": "ok"})
+    })
+    .await
 }
 
 fn listener_key(c: &crate::accounts::Caller) -> Result<String, ApiError> {
@@ -897,10 +910,7 @@ mod tests {
             "the same key, either spelling"
         );
         assert!(may_keep(k, "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy", &all).is_err());
-        assert!(
-            may_keep(k, k, &all[..1]).is_err(),
-            "bookmarks alone is not enough"
-        );
+        assert!(may_keep(k, k, &[]).is_err(), "nothing approved is not enough");
         assert!(may_keep(k, k, &["/pub/pubky.app/:r".to_string()]).is_err());
     }
 
@@ -1131,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_wider_than_the_three_folders_is_never_kept() {
+    fn a_grant_wider_than_the_bookmarks_folder_is_never_kept() {
         let k = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
         let all: Vec<String> = PERSONAL_CAPABILITIES.split(',').map(String::from).collect();
         let with = |extra: &[&str]| -> Vec<String> {
@@ -1140,7 +1150,7 @@ mod tests {
                 .chain(extra.iter().map(|x| x.to_string()))
                 .collect()
         };
-        // Each covers the three folders, and more: the node would hold a key to the rest
+        // Each covers the bookmarks folder, and more: the node would hold a key to the rest
         for (granted, what) in [
             (vec!["/:rw".to_string()], "the whole homeserver"),
             (
@@ -1151,24 +1161,25 @@ mod tests {
                 "every private social folder",
             ),
             (with(&["/priv/pubky.music/vault/:rw"]), "their sources vault"),
-            (with(&["/pub/pubky.app/:r"]), "an unrelated folder, read only"),
             (
-                with(&["/priv/social/v1/:r"]),
-                "the parent of two of them, read only",
+                with(&["/priv/social/v1/posts/:rw"]),
+                "their posts (nothing here writes them)",
             ),
+            (with(&["/pub/pubky.app/:r"]), "an unrelated folder, read only"),
+            (with(&["/priv/social/v1/:r"]), "its parent folder, read only"),
             (with(&["garbage"]), "something unreadable"),
             (
-                with(&["/priv/social/v1/posts/../../pubky.music/vault/:rw"]),
+                with(&["/priv/social/v1/bookmarks/../../pubky.music/vault/:rw"]),
                 "a folder that steps out of its own",
             ),
         ] {
             assert!(may_keep(k, k, &granted).is_err(), "{what}: {granted:?}");
         }
-        // Exactly the three, in any order, or narrower within them, is theirs to give
+        // Exactly what it asks for, in any order, or narrower within it, is theirs to give
         let mut back = all.clone();
         back.reverse();
         assert!(may_keep(k, k, &back).is_ok());
-        assert!(may_keep(k, k, &with(&["/priv/social/v1/posts/abc/:r"])).is_ok());
+        assert!(may_keep(k, k, &with(&["/priv/social/v1/bookmarks/abc/:r"])).is_ok());
     }
 
     #[tokio::test]
@@ -1195,5 +1206,40 @@ mod tests {
         assert!(still_asked("t-dis-late").await);
         end_approvals_of("dis-ann").await;
         assert!(!still_asked("t-dis-late").await);
+    }
+
+    #[tokio::test]
+    async fn a_grant_is_kept_only_while_its_approval_is_asked_for() {
+        waiting("t-keep", "keep-ann").await;
+        let ok = || serde_json::json!({"state": "ok"});
+        assert_eq!(keep_if_current("t-keep", "keep-ann", ok).await["state"], "ok");
+        // A Disconnect holds her lock while it ends her approvals: an approval past the relay that
+        // waits on that lock keeps nothing after
+        waiting("t-keep-late", "keep-ann").await;
+        let lock = person_lock("keep-ann");
+        let disconnecting = lock.lock().await;
+        let keeping = tokio::spawn(keep_if_current(
+            "t-keep-late",
+            "keep-ann",
+            || -> serde_json::Value { panic!("a grant kept after her Disconnect") },
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        end_approvals_of("keep-ann").await;
+        drop(disconnecting);
+        assert_eq!(keeping.await.unwrap()["state"], "expired");
+    }
+
+    #[test]
+    fn a_bookmark_the_node_cant_build_is_dropped_not_waited_on() {
+        // Longer than any reference a bookmark may hold: no homeserver could ever take it
+        let long = format!("https://example.com/{}", "a".repeat(20_000));
+        assert!(matches!(
+            pm_pubky::v1::bookmark_of(&long, 0).map_err(unbuildable),
+            Err(PersonalError::Rejected(_))
+        ));
+        assert!(matches!(
+            pm_pubky::v1::bookmark_path(&long).map_err(unbuildable),
+            Err(PersonalError::Rejected(_))
+        ));
     }
 }

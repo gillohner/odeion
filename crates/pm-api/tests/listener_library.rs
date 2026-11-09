@@ -815,6 +815,76 @@ async fn a_change_her_homeserver_never_takes_is_refused_for_good() {
     assert!(owners_rows(&s).is_empty());
 }
 
+#[tokio::test]
+async fn a_waiting_change_never_taken_is_dropped_and_a_refusal_loses_the_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let heart = |uri: &str| Some(serde_json::json!({"uri": uri}));
+    // Two hearts wait while her homeserver is away
+    fake.down.store(true, Ordering::SeqCst);
+    call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_B)).await;
+    call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_C)).await;
+    // Back, but it will never take the first: that one goes, the next lands
+    fake.down.store(false, Ordering::SeqCst);
+    fake.rejects.lock().unwrap().insert(SONG_B.to_string());
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(v["homeserver"]["pending"], 0, "{v}");
+    assert_eq!(fake.of(ANN), vec![SONG_C], "the one after it was written");
+    // Another waits; then she revokes the node in Ring: the grant is lost, the change still waits
+    fake.down.store(true, Ordering::SeqCst);
+    call(&app, &ann, "PUT", "/v1/bookmarks", heart(SONG_A)).await;
+    fake.down.store(false, Ordering::SeqCst);
+    fake.refused.lock().unwrap().insert(ANN.to_string());
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(v["homeserver"]["lost"], true, "{v}");
+    assert_eq!(
+        v["homeserver"]["pending"], 1,
+        "kept until she approves again: {v}"
+    );
+    assert!(owners_rows(&s).is_empty());
+}
+
+#[tokio::test]
+async fn a_listener_removed_while_her_change_is_on_its_way_leaves_no_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (app2, ann2) = (app.clone(), ann.clone());
+    let heart = tokio::spawn(async move {
+        call(
+            &app2,
+            &ann2,
+            "PUT",
+            "/v1/bookmarks",
+            Some(serde_json::json!({"uri": SONG_B})),
+        )
+        .await
+    });
+    // Her homeserver takes a moment; meanwhile People › Remove: off the roster, then her data goes
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let roster = serde_json::json!({"people": [
+        {"key": BO, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
+    pm_api::accounts::forget_person(&s, ANN).unwrap();
+    heart.await.unwrap();
+    assert!(
+        s.library
+            .lock()
+            .unwrap()
+            .get_setting(&format!("person.{ANN}.bookmarks"))
+            .unwrap()
+            .is_none(),
+        "her copy doesn't come back once she is removed"
+    );
+}
+
 fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
