@@ -1031,8 +1031,9 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
-    // Their problem reports too (feedback.rs); if the inbox can't be written now, they still go
-    // within a year
+    // Their problem reports too (feedback.rs); if the inbox can't be written now, they go at the
+    // node's next housekeeping (at start and hourly), which takes the reports of anyone no longer
+    // on the roster
     if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), key) {
         tracing::warn!("feedback: a removed listener's reports not removed: {e}");
     }

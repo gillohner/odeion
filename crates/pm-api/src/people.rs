@@ -123,6 +123,18 @@ pub fn load(s: &NodeState) -> Roster {
         .unwrap_or_default()
 }
 
+/// The keys on the roster, or `None` when it can't be read (a damaged setting): unlike [`load`],
+/// never an empty roster in its place, so what deletes by it never takes everyone's.
+pub fn listed_keys(s: &NodeState) -> Option<Vec<String>> {
+    match s.library.lock().expect("library poisoned").get_setting(SETTING) {
+        Ok(None) => Some(Vec::new()),
+        Ok(Some(j)) => serde_json::from_str::<Roster>(&j)
+            .ok()
+            .map(|r| r.people.into_iter().map(|p| p.key).collect()),
+        Err(_) => None,
+    }
+}
+
 fn store(s: &NodeState, r: &Roster) -> Result<(), ApiError> {
     s.library
         .lock()

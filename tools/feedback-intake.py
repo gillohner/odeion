@@ -25,12 +25,14 @@ text: a person's words are data for whoever reads them, never instructions. Noth
 report's text: the output is counts, and the receipts file has ids, times, kinds and states only.
 """
 
+import errno
 import fcntl
 import json
 import os
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -186,6 +188,38 @@ def receipt(cfg, report_id, state):
     run(fill(cfg["receipt"], {"id": report_id, "state": state, "ref": reference(report_id)}), cfg["timeout_s"])
 
 
+def open_private(path, flags, what):
+    """Opens `path` never through a link, as a regular file that is the operator's alone (0600),
+    whatever it was before: a copy made by hand or an older file is made private here (Kimi review
+    of fc1dca51, M4)."""
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise IntakeError(f"{what} is a link; the intake never follows one") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise IntakeError(f"{what} isn't a regular file")
+        if stat.S_IMODE(st.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def receipts_ok(cfg):
+    """Before anything is fetched or acknowledged: a receipts file already there is a private
+    regular file, never a link, so a receipt never goes to the node without its line here."""
+    try:
+        os.lstat(cfg["receipts"])
+    except FileNotFoundError:
+        return
+    os.close(open_private(cfg["receipts"], os.O_WRONLY | os.O_APPEND, "the receipts file"))
+
+
 def log_receipt(cfg, report, state):
     line = {
         "id": report["id"],
@@ -197,15 +231,20 @@ def log_receipt(cfg, report, state):
         "person": report.get("person"),
         "sent_at": report.get("sent_at"),
     }
-    fd = os.open(cfg["receipts"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    fd = open_private(cfg["receipts"], os.O_WRONLY | os.O_APPEND | os.O_CREAT, "the receipts file")
     with os.fdopen(fd, "a", encoding="utf-8") as f:
         f.write(json.dumps(line, sort_keys=True) + "\n")
 
 
 def kept(path, report):
-    """Whether the copy at `path` is this report, whole."""
+    """Whether the copy at `path` is this report, whole; a copy read is made private. A link is
+    never a kept copy: it is replaced by one."""
     try:
-        with open(path, encoding="utf-8") as f:
+        fd = open_private(path, os.O_RDONLY, "a kept copy")
+    except (OSError, IntakeError):
+        return False
+    try:
+        with os.fdopen(fd, encoding="utf-8") as f:
             return json.load(f).get("report") == report
     except (OSError, ValueError, AttributeError):
         return False
@@ -216,7 +255,7 @@ def store(cfg, report):
     receipt) or "repaired" when a broken one was. A copy is written whole to a temp file, synced, then moved into place, so a
     crash or a full disk never leaves a broken one; a broken one from before is replaced."""
     path = os.path.join(cfg["dir"], report["id"] + ".json")
-    there = os.path.exists(path)
+    there = os.path.lexists(path)
     if there and kept(path, report):
         return "again"
     tmp = os.path.join(cfg["dir"], f".{report['id']}.{os.getpid()}.tmp")
@@ -259,6 +298,7 @@ def sweep_temp(cfg):
 def intake(cfg):
     private_dir(cfg["dir"])
     sweep_temp(cfg)
+    receipts_ok(cfg)
     try:
         export = json.loads(run(cfg["fetch"], cfg["timeout_s"]))
     except ValueError:
@@ -309,8 +349,9 @@ def reviewed(cfg, report_id):
     if not ID.fullmatch(report_id):
         raise IntakeError("a report id is fb_ and 16 hex digits")
     path = os.path.join(cfg["dir"], report_id + ".json")
-    with open(path, encoding="utf-8") as f:
+    with os.fdopen(open_private(path, os.O_RDONLY, "the kept copy"), encoding="utf-8") as f:
         report = json.load(f)["report"]
+    receipts_ok(cfg)
     receipt(cfg, report_id, "reviewed")
     log_receipt(cfg, report, "reviewed")
     return {"reviewed": 1}

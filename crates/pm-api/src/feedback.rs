@@ -288,7 +288,8 @@ impl Inbox {
     /// Open the inbox in `dir` if the node has made one: the operator's commands never make it
     /// (made by another user, it would lock the node out of its own inbox).
     pub fn open_existing(dir: &Path) -> Result<Option<Inbox>, InboxError> {
-        if !dir.join(FILE).exists() {
+        // Anything there counts, a link too: it is refused below, never taken for no inbox
+        if std::fs::symlink_metadata(dir.join(FILE)).is_err() {
             return Ok(None);
         }
         Inbox::open(dir).map(Some)
@@ -298,29 +299,53 @@ impl Inbox {
     pub fn open(dir: &Path) -> Result<Inbox, InboxError> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(FILE);
-        // Made for the node's user alone, before SQLite opens it
+        // Made for the node's user alone, before SQLite opens it, and never through a link: a link
+        // at the inbox's place would have reports written into whatever it points to (Kimi review
+        // of fc1dca51, M3). The file is looked at and made private through the opened descriptor
         #[cfg(unix)]
         {
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            match std::fs::OpenOptions::new()
+            let not_ours = |what: String| InboxError::Store(format!("{FILE} {what}; the inbox isn't opened"));
+            let file = match std::fs::OpenOptions::new()
+                .read(true)
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(&path)
             {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(&path)
+                    .map_err(|e| not_ours(format!("can't be opened as a file, a link is refused ({e})")))?,
                 Err(e) => return Err(e.into()),
+            };
+            let meta = file.metadata()?;
+            if !meta.file_type().is_file() {
+                return Err(not_ours("isn't a regular file".into()));
             }
-            if std::fs::metadata(&path)?.permissions().mode() & 0o777 != 0o600 {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            if meta.permissions().mode() & 0o777 != 0o600 {
+                file.set_permissions(std::fs::Permissions::from_mode(0o600)).map_err(|e| {
                     InboxError::Store(format!(
                         "{FILE} can't be made private ({e}): it belongs to another user; run as the node's user"
                     ))
                 })?;
             }
+            // SQLite's own files beside it: a link there would take report pages elsewhere too
+            for ext in ["-journal", "-wal", "-shm"] {
+                let side = dir.join(format!("{FILE}{ext}"));
+                if let Ok(m) = std::fs::symlink_metadata(&side) {
+                    if !m.file_type().is_file() {
+                        return Err(not_ours(format!("has a {ext} that isn't a regular file")));
+                    }
+                }
+            }
         }
-        let mut conn = Connection::open(&path)?;
+        let flags = rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        let mut conn = Connection::open_with_flags(&path, flags)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // What the inbox lets go of (a purged report, a cleared digest) is overwritten in this
         // file, not left in its free space: whoever copies the file has its key too. It is set per
@@ -611,6 +636,17 @@ fn sender(c: &Caller) -> Option<Sender> {
     }
 }
 
+/// Whether the caller a token gives `now` is still the person it gave `then`: the owner, or the
+/// same listener. Not the whole `Caller`: the owner's key can load during a request (the node's
+/// identity syncing), which is no sign-out (held Low 3 of the Claude review of 2d2f0a8a).
+fn same_person(then: &Caller, now: Option<&Caller>) -> bool {
+    match (sender(then), now.and_then(sender)) {
+        (Some(Sender::Owner), Some(Sender::Owner)) => true,
+        (Some(Sender::Listener(a)), Some(Sender::Listener(b))) => a == b,
+        _ => false,
+    }
+}
+
 impl Inbox {
     /// What a report says, as written: keyed with the inbox's secret, so it tells nothing by
     /// itself. A report sent again is the same one only when this matches; comparing the stored
@@ -786,7 +822,7 @@ pub async fn send(
     // Still signed in as the same person once the body is here (and again at the write)
     let signed_in = {
         let (s, token, c) = (s.clone(), token.clone(), c.clone());
-        move || crate::accounts::caller(&s, Some(&token)).as_ref() == Some(&c)
+        move || same_person(&c, crate::accounts::caller(&s, Some(&token)).as_ref())
     };
     if !signed_in() {
         return refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
@@ -863,20 +899,36 @@ pub async fn mine(
         Some(t) if t.chars().count() < MIN_TOKEN => return refuse(StatusCode::FORBIDDEN, short_token(&c)),
         Some(_) => {}
     }
-    if header_token(&headers).is_none() {
+    let Some(token) = header_token(&headers) else {
         return refuse(StatusCode::UNAUTHORIZED, IN_THE_HEADER);
-    }
+    };
     let Some(who) = sender(&c) else {
         return refuse(StatusCode::FORBIDDEN, "Only the node's people send reports.");
     };
+    // Still signed in as the same person when the inbox answers, as at a write: a read that waited
+    // for the inbox while its sign-in ended shows nothing (Kimi review of fc1dca51, M2)
+    let signed_in = {
+        let (s, c) = (s.clone(), c.clone());
+        move || same_person(&c, crate::accounts::caller(&s, Some(&token)).as_ref())
+    };
+    if !signed_in() {
+        return refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
+    }
     let dir = s.data_dir();
-    match tokio::task::spawn_blocking(move || match Inbox::open_existing(&dir)? {
-        Some(inbox) => inbox.mine(&inbox.reporter_of(&who)),
-        None => Ok(Vec::new()),
+    match tokio::task::spawn_blocking(move || {
+        let list = match Inbox::open_existing(&dir)? {
+            Some(inbox) => inbox.mine(&inbox.reporter_of(&who))?,
+            None => Vec::new(),
+        };
+        if !signed_in() {
+            return Err(InboxError::SignedOut);
+        }
+        Ok(list)
     })
     .await
     {
         Ok(Ok(list)) => Json(list).into_response(),
+        Ok(Err(InboxError::SignedOut)) => refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token"),
         Ok(Err(e)) => {
             tracing::warn!("feedback: {e}");
             refuse(
@@ -903,17 +955,58 @@ pub fn forget_listener(dir: &Path, key: &str) -> Result<usize, InboxError> {
         .execute("DELETE FROM report WHERE reporter = ?1", params![reporter])?)
 }
 
-/// Drop expired reports every hour, whether or not anyone sends or reads one.
+/// Listeners' reports whose sender is no longer on the roster (`listed`, its keys) go: a People ›
+/// Remove the inbox was too busy or broken for is finished here (Kimi review of fc1dca51, M1), and
+/// so is a restore that brought back a roster without them. The owner's stay. How many went.
+pub fn forget_unlisted(dir: &Path, listed: &[String]) -> Result<usize, InboxError> {
+    let Some(inbox) = Inbox::open_existing(dir)? else {
+        return Ok(0);
+    };
+    let keep: std::collections::HashSet<String> = listed
+        .iter()
+        .map(|k| inbox.reporter_of(&Sender::Listener(k.trim_start_matches("pubky").to_string())))
+        .chain([OWNER.to_string()])
+        .collect();
+    let reporters: Vec<String> = inbox
+        .conn
+        .prepare("SELECT DISTINCT reporter FROM report")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut gone = 0;
+    for r in reporters.iter().filter(|r| !keep.contains(*r)) {
+        gone += inbox
+            .conn
+            .execute("DELETE FROM report WHERE reporter = ?1", params![r])?;
+    }
+    Ok(gone)
+}
+
+/// Every hour, and once at start: expired reports go, and the reports of anyone no longer on the
+/// roster, whether or not anyone sends or reads one. A roster that can't be read takes none.
 pub fn start_housekeeping(s: &Arc<NodeState>) {
-    let dir = s.data_dir();
+    let s = s.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(HOUR as u64));
         loop {
             tick.tick().await;
-            let dir = dir.clone();
-            if let Ok(Err(e)) = tokio::task::spawn_blocking(move || housekeeping(&dir, now())).await {
-                tracing::warn!("feedback: expired reports not removed: {e}");
-            }
+            let s = s.clone();
+            let round = tokio::task::spawn_blocking(move || {
+                let dir = s.data_dir();
+                if let Err(e) = housekeeping(&dir, now()) {
+                    tracing::warn!("feedback: expired reports not removed: {e}");
+                }
+                match crate::people::listed_keys(&s).map(|keys| forget_unlisted(&dir, &keys)) {
+                    Some(Ok(0)) => {}
+                    Some(Ok(n)) => tracing::info!(n, "feedback: reports of people no longer listed removed"),
+                    Some(Err(e)) => {
+                        tracing::warn!("feedback: reports of people no longer listed not removed: {e}")
+                    }
+                    None => {
+                        tracing::warn!("feedback: the roster can't be read; no one's reports removed for it")
+                    }
+                }
+            });
+            let _ = round.await;
         }
     });
 }
@@ -942,6 +1035,31 @@ mod tests {
             client_id: uuid::Uuid::new_v4().to_string(),
             details: None,
         }
+    }
+
+    /// Held Low 3 of the Claude review of 2d2f0a8a: the owner's key loading during a request is no
+    /// sign-out; another listener, a guest or nobody is.
+    #[test]
+    fn the_same_person_is_who_the_sign_in_names_not_every_field() {
+        let owner = |key: Option<&str>| Caller {
+            role: Role::Owner,
+            key: key.map(Into::into),
+        };
+        let listener = |key: &str| Caller {
+            role: Role::Listener,
+            key: Some(key.into()),
+        };
+        let guest = Caller {
+            role: Role::Guest,
+            key: None,
+        };
+        assert!(same_person(&owner(None), Some(&owner(Some("ownerkey")))));
+        assert!(same_person(&listener("annkey"), Some(&listener("pubkyannkey"))));
+        assert!(!same_person(&listener("annkey"), Some(&listener("benkey"))));
+        assert!(!same_person(&listener("annkey"), None));
+        assert!(!same_person(&owner(None), Some(&listener("annkey"))));
+        assert!(!same_person(&listener("annkey"), Some(&owner(None))));
+        assert!(!same_person(&guest, Some(&guest)));
     }
 
     #[test]
