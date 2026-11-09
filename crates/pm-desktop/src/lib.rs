@@ -560,7 +560,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     // known), so the grant exchange routes on them and not on the first record a node answered
     let identity = state
         .current()
-        .and_then(|c| pubky::PublicKey::try_from(c.owner.as_str()).ok());
+        .and_then(|c| pm_pubky::homeserver::PublicKey::try_from(c.owner.as_str()).ok());
     let records = hs.fresh_for_sign_in(identity.as_ref(), None).await;
     tracing::info!(?records, "Ring: homeserver records before the sign-in");
     let flow = hs
@@ -693,7 +693,7 @@ struct RingFlow {
     /// The client the flow runs on (its records are the ones the exchange routes on).
     hs: pm_pubky::homeserver::NodeHomeserver,
     /// The identity this device connected with before, when known.
-    identity: Option<pubky::PublicKey>,
+    identity: Option<pm_pubky::homeserver::PublicKey>,
 }
 
 impl ring_wait::Pending for RingFlow {

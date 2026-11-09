@@ -15,8 +15,10 @@
 
 use crate::config::Network;
 use crate::schemas::{Activity, Bookmark, MusicPost, Playlist, Review, Visibility};
+use pubky::Pubky;
 pub use pubky::PubkySession;
-use pubky::{Pubky, PublicKey};
+/// A Pubky key (a person's or a homeserver's), for callers that don't depend on `pubky` themselves.
+pub use pubky::PublicKey;
 use serde::Serialize;
 
 /// The homeserver answers 404 for a directory nobody has written to yet.
