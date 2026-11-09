@@ -483,23 +483,24 @@ impl Media {
             };
             let Some(body) = body else { return };
             // Shown at once; the node's read-back follows (and a refused set puts it back)
-            if let Some(z) = st.zones.get_mut(&zone) {
-                let mut v = level.as_object().cloned().unwrap_or_default();
-                v.remove("percent");
-                v.remove("db");
-                if let Some(o) = body.as_object() {
-                    v.extend(o.clone());
-                }
-                z["volume"] = Value::Object(v);
+            let mut v = level.as_object().cloned().unwrap_or_default();
+            v.remove("percent");
+            v.remove("db");
+            if let Some(o) = body.as_object() {
+                v.extend(o.clone());
             }
-            (body, st.settings.as_ref().map(|s| s.base().to_string()), level)
+            let shown = Value::Object(v);
+            if let Some(z) = st.zones.get_mut(&zone) {
+                z["volume"] = shown.clone();
+            }
+            (
+                body,
+                st.settings.as_ref().map(|s| s.base().to_string()),
+                level,
+                shown,
+            )
         };
-        let (body, base, was) = body;
-        let shown = self
-            .state()
-            .zones
-            .get(&zone)
-            .and_then(|z| z.get("volume").cloned());
+        let (body, base, was, shown) = body;
         self.push();
         let url = base.and_then(|b| media::zone_url(&b, &zone, "volume"));
         if self
@@ -510,7 +511,7 @@ impl Media {
             // Put back only what this set showed: a newer level (the node's, another
             // controller's) stays
             if let Some(z) = self.state().zones.get_mut(&zone) {
-                if z.get("volume") == shown.as_ref() {
+                if z.get("volume") == Some(&shown) {
                     z["volume"] = was;
                 }
             }

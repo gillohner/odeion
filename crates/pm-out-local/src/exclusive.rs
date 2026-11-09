@@ -729,8 +729,9 @@ pub fn decide(
     if !keep && !chosen(settings.mode, crate::bit_perfect::offer(dac).is_ok(), permission) {
         return None;
     }
-    // Auto: this DAC's Exclusive USB didn't start before; Android plays it
-    if settings.mode == PreferredMode::Auto && !held && auto_skips(dac) {
+    // Auto: this DAC's Exclusive USB didn't start before; Android plays it (never while the
+    // listener has the zone muted on it: Android's paths don't know that mute)
+    if settings.mode == PreferredMode::Auto && !held && auto_skips(dac) && !listener_muted(dac) {
         return None;
     }
     if !permission {
