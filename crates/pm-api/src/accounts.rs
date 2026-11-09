@@ -1326,10 +1326,15 @@ pub struct CleanedQueues {
 /// since the queue was readable by everyone who could use the zone: the owner's browser sessions
 /// and device sign-ins (they sign in again by themselves), a listener's token. The API token is
 /// the owner's to replace (Settings): reported. A token this node doesn't know ends nothing.
+///
+/// What ends, and the API token's warning, is saved before any queue is cleaned: a failure on
+/// the way leaves the sign-ins in the queues, so the next start finds them and does it again
+/// (each step can be done twice).
 pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut out = CleanedQueues::default();
     let origins = s.node_origins();
     let mut found: Vec<String> = Vec::new();
+    let mut cleaned: Vec<(String, String)> = Vec::new();
     let lib = s.library.lock().expect("library poisoned");
     // A link under another of the node's names loses the node's own sign-ins too
     let known_set = KnownSet::load(&lib, s.token());
@@ -1359,11 +1364,8 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
         }
         if n > 0 {
             out.items += n;
-            lib.set_setting(&key, &v.to_string())?;
+            cleaned.push((key, v.to_string()));
         }
-    }
-    if found.is_empty() {
-        return Ok(out);
     }
     let api = s.token();
     let owners: Vec<String> = [OWNER_SESSIONS, DEVICE_SESSIONS]
@@ -1377,7 +1379,7 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
         })
         .map(|t| t.hash)
         .collect();
-    let mut listener_keys = Vec::new();
+    let mut listeners = Vec::new();
     for t in &found {
         let h = hash(t);
         if api.as_deref() == Some(t.as_str()) {
@@ -1385,15 +1387,7 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
         } else if owners.contains(&h) {
             out.owner_sessions_ended = true;
         } else if t.starts_with("pml_") {
-            let key = update_in(&lib, TOKENS, |all| {
-                let key = all.iter().find(|x| x.hash == h).map(|x| x.key.clone());
-                all.retain(|x| x.hash != h);
-                key
-            })?;
-            if let Some(key) = key {
-                out.listener_tokens_ended += 1;
-                listener_keys.push(key);
-            }
+            listeners.push(h);
         }
     }
     // The API token can't be replaced here: Home and Settings say so until the owner does
@@ -1409,12 +1403,30 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
         update_in(&lib, OWNER_SESSIONS, Vec::clear)?;
         update_in(&lib, DEVICE_SESSIONS, Vec::clear)?;
     }
+    let mut listener_keys = Vec::new();
+    if !listeners.is_empty() {
+        listener_keys = update_in(&lib, TOKENS, |all| {
+            let keys: Vec<String> = all
+                .iter()
+                .filter(|x| listeners.contains(&x.hash))
+                .map(|x| x.key.clone())
+                .collect();
+            all.retain(|x| !listeners.contains(&x.hash));
+            keys
+        })?;
+        out.listener_tokens_ended = listener_keys.len();
+    }
     drop(lib);
     if out.owner_sessions_ended {
         s.usage.revoke_owner();
     }
-    for key in listener_keys {
-        s.usage.revoke_listener(&key);
+    for key in &listener_keys {
+        s.usage.revoke_listener(key);
+    }
+    // Only now the queues lose the sign-ins: what they showed has ended
+    let lib = s.library.lock().expect("library poisoned");
+    for (key, json) in &cleaned {
+        lib.set_setting(key, json)?;
     }
     Ok(out)
 }

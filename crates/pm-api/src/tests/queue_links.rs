@@ -529,3 +529,64 @@ async fn a_restored_queue_under_another_name_loses_the_nodes_sign_in() {
     let (_, q) = call_as(&app, &listener, &format!("/v1/zones/{zid}/queue")).await;
     assert!(!q.to_string().contains("s3cret"), "{q}");
 }
+
+/// What a sign-in found in a saved queue ends is saved before the queue is cleaned: a write that
+/// fails on the way (here the API token's warning) leaves the sign-in in the queue, and the next
+/// start finds it again and says so, with the owner's sessions ended.
+#[tokio::test]
+async fn a_failure_while_cleaning_saved_queues_is_done_again_at_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    let app = router(s.clone());
+    let key = "queue.somewhere";
+    let saved = serde_json::json!({"items": [{"id": 1, "uri": "track:1", "image": "/v1/library/albums/1/cover?token=s3cret"}],
+        "repeat": "off", "radio": false, "shuffle": false, "order": []})
+    .to_string();
+    let browser = serde_json::json!([{"hash": blake3::hash(b"pmo_browser").to_hex().to_string(), "key": "owner", "created_at": 1}]).to_string();
+    {
+        let lib = s.library.lock().unwrap();
+        lib.set_setting(key, &saved).unwrap();
+        lib.set_setting("accounts.owner_sessions", &browser).unwrap();
+    }
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_note_i BEFORE INSERT ON settings WHEN NEW.key = 'security.api_token_exposed'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+         CREATE TRIGGER no_note_u BEFORE UPDATE ON settings WHEN NEW.key = 'security.api_token_exposed'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+    )
+    .unwrap();
+    assert!(accounts::clean_saved_queues(&s).is_err());
+    let setting = |k: &str| s.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(
+        setting(key).as_deref(),
+        Some(saved.as_str()),
+        "the queue still shows it"
+    );
+    db.execute_batch("DROP TRIGGER no_note_i; DROP TRIGGER no_note_u;")
+        .unwrap();
+    // The next start: found again, said, and the sessions end
+    let cleaned = accounts::clean_saved_queues(&s).unwrap();
+    assert!(
+        cleaned.api_token_found && cleaned.owner_sessions_ended,
+        "{cleaned:?}"
+    );
+    assert!(!setting(key).unwrap().contains("s3cret"));
+    assert_eq!(setting("accounts.owner_sessions").as_deref(), Some("[]"));
+    let (_, ns) = call_as(&app, "s3cret", "/v1/node/settings").await;
+    assert!(ns["api_token_exposed_at"].as_i64().is_some_and(|t| t > 0), "{ns}");
+
+    // A failure on the last step, the queue's own write: what ended stays ended, the next start
+    // finds the sign-in again and does it again
+    s.library.lock().unwrap().set_setting(key, &saved).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_queue BEFORE UPDATE ON settings WHEN NEW.key = 'queue.somewhere'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+    )
+    .unwrap();
+    assert!(accounts::clean_saved_queues(&s).is_err());
+    assert_eq!(setting(key).as_deref(), Some(saved.as_str()));
+    db.execute_batch("DROP TRIGGER no_queue;").unwrap();
+    assert!(accounts::clean_saved_queues(&s).unwrap().api_token_found);
+    assert!(!setting(key).unwrap().contains("s3cret"));
+}
