@@ -1297,6 +1297,8 @@ code.path { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .sg-other > .list { margin-top: 6px; }
 .sg-other .list-row .sub { overflow-wrap: anywhere; }
 .sg-play-h { margin-top: 18px; }
+.sg-in .set-name, .sg-in .set-help { overflow-wrap: anywhere; }
+.sg-main .set-help { margin-top: 2px; }
 /* People › Invite someone: the key field with Paste and Scan QR; its error under it */
 .invite-fields { margin-top: 12px; }
 .invite-fields .input { flex: 1 1 200px; min-width: 0; width: auto; }

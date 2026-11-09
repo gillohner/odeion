@@ -2051,7 +2051,7 @@
   // your speakers (`speakers`), as it does nothing before.
   const youtubeSigninCfg = (el, speakers) => ({
     source: 'youtube', name: 'YouTube', el,
-    lead: () => 'Search YouTube here and play it in this browser. Search needs a free YouTube Data API key.',
+    lead: () => `Search YouTube here and play it ${hereIn()}. Search needs a free YouTube Data API key.`,
     keep: (w) => w.id !== 'cookies' || !!speakers,
     actions: (pick, si, h) => {
       const key = (si.details.key || {}).set;
