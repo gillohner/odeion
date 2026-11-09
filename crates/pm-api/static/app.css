@@ -1429,6 +1429,7 @@ html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs).more-
 .libnav > *, .scopechips > *, .np-sheet-tabs > * { scroll-snap-align: start; }
 .libnav::-webkit-scrollbar { display: none; }
 .libnav .chip { flex: none; }
+html[data-shell="phone"] .libnav .chip { min-height: 44px; min-width: 44px; scroll-snap-align: center; }
 .main > .libnav + * { margin-top: 14px; }
 html[data-shell="desktop"] .libnav { display: none; }
 html[data-shell="desktop"] .main > .libnav + * { margin-top: 0; }

@@ -2688,8 +2688,23 @@
   // A scrolling chip row fades at its end only while more chips are off to the right (touch layouts)
   const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs';
   const fadeRow = (el) => el.classList.toggle('more-right', el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  // A newly drawn Library row starts around the current section. Remember its size so
+  // unrelated updates leave a person's swipe alone; resizing reveals the section again.
+  const libraryNavSizes = new WeakMap();
+  const revealLibrarySection = (el) => {
+    const width = el.clientWidth;
+    if (!width) { libraryNavSizes.delete(el); return; }
+    const size = `${width}:${el.scrollWidth}`;
+    if (libraryNavSizes.get(el) === size) return;
+    const current = $('[aria-current="page"]', el);
+    if (!current) return;
+    libraryNavSizes.set(el, size);
+    const row = el.getBoundingClientRect(), chip = current.getBoundingClientRect();
+    // Scroll only this row: scrollIntoView can also move the page vertically.
+    el.scrollLeft += chip.left - row.left - (width - chip.width) / 2;
+  };
   let fadeQueued = false;
-  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach(fadeRow); }); };
+  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach((el) => { if (el.matches('.libnav')) revealLibrarySection(el); fadeRow(el); }); }); };
   document.addEventListener('scroll', (e) => { if (e.target instanceof Element && e.target.matches(CHIP_ROWS)) fadeRow(e.target); }, true);
   window.addEventListener('resize', fadeRows);
   new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
