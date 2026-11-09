@@ -70,6 +70,8 @@ class UsbExclusive private constructor() {
                                     while (detachedLog.size > 64) detachedLog.removeAt(0)
                                 }
                                 if (gone != null && device?.deviceName == gone.deviceName) {
+                                    // Unplugged while the app held it: the speaker never comes on loud
+                                    MediaControl.safeAfterUnplug()
                                     runCatching { conn?.close() }
                                     conn = null
                                     device = null
@@ -116,16 +118,37 @@ class UsbExclusive private constructor() {
             return runCatching { usb()?.hasPermission(d) ?: false }.getOrDefault(false)
         }
 
-        /// Android's dialog for the DAC: only when the listener chose Exclusive USB.
+        /// Auto's own ask (Exclusive USB is its first path): Android's dialog for this DAC once, and
+        /// only while the app is on screen (Android shows it over the app). Someone who said no is
+        /// not asked again; choosing Exclusive USB in Settings asks again (requestPermission).
+        @JvmStatic
+        fun requestPermissionOnce(vendor: Int, product: Int) {
+            val me = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(me)
+            if (me.importance != android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) return
+            val p = prefs() ?: return
+            val key = "auto-asked-$vendor:$product"
+            if (p.getBoolean(key, false)) return
+            // Counted only once Android was really asked (the DAC listed, the app ready)
+            if (ask(vendor, product)) p.edit().putBoolean(key, true).apply()
+        }
+
+        /// Android's dialog for the DAC: when the listener chose Exclusive USB, or Auto's one ask.
         @JvmStatic
         fun requestPermission(vendor: Int, product: Int) {
-            val c = context ?: return
-            val d = find(vendor, product) ?: return
+            ask(vendor, product)
+        }
+
+        /// Whether Android's dialog was asked for.
+        private fun ask(vendor: Int, product: Int): Boolean {
+            val c = context ?: return false
+            val d = find(vendor, product) ?: return false
             // Explicit (this package) and mutable: Android adds the answer to it
             val intent = Intent(ACTION_PERMISSION).setPackage(c.packageName)
             val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
             val pi = PendingIntent.getBroadcast(c, 0, intent, flags)
-            runCatching { usb()?.requestPermission(d, pi) }
+            val um = usb() ?: return false
+            return runCatching { um.requestPermission(d, pi) }.isSuccess
         }
 
         private fun refused(why: String) = JSONObject().put("ok", false).put("why", why).toString()

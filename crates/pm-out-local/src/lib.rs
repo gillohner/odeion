@@ -34,6 +34,9 @@ pub mod exclusive;
 // The shared sink's waits and stream faults, apart from cpal (built and tested on every host)
 pub mod sink_wait;
 
+// The phone's media volume as its zone's volume (decisions and mapping; built on every host)
+pub mod media_volume;
+
 /// The tests that touch the phone's DAC (one process-wide value) run one at a time.
 #[cfg(test)]
 pub(crate) static PHONE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());

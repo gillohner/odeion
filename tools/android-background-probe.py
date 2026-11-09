@@ -550,7 +550,19 @@ def main():
             return t if isinstance(t, list) else t.get("items") or t.get("tracks") or []
 
         track = until("the scan", tracks)[0]
-        lc, address = connect_app()
+        try:
+            lc, address = connect_app()
+        except Exception:
+            # Keep evidence even when the first connect control never appeared. The old
+            # inner handler covered only the later node-page wait, hiding startup failures.
+            shot("connect-failed")
+            try:
+                (out / "connect-failed-ui.txt").write_text("\n".join(ui_nodes()))
+                dump("connect-failed-activity", "activity", "activities")
+                dump("connect-failed-window", "window", "windows")
+            except Exception as evidence_error:
+                log(f"connect failure evidence incomplete: {evidence_error}")
+            raise
         # B first: on a fresh install the app's zone is its own player
         try:
             part_b()
