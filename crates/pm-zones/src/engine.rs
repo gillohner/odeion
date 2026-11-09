@@ -10,7 +10,7 @@ use crate::source::{FrameSource, Processor, SourceError, SourceFactory, StreamIn
 use crate::zone::{NowPlaying, Transport, ZoneEvent, ZoneId, ZoneState};
 use pm_model::{AudioBlock, AudioFormat, PathStage, Quality, SampleKind, Samples};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
@@ -95,7 +95,21 @@ struct Prefetched {
     index: usize,
     item: QueueItem,
     result: Prefetch,
+    /// True while the open's thread runs (it clears it when it ends, panic or not).
+    running: Arc<AtomicBool>,
 }
+
+/// Clears the open's [`Prefetched::running`] flag when its thread ends.
+struct Running(Arc<AtomicBool>);
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The most opens a zone keeps in flight at once: the one it waits for and one given up.
+const OPENS_IN_FLIGHT: usize = 2;
 
 enum Prefetch {
     /// The thread hands its result over this; a thread that panics drops it.
@@ -155,6 +169,12 @@ struct Engine {
     sink: Option<Box<dyn AudioSink>>,
     current: Option<Current>,
     prefetch: Option<Prefetched>,
+    /// Opens given up while still in progress (the queue changed, Stop, Next): their threads
+    /// can't be stopped, so only whether each still runs is kept (its result channel is
+    /// dropped, so a late success is closed at once). No open ahead starts while one runs, and a
+    /// track's end opens the next item only while fewer than [`OPENS_IN_FLIGHT`] run: a zone has
+    /// at most that many opens in flight, however often the queue changes.
+    parked: Vec<Arc<AtomicBool>>,
     /// Crossfade length in ms (0 = off), set from the zone.
     crossfade: Arc<AtomicU64>,
     incoming: Option<Incoming>,
@@ -203,6 +223,7 @@ pub(crate) fn spawn(
         sink: None,
         current: None,
         prefetch: None,
+        parked: Vec::new(),
         deferred: std::collections::VecDeque::new(),
         crossfade,
         incoming: None,
@@ -352,8 +373,21 @@ impl Engine {
         match cmd {
             Command::Shutdown => return Flow::Exit,
             Command::QueueChanged => {
-                // The next item may have changed; prefetch again lazily.
-                self.prefetch = None;
+                // The next item may have changed: an item opened ahead is kept while it is still
+                // the next one, else given up (and prefetched again lazily)
+                let still = self
+                    .current
+                    .as_ref()
+                    .zip(self.prefetch.as_ref())
+                    .is_some_and(|(cur, p)| {
+                        let q = self.queue.lock().expect("queue poisoned");
+                        q.after_end(cur.item.id)
+                            .and_then(|i| q.get(i).map(|it| (i, it.id)))
+                            == Some((p.index, p.item.id))
+                    });
+                if !still {
+                    self.drop_prefetch();
+                }
                 // A fade in progress goes on only while its track is still the one that plays
                 // after the current one ("Play next", a removal or a repeat change may differ).
                 if let (Some(cur), Some(inc)) = (self.current.as_ref(), self.incoming.as_ref()) {
@@ -790,9 +824,70 @@ impl Engine {
         self.stop();
     }
 
+    /// Give up the item opened ahead: one still opening is parked ([`Engine::parked`]).
+    fn drop_prefetch(&mut self) {
+        if let Some(p) = self.prefetch.take() {
+            self.park(p);
+        }
+    }
+
+    fn park(&mut self, mut p: Prefetched) {
+        if !p.settle(Duration::ZERO) {
+            self.parked.push(p.running.clone());
+        }
+    }
+
+    /// How many given-up opens still run.
+    fn parked_running(&mut self) -> usize {
+        self.parked.retain(|r| r.load(Ordering::SeqCst));
+        self.parked.len()
+    }
+
+    /// Open `item` (at queue `index`) on a thread of its own.
+    fn spawn_open(&mut self, index: usize, item: QueueItem) -> Prefetched {
+        let (factory, output, it) = (self.factory.clone(), self.output.clone(), item.clone());
+        let running = Arc::new(AtomicBool::new(true));
+        let flag = Running(running.clone());
+        let (tx, rx) = mpsc::sync_channel(1);
+        let spawned = std::thread::Builder::new()
+            .name(format!("prefetch-{}", self.id))
+            .spawn(move || {
+                let _flag = flag;
+                let _ = tx.send(open_with(factory.as_ref(), output.as_ref(), &it));
+            });
+        let result = match spawned {
+            Ok(_) => Prefetch::Opening(rx),
+            Err(_) => {
+                // No thread (so the flag was dropped with the closure): open here
+                Prefetch::Done(self.open(&item))
+            }
+        };
+        Prefetched {
+            index,
+            item,
+            result,
+            running,
+        }
+    }
+
+    /// Wait for `p`'s open to end, taking Stop, Next or a Play of another item meanwhile:
+    /// `None` when one came (`p` is then given up).
+    fn await_open(&mut self, mut p: Prefetched) -> Option<Result<Opened, SourceError>> {
+        loop {
+            if p.settle(PREFETCH_POLL) {
+                return Some(p.wait());
+            }
+            if self.interrupted() {
+                // Its thread ends by itself, its result unused
+                self.park(p);
+                return None;
+            }
+        }
+    }
+
     fn abort_current(&mut self) {
         self.current = None;
-        self.prefetch = None;
+        self.drop_prefetch();
         self.incoming = None;
         if let Some(s) = self.sink.as_mut() {
             let _ = s.flush();
@@ -946,7 +1041,7 @@ impl Engine {
             format,
             seek_from: None,
         });
-        self.prefetch = None;
+        self.drop_prefetch();
         self.error = None;
         self.transport = Transport::Playing;
         self.dirty = true;
@@ -1025,6 +1120,10 @@ impl Engine {
         if self.prefetch.is_some() {
             return;
         }
+        // One open ahead at a time: a given-up one still in progress goes first
+        if self.parked_running() > 0 {
+            return;
+        }
         let Some(cur) = self.current.as_ref() else {
             return;
         };
@@ -1034,18 +1133,7 @@ impl Engine {
                 .and_then(|i| q.get(i).cloned().map(|it| (i, it)))
         };
         if let Some((index, item)) = next {
-            let (factory, output, it) = (self.factory.clone(), self.output.clone(), item.clone());
-            let (tx, rx) = mpsc::sync_channel(1);
-            let spawned = std::thread::Builder::new()
-                .name(format!("prefetch-{}", self.id))
-                .spawn(move || {
-                    let _ = tx.send(open_with(factory.as_ref(), output.as_ref(), &it));
-                });
-            let result = match spawned {
-                Ok(_) => Prefetch::Opening(rx),
-                Err(_) => Prefetch::Done(self.open(&item)),
-            };
-            self.prefetch = Some(Prefetched { index, item, result });
+            self.prefetch = Some(self.spawn_open(index, item));
         }
     }
 
@@ -1092,21 +1180,27 @@ impl Engine {
             let Some(item) = self.queue.lock().expect("queue poisoned").get(index).cloned() else {
                 break;
             };
-            let opened = match self.prefetch.take() {
-                Some(mut p) if p.index == index && p.item.id == item.id => {
-                    // The next item opened ahead may still be opening (a stream that doesn't
-                    // answer): wait for it, but take Stop, Next or a Play of another item meanwhile
-                    loop {
-                        if p.settle(PREFETCH_POLL) {
-                            break p.wait();
-                        }
+            // The next item opened ahead may still be opening (a stream that doesn't answer); with
+            // none (or another), it opens on a thread of its own, never here: either way the wait
+            // takes Stop, Next or a Play of another item meanwhile
+            let p = match self.prefetch.take() {
+                Some(p) if p.index == index && p.item.id == item.id => p,
+                other => {
+                    if let Some(p) = other {
+                        self.park(p);
+                    }
+                    // At most OPENS_IN_FLIGHT per zone: a given-up one ends first
+                    while self.parked_running() >= OPENS_IN_FLIGHT {
                         if self.interrupted() {
-                            // Dropped: its thread ends by itself, its result unused
                             return;
                         }
+                        std::thread::sleep(PREFETCH_POLL);
                     }
+                    self.spawn_open(index, item.clone())
                 }
-                _ => self.open(&item),
+            };
+            let Some(opened) = self.await_open(p) else {
+                return;
             };
             match opened {
                 Ok((source, proc)) => {
@@ -1135,7 +1229,7 @@ impl Engine {
         }
         // End of the queue: let the tail play out, then close.
         self.current = None;
-        self.prefetch = None;
+        self.drop_prefetch();
         if let Some(mut s) = self.sink.take() {
             if let Err(e) = s.drain() {
                 tracing::warn!(zone = %self.id, "drain: {e}");
@@ -1215,6 +1309,7 @@ impl Engine {
             index,
             item,
             result: Prefetch::Done(Ok((source, proc))),
+            ..
         }) = self.prefetch.take()
         else {
             return false;
@@ -1329,7 +1424,7 @@ impl Engine {
             format,
             seek_from: None,
         });
-        self.prefetch = None;
+        self.drop_prefetch();
         self.error = None;
         self.transport = Transport::Playing;
         self.dirty = true;
