@@ -2689,14 +2689,15 @@
   const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs';
   const fadeRow = (el) => el.classList.toggle('more-right', el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
   // A newly drawn Library row starts around the current section. Remember its size so
-  // unrelated updates leave a person's swipe alone; resizing reveals the section again.
+  // unrelated updates leave a person's swipe alone; resizing keeps keyboard focus in view.
   const libraryNavSizes = new WeakMap();
   const revealLibrarySection = (el) => {
     const width = el.clientWidth;
     if (!width) { libraryNavSizes.delete(el); return; }
     const size = `${width}:${el.scrollWidth}`;
     if (libraryNavSizes.get(el) === size) return;
-    const current = $('[aria-current="page"]', el);
+    const focused = document.activeElement;
+    const current = el.contains(focused) && focused.matches('[data-libnav]') ? focused : $('[aria-current="page"]', el);
     if (!current) return;
     libraryNavSizes.set(el, size);
     const row = el.getBoundingClientRect(), chip = current.getBoundingClientRect();

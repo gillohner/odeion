@@ -1,4 +1,4 @@
-// Phone Library navigation: the current section stays in view, with 44 px targets.
+// Phone Library navigation: the current section (or focused tab on resize) stays in view, with 44 px targets.
 // Real app assets, isolated API fixtures; no live accounts or devices touched.
 // NODE_PATH=/path/to/node_modules node tools/ui-phone-library-nav.js [repo root] [shots dir]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -91,6 +91,35 @@ const tap = async (page, section) => {
         check((await geometry(page))?.visible, `${label}: resizing reveals the current tab again`);
         check(await page.$eval('#main', (e) => e.scrollTop) === 200, `${label}: revealing the tab does not scroll the page`);
         await fx.cleanCopy(page);
+
+        await page.setViewportSize({ width, height: 900 });
+        await fx.go(page, '/sources');
+        await page.waitForSelector('.libnav [aria-current="page"]');
+        await settle(page);
+        // Use the keyboard, not locator.focus/click (which can scroll for us).
+        const focusedLibrary = () => page.evaluate(() => document.activeElement?.dataset.libnav === 'library');
+        for (let i = 0; i < 30 && !await focusedLibrary(); i++) await page.keyboard.press('Tab');
+        check(await focusedLibrary() && (await geometry(page, 'library'))?.visible, `${label}: Tab reaches a visible Your library button`);
+        await page.setViewportSize({ width: width === 360 ? 412 : 360, height: 900 });
+        await settle(page);
+        check(await focusedLibrary(), `${label}: resizing retains keyboard focus on Your library`);
+        check((await geometry(page, 'library'))?.visible, `${label}: resizing keeps the entire focused button visible`);
+        check((await geometry(page))?.current === 'sources', `${label}: resizing does not change the selected section`);
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `focused-resize-${width}-${android ? 'android' : 'browser'}.png`) });
+        await fx.cleanCopy(page);
+
+        // Keeping focus visible on resize must not turn into recentering on every redraw.
+        const manualLeft = await page.$eval('.libnav', (e) => { e.scrollLeft = e.scrollWidth; return e.scrollLeft; });
+        await page.$eval('#main h2', (e) => e.append(' '));
+        await settle(page);
+        check((await geometry(page))?.left === manualLeft && await focusedLibrary(), `${label}: unrelated updates preserve manual scrolling even with a focused tab`);
+        await page.setViewportSize({ width, height: 900 });
+        await settle(page);
+        check(await focusedLibrary() && (await geometry(page, 'library'))?.visible, `${label}: resizing back reveals the focused button again`);
+        await page.keyboard.press('Enter');
+        await page.waitForURL('**/library');
+        await settle(page);
+        check((await geometry(page))?.current === 'library' && (await geometry(page))?.visible, `${label}: Enter opens the visible focused section`);
 
         await fx.go(page, '/library');
         await page.waitForSelector('.libnav [aria-current="page"]');
