@@ -1049,9 +1049,10 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
                     .try_for_each(|(k, _)| lib.delete_setting(&k).map(drop))
             })
     };
-    crate::personal::forget(s, key);
+    let grant = crate::personal::forget(s, key);
     signed_out?;
     personal?;
+    grant.map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
     crate::tidal::pending()

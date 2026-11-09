@@ -1017,27 +1017,46 @@ async fn answer_of(key: &str, id: &str, ttl: Duration) -> Result<serde_json::Val
 }
 
 /// People › Remove: the grant of `key` goes (in the background: the store is async).
-pub(crate) fn forget(s: &NodeState, key: &str) {
+/// An error when their grant is still on the node (it couldn't be deleted): the removal says
+/// so, and removing them again finishes it.
+pub(crate) fn forget(s: &NodeState, key: &str) -> Result<(), String> {
     let b = backend(s);
     let key = key.trim_start_matches("pubky").to_string();
     sessions().lock().expect("sessions").remove(&key);
-    match tokio::runtime::Handle::try_current() {
-        Ok(h) => {
-            h.spawn(async move {
-                let lock = person_lock(&key);
-                let _one = lock.lock().await;
-                end_approvals_of(&key).await;
-                if let Err(e) = b.disconnect(&key).await {
-                    tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
-                }
-            });
+    // The grant file goes now, not in the background, so a removal that can't delete it fails
+    let gone = match grant_file(&grants_dir(s), &key).map(std::fs::remove_file) {
+        Some(Err(e)) if e.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
+            Err(format!(
+                "their homeserver approval is still on the node ({e}): remove them again"
+            ))
         }
-        Err(_) => {
-            if let Some(f) = grant_file(&grants_dir(s), &key) {
-                let _ = std::fs::remove_file(f);
+        _ => Ok(()),
+    };
+    // Approvals still on their way end, and the store forgets them, under their lock
+    if let Ok(h) = tokio::runtime::Handle::try_current() {
+        h.spawn(async move {
+            let lock = person_lock(&key);
+            let _one = lock.lock().await;
+            end_approvals_of(&key).await;
+            if let Err(e) = b.disconnect(&key).await {
+                tracing::warn!(%key, "a removed listener's grant is still on the node: {e}");
             }
-        }
+        });
     }
+    gone
+}
+
+/// Whether anything of `key`'s is still on the node: their grant, or their copies (a removal
+/// that failed part way). Removing them again finishes it.
+pub(crate) fn leftover(s: &NodeState, key: &str) -> bool {
+    let key = key.trim_start_matches("pubky");
+    grant_file(&grants_dir(s), key).is_some_and(|f| f.exists())
+        || s.library
+            .lock()
+            .expect("library poisoned")
+            .settings_with_prefix(&format!("{}{key}.", crate::accounts::PERSON_PREFIX))
+            .is_ok_and(|all| !all.is_empty())
 }
 
 #[cfg(test)]
