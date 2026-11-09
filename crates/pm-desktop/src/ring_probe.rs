@@ -106,6 +106,8 @@ pub async fn run() {
             exchange["on_screen"] = json!(on_screen);
             exchange["info"] =
                 routed(c, Method::GET, &format!("https://{PUBLIC_HOMESERVER}/info"), None).await;
+            // The record that routing decided on (see `after_return`)
+            exchange["decided_on"] = cached_packet(c.pkarr(), PUBLIC_HOMESERVER).await;
         }
         Err(e) => exchange["error"] = json!(chain(e)),
     }
@@ -482,26 +484,28 @@ async fn public_homeserver() {
         };
         let eps = lookups(client.pkarr(), PUBLIC_HOMESERVER).await;
         // The default client is the one Ring sign-in uses (`Pubky::new`): where would it send?
-        let info = if configure.is_none() {
+        let (info, decided_on) = if configure.is_none() {
             // A fresh client, so the endpoint lookup above cannot have warmed its caches.
             match PubkyHttpClient::new() {
                 Ok(c) => {
-                    routed(
+                    let info = routed(
                         &c,
                         Method::GET,
                         &format!("https://{PUBLIC_HOMESERVER}/info"),
                         None,
                     )
-                    .await
+                    .await;
+                    // The record that routing decided on (see `after_return`)
+                    (info, cached_packet(c.pkarr(), PUBLIC_HOMESERVER).await)
                 }
-                Err(e) => json!({ "error": chain(&e) }),
+                Err(e) => (json!({ "error": chain(&e) }), Value::Null),
             }
         } else {
-            Value::Null
+            (Value::Null, Value::Null)
         };
         emit(
             name,
-            json!({ "homeserver": PUBLIC_HOMESERVER, "lookup": eps, "info": info }),
+            json!({ "homeserver": PUBLIC_HOMESERVER, "lookup": eps, "info": info, "decided_on": decided_on }),
         );
     }
 }
