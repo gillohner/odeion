@@ -833,7 +833,10 @@ pub fn run() {
                 .app_local_data_dir()
                 .ok()
                 .and_then(|d| offline::Offline::open(d.join("offline"), offline_origin.clone()));
-            // The page hears what this device keeps and how its downloads go
+            // The page hears what this device keeps and how its downloads go; the app's player
+            // plays the songs kept here from their copy
+            #[cfg(target_os = "android")]
+            native::play_downloads(app.handle());
             if let Some(o) = &offline {
                 let h = app.handle().clone();
                 o.on_change(move || offline::push_state(&h));

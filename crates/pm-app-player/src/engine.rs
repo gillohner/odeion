@@ -51,6 +51,8 @@ pub struct Status {
     pub broke: bool,
     /// The format and path of what plays, as a zone reports them.
     pub now_playing: Option<Playing>,
+    /// What plays is the copy downloaded to this device (no stream).
+    pub from_device: bool,
     pub output: OutputId,
     /// The hardware behind the output (a USB DAC), as the node's output list has it.
     pub device: Option<OutputDevice>,
@@ -249,6 +251,7 @@ impl Page {
                 signal_path: np.signal_path.clone(),
                 format: np.format.clone(),
             }),
+            from_device: false,
             output: output.id(),
             device: output.device(),
         }
@@ -300,7 +303,13 @@ impl AppPlayer {
 
     pub fn status(&self) -> Status {
         let z = self.zone_state();
-        self.page().status(z.as_ref(), &*self.inner.output)
+        let mut st = self.page().status(z.as_ref(), &*self.inner.output);
+        st.from_device = st.now_playing.is_some()
+            && st
+                .url
+                .as_deref()
+                .is_some_and(|u| self.inner.sources.from_device(u));
+        st
     }
 
     fn page(&self) -> std::sync::MutexGuard<'_, Page> {
@@ -877,6 +886,42 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(first_end.url.as_deref(), Some(ub.as_str()), "{first_end:?}");
+    }
+
+    /// A song kept on this device plays from its copy (no request reaches the node), and the
+    /// status says so; one without a copy streams.
+    #[test]
+    fn a_downloaded_song_plays_from_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wav, want) = wav_bytes(44_100, 16, 10_000, 4);
+        std::fs::write(dir.path().join("3.wav"), &wav).unwrap();
+        let (url, asked) = serve(wav.clone(), "audio/wav", Mode::default());
+        let out_path = dir.path().join("out.wav");
+        let p = AppPlayer::new(Arc::new(WavFileOutput::new(&out_path)), OutputOwner::new());
+        let kept = dir.path().join("3.wav");
+        let u2 = url.clone();
+        p.sources()
+            .set_local(Some(Box::new(move |u: &str| (u == u2).then(|| kept.clone()))));
+        let seen = recorder(&p);
+        p.load(&url, 0, None).unwrap();
+        wait(&p, "the end", |s| s.ended == 1);
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|s| s.from_device && s.now_playing.is_some()),
+            "said it plays from the device"
+        );
+        p.stop();
+        assert!(asked.lock().unwrap().is_empty(), "nothing asked of the node");
+        assert_eq!(read_wav(&out_path).unwrap().samples, Samples::PcmI32(want));
+        // Without a copy: the stream
+        p.sources().set_local(None);
+        p.load(&url, 0, None).unwrap();
+        wait(&p, "the end of the stream", |s| s.ended == 2);
+        assert!(!p.sources().from_device(&url));
+        assert!(!asked.lock().unwrap().is_empty(), "streamed from the node");
+        p.stop();
     }
 
     #[test]

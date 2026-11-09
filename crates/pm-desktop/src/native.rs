@@ -87,6 +87,33 @@ pub fn start(app: &AppHandle, endpoint: &Arc<pm_endpoint::Endpoint>) {
     }
 }
 
+/// Songs downloaded to this device play from their copy (no network: offline, or saving mobile
+/// data), for the node in use and the offline page.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn play_downloads(app: &AppHandle) {
+    let Some(p) = PLAYER.get() else { return };
+    let app = app.clone();
+    p.sources().set_local(Some(Box::new(move |url: &str| {
+        let u = url::Url::parse(url).ok()?;
+        let id: i64 = u
+            .path()
+            .strip_prefix("/v1/library/tracks/")?
+            .strip_suffix("/file")?
+            .parse()
+            .ok()?;
+        if !ORIGINS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .has(&u.origin().ascii_serialization())
+        {
+            return None;
+        }
+        let state = app.state::<crate::AppState>();
+        let node_id = state.current()?.node_id;
+        state.offline.as_ref()?.track_file(&node_id, id)
+    })));
+}
+
 /// The page hears the player (and the player service whether it plays).
 fn push(app: &AppHandle, st: &Status) {
     let playing = st.transport == pm_app_player::Transport::Playing;
@@ -359,6 +386,7 @@ mod tests {
             refused: None,
             taken: false,
             broke: false,
+            from_device: false,
             now_playing: None,
             output: pm_app_player::OutputId::new("cpal", "Speaker or headphones"),
             device: None,
@@ -385,6 +413,7 @@ mod tests {
             refused: None,
             taken: false,
             broke: false,
+            from_device: false,
             now_playing: Some(pm_app_player::Playing {
                 source_format: f,
                 output_format: f,

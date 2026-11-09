@@ -105,6 +105,8 @@ pub struct UrlSources {
     ready: Mutex<HashMap<String, Box<dyn FrameSource>>>,
     /// A copy of the URL's file on this device, when there is one.
     local: Mutex<Option<LocalCopy>>,
+    /// The URLs last opened from the copy on this device (the page says "From this phone").
+    from_device: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Where a URL's file is kept on this device, if anywhere.
@@ -131,6 +133,7 @@ impl UrlSources {
             cfg: PipelineConfig::default(),
             ready: Mutex::default(),
             local: Mutex::default(),
+            from_device: Mutex::default(),
         }
     }
 
@@ -148,13 +151,31 @@ impl UrlSources {
             .and_then(|f| f(url))
     }
 
+    fn mark(&self, url: &str, here: bool) {
+        let mut m = self.from_device.lock().unwrap_or_else(|e| e.into_inner());
+        if here {
+            m.insert(url.to_string());
+        } else {
+            m.remove(url);
+        }
+    }
+
+    /// Whether `url` last opened from the copy on this device.
+    pub fn from_device(&self, url: &str) -> bool {
+        self.from_device
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(url)
+    }
+
     /// Open and probe `url` now; `Err` says why it can't play here (the page then plays it).
     pub fn open_url(&self, url: &str) -> Result<Box<dyn FrameSource>, String> {
         if let Some(path) = self.local_copy(url) {
             match pm_audio::zone::FileSource::open(&path) {
                 Ok(f) => {
-                    let mut info = FrameSource::stream_info(&f).unwrap_or_default();
-                    info.service = "device".into();
+                    // The library's file, as the node sent it: only where it plays from differs
+                    let info = FrameSource::stream_info(&f).unwrap_or_default();
+                    self.mark(url, true);
                     return Ok(Box::new(Kept { inner: f, info }));
                 }
                 Err(e) => {
@@ -162,6 +183,7 @@ impl UrlSources {
                 }
             }
         }
+        self.mark(url, false);
         let reader = RangeReader::open(&self.client, url)?;
         let ext = ext_for(reader.content_type(), url).map_err(|why| format!("{CANT_PLAY_HERE}{why}"))?;
         let bytes = reader.len();

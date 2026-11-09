@@ -162,6 +162,11 @@ impl Offline {
         Ok(())
     }
 
+    /// The copy of a library song this device keeps from the node with this id, if any.
+    pub fn track_file(&self, node_id: &str, track_id: i64) -> Option<PathBuf> {
+        self.store(node_id)?.track_file(track_id).filter(|p| p.is_file())
+    }
+
     /// Keep nothing: the next sync removes the device's copies (only those).
     pub fn keep_nothing(&self, node_id: &str) -> Result<(), String> {
         let store = self.store(node_id).ok_or("Downloads are off on this device")?;

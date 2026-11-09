@@ -85,6 +85,11 @@ the screen says so. Songs on the phone carry a small download mark in lists and 
 The app brings its copies up to date every 15 minutes while it reaches your node, and when a file
 changes on the node (replaced, retagged), the phone gets the new one.
 
+A downloaded song plays from the phone's copy, also while the app reaches your node (no stream,
+no mobile data); Now playing › Details › Output then says "From this phone". With no network (or the
+node off), the app opens what the phone keeps by itself and plays it the same way, through "This
+phone" with its USB DAC path; it goes back to your node when it answers again.
+
 ## Updates
 
 On macOS, Windows and the Linux AppImage, the app checks for a new version when it starts and

@@ -2647,7 +2647,11 @@
     if (z.id !== BROWSER) { const l = deviceOf(z) ? dacLine(z) : ''; return l ? [l, ''] : null; }
     if (appPlatform() !== 'android') return null;
     // The app plays it itself: the same words as the phone's own zone
-    if (state.natOn && !state.ytOn && z.now_playing && z.now_playing.signal_path) { const l = deviceOf(z) ? dacLine(z) : ''; return [l || 'Shared · Android mixer', '']; }
+    if (state.natOn && !state.ytOn && z.now_playing && z.now_playing.signal_path) {
+      const l = deviceOf(z) ? dacLine(z) : ''; const n = nat.status();
+      // A song downloaded here plays from its copy: no stream, no mobile data
+      return [l || 'Shared · Android mixer', n && n.from_device ? 'From this phone: the downloaded copy plays, not a stream.' : ''];
+    }
     if (nativeOk()) {
       const cur = state.browserQueue[state.browserIndex];
       if (state.ytOn) return ['Android mixer · usually 48 kHz', 'Not bit-perfect: YouTube plays in its own player, through Android’s mixer.'];
