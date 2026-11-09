@@ -240,6 +240,80 @@ async function keyboardControls(browser) {
   } finally { await context.close(); }
 }
 
+async function navigationShortcut(browser, width, key) {
+  const { page, context, state } = await withPlayer(browser, width);
+  try {
+    await fx.go(page, '/library/import');
+    await page.locator('#sidebar [data-view="tracks"]').click();
+    await page.locator('#tracklist').waitFor();
+    assert.equal(await page.locator('#sidebar [data-view="tracks"]').evaluate((e) => e === document.activeElement), true, 'navigation leaves its button focused');
+    await page.keyboard.press(key);
+    await page.screenshot({ path: path.join(shots, `navigation-${key === '/' ? 'search' : 'help'}-${width}.png`) });
+    if (key === '/') assert.equal(await page.locator('#search').evaluate((e) => e === document.activeElement), true, '/ still opens Search from navigation');
+    else {
+      assert.equal(await page.locator('dialog[open]').count(), 1, '? still opens Help from navigation');
+      assert.match(await page.locator('dialog[open]').innerText(), /Keyboard shortcuts/);
+    }
+    assert.deepEqual(transports(state), [], 'navigation shortcuts do not control playback');
+    assert.deepEqual(state.errors, []);
+    console.log(`PASS ${width} ${key}: shortcut works after clicking navigation`);
+  } finally { await context.close(); }
+}
+
+async function heldRetry(browser, width, update, theme = 'light', leaveFocus = false) {
+  const { page, context, state } = await withPlayer(browser, width);
+  await context.addInitScript((t) => localStorage.setItem('pm.theme', t), theme);
+  let releaseUpdate;
+  const updateGate = new Promise((resolve) => { releaseUpdate = resolve; });
+  await context.route(update === 'tags' ? /\/v1\/search\/tags\?/ : /\/v1\/sources$/, async (route) => {
+    await updateGate;
+    const body = update === 'tags' ? { mine: [], others: ['late arrival'] }
+      : [{ id: 'tidal', name: 'TIDAL', status: 'ready', enabled: true, features: ['search'] }];
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
+  });
+  const requests = [];
+  let releaseRetry;
+  const retryGate = new Promise((resolve) => { releaseRetry = resolve; });
+  await context.route(/\/v1\/search\?/, async (route) => {
+    const u = new URL(route.request().url());
+    requests.push({ q: u.searchParams.get('q'), scope: u.searchParams.get('in') });
+    if (requests.length === 1) return route.fulfill(response(answer() + '\n{broken\n'));
+    await retryGate;
+    return route.fulfill(response(answer() + '\n'));
+  });
+  try {
+    await fx.go(page, '/search?q=Journey');
+    const retry = page.locator('#sresults button[data-sretry]');
+    await retry.focus();
+    const original = await retry.elementHandle();
+    await page.keyboard.down('Space');
+    if (leaveFocus) await page.locator('#search').focus();
+    releaseUpdate();
+    await page.locator(update === 'tags' ? '#stags [data-stag="late arrival"]' : '[data-scope-in="tidal"]').waitFor();
+    assert.match(await page.locator('#sresults').innerText(), /Journey Through Time/, 'late update keeps partial results');
+    const sameButton = await original.evaluate((e) => e === document.querySelector('#sresults button[data-sretry]') && e.isConnected);
+    await page.screenshot({ path: path.join(shots, `held-${update}-${width}-${theme}${leaveFocus ? '-search' : ''}.png`) });
+    await page.keyboard.up('Space');
+    await sleep(150);
+    assert.equal(requests.length, leaveFocus ? 1 : 2, leaveFocus ? 'Space release after moving focus does not activate Retry' : `${update} arriving during Space must not swallow Retry activation`);
+    assert.equal(sameButton, true, 'asynchronous updates keep the actual Retry node connected');
+    assert.deepEqual(transports(state), [], 'held Space never controls playback');
+    if (leaveFocus) {
+      assert.equal(await page.locator('#search').evaluate((e) => e === document.activeElement), true, 'late update does not reclaim focus');
+    } else {
+      assert.deepEqual(requests, [{ q: 'Journey', scope: 'everywhere' }, { q: 'Journey', scope: 'everywhere' }], 'one retry of the same query and source');
+      assert.equal(await page.locator('#sprog').isVisible(), true, 'Retry shows immediate progress');
+      assert.equal(await retry.count(), 0, 'Retry is removed while the new request runs');
+      releaseRetry();
+      await until(page, () => document.querySelector('#sprog').hidden && !!document.querySelector('#sresults .srow'), 'held-Space retry succeeds');
+      assert.doesNotMatch(await page.locator('#sresults').innerText(), /Search couldn.t finish/);
+    }
+    assert.deepEqual(state.errors, []);
+    await fx.cleanCopy(page);
+    console.log(`PASS ${width} ${theme} held Space + ${update}${leaveFocus ? ' + moved focus' : ''}: native activation, retained Retry node, no playback`);
+  } finally { releaseUpdate(); releaseRetry(); await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -247,6 +321,9 @@ async function keyboardControls(browser) {
     if (process.env.SEARCH_RECOVERY_CASE === 'sources') { await delayedSources(browser, 'retry'); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'keyboard') { await recovery(browser, 1280, 'http', 'light', 'Space'); return; }
     if (process.env.SEARCH_RECOVERY_CASE === 'controls') { await keyboardControls(browser); return; }
+    if (process.env.SEARCH_RECOVERY_CASE === 'shortcut-search') { await navigationShortcut(browser, 1280, '/'); return; }
+    if (process.env.SEARCH_RECOVERY_CASE === 'shortcut-help') { await navigationShortcut(browser, 1280, '?'); return; }
+    if (process.env.SEARCH_RECOVERY_CASE?.startsWith('held-')) { await heldRetry(browser, 1280, process.env.SEARCH_RECOVERY_CASE.slice(5)); return; }
     for (const [width, theme] of [[1280, 'dark'], [1024, 'light'], [768, 'dark'], [360, 'light'], [412, 'dark']]) {
       await recovery(browser, width, 'http', theme);
       await recovery(browser, width, 'http', theme, 'Space');
@@ -257,5 +334,10 @@ async function keyboardControls(browser) {
     await lateReplies(browser, true);
     for (const action of ['retry', 'query', 'leave']) await delayedSources(browser, action);
     await keyboardControls(browser);
+    for (const width of [1280, 1024, 768]) for (const key of ['/', '?']) await navigationShortcut(browser, width, key);
+    for (const [width, theme] of [[1280, 'light'], [1024, 'dark'], [768, 'light'], [360, 'dark'], [412, 'light']]) {
+      for (const update of ['tags', 'sources']) await heldRetry(browser, width, update, theme);
+    }
+    for (const update of ['tags', 'sources']) await heldRetry(browser, 1280, update, 'light', true);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

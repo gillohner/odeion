@@ -3958,9 +3958,9 @@
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
     if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
-    // Focused controls own their keys (including native button Space activation).
-    // Playback shortcuts apply to the page, never to a control or its children.
-    if (e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]')) return;
+    // Focused controls own Space/arrows; Search, Help and Now playing stay available.
+    const playbackKey = e.code === 'Space' || e.key === 'ArrowRight' || e.key === 'ArrowLeft';
+    if (playbackKey && e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]')) return;
     if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
@@ -5045,8 +5045,14 @@
     const notes = problems.length ? `<div class="snotes">${problems.map((src) => { const err = run.answers[src] && run.answers[src].error; const said = err ? short(err, src).replace(/[.\s·]+$/, '') : ''; const why = said && !said.toLowerCase().includes(srcName(src).toLowerCase()) ? `${srcName(src)}: ${said}` : said; const again = !err || /answered 5\d\d|timed? ?out|time-?out|took too long|reach|network|busy|later|didn.t answer|isn.t answering|sending request|refused|dns|connect(ion)? (error|reset|closed)/i.test(err); return `<span class="snote" title="${esc(err || 'still waiting')}">${svcBadge(src)} ${why ? esc(why) : `${esc(srcName(src))} didn’t answer`}${again ? ` · <a data-sretry="${src}">Retry</a>` : ''}</span>`; }).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
-    const failure = run.error ? '<div class="snotes"><div class="notice" role="status"><div class="row"><span class="grow">Search couldn’t finish.</span><button class="btn sm" data-sretry>Retry</button></div></div></div>' : '';
-    box.innerHTML = failure + notes + facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    // Keep Retry attached while late tags/sources redraw the results. Replacing it and restoring
+    // focus loses the browser's native Space activation between keydown and keyup.
+    let content = $('#scontent', box);
+    if (!content) { box.innerHTML = '<div id="scontent"></div>'; content = $('#scontent', box); }
+    const failure = $('#sfailure', box);
+    if (run.error && !failure) box.insertAdjacentHTML('afterbegin', '<div class="snotes" id="sfailure"><div class="notice" role="status"><div class="row"><span class="grow">Search couldn’t finish.</span><button class="btn sm" data-sretry>Retry</button></div></div></div>');
+    else if (!run.error && failure) failure.remove();
+    content.innerHTML = notes + facetBar + (nothingAtAll && !run.error ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
     const sf = $('.sfilters', box); if (sf) sf.addEventListener('toggle', () => { run.filtersOpen = sf.open; });
     // A facet chip keeps the focus across the re-render (or it moves to the first chip, after Clear)
     $$('[data-facet]', box).forEach((b) => b.onclick = () => {
@@ -5067,7 +5073,7 @@
     const to = $('[data-sopen="top"]', box); if (to) to.onclick = () => setView('item', { kind: top.kind === 'song' ? 'song' : top.kind, id: top.id });
     const tp = $('[data-splaytop]', box); if (tp) tp.onclick = async (e) => { if (top.kind === 'song') return playSongs([{ ...top, artist: top.subtitle }], 0, 'replace', null, e.currentTarget); try { const pg = await api('GET', `/item/${top.kind}/${top.id}`); playSongs(pg.songs || [], 0, 'replace', pg.plays_from, e.currentTarget, { artist: pg.artist && pg.artist.name, album: pg.title, image: pg.image }); } catch (er) { toast(er.message, 'error'); } };
     $$('[data-sretry]', box).forEach((b) => b.onclick = () => { searchRuns.delete(`${run.q.toLowerCase()}|${run.scope}`); startSearch(run.q, run.scope); render(); search.focus(); });
-    if (retryFocus) { const again = $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
+    if (retryFocus && !retryFocus.isConnected) { const again = $$('[data-sretry]', box).find((b) => b.dataset.sretry === retryFocus.dataset.sretry); (again || search).focus(); }
   };
   // ---- Home (STEWARD-UX-HOME.md): everything Pinakes knows about music, one section per call ----
   const HOME_TITLES = { 'trending-songs': 'Trending songs', 'trending-albums': 'Trending albums', 'trending-artists': 'Trending artists', following: 'From people you follow', tags: 'Tags people use for music', concerts: 'Concerts near you', podcasts: 'Podcasts', yours: 'Yours on Pubky', new: 'New on Pubky' };

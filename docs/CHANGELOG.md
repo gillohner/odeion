@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 - Search shows when it could not finish and offers Retry, keeping the same words and source. Results already received remain available, retry progress appears immediately, and late replies from a failed attempt cannot replace the recovered results.
 - Connected search sources appear even when they finish loading after a retry. Space activates the focused button, and arrow keys in tabs change tabs, without also changing playback.
+- Search and Help keyboard shortcuts work after clicking navigation. Holding Space on Retry still retries once when tags or sources finish loading during the key press.
 
 ### 2026-11-09
 
