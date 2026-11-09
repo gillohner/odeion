@@ -297,7 +297,9 @@ def main():
     # localhost. pkarr's CacheFirst lookup on an empty cache keeps the first record a relay or DHT node
     # answers with. The sign-in now asks for the newest record network-first before any request routes
     # on it (`freshened`, pm_pubky::records), on each of the three clients below, so every one of them
-    # must decide on the newest record any lookup in this run found and send to the host it names.
+    # must decide on the record its own refresh found (or a newer one) and send to the host it names.
+    # Each against its own refresh: the homeserver may publish a newer record later in the run, which
+    # an earlier, rightly routed request could not have used (`newest` is reported, not compared).
     clean = ret.get("held_clean") or {}
     stamps = [((st.get("lookup") or {}).get("packet") or {}).get("timestamp_us") for st in steps.values() if isinstance(st, dict)]
     stamps += [((c.get("lookup") or {}).get("packet") or {}).get("timestamp_us") for c in ret.values() if isinstance(c, dict)]
@@ -317,9 +319,10 @@ def main():
             failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, but it sent "
                             f"to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')}); decided on {decided}, "
                             f"freshened {fresh}, newest record found {newest}")
-        if newest is not None and isinstance(decided.get("timestamp_us"), int) and decided["timestamp_us"] < newest:
-            failures.append(f"public homeserver, {name}: decided on an older record ({decided}) than the newest found "
-                            f"({newest}); freshened {fresh}")
+        own = max((t for t in freshened_stamps(step) if isinstance(t, int)), default=None)
+        if own is not None and isinstance(decided.get("timestamp_us"), int) and decided["timestamp_us"] < own:
+            failures.append(f"public homeserver, {name}: decided on an older record ({decided}) than its own refresh "
+                            f"found ({own}; newest in the run {newest}); freshened {fresh}")
         records = (fresh.get("records") or [])
         # Every client took the sign-in's step, and the network answered it
         if len(records) != 1 or records[0].get("from") != "network":

@@ -187,3 +187,116 @@ async fn a_sign_in_with_no_homeserver_record_is_refused_before_it_starts() {
     );
     assert!(testnet.fresh_for_sign_in(None, None, false).await.is_ok());
 }
+
+/// A user's record naming `homeserver` (`_pubky`), dated `at`.
+fn user_record(user: &Keypair, homeserver: &PublicKey, at: u64) -> SignedPacket {
+    SignedPacket::builder()
+        .https(
+            "_pubky".try_into().unwrap(),
+            SVCB::new(0, homeserver.to_string().as_str().try_into().unwrap()),
+            3600,
+        )
+        .timestamp(Timestamp::from(at))
+        .sign(user)
+        .unwrap()
+}
+
+/// A relay that takes requests and never answers.
+async fn stalled_relay() -> String {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}/", l.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((c, _)) = l.accept().await {
+            held.push(c);
+        }
+    });
+    url
+}
+
+fn mainnet(c: PubkyHttpClient) -> pm_pubky::homeserver::NodeHomeserver {
+    pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
+        pubky::Pubky::with_client(c),
+        pm_pubky::Network::Mainnet,
+    )
+}
+
+/// A signup's homeserver is looked up and is the one that decides: the public homeserver (here
+/// one the network knows nothing of) doesn't refuse a signup on another, healthy homeserver.
+#[tokio::test]
+async fn a_signups_target_homeserver_is_freshened_and_decides() {
+    let hs = Keypair::random();
+    let (url, r) = relay(vec![record(&hs, "homeserver.example.org", 1_762_200_000_000_000)]).await;
+    let (c, _) = client(&url, &[]);
+    let target = pubky::PublicKey::from(hs.public_key());
+    let out = mainnet(c).fresh_for_sign_in(None, Some(&target), false).await;
+    let out = out.expect("the target's record is healthy");
+    let mine = out
+        .iter()
+        .find(|f| f.key == hs.public_key().to_string())
+        .unwrap_or_else(|| panic!("the target was looked up: {out:?}"));
+    assert_eq!((mine.from, mine.loopback), (From::Network, false), "{mine:?}");
+    assert!(r.served.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+}
+
+/// A known identity on another homeserver: its homeserver's record (localhost) refuses; the
+/// public homeserver's state is not what decides.
+#[tokio::test]
+async fn the_identitys_own_homeserver_decides_its_sign_in() {
+    let (user, hs) = (Keypair::random(), Keypair::random());
+    let healthy = record(&hs, "homeserver.example.org", 1_762_200_000_000_000);
+    let local = {
+        let mut name = SVCB::new(10, "localhost".try_into().unwrap());
+        name.set_port(6287);
+        SignedPacket::builder()
+            .https(".".try_into().unwrap(), name, 3600)
+            .timestamp(Timestamp::from(1_762_300_000_000_000))
+            .sign(&hs)
+            .unwrap()
+    };
+    let me = user_record(&user, &hs.public_key(), 1_762_200_000_000_000);
+    let identity = pubky::PublicKey::from(user.public_key());
+    let (url, _) = relay(vec![me.clone(), healthy]).await;
+    let (c, _) = client(&url, &[]);
+    let out = mainnet(c).fresh_for_sign_in(Some(&identity), None, false).await;
+    let out = out.expect("its homeserver is healthy; the public one doesn't decide");
+    assert!(
+        out.iter()
+            .any(|f| f.key == hs.public_key().to_string() && f.from == From::Network),
+        "{out:?}"
+    );
+    let (url, _) = relay(vec![me, local]).await;
+    let (c, _) = client(&url, &[]);
+    let r = mainnet(c).fresh_for_sign_in(Some(&identity), None, false).await;
+    assert!(r.unwrap_err().contains("names only this device"));
+}
+
+/// The network stalls on every lookup; the identity's record and its homeserver's are held
+/// here. Both stages fall back to the held copies within the whole step's time, and the sign-in
+/// goes on (the overall bound never cancels the second stage's cache read).
+#[tokio::test]
+async fn a_stalled_network_still_leaves_both_stages_their_cached_records() {
+    let (user, hs) = (Keypair::random(), Keypair::random());
+    let me = user_record(&user, &hs.public_key(), 1_762_200_000_000_000);
+    let theirs = record(&hs, "homeserver.example.org", 1_762_200_000_000_000);
+    let url = stalled_relay().await;
+    let (c, _) = client(&url, &[me, theirs.clone()]);
+    let identity = pubky::PublicKey::from(user.public_key());
+    let started = std::time::Instant::now();
+    let out = mainnet(c).fresh_for_sign_in(Some(&identity), None, false).await;
+    let elapsed = started.elapsed();
+    let out = out.expect("the cached records carry the sign-in");
+    let named = out
+        .iter()
+        .find(|f| f.key == hs.public_key().to_string())
+        .unwrap_or_else(|| panic!("its homeserver was looked up: {out:?}"));
+    assert_eq!(
+        (named.from, named.timestamp_us),
+        (From::Cache, Some(theirs.timestamp().as_u64())),
+        "{named:?}"
+    );
+    assert!(
+        elapsed <= pm_pubky::records::SIGN_IN_LOOKUPS + std::time::Duration::from_millis(500),
+        "{elapsed:?}"
+    );
+}

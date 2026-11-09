@@ -345,64 +345,64 @@ impl NodeHomeserver {
 
     /// Before a sign-in: the newest records of the homeservers it may route to, network-first
     /// ([`crate::records::freshen`]), so the grant exchange routes on the newest and not on the
-    /// first record a relay or DHT node answered with. The project's public homeserver always;
-    /// the homeserver of `identity` (the one signed in here before, whose `_pubky` record is
-    /// freshened first) when known; `target` (a signup's homeserver) when given. Never fails.
+    /// first record a relay or DHT node answered with: `target` (a signup's homeserver) when
+    /// given; the homeserver of `identity` (the one signed in here before, whose `_pubky` record
+    /// is freshened first) when known; the project's public homeserver always, to have it ready.
     ///
-    /// All of it within [`crate::records::SIGN_IN_LOOKUPS`]: the public homeserver (and `target`)
-    /// and the identity's own record at once, then the homeserver that record names. On the
-    /// public network, a homeserver record that names only this machine, or a homeserver nothing
-    /// is known of, refuses the sign-in ([`crate::records::refusal`]) before its link exists;
-    /// on a local testnet the local homeserver's record is loopback by nature.
+    /// All of it within [`crate::records::SIGN_IN_LOOKUPS`], the identity's record within
+    /// [`crate::records::IDENTITY_STAGE`] and its homeserver's in the rest, each keeping time for
+    /// the copy held here. On the public network, the record of the homeserver the sign-in routes
+    /// to (`target`, else the identity's homeserver, else, nothing known of the person, the public
+    /// one) refuses it when it names only this machine or nothing is known of it
+    /// ([`crate::records::refusal`]), before its link exists; other homeservers' records never do.
+    /// On a local testnet the local homeserver's record is loopback by nature.
     pub async fn fresh_for_sign_in(
         &self,
         identity: Option<&PublicKey>,
         target: Option<&PublicKey>,
         allow_local: bool,
     ) -> Result<Vec<crate::records::Freshened>, String> {
+        use crate::records::{self, freshen_until, IDENTITY_STAGE, SIGN_IN_LOOKUPS};
         let pkarr = self.pubky.client().pkarr();
-        let mut keys: Vec<String> = vec![crate::records::PUBLIC_HOMESERVER.to_string()];
-        if let Some(t) = target {
-            let t = t.to_string();
-            if !keys.contains(&t) {
-                keys.push(t);
-            }
+        let start = tokio::time::Instant::now();
+        let public = PublicKey::try_from_z32(records::PUBLIC_HOMESERVER).map_err(|e| e.to_string())?;
+        // Keys as z32 (a `PublicKey` displays as `pubky<z32>`)
+        let mut first: Vec<&PublicKey> = vec![&public];
+        if let Some(t) = target.filter(|t| **t != public) {
+            first.push(t);
         }
-        let lookups = async {
-            let first: Vec<&str> = keys.iter().map(String::as_str).collect();
-            // The identity's record alongside the homeservers known already
-            let (mut out, user) = futures_util::future::join(crate::records::freshen(pkarr, &first), async {
-                match identity {
-                    Some(user) => Some(crate::records::freshen_one(pkarr, user).await),
-                    None => None,
-                }
-            })
-            .await;
-            // Then the homeserver the identity's record names, when it is another one
-            if let (Some(u), Some(user)) = (user, identity) {
-                tracing::info!(key = %u.key, from = ?u.from, "pkarr: the signed-in identity's record");
-                let named = tokio::time::timeout(
-                    crate::records::CACHE_TIMEOUT,
-                    pkarr.resolve(user, pubky::pkarr::ResolvePolicy::CacheOnly),
-                )
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .and_then(|p| crate::records::homeserver_in(&p));
-                if let Some(hs) = named.filter(|hs| !keys.contains(&hs.to_string())) {
-                    out.push(crate::records::freshen_one(pkarr, &hs).await);
-                }
-            }
-            out
+        let ready = futures_util::future::join_all(
+            first
+                .iter()
+                .map(|k| async move { freshen_until(pkarr, k, start + SIGN_IN_LOOKUPS).await.0 }),
+        );
+        // The identity's record, then the homeserver it names, alongside
+        let own = async {
+            let user = identity?;
+            let (u, packet) = freshen_until(pkarr, user, start + IDENTITY_STAGE).await;
+            tracing::info!(key = %u.key, from = ?u.from, "pkarr: the signed-in identity's record");
+            let named = packet.as_ref().and_then(records::homeserver_in)?;
+            let fresh = if first.iter().any(|k| ***k == named) {
+                None
+            } else {
+                Some(freshen_until(pkarr, &named, start + SIGN_IN_LOOKUPS).await.0)
+            };
+            Some((named.to_string(), fresh))
         };
-        let out = tokio::time::timeout(crate::records::SIGN_IN_LOOKUPS, lookups)
-            .await
-            .map_err(|_| {
-                "the homeserver's current address couldn't be found in time; try again".to_string()
-            })?;
+        let (mut out, own) = futures_util::future::join(ready, own).await;
+        let selected = match (target, &own) {
+            (Some(t), _) => Some(t.z32()),
+            (None, Some((named, _))) => Some(named.clone()),
+            // A known identity whose record names no homeserver: none known to check
+            (None, None) if identity.is_some() => None,
+            (None, None) => Some(public.z32()),
+        };
+        if let Some((_, Some(f))) = own {
+            out.push(f);
+        }
         if self.network == Network::Mainnet {
-            if let Some(why) = crate::records::refusal(&out, allow_local) {
-                tracing::warn!(?out, "pkarr: sign-in not started: {why}");
+            if let Some(why) = records::refusal(&out, selected.as_deref(), allow_local) {
+                tracing::warn!(?out, ?selected, "pkarr: sign-in not started: {why}");
                 return Err(why);
             }
         }

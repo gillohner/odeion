@@ -30,6 +30,10 @@ pub const CACHE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The most all of a sign-in's lookups take together (the identity's record, then its
 /// homeserver's): the node's sign-in start must answer the app well within its own wait.
 pub const SIGN_IN_LOOKUPS: Duration = Duration::from_secs(9);
+/// The identity's own record is looked up within this much of [`SIGN_IN_LOOKUPS`]; the rest is
+/// its homeserver's. Each stage keeps [`CACHE_TIMEOUT`] of its share for the copy held here, so a
+/// network that stalls never takes away the cached fallback.
+pub const IDENTITY_STAGE: Duration = Duration::from_secs(4);
 
 /// Where a record came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,8 +75,24 @@ pub async fn freshen(pkarr: &pkarr::Client, keys: &[&str]) -> Vec<Freshened> {
 
 /// [`freshen`] for one key.
 pub async fn freshen_one(pkarr: &pkarr::Client, pk: &PublicKey) -> Freshened {
+    let until = tokio::time::Instant::now() + FRESHEN_TIMEOUT + CACHE_TIMEOUT;
+    freshen_until(pkarr, pk, until).await.0
+}
+
+/// [`freshen_one`] done by `until`: the network gets what is left of the time but
+/// [`CACHE_TIMEOUT`] (at most [`FRESHEN_TIMEOUT`]), the copy held here always gets its read.
+/// Also returns the record itself.
+pub async fn freshen_until(
+    pkarr: &pkarr::Client,
+    pk: &PublicKey,
+    until: tokio::time::Instant,
+) -> (Freshened, Option<SignedPacket>) {
     let key = pk.to_string();
-    let network = tokio::time::timeout(FRESHEN_TIMEOUT, pkarr.resolve(pk, ResolvePolicy::NetworkOnly)).await;
+    let left = until
+        .saturating_duration_since(tokio::time::Instant::now())
+        .saturating_sub(CACHE_TIMEOUT)
+        .min(FRESHEN_TIMEOUT);
+    let network = tokio::time::timeout(left, pkarr.resolve(pk, ResolvePolicy::NetworkOnly)).await;
     let (from, error) = match network {
         Ok(Ok(_)) => (From::Network, None),
         Ok(Err(e)) => (From::None, Some(e.to_string())),
@@ -89,37 +109,37 @@ pub async fn freshen_one(pkarr: &pkarr::Client, pk: &PublicKey) -> Freshened {
         (Some(p), _) => (Some(p), From::Cache),
         (None, _) => (None, From::None),
     };
-    Freshened {
+    let f = Freshened {
         key,
         from,
         timestamp_us: packet.as_ref().map(|p| p.timestamp().as_u64()),
         loopback: packet.as_ref().is_some_and(routes_to_loopback),
         error,
-    }
+    };
+    (f, packet)
 }
 
-/// Why a sign-in on the public network must not start with these homeserver records, if it must
-/// not: a homeserver whose newest record names only the client's own machine (an old record of a
-/// public homeserver did), or one nothing is known of (the exchange would take the first record
-/// some node answers with, which is what went wrong). Refused before the sign-in's link exists,
-/// so the person tries again without spending a Ring approval.
+/// Why a sign-in on the public network must not start with the record of `selected`, the
+/// homeserver it will route to (none known: nothing refuses), if it must not: its newest record
+/// names only the client's own machine (an old record of a public homeserver did), or nothing is
+/// known of it (the exchange would take the first record some node answers with, which is what
+/// went wrong). Other homeservers' records, looked up only to have them ready, never refuse.
+/// Refused before the sign-in's link exists, so the person tries again without spending a Ring
+/// approval.
 ///
 /// `allow_local`: the node is configured for a local homeserver (its bundled one), whose record
 /// names a local address by design, and which needs no lookup on the wider network: only a
-/// loopback record of the public homeserver refuses then.
-pub fn refusal(records: &[Freshened], allow_local: bool) -> Option<String> {
+/// loopback record of the public homeserver refuses then, when the sign-in routes to it.
+pub fn refusal(records: &[Freshened], selected: Option<&str>, allow_local: bool) -> Option<String> {
+    let selected = records.iter().filter(|r| Some(r.key.as_str()) == selected);
     let held = |r: &&Freshened| !allow_local || r.key == PUBLIC_HOMESERVER;
-    if let Some(r) = records.iter().filter(held).find(|r| r.loopback) {
+    if let Some(r) = selected.clone().filter(held).find(|r| r.loopback) {
         return Some(format!(
             "the homeserver's record ({}) names only this device; try again in a moment",
             short(&r.key)
         ));
     }
-    if let Some(r) = records
-        .iter()
-        .filter(|_| !allow_local)
-        .find(|r| r.from == From::None)
-    {
+    if let Some(r) = selected.filter(|_| !allow_local).find(|r| r.from == From::None) {
         return Some(format!(
             "the homeserver's current address couldn't be found ({}{}); check the connection and try again",
             short(&r.key),
@@ -239,25 +259,60 @@ mod tests {
     #[test]
     fn a_sign_in_is_refused_on_a_loopback_or_unknown_homeserver() {
         let other = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        let public = Some(PUBLIC_HOMESERVER);
+        let r = |rs: &[Freshened], sel: Option<&str>, local| refusal(rs, sel, local);
         assert_eq!(
-            refusal(&[freshened(PUBLIC_HOMESERVER, From::Network, false)], false),
+            r(
+                &[freshened(PUBLIC_HOMESERVER, From::Network, false)],
+                public,
+                false
+            ),
             None
         );
         assert_eq!(
-            refusal(&[freshened(PUBLIC_HOMESERVER, From::Cache, false)], false),
+            r(&[freshened(PUBLIC_HOMESERVER, From::Cache, false)], public, false),
             None
         );
-        assert!(refusal(&[freshened(PUBLIC_HOMESERVER, From::Network, true)], false).is_some());
-        assert!(refusal(&[freshened(PUBLIC_HOMESERVER, From::None, false)], false).is_some());
-        assert!(refusal(&[freshened(other, From::Network, true)], false).is_some());
+        assert!(r(
+            &[freshened(PUBLIC_HOMESERVER, From::Network, true)],
+            public,
+            false
+        )
+        .is_some());
+        assert!(r(&[freshened(PUBLIC_HOMESERVER, From::None, false)], public, false).is_some());
+        assert!(r(&[freshened(other, From::Network, true)], Some(other), false).is_some());
         // A node with a homeserver of its own: that one may be local; the public one never
-        assert_eq!(refusal(&[freshened(other, From::Network, true)], true), None);
-        assert_eq!(refusal(&[freshened(other, From::None, false)], true), None);
         assert_eq!(
-            refusal(&[freshened(PUBLIC_HOMESERVER, From::None, false)], true),
+            r(&[freshened(other, From::Network, true)], Some(other), true),
             None
         );
-        assert!(refusal(&[freshened(PUBLIC_HOMESERVER, From::Network, true)], true).is_some());
+        assert_eq!(r(&[freshened(other, From::None, false)], Some(other), true), None);
+        assert_eq!(
+            r(&[freshened(PUBLIC_HOMESERVER, From::None, false)], public, true),
+            None
+        );
+        assert!(r(&[freshened(PUBLIC_HOMESERVER, From::Network, true)], public, true).is_some());
+    }
+
+    /// Only the homeserver the sign-in routes to refuses it: the public homeserver's record,
+    /// looked up only to have it ready, never blocks a sign-in on another, healthy one (nor a
+    /// bundled signup), and with no homeserver known nothing refuses.
+    #[test]
+    fn another_homeservers_record_never_refuses_the_sign_in() {
+        let other = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        let records = [
+            freshened(PUBLIC_HOMESERVER, From::Network, true),
+            freshened(other, From::Network, false),
+        ];
+        assert_eq!(refusal(&records, Some(other), false), None);
+        assert_eq!(refusal(&records, Some(other), true), None);
+        assert!(refusal(&records, Some(PUBLIC_HOMESERVER), false).is_some());
+        let unknown_public = [
+            freshened(PUBLIC_HOMESERVER, From::None, false),
+            freshened(other, From::Cache, false),
+        ];
+        assert_eq!(refusal(&unknown_public, Some(other), false), None);
+        assert_eq!(refusal(&records, None, false), None);
     }
 
     #[test]
