@@ -160,6 +160,12 @@ pub trait Pending: Sized {
     fn poll(&self) -> impl std::future::Future<Output = Result<Option<Self::Done>, Failed>> + Send + '_;
     /// The same sign-in listening again on its relay inbox (a fresh client).
     fn resume(&self) -> Result<Self, String>;
+    /// The app is back on screen with the network answering, before the poll that may exchange
+    /// the grant: the records the exchange routes on are asked for anew (network-first), the
+    /// ones held from before the app went away may be behind.
+    fn returned(&self) -> impl std::future::Future<Output = ()> + Send + '_ {
+        async {}
+    }
 }
 
 /// How long a sign-in waits for Pubky Ring before it gives up.
@@ -280,6 +286,7 @@ pub async fn approval<F: Pending>(
                 .await
                 .map_err(str::to_string)?;
             ready_after = Some(trips());
+            flow.returned().await;
         }
         match flow.poll().await {
             Ok(Some(done)) => return Ok(done),

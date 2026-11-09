@@ -301,6 +301,9 @@ where
 #[derive(Clone)]
 pub struct NodeHomeserver {
     pubky: Pubky,
+    /// Which network the client is on: on a local testnet a homeserver record naming the
+    /// client's own machine is what the homeserver is; on the public network it isn't.
+    network: Network,
 }
 
 /// Pubky clients built in this process: each one starts its own DHT node and keeps its own
@@ -321,12 +324,67 @@ impl NodeHomeserver {
             Network::Mainnet => Pubky::new()?,
             Network::Testnet => Pubky::testnet()?,
         };
-        Ok(Self { pubky })
+        Ok(Self { pubky, network })
     }
 
-    /// Wrap a client the caller configured (timeouts, testnet host).
+    /// Wrap a client the caller configured (timeouts, testnet host), on the public network.
     pub fn from_pubky(pubky: Pubky) -> Self {
-        Self { pubky }
+        Self::from_pubky_on(pubky, Network::Mainnet)
+    }
+
+    /// Wrap a client the caller configured, saying which network it is on.
+    pub fn from_pubky_on(pubky: Pubky, network: Network) -> Self {
+        Self { pubky, network }
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
+    /// Before a sign-in: the newest records of the homeservers it may route to, network-first
+    /// ([`crate::records::freshen`]), so the grant exchange routes on the newest and not on the
+    /// first record a relay or DHT node answered with. The project's public homeserver always;
+    /// the homeserver of `identity` (the one signed in here before, whose `_pubky` record is
+    /// freshened first) when known; `target` (a signup's homeserver) when given. Never fails.
+    pub async fn fresh_for_sign_in(
+        &self,
+        identity: Option<&PublicKey>,
+        target: Option<&PublicKey>,
+    ) -> Vec<crate::records::Freshened> {
+        let pkarr = self.pubky.client().pkarr();
+        let mut keys: Vec<String> = vec![crate::records::PUBLIC_HOMESERVER.to_string()];
+        if let Some(user) = identity {
+            let mut r = crate::records::freshen_one(pkarr, user).await;
+            // The user's record: its homeserver is the one to freshen (`loopback` says nothing
+            // of a user's record)
+            r.loopback = false;
+            if let Ok(packet) = pkarr.resolve(user, pubky::pkarr::ResolvePolicy::CacheOnly).await {
+                if let Some(hs) = crate::records::homeserver_in(&packet) {
+                    let hs = hs.to_string();
+                    if !keys.contains(&hs) {
+                        keys.push(hs);
+                    }
+                }
+            }
+            tracing::info!(key = %r.key, from = ?r.from, "pkarr: the signed-in identity's record");
+        }
+        if let Some(t) = target {
+            let t = t.to_string();
+            if !keys.contains(&t) {
+                keys.push(t);
+            }
+        }
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let out = crate::records::freshen(pkarr, &keys).await;
+        for r in &out {
+            if r.loopback && self.network == Network::Mainnet {
+                tracing::warn!(
+                    key = %r.key,
+                    "pkarr: the homeserver's newest record names only the client's own machine"
+                );
+            }
+        }
+        out
     }
 
     pub fn pubky(&self) -> &Pubky {

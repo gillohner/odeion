@@ -1946,6 +1946,10 @@ pub struct CreatePull {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginStarted {
+    /// The homeserver records fetched network-first before this sign-in (the public homeserver,
+    /// the identity signed in here before), with where each came from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<pm_pubky::records::Freshened>,
     /// `pubkyauth://…` to scan or paste into Pubky Ring.
     pub url: String,
     /// The same as a QR code (SVG markup), for screens.

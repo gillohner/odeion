@@ -3324,13 +3324,19 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The newest records first, so the grant exchange routes on them (the identity signed in
+    // here before, when there is one)
+    let identity = s
+        .sync_handle()
+        .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
+    let records = hs.fresh_for_sign_in(identity.as_ref(), None).await;
     let flow = hs
         .start_login("pubky-music-node")
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     *s.login.lock().await = Some(flow);
     let qr_svg = qr_svg(&url);
-    Ok(Json(LoginStarted { url, qr_svg }))
+    Ok(Json(LoginStarted { records, url, qr_svg }))
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
@@ -3513,6 +3519,12 @@ async fn controller_login_start(
     // The node's own session lacks folders and the owner asked: this log in asks for them too, so
     // the owner's approval renews it (no separate "sign in again")
     let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
+    // The newest records first, so the grant exchange routes on them (the owner's identity is
+    // the one that approves)
+    let identity = s
+        .sync_handle()
+        .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
+    hs.fresh_for_sign_in(identity.as_ref(), None).await;
     let flow = hs
         .start_login_with("pubky-music-controller", caps)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;

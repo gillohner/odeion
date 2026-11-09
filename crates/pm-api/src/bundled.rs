@@ -238,6 +238,7 @@ pub(crate) async fn owner_signup(State(s): State<Arc<NodeState>>) -> ApiResult<c
     *s.login.lock().await = Some(flow);
     tracing::info!(homeserver = %hs, "owner sign-up on the bundled homeserver started");
     Ok(Json(crate::types::LoginStarted {
+        records: Vec::new(),
         qr_svg: crate::qr_svg(&url),
         url,
     }))

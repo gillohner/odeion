@@ -556,6 +556,13 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
         pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet).map_err(|e| e.to_string())?;
     // Ends the wait after ring_wait::DEADLINE, or on the page's Cancel (ring_cancel).
     let stop = ring_wait::Stop::begin(ring_wait::DEADLINE);
+    // The newest homeserver records first (the identity this device connected with before, when
+    // known), so the grant exchange routes on them and not on the first record a node answered
+    let identity = state
+        .current()
+        .and_then(|c| pubky::PublicKey::try_from(c.owner.as_str()).ok());
+    let records = hs.fresh_for_sign_in(identity.as_ref(), None).await;
+    tracing::info!(?records, "Ring: homeserver records before the sign-in");
     let flow = hs
         .start_login_with("pubky-music-desktop", RING_CAPS)
         .map_err(|e| e.to_string())?;
@@ -572,9 +579,20 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     );
     // Only on screen and online: Android 15+ cuts a backgrounded app's network (see ring_wait).
     let page = app.clone();
-    let session = ring_wait::approval(RingFlow(flow), since_trip, &relay, 443, stop, move |s| {
-        let _ = page.emit("ring-state", s);
-    })
+    let session = ring_wait::approval(
+        RingFlow {
+            flow,
+            hs: hs.clone(),
+            identity,
+        },
+        since_trip,
+        &relay,
+        443,
+        stop,
+        move |s| {
+            let _ = page.emit("ring-state", s);
+        },
+    )
     .await?;
     let record = hs
         .read_node_record(&session)
@@ -670,21 +688,27 @@ async fn sign_in_at_node(app: &AppHandle, s: &Settings) -> Result<String, String
 }
 
 /// A Ring sign-in in progress, for [`ring_wait::approval`].
-struct RingFlow(pm_pubky::homeserver::LoginFlow);
+struct RingFlow {
+    flow: pm_pubky::homeserver::LoginFlow,
+    /// The client the flow runs on (its records are the ones the exchange routes on).
+    hs: pm_pubky::homeserver::NodeHomeserver,
+    /// The identity this device connected with before, when known.
+    identity: Option<pubky::PublicKey>,
+}
 
 impl ring_wait::Pending for RingFlow {
     type Done = pm_pubky::homeserver::PubkySession;
     /// An error that came before the poll waited for anything is the relay listener's own (no
     /// grant was sent): see [`ring_wait::at_once`].
     async fn poll(&self) -> Result<Option<Self::Done>, ring_wait::Failed> {
-        let (r, at_once) = ring_wait::at_once(self.0.poll()).await;
+        let (r, at_once) = ring_wait::at_once(self.flow.poll()).await;
         r.map_err(|e| {
             ring_wait::Failed::sort(
                 ring_wait::chain(&e),
                 at_once,
                 e.is_transient(),
                 e.is_server_error(),
-                &ring_wait::relay_host(self.0.url()),
+                &ring_wait::relay_host(self.flow.url()),
             )
         })
     }
@@ -692,7 +716,18 @@ impl ring_wait::Pending for RingFlow {
     fn resume(&self) -> Result<Self, String> {
         let hs = pm_pubky::homeserver::NodeHomeserver::new(pm_pubky::Network::Mainnet)
             .map_err(|e| e.to_string())?;
-        hs.resume_login(&self.0).map(RingFlow).map_err(|e| e.to_string())
+        let flow = hs.resume_login(&self.flow).map_err(|e| e.to_string())?;
+        Ok(RingFlow {
+            flow,
+            hs,
+            identity: self.identity.clone(),
+        })
+    }
+    /// Back on screen: the newest records again before the exchange (the ones held from before
+    /// the app went away, and pubky's transport choice on them, may be behind).
+    async fn returned(&self) {
+        let records = self.hs.fresh_for_sign_in(self.identity.as_ref(), None).await;
+        tracing::info!(?records, "Ring: homeserver records on return");
     }
 }
 

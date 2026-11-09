@@ -295,41 +295,34 @@ def main():
     # names homeserver.riginode.xyz: the client had decided on an older signed record of the
     # homeserver's (2026-10-29, `decided_on`, read from its cache right after the request), which names
     # localhost. pkarr's CacheFirst lookup on an empty cache keeps the first record a relay or DHT node
-    # answers with. A real Ring sign-in on such a client fails the same way; the fix belongs in the
-    # sign-in client (a network-first lookup of the homeserver before the grant exchange) or pkarr,
-    # not in this check.
-    # QUARANTINED (2026-11-09, owner item in mailbox/music-node/NEEDS-YOU.md): exactly that case (the
-    # client decided on an older record than the newest any lookup in this run found, and the request
-    # went to a host that older record names) is written to the job summary and as a warning instead
-    # of failing the run. Every other wrong route still fails: the raw key, a host no record it
-    # decided on names, or anything but homeserver.riginode.xyz when it decided on the newest.
+    # answers with. The sign-in now asks for the newest record network-first before any request routes
+    # on it (`freshened`, pm_pubky::records), on each of the three clients below, so every one of them
+    # must decide on the newest record any lookup in this run found and send to the host it names.
     stamps = [((st.get("lookup") or {}).get("packet") or {}).get("timestamp_us") for st in steps.values() if isinstance(st, dict)]
     stamps += [((c.get("lookup") or {}).get("packet") or {}).get("timestamp_us") for c in ret.values() if isinstance(c, dict)]
+    def freshened_stamps(step):
+        for r in ((step.get("freshened") or {}).get("records") or []):
+            yield r.get("timestamp_us")
+    stamps += [t for st in (default, ex, clean) for t in freshened_stamps(st)]
     newest = max((t for t in stamps if isinstance(t, int)), default=None)
     clean = ret.get("held_clean") or {}
-    for name, info, decided in (("default client", default.get("info") or {}, default.get("decided_on") or {}),
-                                ("grant exchange after Ring's approval came in while away", ex.get("info") or {},
-                                 ex.get("decided_on") or {}),
-                                ("unused held client back in the foreground", clean.get("info") or {},
-                                 clean.get("decided_on") or {})):
+    for name, step in (("default client", default),
+                       ("grant exchange after Ring's approval came in while away", ex),
+                       ("unused held client back in the foreground", clean)):
+        info = step.get("info") or {}
+        decided = step.get("decided_on") or {}
+        fresh = step.get("freshened") or {}
         host = info.get("host")
-        if not (found_icann and direct.get("reachable") is False and host != "homeserver.riginode.xyz"):
-            continue
-        wrong = (f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, but it sent "
-                 f"to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')}); decided on {decided}, "
-                 f"newest record found {newest}")
-        older = isinstance(decided.get("timestamp_us"), int) and newest is not None and decided["timestamp_us"] < newest
-        if older and host and host != PUBLIC_KEY and host in (decided.get("targets") or []):
-            note = wrong + (" - it decided on an older signed record of the homeserver's, which names that host "
-                            "(pkarr kept the first answer over the newest)")
-            log("QUARANTINED " + note)
-            print("::warning title=ring transport, quarantined case::"
-                  + note.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
-            if os.environ.get("GITHUB_STEP_SUMMARY"):
-                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-                    f.write(f"### Quarantined: ring transport, an older homeserver record\n\n{note}\n\n")
-        else:
-            failures.append(wrong)
+        if found_icann and direct.get("reachable") is False and host != "homeserver.riginode.xyz":
+            failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, but it sent "
+                            f"to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')}); decided on {decided}, "
+                            f"freshened {fresh}, newest record found {newest}")
+        if newest is not None and isinstance(decided.get("timestamp_us"), int) and decided["timestamp_us"] < newest:
+            failures.append(f"public homeserver, {name}: decided on an older record ({decided}) than the newest found "
+                            f"({newest}); freshened {fresh}")
+        records = (fresh.get("records") or [])
+        if records and records[0].get("from") != "network":
+            failures.append(f"public homeserver, {name}: the network-first lookup fell back ({records[0]})")
     if not found_icann:
         failures.append("public homeserver: no lookup (relays, DHT, default) found its ICANN endpoint "
                         f"(relays: {steps.get('resolve_relays', {}).get('lookup')}, "
