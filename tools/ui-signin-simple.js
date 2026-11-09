@@ -61,8 +61,6 @@ const lastfmSi = () => ({
   ],
   details: { lastfm: { configured: false, connected: false } },
 });
-const qobuzU = { enabled: true, signed_in: false, hires: false, quality: 'max', warning: 'Unofficial.' };
-const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed in', imports: [], places: ['streamrip: ~/.config/streamrip/config.toml (not found)'], ways: [way('own', 'Your own Qobuz app and account', 'A Qobuz app id and secret.', { recommended: true }), way('import', 'A sign-in from another app on this machine', 'Nothing found.', { action: 'import' }), way('paste', "Paste streamrip's or qobuz-dl's config", 'The contents of the config.', { action: 'paste' })], details: { unofficial: qobuzU } };
 
 (async () => {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
@@ -76,6 +74,7 @@ const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed
       const w = `${width}:`;
       const M = { spotify: spotifySi(), soloist: soloist(), librespot: librespot(), tidal: tidalSi(), youtube: youtubeSi(), ytOn: false, lastfm: lastfmSi() };
       const log = [];
+      const qobuzU = { enabled: true, signed_in: false, hires: false, quality: 'max', warning: 'Unofficial.' };
       await p.route(/\/v1\/sources\/spotify\/signin(\?way=[\w-]+)?$/, (r) => { const m = r.request().method(); const named = /\?way=([\w-]+)$/.exec(r.request().url()); // as spotify.rs: the way in use follows the chosen one where it is signed in
         const inUseWay = () => { const c = M.spotify.chosen || ''; return /^librespot/.test(c) && M.spotify.details.librespot.signed_in ? c : c === 'app' && M.spotify.details.status.signed_in ? 'app' : (M.spotify.in_use || {}).way; };
         log.push([m, 'spotify', m === 'PUT' ? r.request().postDataJSON().way : named ? named[1] : inUseWay()]); if (m === 'PUT') M.spotify.chosen = r.request().postDataJSON().way; if (m === 'DELETE') { M.spotify = spotifySi({ configured: true }); } return r.fulfill({ json: M.spotify }); });
@@ -84,11 +83,46 @@ const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed
       await p.route(/\/v1\/sources\/spotify\/librespot$/, (r) => r.fulfill({ json: M.librespot }));
       await p.route(/\/v1\/sources\/spotify\/login$/, (r) => { log.push(['LOGIN', 'spotify']); return r.fulfill({ json: { url: BASE + '/sources/spotify?spotify-login-test=1' } }); });
       await p.route(/\/v1\/sources\/spotify\/app$/, (r) => { const b = r.request().postDataJSON(); log.push(['APP', b.client_id]); M.spotify = spotifySi({ configured: !!b.client_id }); return r.fulfill({ json: M.spotify.details.status }); });
-      await p.route(/\/v1\/sources\/tidal\/signin$/, (r) => { if (r.request().method() === 'PUT') { M.tidal.chosen = r.request().postDataJSON().way; } return r.fulfill({ json: M.tidal }); });
+      // Mirror chosen-app precedence when re-enabling a retained full-track session.
+      const describeTidal = () => {
+        const si = M.tidal; const u = si.details.unofficial;
+        if (M.retainedTidal) si.in_use = si.chosen === 'app' || !u.enabled
+          ? { way: 'app', label: 'Your own TIDAL app', user: 'Official listener', gives: '30-second previews, your collection' }
+          : { ...M.retainedTidal };
+        return si;
+      };
+      await p.route(/\/v1\/sources\/tidal\/signin$/, (r) => {
+        if (r.request().method() === 'PUT') {
+          const picked = r.request().postDataJSON().way;
+          if (!M.tidal.ways.some((way) => way.id === picked && way.available)) return r.fulfill({ status: 400, json: { error: 'This way is unavailable' } });
+          M.tidal.chosen = picked;
+          if (M.retainedTidal) { log.push(['TIDAL-WAY', picked]); M.tidal.details.unofficial.enabled = picked !== 'app'; if (picked !== 'app') M.tidal.details.unofficial.health = null; }
+        }
+        if (r.request().method() === 'DELETE' && M.retainedTidal) {
+          const active = describeTidal().in_use.way; log.push(['TIDAL-OUT', active]);
+          if (active === 'app') M.tidal.details.status.signed_in = false;
+          else { M.tidal.details.unofficial.signed_in = false; M.tidal.details.unofficial.enabled = false; }
+        }
+        return r.fulfill({ json: describeTidal() });
+      });
+      await p.route(/\/v1\/sources\/tidal\/unofficial$/, (r) => {
+        if (r.request().method() === 'PUT') { log.push(['TIDAL-PUT', r.request().postDataJSON()]); Object.assign(M.tidal.details.unofficial, r.request().postDataJSON()); if (r.request().postDataJSON().enabled) M.tidal.details.unofficial.health = null; }
+        return r.fulfill({ json: M.tidal.details.unofficial });
+      });
       await p.route(/\/v1\/sources\/qobuz\/unofficial$/, (r) => r.fulfill({ json: qobuzU }));
-      await p.route(/\/v1\/sources\/qobuz\/signin(\/import)?$/, (r) => { if (r.request().method() === 'POST') { log.push(['QIMPORT', r.request().postDataJSON().text]); return r.fulfill({ status: 400, json: { error: 'Not usable: no app values and no sign-in in this' } }); } return r.fulfill({ json: qobuzSi }); });
+      await p.route(/\/v1\/sources\/qobuz\/unofficial\/login$/, (r) => {
+        const method = r.request().method();
+        if (method === 'DELETE') { Object.assign(qobuzU, { signed_in: false, user: undefined, plan: undefined }); return r.fulfill({ json: qobuzU }); }
+        const body = r.request().postDataJSON(); log.push(['QLOGIN', Object.keys(body).sort()]);
+        if (body.password === 'wrong') return r.fulfill({ status: 401, json: { error: 'Wrong Qobuz email or password' } });
+        Object.assign(qobuzU, { signed_in: true, user: 'Listener', plan: 'Studio', hires: true });
+        return r.fulfill({ json: qobuzU });
+      });
       await p.route(/\/v1\/sources\/youtube\/signin$/, (r) => r.fulfill({ json: M.youtube }));
-      await p.route(/\/v1\/sources\/youtube\/unofficial$/, (r) => r.fulfill({ json: { enabled: M.ytOn, can_download: true, warning: 'This plays YouTube on your speakers through yt-dlp, outside YouTube’s own player. More words.' } }));
+      await p.route(/\/v1\/sources\/youtube\/unofficial$/, (r) => {
+        if (r.request().method() === 'PUT') M.ytOn = r.request().postDataJSON().enabled;
+        return r.fulfill({ json: { enabled: M.ytOn, ytdlp: M.ytdlp, can_download: M.ytCanDownload !== false, warning: 'This plays YouTube on your speakers through yt-dlp, outside YouTube’s own player. More words.' } });
+      });
       await p.route(/\/v1\/sources\/youtube\/key$/, (r) => { const b = r.request().postDataJSON(); log.push(['YTKEY', b.key]); return r.fulfill({ status: 400, json: { error: 'YouTube refused this key' } }); });
       await p.route(/\/v1\/sources\/lastfm\/signin$/, (r) => r.fulfill({ json: M.lastfm }));
       await p.route(/\/v1\/sources\/jamendo\/status$/, (r) => r.fulfill({ json: { configured: false, signed_in: false, can_sign_in: false } }));
@@ -181,6 +215,7 @@ const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed
       const td = '#tidalsignin';
       await p.waitForSelector(`${td} [data-sg=signed-in]`, { timeout: 20000 });
       await common(td, 'TIDAL');
+      check(/Unofficial: can stop working/.test(await p.textContent(`${td} [data-sg=lead]`)) && await p.locator(`${td} [data-sg=lead] a[href*="guides/tidal-full-tracks.md"]`).count() === 1, `${w} TIDAL: a signed-in session keeps its short warning and guide`);
       check(await p.locator(`${td} [data-sg=signed-in]`).count() === 1 && /^Signed in$/.test((await p.textContent(`${td} [data-sg=signed-in] .set-name`)).trim()) && /Sign in with TIDAL · Full tracks, lossless/.test(await p.textContent(`${td} [data-sg=signed-in]`)) && /Full tracks, lossless/.test(await p.textContent(`${td} [data-sg=signed-in]`)), `${w} TIDAL: signed in is one row saying what it gives`);
       check(await p.locator(`${td} [data-sg=change]`).count() === 1, `${w} TIDAL: Change, as other ways work`);
       check(await p.locator(`${td} .set-name .pill`).count() === 0, `${w} TIDAL: no second status row while it works`);
@@ -197,6 +232,7 @@ const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed
       M.tidal.chosen = 'paste';
       await p.goto(BASE + '/sources/tidal'); await p.waitForSelector(`${td} #tbin`, { timeout: 20000 });
       await common(td, 'TIDAL (signed out)');
+      check(/Unofficial: can stop working/.test(await p.textContent(`${td} [data-sg=lead]`)) && await p.locator(`${td} [data-sg=lead] a[href*="guides/tidal-full-tracks.md"]`).count() === 1, `${w} TIDAL: the recommended browser action has its short warning and guide`);
       check(await p.locator(`${td} [data-sg=action] textarea`).count() === 0, `${w} TIDAL: a way picked before doesn't push the recommended one aside`);
       const others2 = await p.$$eval(`${td} [data-sg-way]`, (bs) => bs.map((b) => b.dataset.sgWay));
       check(JSON.stringify(others2) === '["device","app","paste"]', `${w} TIDAL: Sign in with TIDAL first; the code, the app and a token under Other ways (${others2.join(', ')})`);
@@ -211,28 +247,53 @@ const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed
       await p.goto(BASE + '/sources/tidal'); await p.waitForSelector(`${td} #tbin`, { timeout: 20000 });
       check((await p.$$eval(`${td} [data-sg-way]`, (bs) => bs.map((b) => b.dataset.sgWay))).includes('own-device'), `${w} TIDAL: your own device client shows once one is set here`);
 
-      // ---- Qobuz: the config that works; no app form, no api@qobuz.com ----
+      // Turn on a retained session while the official app is preferred, including when
+      // the original import file/client is gone. Keep the session and its real provenance.
+      for (const recovery of [{ button: '#tfon', action: 'Turn on' }, { button: '#tfretry', action: 'Try again' }]) {
+        for (const retained of [
+          { way: 'import', from: 'tidal-dl-ng', client: 'device' },
+          { way: 'browser', client: 'pkce' },
+          { way: 'device', client: 'device' },
+        ]) {
+          M.tidal = tidalSi({ browser: retained.way !== 'browser' });
+          M.tidal.chosen = 'app';
+          M.tidal.details.status = { configured: true, signed_in: true, playback_limit: '30-second previews' };
+          Object.assign(M.tidal.details.unofficial, { signed_in: true, enabled: false, user: 'Retained listener', session_client: retained.client, from: retained.from, health: recovery.action === 'Try again' ? { ok: false, detail: 'Temporary stream failure' } : null });
+          if (retained.way === 'device') M.tidal.ways.find((way) => way.id === 'device').available = false;
+          M.retainedTidal = { way: retained.way, label: 'Retained TIDAL session', user: 'Retained listener', gives: 'full tracks' };
+          await p.goto(BASE + '/sources/tidal'); await p.waitForSelector(recovery.button);
+          const before = log.length;
+          await p.click(recovery.button);
+          check(await until(async () => await p.locator('#tfq').count() === 1, 1500), `${w} TIDAL: ${recovery.action} restores full-track quality when ${retained.way} is unavailable`);
+          check(M.tidal.chosen !== 'app' && M.tidal.details.unofficial.signed_in && M.tidal.details.unofficial.user === 'Retained listener' && M.tidal.in_use.way === retained.way, `${w} TIDAL: ${recovery.action} preserves the ${retained.way} session and provenance while changing preference`);
+          check(log.slice(before).filter((item) => item[0].startsWith('TIDAL-')).length === 1 && log[before][0] === 'TIDAL-WAY', `${w} TIDAL: ${recovery.action} selects a working way without a second login or import`);
+          await p.click(`${td} [data-sg=out]`);
+          check(await until(async () => log.slice(before).some((item) => item[0] === 'TIDAL-OUT' && item[1] === retained.way), 1500) && M.tidal.details.status.signed_in && !M.tidal.details.unofficial.signed_in, `${w} TIDAL: after ${recovery.action}, Sign out removes the resumed ${retained.way} session and keeps the official account`);
+        }
+      }
+      delete M.retainedTidal; M.tidal = tidalSi();
+
+      // ---- Qobuz: automatic email/password-only setup, with or without an admin override ----
       await p.goto(BASE + '/sources/qobuz');
       const qb = '#signin-qobuz';
-      await p.waitForSelector(`${qb} .setup-step`, { timeout: 20000 });
+      await p.waitForSelector(`${qb} #qbin`, { timeout: 20000 });
       await common(qb, 'Qobuz');
-      check(await p.locator(`${qb} #qbapp, ${qb} a[href^="mailto:"], ${qb} #qbcheck`).count() === 0 && !/api@qobuz/.test(await p.textContent(qb)), `${w} Qobuz: no app ID form and no "ask api@qobuz.com"`);
-      check(await p.locator(`${qb} .setup-step[data-step="1"] #qbimpfile`).count() === 1 && await p.isVisible(`${qb} #qbimppaste textarea`), `${w} Qobuz: step 1 is streamrip’s or qobuz-dl’s config, open`);
-      check(await p.locator(`${qb} .setup-step[data-step="2"] input`).count() === 0, `${w} Qobuz: step 2 waits for it`);
-      await p.fill(`${qb} #qbimppaste textarea`, 'not a config'); await p.click(`${qb} #qbimppaste button`);
-      check(await until(async () => await p.isVisible('#qbimperr') && /Not usable/.test(await p.textContent('#qbimperr'))), `${w} Qobuz: a refused config is said in place`);
+      check(await p.locator(`${qb} #qbapp, ${qb} a[href^="mailto:"], ${qb} #qbcheck, ${qb} #qbimport, ${qb} textarea, ${qb} input[type=file], ${qb} .setup-step`).count() === 0 && !/api@qobuz|streamrip|qobuz-dl/.test(await p.textContent(qb)), `${w} Qobuz: no app ID, Check, config import or setup steps`);
+      check(await p.locator(`${qb} input[name=email]`).isEnabled() && await p.locator(`${qb} input[name=password]`).isEnabled(), `${w} Qobuz: the account form works without a saved app`);
+      await p.fill(`${qb} input[name=email]`, 'listener@example.test'); await p.fill(`${qb} input[name=password]`, 'wrong'); await p.click(`${qb} button[type=submit]`);
+      check(await until(async () => await p.isVisible('#qbinerr') && /Wrong Qobuz email or password/.test(await p.textContent('#qbinerr'))), `${w} Qobuz: a refused account is explained in place`);
       await shot('qobuz-new');
-      // An app from the node config: the account is next; a newer config can still replace the app
-      Object.assign(qobuzU, { app_from: 'config', app_id: '100000000' });
-      await p.goto(BASE + '/sources/qobuz'); await p.waitForSelector(`${qb} #qbin`, { timeout: 20000 });
-      check(await p.locator(`${qb} .setup-step[data-step="1"].done details #qbimppaste`).count() === 1 && await p.locator('#qbappforget').count() === 0, `${w} Qobuz: with an app from the config, "Use a newer config" (no Forget for the config's)`);
-      // A listener on a node without an app: the owner's reason, nothing to do
-      delete qobuzU.app_from; delete qobuzU.app_id;
-      // (as qobuz.rs answers a listener: the owner's ways not available)
-      const own = qobuzSi.ways[0]; own.available = false; own.reason = "The node's owner hasn't set up a Qobuz app yet."; qobuzSi.ways[1].available = false;
-      await p.goto(BASE + '/sources/qobuz'); await p.waitForSelector(`${qb} [data-sg=none]`, { timeout: 20000 });
-      check(await p.locator(`${qb} .setup-step, ${qb} textarea, ${qb} input`).count() === 0 && /owner hasn't set up/.test(await p.textContent(qb)), `${w} Qobuz: a listener without an app here gets the reason, no import`);
-      own.available = true; delete own.reason; qobuzSi.ways[1].available = true;
+      await p.fill(`${qb} input[name=password]`, 'synthetic-password'); await p.click(`${qb} button[type=submit]`);
+      check(await until(async () => await p.locator(`${qb} [data-sg=signed-in]`).count() === 1), `${w} Qobuz: successful sign-in has one row`);
+      check(await p.locator(`${qb} button:text("Sign out")`).count() === 1 && /Signed in as Listener/.test(await p.textContent(qb)) && /Studio/.test(await p.textContent(qb)) && await p.locator('#qbq').count() === 1, `${w} Qobuz: account, plan, quality and one Sign out`);
+      check(await p.locator(`${qb} #qbin, ${qb} [data-sg=change]`).count() === 0 && !/synthetic-password/.test(await p.content()), `${w} Qobuz: no password or alternate method remains after sign-in`);
+      check(log.filter((l) => l[0] === 'QLOGIN').every((l) => JSON.stringify(l[1]) === '["email","password"]'), `${w} Qobuz: only email and password go to sign-in`);
+      await shot('qobuz-signed-in');
+      await p.click('#qbout'); await p.waitForSelector('#qbin');
+      Object.assign(qobuzU, { app_from: 'config' });
+      await p.goto(BASE + '/sources/qobuz'); await p.waitForSelector('#qbin');
+      check(await p.locator(`${qb} #qbappforget, ${qb} textarea, ${qb} .setup-step`).count() === 0 && await p.locator(`${qb} input[name=email]`).isEnabled(), `${w} Qobuz: an admin override keeps the same account-only form`);
+      delete qobuzU.app_from;
 
       // ---- YouTube: the key; cookies only with On your speakers ----
       await p.goto(BASE + '/sources/youtube');
@@ -252,6 +313,20 @@ const qobuzSi = { source: 'qobuz', chosen: null, in_use: null, line: 'Not signed
       await p.goto(BASE + '/sources/youtube'); await p.waitForSelector(`${yt} [data-yt=key]`, { timeout: 20000 });
       check(await p.locator(`${yt} [data-sg=other]`).count() === 0 && !/Switch on On your speakers first/.test(await p.textContent(yt)), `${w} YouTube: an unusable way is not drawn, nor its reason`);
       M.youtube = youtubeSi(); M.ytOn = false;
+
+      // With no installed or downloadable yt-dlp, there is no working setup to advertise.
+      M.ytCanDownload = false;
+      await p.goto(BASE + '/sources/youtube'); await p.waitForSelector(`${yt} [data-yt=key]`); await sleep(200);
+      check(await p.locator('#yzon').count() === 0 && !/Install yt-dlp/.test(await p.textContent('#ytzones')), `${w} YouTube: no speakers setup when yt-dlp cannot be installed here`);
+      M.ytOn = true;
+      await p.goto(BASE + '/sources/youtube'); await p.waitForSelector('#yzon');
+      check(await p.locator(`${yt} [data-sg=other], #yzget`).count() === 0 && !/Install yt-dlp/.test(await p.textContent('#ytzones')), `${w} YouTube: an old enabled setting offers only Turn off, no cookies or dead install path`);
+      await p.click('#yzon');
+      check(await until(async () => await p.locator('#yzon').count() === 0) && !M.ytOn, `${w} YouTube: the unavailable speakers mode can be turned off`);
+      M.ytdlp = { path: '/fixture/yt-dlp', from: 'path', version: 'fixture' }; M.ytOn = true;
+      await p.goto(BASE + '/sources/youtube'); await p.waitForSelector(`${yt} [data-sg=other]`);
+      check(await p.locator(`${yt} [data-sg-way=cookies]`).count() === 1, `${w} YouTube: an installed yt-dlp keeps cookies even without a downloader`);
+      M.ytOn = false; delete M.ytdlp; delete M.ytCanDownload;
 
       // ---- Last.fm (Settings › Accounts): two steps; nothing found, so no import way ----
       await p.goto(BASE + '/settings/accounts');

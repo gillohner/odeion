@@ -279,8 +279,9 @@ in use or yours, and what the service limits.
   Soloist (from Spotify's own servers; Spotify forbids us to ship it), switch it on, and pick the device in a Spotify
   app. It plays on the machine's PipeWire or PulseAudio output, not on the node's zones. `[spotify] soloist` (or
   `PM_SOLOIST`) names an install of your own. In Docker it needs the host's audio socket, which the image doesn't set up;
-  on Linux the tab shows Soloist only where the node finds a PipeWire or PulseAudio output (`PULSE_SERVER`,
-  `PIPEWIRE_REMOTE`, the sockets in `$XDG_RUNTIME_DIR`, or `/run/pulse/native`).
+  on Linux the tab shows Soloist only when a local PipeWire or PulseAudio socket accepts a bounded connection (`PULSE_SERVER`,
+  `PIPEWIRE_REMOTE`, `$PIPEWIRE_RUNTIME_DIR`, the sockets in `$XDG_RUNTIME_DIR`, or `/run/pulse/native`). Remote
+  PulseAudio addresses are conservatively excluded from this setup check; a reachable socket is not a playback test.
 - **Spotify through librespot (unofficial):** install librespot yourself (`cargo install librespot` or your
   distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › Other ways to play
   (it shows there once installed). It can

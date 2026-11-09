@@ -315,6 +315,8 @@
   // resource in between is sent, and so is a repeat after it (A, B, A sends all three, one after another).
   // Reads are left alone.
   const inFlight = new Map();
+  // A listing of someone's shared playlists that may miss some (x-partial)
+  const SHARED_PARTIAL = "Some of their posts couldn't be read, so this list may miss some.";
   const api = (method, path, body, opts = {}) => {
     if (method === 'GET') return apiSend(method, path, body, opts);
     // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
@@ -347,6 +349,8 @@
         signal: opts.signal,
       });
     } catch (e) { if (opts.signal && opts.signal.aborted) throw e; linkHint(); throw new Error("Can't reach the node."); }
+    // opts.onHeaders: a caller that reads a header of the answer (x-partial on a listing that may miss some)
+    if (opts.onHeaders) opts.onHeaders(r.headers);
     // and again once the change has landed: a read that started meanwhile isn't kept either
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     const text = await r.text();
@@ -1114,10 +1118,11 @@
   const bringFiles = async () => {
     let plan; try { plan = await api('POST', '/pubky/files/mirror', { dry_run: true }); } catch (e) { return toast(e.message, 'error'); }
     const broken = plan.broken ? ` ${countOf(plan.broken, 'files')} on the homeserver are empty or a second copy; they are left out (remove them below).` : '';
-    if (!plan.total) return toast(`Nothing to bring: ${countOf(plan.skipped, 'files')} already on this node.${broken}`);
+    const unchecked = plan.unchecked ? ` ${countOf(plan.unchecked, 'files')} couldn't be checked (the homeserver didn't answer in time); they are left out this time, try again later.` : '';
+    if (!plan.total) return toast(`Nothing to bring: ${countOf(plan.skipped, 'files')} already on this node.${broken}${unchecked}`);
     const go = await choiceDialog({
       title: 'Bring files here',
-      text: `${countOf(plan.total, 'files')} (${fmtBytes(plan.bytes_total)}) to bring${plan.skipped ? `, ${plan.skipped} already here` : ''}. They go into this folder, then into your library.${broken}`,
+      text: `${countOf(plan.total, 'files')} (${fmtBytes(plan.bytes_total)}) to bring${plan.skipped ? `, ${plan.skipped} already here` : ''}. They go into this folder, then into your library.${broken}${unchecked}`,
       field: { label: 'Folder', value: plan.dest },
       choices: [{ label: 'Bring them', note: 'Runs on the node at your copy speed; you can leave this page.', value: true, primary: true }],
     });
@@ -1723,18 +1728,18 @@
   const secretInput = (name, label, placeholder, autocomplete = 'off', disabled = false) => `<span class="secretwrap"><input class="input" name="${name}" type="password" placeholder="${esc(placeholder)}" autocomplete="${autocomplete}" aria-label="${esc(label)}" spellcheck="false" required ${disabled ? 'disabled' : ''}><button class="icon-btn showpw" type="button" aria-label="Show ${esc(label)}" aria-pressed="false" title="Show">${icon('eye')}</button></span>`;
   // One name ("Show …") and the pressed state say it all; only the picture and the tooltip change
   const wireSecretToggles = (root) => $$('.showpw', root).forEach((b) => b.onclick = () => { const i = b.previousElementSibling; const show = i.type === 'password'; i.type = show ? 'text' : 'password'; b.setAttribute('aria-pressed', String(show)); b.title = show ? 'Hide' : 'Show'; b.innerHTML = icon(show ? 'eye-off' : 'eye'); });
-  // A pasted block (`app_id=… app_secret=…`, a config section, JSON) split into its two values
-  const splitAppPaste = (text, kind) => {
+  // A pasted block (`client_id=… client_secret=…`, a config section, JSON) split into its two values
+  const splitAppPaste = (text) => {
     const t = String(text || ''); if (!/[=:]/.test(t)) return null;
-    const idRe = kind === 'tidal' ? /client_?id\b["']?\s*[=:]\s*["']?([A-Za-z0-9._-]{4,})/i : /app_?id\b["']?\s*[=:]\s*["']?(\d{3,})/i;
-    const secRe = kind === 'tidal' ? /client_?secret\b["']?\s*[=:]\s*["']?([A-Za-z0-9+/=._-]{8,})/i : /(?:app_?secret|secrets?)\b["']?\s*[=:]\s*\[?\s*["']?([A-Za-z0-9]{8,})/i;
+    const idRe = /client_?id\b["']?\s*[=:]\s*["']?([A-Za-z0-9._-]{4,})/i;
+    const secRe = /client_?secret\b["']?\s*[=:]\s*["']?([A-Za-z0-9+/=._-]{8,})/i;
     const id = idRe.exec(t); const sec = secRe.exec(t);
     return id || sec ? { id: id ? id[1] : '', secret: sec ? sec[1] : '' } : null;
   };
   const wireAppPaste = (form, kind) => {
     if (!form) return; const idF = form.querySelector('input[name=id]'); const secF = form.querySelector('input[name=secret]');
     [idF, secF].forEach((f) => f && f.addEventListener('paste', (e) => {
-      const got = splitAppPaste(e.clipboardData && e.clipboardData.getData('text'), kind); if (!got) return;
+      const got = splitAppPaste(e.clipboardData && e.clipboardData.getData('text')); if (!got) return;
       e.preventDefault(); if (got.id) idF.value = got.id; if (got.secret) secF.value = got.secret;
       (got.id && got.secret ? form.querySelector('.btn[type=button]') || form.querySelector('button[type=submit]') : got.id ? secF : idF).focus();
       toast('Split into ID and secret');
@@ -1852,7 +1857,7 @@
   };
   const tidalSigninCfg = (el) => ({
     source: 'tidal', name: 'TIDAL', el,
-    lead: () => 'Full tracks, lossless and hi-res, and your TIDAL collection and playlists. Needs a paid TIDAL plan.',
+    lead: () => `Full tracks, lossless and hi-res, and your TIDAL collection and playlists. Needs a paid TIDAL plan. Unofficial: can stop working. ${guideLink('tidal-full-tracks.md')}`,
     keep: (w, si) => w.id !== 'own-device' || (si.details.unofficial || {}).client_from === 'settings',
     prefer: (si) => { const u = si.details.unofficial || {}; return u.pending ? si.chosen : u.browser_pending ? 'browser' : null; },
     actions: (pick, si, h) => {
@@ -1937,10 +1942,13 @@
     after: (si, h) => {
       const u = si.details.unofficial || {};
       const putU = async (body, ok) => { try { await api('PUT', '/sources/tidal/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } h.refill(); };
-      const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
-      // Turn on: the way the full-tracks session came from (picking it switches full tracks on)
+      // Select the retained full-tracks session as well as enabling it. If its original sign-in
+      // method is no longer available, paste selects the same session without replacing it.
       const sessionWay = u.from === 'pasted' ? 'paste' : u.from ? 'import' : u.session_client === 'pkce' ? 'browser' : 'device';
-      const ton = $('#tfon'); if (ton) ton.onclick = async () => { if (si.ways.some((w) => w.id === sessionWay && w.available)) { if (await h.choose(sessionWay)) { toast('TIDAL full tracks are on'); h.done(); } } else putU({ enabled: true }, 'TIDAL full tracks are on'); };
+      const resumeWay = [sessionWay, 'paste'].find((id) => si.ways.some((w) => w.id === id && w.available));
+      const resume = async (ok) => { if (resumeWay && await h.choose(resumeWay)) { toast(ok); h.done(); } };
+      const tr = $('#tfretry'); if (tr) tr.onclick = () => u.signed_in ? resume('Trying full tracks again') : putU({ enabled: true }, 'Trying full tracks again');
+      const ton = $('#tfon'); if (ton) ton.onclick = () => resume('TIDAL full tracks are on');
       const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
       const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
       // From a code sign-in to the browser one: the chooser opens on it and TIDAL's tab opens
@@ -1960,62 +1968,40 @@
   // The device code, big: Open link.tidal.com fills it in (TIDAL's complete verification address);
   // Copy for a device where that doesn't work; the time left under it (wired in `after`)
   const tidalCodeBox = (p) => `<div class="codebox" id="tfpending"><p class="small">Open link.tidal.com, sign in to TIDAL and enter this code. The button opens it with the code filled in. This page continues by itself once TIDAL says yes.</p><div class="toolbar"><code class="tf-code big" id="tfcode">${esc(p.user_code)}</code><button class="btn ghost sm" type="button" data-copylink="${esc(p.user_code)}" aria-label="Copy the code">${icon('copy')} Copy</button></div><div class="toolbar"><a class="btn primary" id="tfopen" href="${esc(webUrl(p.uri))}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a><span class="muted small" id="tfcount" role="status"></span></div></div>`;
-  // ---- Qobuz: one guided page (TASK-qobuz-tidal-setup-ux; owner, 2026-11-08) ----
-  // What works on this build: streamrip's or qobuz-dl's config (the app Qobuz needs, often the
-  // sign-in too), then the Qobuz account if the config had none. Qobuz hands no app to a person who
-  // asks, so there is no app form here (an app in the node config still works). Signed in, one row.
+  // ---- Qobuz: one account card; web-player app discovery happens on the node ----
   const qobuzSetup = async (el) => {
     if (!el || !el.isConnected) return;
-    let u, si;
-    try { [u, si] = await Promise.all([api('GET', '/sources/qobuz/unofficial'), api('GET', '/sources/qobuz/signin')]); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)}</div>`; return; }
+    let u;
+    try { u = await api('GET', '/sources/qobuz/unofficial'); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)}</div>`; return; }
     if (!el.isConnected) return;
-    const broke = !!(u.health && !u.health.ok); const hasApp = !!u.app_from;
-    // The app is the owner's to set up: a listener without one here sees why, nothing to do
-    const own = (si.ways || []).find((w) => w.id === 'own') || {}; const owner = ((si.ways || []).find((w) => w.id === 'import') || {}).available !== false;
-    // A config can be pasted by anyone it works for (a listener's, made with this node's app)
-    const canPaste = owner || ((si.ways || []).find((w) => w.id === 'paste') || {}).available === true;
+    const broke = !!(u.health && !u.health.ok);
     const quality = u.quality === 'mp3' ? 'MP3 320 kbps' : u.quality === 'cd' || !u.hires ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz';
-    const lead = `<p class="sg-lead" data-sg="lead">Full tracks in CD or hi-res quality. Needs a paid Qobuz plan${hasApp || !owner ? '' : ' and the config of streamrip or qobuz-dl, which holds the app Qobuz needs'}. Unofficial: can stop working. ${guideLink('qobuz.md')}</p>`;
-    let body;
-    const found = si.imports || []; const places = si.places || [];
-    const importBox = `<div class="stack" id="qbimport">${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn primary sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="Or paste it: [qobuz] … from streamrip’s config.toml, [DEFAULT] … from qobuz-dl’s config.ini" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Only read; never shown again.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div>`;
-    if (!u.signed_in && !hasApp && !owner && own.available === false) body = `<p class="muted small" data-sg="none">${esc(own.reason || 'The node’s owner hasn’t set up Qobuz yet.')}</p>`;
-    else if (u.signed_in) {
-      const st = broke ? { cls: 'bad', label: 'Problem' } : !u.enabled ? { cls: '', label: 'Off' } : { cls: 'ok', label: 'Working' };
-      body = `<div class="set-row sg-in" data-sg="signed-in"><div class="set-label"><div class="set-name">Signed in${u.user ? ' as ' + esc(u.user) : ''} <span class="pill ${st.cls}">${esc(st.label)}</span></div>${sgHelp(esc([u.plan, broke ? `Switched itself off: ${u.health.detail}` : !u.enabled ? 'Switched off here' : `Full tracks ${quality}`].filter(Boolean).join(' · ')))}</div><div class="set-ctl"><input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks"><button class="btn ghost sm" id="qbout">Sign out</button></div></div>`
-        + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>${canPaste ? `<details class="small set-row set-block"><summary>Use a newer config</summary>${importBox}</details>` : ''}` : '');
-    } else {
-      // 1. The config (the app, and often the sign-in): importBox above
-      const appInfo = `<p class="small">${u.app_from === 'config' ? 'Set up on this node.' : 'From the config you gave.'}${u.app_from !== 'config' && owner ? ' <button class="btn ghost sm" type="button" id="qbappforget">Forget</button>' : ''}</p>${canPaste ? `<details class="small"><summary>Use a newer config</summary>${importBox}</details>` : ''}`;
-      const step1 = stepCard(1, 'streamrip’s or qobuz-dl’s config', hasApp, hasApp ? 'Done.' : 'Its config.toml or config.ini, from this machine or another.', hasApp ? appInfo : importBox);
-      // 2. The account, when the config had no sign-in
-      const acct = `<form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required ${hasApp ? '' : 'disabled'}>${secretInput('password', 'Qobuz password', 'Password', 'current-password', !hasApp)}<button class="btn primary" type="submit" ${hasApp ? '' : 'disabled'}>Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
-      const step2 = stepCard(2, 'Your Qobuz account', false, hasApp ? 'Your email and password go to Qobuz once; only its session is kept.' : 'After step 1, if the config had no sign-in.', hasApp ? acct : '');
-      body = sgBlock('', '', `<div class="setup-steps">${step1}${step2}</div>`);
-    }
+    const st = !u.signed_in ? { cls: '', label: 'Needs sign-in', text: 'Sign in with your Qobuz account below.' }
+      : broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
+      : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here.' }
+      : { cls: 'ok', label: 'Working', text: `Full tracks ${quality}.` };
+    const lead = `<p class="sg-lead" data-sg="lead">Full tracks in CD or hi-res quality. Needs a paid Qobuz plan. Unofficial: can stop working. ${guideLink('qobuz.md')}</p>`;
+    const account = u.signed_in
+      ? `<div class="set-row sg-in" data-sg="signed-in"><div class="set-label"><div class="set-name">Signed in${u.user ? ' as ' + esc(u.user) : ''} <span class="pill ${st.cls}">${esc(st.label)}</span></div>${sgHelp(esc([u.plan, st.text].filter(Boolean).join(' · ')))}</div><div class="set-ctl"><input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks"><button class="btn ghost sm" id="qbout">Sign out</button></div></div>`
+        + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>` : '')
+      : sgRow(`Full tracks <span class="pill">Needs sign-in</span>`, 'Your email and password go to Qobuz once; the node keeps only the session.', '')
+        + `<form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required>${secretInput('password', 'Qobuz password', 'Password', 'current-password')}<button class="btn primary" type="submit">Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
     const playback = u.signed_in ? sgGroup('Playback', sgRow('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option><option value="mp3" ${u.quality === 'mp3' ? 'selected' : ''}>MP3 (320 kbps)</option></select>`)
       + (u.health && u.health.ok ? sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>') : '')) : '';
-    el.innerHTML = sgGroup('Sign in', lead + body) + playback;
-    // Wiring
+    el.innerHTML = sgGroup('Sign in with your Qobuz account', lead + account) + playback;
     const refill = () => qobuzSetup(el);
     const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } state.sources = null; refill(); };
     const on = $('#qbon'); if (on) on.onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Qobuz full tracks are on' : 'Qobuz full tracks are off');
     const retry = $('#qbretry'); if (retry) retry.onclick = () => put({ enabled: true }, 'Trying Qobuz again');
     const signOut = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (e) { toast(e.message, 'error'); } state.sources = null; render(); };
     const so = $('#qbout'); if (so) so.onclick = signOut;
-    const ag = $('#qbappforget'); if (ag) ag.onclick = () => put({ app_id: '' }, 'Qobuz app forgotten');
-    const qi = $('#qbin'); if (qi && hasApp) {
+    const qi = $('#qbin'); if (qi) {
       wireSecretToggles(qi);
       qi.onsubmit = async (e) => {
         e.preventDefault(); const f = new FormData(qi); const b = qi.querySelector('button[type=submit]'); const err = $('#qbinerr'); b.disabled = true; err.hidden = true;
         try { await api('POST', '/sources/qobuz/unofficial/login', { email: f.get('email'), password: f.get('password') }); toast('Signed in to Qobuz'); state.sources = null; render(); } catch (er) { err.textContent = er.message; err.hidden = false; b.disabled = false; }
       };
     }
-    // streamrip's / qobuz-dl's config: the app values and the sign-in at once
-    const imp = async (body, what) => { const err = $('#qbimperr'); err.hidden = true; try { const r = await api('POST', '/sources/qobuz/signin/import', body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); state.sources = null; render(); } catch (e) { err.textContent = e.message; err.hidden = false; } };
-    $$('[data-qbimp]', el).forEach((b) => b.onclick = async () => { b.disabled = true; await imp({ id: b.dataset.qbimp }, b.dataset.qbimp); b.disabled = false; });
-    const ff = $('#qbimpfile'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } imp({ text: await file.text() }, 'the file'); };
-    const pf = $('#qbimppaste'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); imp({ text: pf.querySelector('textarea').value }, 'the pasted config'); };
     const qq = $('#qbq'); if (qq) qq.onchange = () => put({ quality: qq.value }, 'Quality saved');
   };
   // Spotify (owner, 2026-11-08): one sign-in, your own free developer app then Connect, in two
@@ -6011,8 +5997,8 @@
           const pid = state.viewArg;
           let pg; try { pg = await api('GET', `/profiles/${pid}`); } catch (e) { main.innerHTML = backBtn('home', 'Home') + `<div class="notice">${esc(e.message)}</div>`; break; }
           // Their homeserver may not answer: said as such, not as "no shared playlists"
-          let sharedErr = null;
-          const shared = await api('GET', `/shared/${pid}/playlists`).catch((e) => { sharedErr = e.message; return []; });
+          let sharedErr = null; let sharedPartial = false;
+          const shared = await api('GET', `/shared/${pid}/playlists`, undefined, { onHeaders: (h) => { sharedPartial = h.get('x-partial') === '1'; } }).catch((e) => { sharedErr = e.message; return []; });
           if (state.view !== 'person' || state.viewArg !== pid) return;
           state.itemTitle = pg.name;
           const links = (pg.links || []).map((l) => `<a class="chip" href="${esc(webUrl(l.url))}" target="_blank" rel="noopener">${icon('external')} ${esc(l.title || l.url.replace(/^https?:\/\//, ''))}</a>`).join('');
@@ -6023,7 +6009,7 @@
               ${links ? `<div class="chips" style="margin-top:10px">${links}</div>` : ''}<p class="muted small">${countOf(pg.followers || 0, 'followers')} · ${pg.following_count || 0} following</p></div></div>`
             + `<section class="section"><div class="section-head"><h3>Tags they use</h3><span class="muted small">public on Pubky</span></div>${(pg.tags || []).length ? `<div class="chips">${pg.tags.map(([l, c]) => `<button class="chip" data-ptag="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : '<p class="muted small">No music tags from them on Pubky yet.</p>'}</section>`
             + (tagged.length ? `<section class="section"><div class="section-head"><h3>Recently tagged</h3></div><div class="list">${tagged.map((h, k) => `<div class="list-row clickable" data-ptagged="${k}">${h.image ? `<img class="thumb" src="${esc(imgSrc(h.image))}" alt="" loading="lazy" data-err="hide">` : svcBadge('pubky')}<div class="grow"><div class="name">${esc(h.title)}</div><div class="sub">${esc([{ song: 'Song', album: 'Album', artist: 'Artist' }[h.kind] || h.kind, h.subtitle].filter(Boolean).join(' · '))}</div></div></div>`).join('')}</div></section>` : '')
-            + `<section class="section"><div class="section-head"><h3>Playlists they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items || 0, 'songs')}</div></div></div>`).join('')}</div>` : sharedErr ? `<div class="notice warn small" role="status">${esc(sharedErr)}</div>` : '<p class="muted small">No shared playlists.</p>'}</section>`;
+            + `<section class="section"><div class="section-head"><h3>Playlists they share</h3><span class="muted small">${shared.length || ''}</span></div>${shared.length ? `<div class="list">${shared.map((p) => `<div class="list-row clickable" data-pshared="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${countOf(p.items || 0, 'songs')}</div></div></div>`).join('')}</div>` : sharedErr ? `<div class="notice warn small" role="status">${esc(sharedErr)}</div>` : '<p class="muted small">No shared playlists.</p>'}${sharedPartial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : ''}</section>`;
           $('[data-back]', main).onclick = () => goBack('home');
           $$('[data-ptag]', main).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.ptag }));
           $$('[data-ptagged]', main).forEach((r) => r.onclick = () => { const h = tagged[Number(r.dataset.ptagged)]; setView('item', { kind: h.kind === 'artist' ? 'artist' : h.kind === 'album' ? 'album' : 'song', id: h.id }); });
@@ -6036,10 +6022,10 @@
           loading();
           const a = state.viewArg || {}; const who = shortKey(a.user);
           if (!a.id) {
-            let list; try { list = await api('GET', `/shared/${a.user}/playlists`); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
+            let list; let partial = false; try { list = await api('GET', `/shared/${a.user}/playlists`, undefined, { onHeaders: (h) => { partial = h.get('x-partial') === '1'; } }); } catch (e) { main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="notice">${esc(e.message)}</div>`; break; }
             if (state.view !== 'shared') return;
             state.itemTitle = `Shared by ${who}`;
-            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(`Shared by ${who}`, list.length) + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} song${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared playlists on Pubky.'));
+            main.innerHTML = backBtn('playlists', 'Playlists') + pageHead(`Shared by ${who}`, list.length) + (partial ? `<p class="muted small" role="status">${esc(SHARED_PARTIAL)}</p>` : '') + (list.length ? `<div class="list">${list.map((p) => `<div class="list-row clickable" data-shpl="${esc(p.id)}"><div class="avatar" style="background:hsl(${hue(p.name)} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} song${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div></div>`).join('')}</div>` : emptyState('playlist', 'Nothing shared yet', 'This person has no shared playlists on Pubky.'));
             $$('[data-shpl]', main).forEach((r) => r.onclick = () => setView('shared', { user: a.user, id: r.dataset.shpl }));
             break;
           }
@@ -6249,7 +6235,7 @@
           signinChooser(tidalSigninCfg($('#tidalsignin')), tidalSi);
           qobuzSetup($('#signin-qobuz'));
           signinChooser(spotifySigninCfg($('#signin-spotify')));
-          if ($('#signin-youtube')) api('GET', '/sources/youtube/unofficial').catch(() => ({})).then((u) => signinChooser(youtubeSigninCfg($('#signin-youtube'), !!(u && u.enabled))));
+          if ($('#signin-youtube')) api('GET', '/sources/youtube/unofficial').catch(() => ({})).then((u) => signinChooser(youtubeSigninCfg($('#signin-youtube'), !!(u && u.enabled && (u.ytdlp || u.can_download)))));
           // YouTube › On your speakers (unofficial): yt-dlp as an external program (STEWARD-DUAL-MODE.md)
           const yz = $('#ytzones');
           const fillYtZones = async () => {
@@ -6257,8 +6243,10 @@
             let u; try { u = await api('GET', '/sources/youtube/unofficial'); } catch (e) { yz.innerHTML = ''; return; }
             if (!yz.isConnected) return;
             const y = u.ytdlp;
-            const rows = [row('On your speakers (unofficial)', esc(splitNote(u.warning)[0]), `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
-            if (u.enabled || y) {
+            const usable = !!(y || u.can_download);
+            if (!usable && !u.enabled) { yz.innerHTML = ''; return; }
+            const rows = [row('On your speakers (unofficial)', usable ? esc(splitNote(u.warning)[0]) : 'Unavailable on this machine. You can turn it off.', `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
+            if (usable && (u.enabled || y)) {
               rows.push(y
                 ? row('yt-dlp', `${esc(y.version ? 'Version ' + y.version : 'Found')}: ${y.from === 'downloaded' ? 'downloaded by this node' : y.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(y.path)}</code>).`, y.from === 'downloaded' ? '<button class="btn ghost sm" id="yzupdate">Update</button><button class="btn ghost sm" id="yzremove">Remove</button>' : '')
                 : row('yt-dlp', u.can_download ? 'Needed to play YouTube on your speakers. The node downloads it from yt-dlp’s official GitHub releases and checks it against the release’s checksums.' : 'Needed to play YouTube on your speakers. Install yt-dlp on this machine, then reload this page.', u.can_download ? '<button class="btn primary sm" id="yzget">Download yt-dlp</button>' : ''));
@@ -7253,7 +7241,8 @@
             const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
             const row = (label, h, ctl) => `<div class="set-row"><div class="set-label"><div class="set-name">${label}</div>${help(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
-            const zonesText = me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
+            // null: every zone; []: none right now (the node can't read its list); else the zones named
+            const zonesText = Array.isArray(me.zones) && !me.zones.length ? 'none of its zones right now (ask whoever runs it)' : me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
             const srcNote = !ms ? '' : ms.plays_with === 'node' ? 'TIDAL, Qobuz and Spotify play through this node’s sign-ins.' : 'TIDAL, Qobuz and Spotify play with your own sign-ins.';
             const srcCtl = ms && ms.may_choose ? `<div class="chips" role="radiogroup" aria-label="Whose sign-ins">${[['node', 'This node’s'], ['own', 'My own']].map(([v, l]) => `<button class="chip scope ${ms.use === v ? 'on' : ''}" role="radio" aria-checked="${ms.use === v}" data-mysrc="${v}">${l}</button>`).join('')}</div>` : '';
             main.innerHTML = pageHead('Settings', null)
@@ -7588,7 +7577,8 @@
           const loadPeople = async (keep = false) => {
             const box = $('#peoplebox'); if (!box) return;
             let r; try { r = await api('GET', '/people'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
-            const zl = await api('GET', '/people/zones').catch(() => ({ zones: [] }));
+            // A list the node can't read keeps listeners off every zone: said here, not shown as "every zone"
+            const zl = await api('GET', '/people/zones').catch((e) => ({ zones: [], error: e.message }));
             const parties = await api('GET', '/party').catch(() => []);
             if (!box.isConnected) return;
             const hs = r.homeserver || {};
@@ -7620,7 +7610,7 @@
               + sec('people', 'People', r.people.length ? r.people.map(person).join('') : row('Nobody yet', 'People you invite show here once they have signed up.', ''), r.people.length > 0)
               + sec('party', 'Party', (parties.map((pt) => row(esc(pt.name), `${pt.zone_name ? `On ${esc(pt.zone_name)} · ` : ''}until ${new Date(pt.expires_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ${countOf(pt.guests.length, 'guests')} · ${countOf(pt.added, 'songs')} added · ${pt.adds_per_hour} per guest per hour, ${pt.waiting_per_guest} waiting at once<details class="small"><summary>Show the guest link</summary><div class="notice qrbox" style="margin-top:10px">${pt.qr_svg ? `<div class="qr">${pt.qr_svg}</div>` : ''}<div><p>Guests scan this or open the link: they give a name and add songs from the library to this zone. No account needed.</p><p><code>${esc(pt.url)}</code></p><button class="btn sm ghost" data-copylink="${esc(pt.url)}">Copy link</button></div></div></details>`, `<button class="btn sm ghost" data-party-end="${esc(pt.id)}">End party</button>`)).join(''))
                 + (zones.length ? block(parties.length ? 'Start another party' : 'Start a party', 'Anyone with the link adds songs from the library to one zone, without an account. Their songs play after the current one, in the order they came; the limits are checked by the node.', `<div class="toolbar"><select class="input" id="ptzone" aria-label="Party zone">${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('')}</select><input class="input" id="ptname" placeholder="Name (optional)" aria-label="Party name"><select class="input" id="pthours" aria-label="How long the link works">${[[3, '3 hours'], [6, '6 hours'], [12, '12 hours'], [24, 'A day'], [72, '3 days']].map(([h, l]) => `<option value="${h}" ${h === 6 ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div class="toolbar" style="margin-top:8px"><label class="small" for="ptadds">Songs per guest per hour</label><input class="input" id="ptadds" type="number" min="1" max="100" value="5" style="width:6em"><label class="small" for="ptwait">Waiting at once</label><input class="input" id="ptwait" type="number" min="1" max="50" value="3" style="width:6em"><button class="btn primary" id="ptgo">Start party</button></div>`) : row('Start a party', 'Needs a zone to play on.', '')), false)
-              + sec('zones', 'Zones listeners may play on', block('', 'People with music access can play on these. None checked: every zone.', (zones.length ? `<div class="chips" id="pzones">${zones.map((z) => `<label class="chip"><input type="checkbox" value="${esc(z.id)}" style="margin:0 6px 0 0" ${open.has(z.id) ? 'checked' : ''}> ${esc(z.name)}</label>`).join('')}</div><div class="actions" style="margin-top:10px"><button class="btn" id="pzsave">Save zones</button></div>` : '<p class="muted small">No zones yet.</p>')), false);
+              + sec('zones', 'Zones listeners may play on', block('', zl.error ? `<span class="joberr">${esc(zl.error)}</span> Until the list is set again, listeners may play on no zone: tick the zones and save.` : 'People with music access can play on these. None checked: every zone.', (zones.length ? `<div class="chips" id="pzones">${zones.map((z) => `<label class="chip"><input type="checkbox" value="${esc(z.id)}" style="margin:0 6px 0 0" ${open.has(z.id) ? 'checked' : ''}> ${esc(z.name)}</label>`).join('')}</div><div class="actions" style="margin-top:10px"><button class="btn" id="pzsave">Save zones</button></div>` : '<p class="muted small">No zones yet.</p>')), false);
             // The kind of invite: radio cards, the chosen one's details shown (S1)
             const kindOf = () => ($('input[name="pinvkind"]:checked', box) || {}).value || kinds[0];
             const keyIn = $('#pinvkey', box); const keyErr = $('#pinvkeyerr', box);

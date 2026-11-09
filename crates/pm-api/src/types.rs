@@ -2359,6 +2359,10 @@ pub struct UploadProgress {
     /// doubled name (Settings offers to remove them).
     #[serde(default)]
     pub broken: usize,
+    /// Bring: the homeserver files left out this time because their size couldn't be read (not
+    /// broken: the next bring looks again).
+    #[serde(default)]
+    pub unchecked: usize,
     #[serde(default)]
     pub cancelled: bool,
     pub total: usize,
