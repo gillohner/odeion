@@ -744,6 +744,17 @@ async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
     .await;
     let copy = format!("person.{ANN}.bookmarks");
     assert!(s.library.lock().unwrap().get_setting(&copy).unwrap().is_some());
+    // Her preferences, kept on the node: they go too
+    let prefs = format!("me.prefs.{ANN}");
+    s.library.lock().unwrap().set_setting(&prefs, "{}").unwrap();
+    // People › Remove takes her off the roster first
+    let roster = serde_json::json!({"people": [
+        {"key": BO, "access": "music", "music_enabled": true, "added_at": 0}]});
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &roster.to_string())
+        .unwrap();
     // The library refuses the token list from here on
     let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
     db.execute_batch(
@@ -768,6 +779,17 @@ async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert!(!fake.connected.lock().unwrap().contains(ANN), "and her grant");
+    assert!(
+        s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none(),
+        "and the rest of what the node keeps for her, after the failed write too"
+    );
+    // Her sessions are still listed (the write failed): removing her again signs them out
+    assert!(pm_api::accounts::sessions_of(&s, ANN) > 0);
+    db.execute_batch("DROP TRIGGER no_tokens_u; DROP TRIGGER no_tokens_i;")
+        .unwrap();
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(pm_api::accounts::sessions_of(&s, ANN), 0, "her sessions are gone");
 }
 
 #[cfg(unix)]
@@ -783,6 +805,8 @@ async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
     std::fs::create_dir_all(&grants).unwrap();
     let file = grants.join(format!("{ANN}.session"));
     std::fs::write(&file, "fixture-secret").unwrap();
+    let prefs = format!("me.prefs.{ANN}");
+    s.library.lock().unwrap().set_setting(&prefs, "{}").unwrap();
     std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o500)).unwrap();
     let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
     let stuck = file.exists();
@@ -804,6 +828,10 @@ async fn a_removal_that_cant_delete_her_grant_says_so_and_can_be_done_again() {
             "never a success with her grant left: {v}"
         );
         assert!(!listed(&s), "she is off the roster all the same");
+        assert!(
+            s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none(),
+            "the rest of what the node keeps for her went before the error was answered"
+        );
         // Removing her again finishes it
         let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
         assert_eq!(st, StatusCode::OK, "{v}");

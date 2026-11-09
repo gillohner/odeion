@@ -1016,9 +1016,10 @@ async fn answer_of(key: &str, id: &str, ttl: Duration) -> Result<serde_json::Val
     }
 }
 
-/// People › Remove: the grant of `key` goes (in the background: the store is async).
-/// An error when their grant is still on the node (it couldn't be deleted): the removal says
-/// so, and removing them again finishes it.
+/// People › Remove: the grant of `key` goes. Its file is deleted here, so an error says it is
+/// still on the node (it couldn't be deleted): the removal answers that error after the rest of
+/// its cleanup, and removing them again finishes it ([`leftover`]). Approvals on their way end,
+/// and the store forgets them, in the background under their lock.
 pub(crate) fn forget(s: &NodeState, key: &str) -> Result<(), String> {
     let b = backend(s);
     let key = key.trim_start_matches("pubky").to_string();
@@ -1047,11 +1048,12 @@ pub(crate) fn forget(s: &NodeState, key: &str) -> Result<(), String> {
     gone
 }
 
-/// Whether anything of `key`'s is still on the node: their grant, or their copies (a removal
-/// that failed part way). Removing them again finishes it.
+/// Whether anything of `key`'s is still on the node: their grant, their sessions, or their copies
+/// (a removal that failed part way). Removing them again finishes it.
 pub(crate) fn leftover(s: &NodeState, key: &str) -> bool {
     let key = key.trim_start_matches("pubky");
     grant_file(&grants_dir(s), key).is_some_and(|f| f.exists())
+        || crate::accounts::sessions_of(s, key) > 0
         || s.library
             .lock()
             .expect("library poisoned")
