@@ -167,9 +167,20 @@ impl Offline {
         Ok(())
     }
 
-    /// The copy of a library song this device keeps from the node with this id, if any.
-    pub fn track_file(&self, node_id: &str, track_id: i64) -> Option<PathBuf> {
-        self.store(node_id)?.track_file(track_id).filter(|p| p.is_file())
+    /// The copy of a library song this device keeps from the node with this id, if any (with
+    /// `original_only`, only an original).
+    pub fn track_file(&self, node_id: &str, track_id: i64, original_only: bool) -> Option<PathBuf> {
+        let store = self.store(node_id)?;
+        if original_only
+            && store
+                .index()
+                .tracks
+                .get(&track_id)
+                .is_none_or(|t| t.format != "original")
+        {
+            return None;
+        }
+        store.track_file(track_id).filter(|p| p.is_file())
     }
 
     /// Whether a song stays on the device when it alone is let go (see

@@ -88,7 +88,8 @@ changes on the node (replaced, retagged), the phone gets the new one.
 A downloaded song plays from the phone's copy, also while the app reaches your node (no stream,
 no mobile data); Now playing › Details › Output then says "From this phone". With no network (or the
 node off), the app opens what the phone keeps by itself and plays it the same way, through "This
-phone" with its USB DAC path; it goes back to your node when it answers again.
+phone" with its USB DAC path; it goes back to your node when it answers again and nothing is
+playing.
 
 ## Updates
 

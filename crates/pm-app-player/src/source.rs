@@ -153,6 +153,10 @@ impl UrlSources {
 
     fn mark(&self, url: &str, here: bool) {
         let mut m = self.from_device.lock().unwrap_or_else(|e| e.into_inner());
+        // (only the songs of now matter: what plays and what comes next)
+        if m.len() > 8 {
+            m.clear();
+        }
         if here {
             m.insert(url.to_string());
         } else {

@@ -84,6 +84,16 @@ const now = (page) => page.evaluate(() => window.pmPlayer.now());
     await on.page.screenshot({ path: path.join(SHOTS, `from-this-phone-${w}.png`) });
     check(!on.state.errors.length, `${at}: online: no page errors (${on.state.errors.join(' | ')})`);
     await on.context.close();
+    // A streamed song: no "From this phone"
+    const st2 = await fx.create(browser, w, { tracks });
+    await st2.context.addInitScript(FAKE_APP, { len: 60000, fromDevice: false });
+    await fx.go(st2.page, '/'); await st2.page.waitForFunction(() => !!window.pmPlayer); await sleep(500);
+    await st2.page.evaluate(() => window.pmPlayer.play([{ uri: 'track:1', track_id: 1, title: 'Song 1' }])); await sleep(600);
+    await st2.page.click('#npart'); await st2.page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
+    if (await st2.page.evaluate(() => { const b = !document.querySelector('#nowplaying .np-output') && document.querySelector('#nowplaying [data-npsheet="details"]'); if (b) b.click(); return !!b; })) await sleep(400);
+    const o2 = await st2.page.evaluate(() => { const d = document.querySelector('#nowplaying .np-output'); return d ? d.textContent : null; });
+    check(!!o2 && !/From this phone/.test(o2), `${at}: a streamed song's Output line doesn't say "From this phone" ("${o2}")`);
+    await st2.context.close();
   }
   await browser.close();
   if (failed) { console.error(`${failed} check(s) failed`); process.exit(1); }

@@ -94,24 +94,35 @@ pub fn play_downloads(app: &AppHandle) {
     let Some(p) = PLAYER.get() else { return };
     let app = app.clone();
     p.sources().set_local(Some(Box::new(move |url: &str| {
-        let u = url::Url::parse(url).ok()?;
-        let id: i64 = u
-            .path()
-            .strip_prefix("/v1/library/tracks/")?
-            .strip_suffix("/file")?
-            .parse()
-            .ok()?;
-        if !ORIGINS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .has(&u.origin().ascii_serialization())
-        {
-            return None;
-        }
+        let (id, offline) = kept_track_id(url, &ORIGINS.lock().unwrap_or_else(|e| e.into_inner()))?;
         let state = app.state::<crate::AppState>();
         let node_id = state.current()?.node_id;
-        state.offline.as_ref()?.track_file(&node_id, id)
+        // While the node answers, only an original stands in for its stream (a smaller copy is
+        // what plays offline)
+        state.offline.as_ref()?.track_file(&node_id, id, !offline)
     })));
+}
+
+/// The library song a URL is the node's file of (`/v1/library/tracks/{id}/file` on the node's
+/// origin in use, or the offline page's), and whether it is the offline page's.
+fn kept_track_id(url: &str, origins: &Origins) -> Option<(i64, bool)> {
+    let u = url::Url::parse(url).ok()?;
+    let id: i64 = u
+        .path()
+        .strip_prefix("/v1/library/tracks/")?
+        .strip_suffix("/file")?
+        .parse()
+        .ok()?;
+    let origin = u.origin().ascii_serialization();
+    if !origins.has(&origin) {
+        return None;
+    }
+    Some((id, origins.offline.as_deref() == Some(origin.as_str())))
+}
+
+/// Whether the app's own player plays now (the way back from offline waits for it).
+pub fn playing() -> bool {
+    PLAYING.load(Ordering::SeqCst)
 }
 
 /// The page hears the player (and the player service whether it plays).
@@ -120,6 +131,8 @@ fn push(app: &AppHandle, st: &Status) {
     if PLAYING.swap(playing, Ordering::SeqCst) != playing {
         #[cfg(target_os = "android")]
         crate::android::app_playing(app, playing);
+        tracing::info!("{}", log_line(st));
+    } else if playing && st.from_device != LOGGED_HERE.swap(st.from_device, Ordering::SeqCst) {
         tracing::info!("{}", log_line(st));
     } else if playing && LOGGED.swap(st.position_ms / 5_000, Ordering::SeqCst) != st.position_ms / 5_000 {
         // Where it is every 5 s (tools/android-endpoint.py measures the pace from these)
@@ -130,6 +143,8 @@ fn push(app: &AppHandle, st: &Status) {
     }
 }
 
+/// Whether the last song logged played from the device's copy.
+static LOGGED_HERE: AtomicBool = AtomicBool::new(false);
 /// Which 5 s stretch the position was last logged in.
 static LOGGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
@@ -161,8 +176,9 @@ fn log_line(st: &Status) -> String {
             if d.confirmed { ", confirmed" } else { "" }
         )
     });
+    let here = if st.from_device { ", from this device" } else { "" };
     format!(
-        "the app's own player: {} {what}{}{}{}",
+        "the app's own player: {} {what}{here}{}{}{}",
         serde_json::to_value(st.transport)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
@@ -430,6 +446,40 @@ mod tests {
         );
         assert!(l.contains("path bit_perfect"), "{l}");
         assert!(!l.contains("secret-token"), "{l}");
+        let here = log_line(&Status {
+            from_device: true,
+            ..st.clone()
+        });
+        assert!(
+            here.contains("/v1/library/tracks/3/file, from this device, "),
+            "{here}"
+        );
+    }
+
+    #[test]
+    fn only_the_nodes_file_urls_map_to_a_copy() {
+        let o = Origins {
+            node: Some("http://192.168.1.5:7788".into()),
+            offline: Some("http://127.0.0.1:41234".into()),
+        };
+        assert_eq!(
+            kept_track_id("http://192.168.1.5:7788/v1/library/tracks/3/file?token=x", &o),
+            Some((3, false))
+        );
+        assert_eq!(
+            kept_track_id("http://127.0.0.1:41234/v1/library/tracks/3/file", &o),
+            Some((3, true))
+        );
+        for no in [
+            "http://192.168.1.9:7788/v1/library/tracks/3/file",
+            "http://192.168.1.5:7788/v1/library/tracks/3/download",
+            "http://192.168.1.5:7788/v1/library/tracks/x/file",
+            "http://192.168.1.5:7788/x/v1/library/tracks/3/file",
+            "http://192.168.1.5:7788/v1/sources/tidal/stream/3",
+            "not a url",
+        ] {
+            assert_eq!(kept_track_id(no, &o), None, "{no}");
+        }
     }
 
     /// Every page command is in the app's manifest (build.rs), or its capability names nothing.

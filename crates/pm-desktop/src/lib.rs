@@ -294,6 +294,12 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                // Not in the middle of a song: back to the node once nothing plays (the page would
+                // be replaced, and the song with it)
+                #[cfg(any(desktop, target_os = "android"))]
+                if native::playing() {
+                    continue;
+                }
                 let state = app.state::<AppState>();
                 let Some(s) = state.current() else { break };
                 match reach(&app, &state, s).await {

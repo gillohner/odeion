@@ -186,7 +186,8 @@ Edge or CI APK of the top PR of the stack. Start with the KA17's volume low (0-5
    size and the download under way; when it is done, its songs and its tile carry the download mark.
 4. Airplane mode on, close the app (swipe it away) and open it again: it says your node can't be
    reached and opens what the phone keeps; the album plays, seek and next work, and it goes on
-   with the screen off. Airplane mode off: the app goes back to the node by itself.
+   with the screen off. Airplane mode off: once the music is paused or over, the app goes back to
+   the node by itself (never in the middle of a song).
 5. A TIDAL song (search for one, or a playlist with one): its ⋯ menu has no Download.
 6. Your library > Downloads > Remove on the album: it goes from the list, the marks go, and the
    album still plays from the node.

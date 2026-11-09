@@ -16,9 +16,11 @@ on the same output stays silent; the node then playing that zone pauses the app'
 stream per output).
 
 Last, offline: the song is downloaded in the app (Library › Songs › its ⋯ menu › Download), then
-airplane mode is on (`cmd connectivity airplane-mode enable`) and the node stopped; the app,
-started again, opens what it keeps and the song plays from the phone's copy through the app's
-own player, in real time.
+the song plays from the phone's copy while connected ("from this device"); then airplane mode is on
+(`cmd connectivity airplane-mode enable`) and the node stopped; the app, started again, opens what
+it keeps and the song plays from the phone's copy through the app's own player, in real time, also
+in the background with the screen off. Seek and next aren't driven here (one song; the fixture
+pages check them).
 
 The emulator is behind its own NAT, so the node cannot reach the address the
 app registers itself under (the emulator's own, 10.0.2.15). This script makes
@@ -292,28 +294,49 @@ def offline_playback(node, track):
     until("the song downloaded to the phone", lambda: synced.search(logcat()[mark:]), timeout=120, every=3)
     log("the song is on the phone")
     shot("9-downloaded")
+    # Connected, it plays from the phone's copy (no stream: mobile data saved)
+    here = len(logcat())
+    tap(lambda n: 'content-desc="Play from here"' in n or 'text="Play from here"' in n, "the song's play button")
+    def from_copy():
+        return next((m for m in NATIVE.finditer(logcat()[here:]) if m.group(1) == "playing"), None)
+    m = until("the downloaded song playing while connected", from_copy, timeout=60)
+    assert "from this device" in m.group(0), f"connected, it streams instead of the copy: {m.group(0)}"
+    log(f"connected: {m.group(0).strip()}")
     # No network, and no node
     adb("shell", "cmd", "connectivity", "airplane-mode", "enable", check=False)
-    node.terminate()
-    node.wait(timeout=30)
-    log("airplane mode on, the node stopped")
-    adb("shell", "am", "force-stop", PKG)
-    fresh_logcat()
-    adb("logcat", "-c")
-    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
-    # The connect page finds the node out of reach and opens what the phone keeps
-    tap(lambda n: 'text="Shuffle"' in n or 'content-desc="Shuffle"' in n, "Downloads' Shuffle")
-    def playing():
-        return next((m for m in NATIVE.finditer(logcat()) if m.group(1) == "playing"), None)
-    m = until("the app's own player playing the kept song", playing, timeout=60)
-    log(f"offline: {m.group(0).strip()}")
-    assert m.group(2).startswith("/v1/library/tracks/"), f"the kept song: {m.group(2)}"
-    rate, n = until("its pace", lambda: native_pace(0)[0] and native_pace(0), timeout=60, every=5)
-    assert 0.8 < rate < 1.2, f"offline: {rate:.2f}x"
-    log(f"offline: the kept song plays at {rate:.2f}x real time ({n} positions)")
-    shot("10-offline")
-    adb("shell", "cmd", "connectivity", "airplane-mode", "disable", check=False)
-
+    try:
+        on = adb("shell", "settings", "get", "global", "airplane_mode_on", check=False).strip()
+        assert on == "1", f"airplane mode did not turn on ({on!r})"
+        node.terminate()
+        node.wait(timeout=30)
+        log("airplane mode on, the node stopped")
+        adb("shell", "am", "force-stop", PKG)
+        fresh_logcat()
+        adb("logcat", "-c")
+        adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+        # The connect page finds the node out of reach and opens what the phone keeps
+        tap(lambda n: 'text="Shuffle"' in n or 'content-desc="Shuffle"' in n, "Downloads' Shuffle")
+        def playing():
+            return next((m for m in NATIVE.finditer(logcat()) if m.group(1) == "playing"), None)
+        m = until("the app's own player playing the kept song", playing, timeout=60)
+        log(f"offline: {m.group(0).strip()}")
+        assert m.group(2).startswith("/v1/library/tracks/"), f"the kept song: {m.group(2)}"
+        assert "from this device" in m.group(0), f"offline, not from the phone's copy: {m.group(0)}"
+        rate, n = until("its pace", lambda: native_pace(0)[0] and native_pace(0), timeout=60, every=5)
+        assert 0.8 < rate < 1.2, f"offline: {rate:.2f}x"
+        log(f"offline: the kept song plays at {rate:.2f}x real time ({n} positions)")
+        shot("10-offline")
+        # In the background with the screen off, offline too
+        adb("shell", "input", "keyevent", "3")
+        adb("shell", "input", "keyevent", "KEYCODE_SLEEP", check=False)
+        away = len(logcat())
+        time.sleep(25)
+        rate, n = native_pace(away)
+        adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+        assert rate is not None and 0.8 < rate < 1.2, f"offline, screen off: {rate} over {n} positions"
+        log(f"offline, screen off: {rate:.2f}x real time")
+    finally:
+        adb("shell", "cmd", "connectivity", "airplane-mode", "disable", check=False)
 
 # The address the app registers: the emulator's own, on the player's usual port
 GUEST = "10.0.2.15:7790"
