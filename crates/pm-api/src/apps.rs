@@ -269,10 +269,9 @@ pub fn apply_own(s: &NodeState) {
 pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
     // A value stored before origins were recorded has none: it was entered in Settings
     let origin_of = |f: String| if f.is_empty() { "settings".to_string() } else { f };
-    let (qobuz, soundcloud, lastfm, tidal_full, acoustid_own, own) = {
+    let (soundcloud, lastfm, tidal_full, acoustid_own, own) = {
         let lib = s.library.lock().expect("library poisoned");
         (
-            crate::qobuz::app_of(&lib).map(|a| origin_of(a.from)),
             crate::soundcloud::client_of(&lib).map(|c| origin_of(c.from)),
             crate::lastfm::app_of(&lib).map(|a| origin_of(a.from)),
             crate::tidal_unofficial::client_of(&lib).map(|c| origin_of(c.from)),
@@ -376,19 +375,6 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
                 tidal_full.is_some(),
                 tidal_full,
             )
-        },
-        NodeApp {
-            set: Some("PUT /v1/sources/qobuz/unofficial"),
-            fields: vec![
-                field("app_id", "App ID"),
-                secret("app_secret", "App secret", false),
-            ],
-            status: Some("GET /v1/sources/qobuz/unofficial"),
-            limits: Some(
-                "Qobuz gives app IDs only to its partners, not to other players, so Odeion has none \
-                 to build in. Without one, Qobuz doesn't play here.",
-            ),
-            ..app("qobuz", "Qobuz", qobuz.is_some(), qobuz)
         },
         NodeApp {
             set: Some("PUT /v1/sources/soundcloud/unofficial"),
