@@ -156,7 +156,8 @@ def run_ui_tour():
     tour = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tour)
     tour.run({"adb": adb, "api": api, "shot": shot, "ui_nodes": ui_nodes, "tap": tap,
-              "center": center, "until": until, "log": log, "out": out})
+              "center": center, "until": until, "log": log, "out": out,
+              "apk": apk, "node_bin": node_bin, "package": PKG})
 
 
 def api(method, path, body=None):

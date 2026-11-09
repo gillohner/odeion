@@ -15,15 +15,19 @@ only on the first screen: the places of the mini player and the Home and Zones t
 tapped where the Zones page has it with the CI's two zones (its card first). What the gestures did is
 checked with the node (its queue moves on and back) and on the screen itself, comparing raw
 screenshots of the part that must change (or must not). Each
-step's screenshot is ui-*.png; the whole run is recorded in ui-tour.mp4 when the emulator can.
+step's screenshot is ui-*.png; the gesture run is recorded in ui-tour.mp4 when the emulator can.
+After that recording is saved, android-native-pages.py captures the populated Album and
+Confirm matches pages at 360x800 dp, restoring the emulator's original display afterwards.
 
 Not a module of its own: android-endpoint.py passes its helpers in (`h`), so it runs inside that
 script's node, app and adb session.
 """
 import re
+import importlib.util
 import struct
 import subprocess
 import time
+from pathlib import Path
 
 
 def run(h):
@@ -220,3 +224,7 @@ def run(h):
                     (out / "ui-tour.mp4").write_bytes(mp4)
             except Exception as e:  # noqa: BLE001
                 log(f"no recording saved: {e}")
+    spec = importlib.util.spec_from_file_location("android_native_pages", Path(__file__).with_name("android-native-pages.py"))
+    pages = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pages)
+    pages.run(h)

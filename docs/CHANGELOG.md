@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- The strict Android phone UI tour now also requires populated Album and Confirm matches captures from the installed APK, with deterministic local candidates and native screenshot checks.
+
 ### 2026-11-09
 
 - **The phone UI emulator check fails on any unfinished gesture tour.** Its fixture node is reached through an explicit ADB connection at the emulator's LAN address, checked from Android before the app starts, including refusal of an absent API token. This avoids relying on the emulator's host alias for the test connection; the app still signs in through its form, registers its LAN player on the first launch, and must play, restart and recover from a crash. Connection failures retain the complete redacted screen diagnostics.
