@@ -154,36 +154,54 @@ class PlayerService : Service() {
         fun backgroundRefusal(e: Exception): Boolean =
             Build.VERSION.SDK_INT >= 31 && e.javaClass.name == "android.app.ForegroundServiceStartNotAllowedException"
         private const val NOTIFY = "android.permission.POST_NOTIFICATIONS"
-        /// The notification's id (the service's foreground one, and the media one).
+        /// The service's foreground notification (the media one while the zone plays).
         const val ID = 1
+        /// The media notification while the session doesn't play (paused, stopped) or the service
+        /// doesn't run: Android 14+ stops treating a media service as foreground once the session
+        /// its notification shows is not playing, and the zone's service must stay (the node may
+        /// start music on this phone at any time). So the service's own notification shows the
+        /// session only while it plays.
+        const val MEDIA_ID = 2
         @Volatile private var running = false
         @Volatile private var text = "This phone is a zone"
 
-        /// The notification as it should be now: the media one while the session is active, else
-        /// what the service is for. `service`: for startForeground (always ongoing).
-        fun build(c: Context, service: Boolean): Notification {
+        private fun builder(c: Context, ongoing: Boolean): Notification.Builder {
             MediaControl.channel(c)
             val launch = c.packageManager.getLaunchIntentForPackage(c.packageName)
             val open = PendingIntent.getActivity(c, 0, launch, PendingIntent.FLAG_IMMUTABLE)
-            val b = Notification.Builder(c, CHANNEL)
+            return Notification.Builder(c, CHANNEL)
                 // A monochrome status-bar icon: the launcher icon is an adaptive icon, which some
                 // phones refuse as a small icon ("Bad notification for startForeground", a crash).
                 .setSmallIcon(R.drawable.ic_stat_pubky_music)
                 .setContentIntent(open)
                 .setOnlyAlertOnce(true)
-                .setOngoing(service || running)
-            if (!MediaControl.styled(c, b)) {
+                .setOngoing(ongoing)
+        }
+
+        /// The service's notification as it should be now: the media one while the session plays,
+        /// else what the service is for.
+        fun build(c: Context, service: Boolean): Notification {
+            val b = builder(c, service || running)
+            if (!(MediaControl.playing() && MediaControl.styled(c, b))) {
                 b.setContentTitle("Odeion").setContentText(text)
             }
             return b.build()
         }
 
-        /// The session changed (MediaControl.kt): the notification follows. Without the service,
-        /// the media notification alone (gone with the session).
+        /// The session changed (MediaControl.kt): the notifications follow. The service's shows the
+        /// session while it plays; otherwise (paused, stopped, no service) the media notification
+        /// is a separate one, gone with the session.
         fun refresh(c: Context) {
             val nm = c.getSystemService(NotificationManager::class.java) ?: return
             try {
-                if (running || MediaControl.active()) nm.notify(ID, build(c, false)) else nm.cancel(ID)
+                if (running) nm.notify(ID, build(c, false)) else nm.cancel(ID)
+                val separate = MediaControl.active() && !(running && MediaControl.playing())
+                if (separate) {
+                    val b = builder(c, false)
+                    if (MediaControl.styled(c, b)) nm.notify(MEDIA_ID, b.build()) else nm.cancel(MEDIA_ID)
+                } else {
+                    nm.cancel(MEDIA_ID)
+                }
             } catch (e: Exception) {
                 android.util.Log.w("pubky-music", "player notification: $e")
             }

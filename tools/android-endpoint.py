@@ -309,21 +309,33 @@ def media_controls(zid, track):
     api("POST", f"/v1/zones/{nz['id']}/volume", {"volume": {"percent": 3}})
     api("POST", f"/v1/zones/{nz['id']}/queue", {"track_ids": [track["id"]], "replace": True, "play": False})
     def diagnose(what):
-        (out / f"ui-{what}.xml").write_text("\n".join(ui_nodes()))
+        (out / f"ui-{what}.txt").write_text("\n".join(ui_nodes()))
         lines = [l for l in logcat().splitlines() if "media controls" in l or "message port" in l]
         (out / f"media-{what}.txt").write_text("\n".join(lines[-80:]))
-    tap(lambda n: "choose where to play" in n, "the zone button")
-    # The picker may list the null output below what fits: scroll it into view
-    for _ in range(4):
-        if any("Null output (% volume)" in n for n in ui_nodes()):
-            break
-        adb("shell", "input", "swipe", "500", "1400", "500", "700", "300")
-        time.sleep(1)
-    try:
-        tap(lambda n: "Null output (% volume)" in n, "the null output's zone")
-    except RuntimeError:
+
+    def pick(name, what):
+        """Choose a zone in the page's picker. The WebView's accessibility dump can lag behind
+        the screen: the picker is closed and opened again (three tries) before giving up."""
+        for attempt in range(3):
+            tap(lambda n: "choose where to play" in n, "the zone button")
+            end = time.time() + 20
+            while time.time() < end:
+                node = next((n for n in ui_nodes() if name in n), None)
+                if node:
+                    x, y = center(node)
+                    if (x, y) != (0, 0):
+                        adb("shell", "input", "tap", str(x), str(y))
+                        log(f"tapped {what} at {x},{y}")
+                        return
+                    adb("shell", "input", "swipe", "500", "1400", "500", "700", "300")
+                time.sleep(2)
+            log(f"{what} not in the screen's dump (try {attempt + 1}): the picker again")
+            adb("shell", "input", "keyevent", "KEYCODE_BACK")
+            time.sleep(2)
         diagnose("picker")
-        raise
+        raise RuntimeError(f"timed out waiting for {what}")
+
+    pick("Null output (% volume)", "the null output's zone")
     def remote():
         s = our_session()
         # Android 11 prints the type as a number, 15 by name
@@ -340,9 +352,7 @@ def media_controls(zid, track):
     log("volume key on the network zone: its own volume 3 -> 4 %, Android's media volume untouched")
     shot("8-network-zone")
     # Back to the phone's zone in the page
-    tap(lambda n: "choose where to play" in n, "the zone button")
-    name = zone_state(zid)["name"]
-    tap(lambda n: name[:20] in n, "the phone's zone")
+    pick(zone_state(zid)["name"][:20], "the phone's zone")
 
 
 def position(zid):
