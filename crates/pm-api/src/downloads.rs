@@ -208,8 +208,14 @@ fn evict(dir: &FsPath, cap: u64, keep: &FsPath) {
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let now = std::time::SystemTime::now();
-    let making: std::collections::HashSet<String> =
-        locks().lock().expect("download locks").keys().cloned().collect();
+    let making: std::collections::HashSet<String> = {
+        let mut map = locks().lock().expect("download locks");
+        // A waiter can be cancelled after the previous holder drops but before it becomes
+        // a KeyLock. Its future then leaves only the map's Arc, with no destructor left to
+        // remove it. Clone/registration uses this same mutex, so map-only entries are idle.
+        map.retain(|_, lock| Arc::strong_count(lock) > 1);
+        map.keys().cloned().collect()
+    };
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = rd
         .flatten()
         .filter_map(|e| {
@@ -672,6 +678,43 @@ mod tests {
         evict(dir.path(), 100, &c);
         assert!(!a.exists(), "past twice the cap, the oldest fresh file goes");
         assert!(b.exists() && c.exists());
+    }
+
+    /// Poll the waiter exactly once, then cancel on either side of the owner's release.
+    /// In particular, cancellation after handoff must not leave permanent eviction immunity.
+    #[tokio::test]
+    async fn cancelled_waiters_do_not_protect_abandoned_complete_files() {
+        for after_handoff in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let key = format!("cancelled-waiter-{}-{after_handoff}", uuid::Uuid::new_v4());
+            let abandoned = dir.path().join(&key);
+            std::fs::write(&abandoned, [0u8; 100]).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&abandoned)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+                .unwrap();
+            let owner = lock_for(&key).await;
+            let mut waiter = Box::pin(lock_for(&key));
+            assert!(futures_util::poll!(&mut waiter).is_pending());
+            if after_handoff {
+                drop(owner);
+                drop(waiter);
+            } else {
+                drop(waiter);
+                drop(owner);
+            }
+            let next = dir.path().join("distinct-completion");
+            std::fs::write(&next, [0u8; 100]).unwrap();
+            evict(dir.path(), 100, &next);
+            assert!(!abandoned.exists(), "abandoned old file must be evictable");
+            assert!(next.exists());
+            assert!(
+                !locks().lock().unwrap().contains_key(&key),
+                "map-only registration is pruned"
+            );
+        }
     }
 
     #[tokio::test]
