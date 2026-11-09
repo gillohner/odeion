@@ -5248,15 +5248,20 @@
   const setListPref = (kind, p) => { try { localStorage.setItem(`pm.list.${kind}`, JSON.stringify(p)); } catch { /* no storage */ } };
   // Sorting changes the order of the current matches, keeping the filter and keyboard position.
   const renderSortedList = async (control) => {
-    const query = $('#filter')?.value; const focused = document.activeElement === control;
+    const query = $('#filter')?.value; let focused = document.activeElement === control;
     const gen = navGen;
-    const rendered = render(); const drawing = lastDrawing;
-    await rendered;
-    if (gen !== navGen || drawing !== lastDrawing) return;
-    const filter = $('#filter');
-    if (filter && query != null) { filter.value = query; filter.oninput?.(); }
-    // A person who moved to another control while loading keeps that focus.
-    if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
+    // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
+    // restoration, even if the person then dismisses that control (Search followed by Escape).
+    const moved = () => { focused = false; };
+    document.addEventListener('focusin', moved, true);
+    try {
+      const rendered = render(); const drawing = lastDrawing;
+      await rendered;
+      if (gen !== navGen || drawing !== lastDrawing) return;
+      const filter = $('#filter');
+      if (filter && query != null) { filter.value = query; filter.oninput?.(); }
+      if (focused && document.activeElement === document.body) $('[data-lsort]', main)?.focus({ preventScroll: true });
+    } finally { document.removeEventListener('focusin', moved, true); }
   };
   const albumFav = (a) => !!(a.release_mbid && state.favUris && state.favUris.has(`https://musicbrainz.org/release/${a.release_mbid}`));
   const sortList = (kind, list, how) => {

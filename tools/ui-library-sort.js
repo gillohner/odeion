@@ -66,8 +66,8 @@ async function sortMatches(browser, width, theme, kind) {
   } finally { await context.close(); }
 }
 
-async function delayedSort(browser, navigateAway) {
-  const { page, context, state } = await fx.create(browser, 1280, { fixtures });
+async function delayedSort(browser, width, focusChoice, navigateAway = false) {
+  const { page, context, state } = await fx.create(browser, width, { fixtures });
   let release; const gate = new Promise((resolve) => { release = resolve; });
   let entered; const pending = new Promise((resolve) => { entered = resolve; });
   let requests = 0;
@@ -86,7 +86,14 @@ async function delayedSort(browser, navigateAway) {
       await page.locator('#sidebar [data-view="albums"]').click();
       await page.locator('#albumgrid .tile').first().waitFor();
     }
-    await page.focus('#search');
+    if (focusChoice !== 'sort') {
+      await page.keyboard.press('/');
+      assert.equal(await page.locator('#search').evaluate((e) => e === document.activeElement), true, 'Search receives keyboard focus during loading');
+      if (focusChoice === 'blur') {
+        await page.keyboard.press('Escape');
+        assert.equal(await page.evaluate(() => document.activeElement === document.body), true, 'Escape deliberately leaves Search');
+      }
+    }
     release();
     if (navigateAway) {
       await page.waitForTimeout(150);
@@ -97,9 +104,19 @@ async function delayedSort(browser, navigateAway) {
       await ready(page, 'added');
       await matches(page, 'artists', 'Loop', [3, 2, 1]);
     }
-    assert.equal(await page.locator('#search').evaluate((e) => e === document.activeElement), true, 'newly chosen focus is respected');
+    const focused = await page.evaluate(() => document.activeElement.matches('[data-lsort]') ? 'sort' : document.activeElement.id || document.activeElement.tagName);
+    await page.screenshot({ path: path.join(shots, `delayed-${width}-${focusChoice}${navigateAway ? '-navigation' : ''}.png`) });
+    assert.equal(focused, { sort: 'sort', search: 'search', blur: 'BODY' }[focusChoice], 'sorting respects the latest focus choice, including move then blur');
+    // Cancellation belongs to this render only: a later deliberate sort still restores focus.
+    if (!navigateAway) {
+      await page.locator('[data-lsort]').focus();
+      await page.keyboard.press('Home');
+      await ready(page, 'name');
+      await matches(page, 'artists', 'Loop', [1, 2, 3]);
+      assert.equal(await page.locator('[data-lsort]').evaluate((e) => e === document.activeElement), true, 'a later sort keeps its own focus');
+    }
     assert.deepEqual(state.errors, []);
-    console.log(`PASS delayed sort: ${navigateAway ? 'navigation wins' : 'filter restored'}, focus stays where the person moved it`);
+    console.log(`PASS delayed sort ${width} ${focusChoice}: ${navigateAway ? 'navigation wins' : 'filter restored'}, latest focus choice respected`);
   } finally { release(); await context.close(); }
 }
 
@@ -142,8 +159,10 @@ async function sparseLists(browser) {
     for (const width of [1280, 1024, 768, 360, 412]) for (const theme of ['light', 'dark']) {
       for (const kind of ['albums', 'artists']) await sortMatches(browser, width, theme, kind);
     }
-    await delayedSort(browser, false);
-    await delayedSort(browser, true);
+    for (const width of [1280, 1024, 768]) {
+      for (const focusChoice of ['blur', 'search', 'sort']) await delayedSort(browser, width, focusChoice);
+    }
+    await delayedSort(browser, 1280, 'search', true);
     await sparseLists(browser);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
