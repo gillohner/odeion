@@ -70,8 +70,9 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 ];
 /// Settings that belong to this node and are never carried over (its stream key, its id, the
 /// backup schedule with its passphrase, and the hashes of its API token: the one the owner's
-/// browser sessions were made under and the mark of a token an older node record held. A short
-/// token set in the config could be guessed from either offline).
+/// browser sessions were made under, the mark of a token an older node record held and the note
+/// of sign-ins found in saved queues at a start. A short token set in the config could be guessed
+/// from any of them offline).
 /// The owner's browser sessions and device sign-ins (their hashes) are this node's too: a backup
 /// from before Make a new token never brings back a sign-in that ended with it.
 /// Also the files jobs this node is running or keeps for its next start (copies to the
@@ -86,6 +87,7 @@ const NODE_OWN: &[&str] = &[
     crate::accounts::DEVICE_SESSIONS,
     crate::access_token::PUBLISHED_TOKEN_KEY,
     crate::accounts::API_TOKEN_EXPOSED,
+    crate::accounts::QUEUE_CLEANUP_PENDING,
     crate::copy_jobs::JOBS_KEY,
     crate::files::BRING_RESUME_KEY,
     crate::copy_guard::IN_FLIGHT_KEY,

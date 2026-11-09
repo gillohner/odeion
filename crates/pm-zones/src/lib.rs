@@ -38,4 +38,4 @@ pub use sink::{caps_for_source, DeviceFormat};
 pub use source::{
     FrameSource, Processor, ReplayGain, SkipFrames, SourceError, SourceFactory, StreamInfo, WithReplayGain,
 };
-pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};
+pub use zone::{cap_volume, NowPlaying, Transport, VolumeLimit, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

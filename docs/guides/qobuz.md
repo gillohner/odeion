@@ -1,64 +1,69 @@
 # Qobuz
 
 The node plays full tracks from Qobuz, up to 24-bit/192 kHz, through the private API Qobuz's own
-players use. Qobuz has not approved this for other apps: it can stop working at any time, and it
-uses your Qobuz account. It needs a paid Qobuz streaming plan.
+players use. This is unofficial and can stop working at any time. It needs a paid Qobuz streaming
+plan (Studio or Sublime; download-only plans do not stream).
 
-Everything is on one page: **Sources › Qobuz**. The status line at the top says where you are
-(Off, Needs app, Needs sign-in, Working) and the two steps below it do the rest.
+## Sign in
 
-## What you need
+Open **Sources › Qobuz**. Under **Sign in with your Qobuz account**, enter your Qobuz email and
+password and choose **Sign in**. That is the whole setup: no app ID, app secret, API application or
+config import is needed.
 
-1. **A Qobuz app ID and secret.** Qobuz issues these to partners; there is no public developer
-   page. Ask Qobuz for API access at [api@qobuz.com](mailto:api@qobuz.com) and say what it is for.
-   The node has no built-in app and never takes one from another program's code: the app must be
-   one you are allowed to use.
-2. **Your Qobuz account** with a streaming plan (Studio or Sublime; Qobuz's download-only plans
-   don't stream).
+On your first sign-in, the node reads the current Qobuz web player's public login page and bundle
+to discover the app values its API expects. It selects a signing secret, then caches the app ID,
+secret and bundle URL for the whole node. Later sign-ins reuse that cache. If Qobuz refuses the
+signature or app ID, the node refreshes those values once and retries without signing anyone out.
+It looks at the web player at most once every five minutes, or once a minute after a look that
+could not reach Qobuz or was interrupted. What a look found is reused for at most ten minutes,
+unless Qobuz refused those values; refused values are not tried again until the next look. Until
+then, a sign-in or refresh that needs new values gets the last look's own answer. Only a 400 about
+the app ID or the signature counts against the app values: any other 400 fails only that person's
+sign-in. When such a 400 comes with the cached values, the sign-in tries once more with what the web
+player offers (within the same limits), in case Qobuz retired the cached values without saying so;
+the 400 stands when the web player offers no other values, or when they get it too. Every request
+to Qobuz uses one fixed browser User-Agent, never the node's own.
 
-## Step 1: App ID and secret
+Your email and password go to Qobuz once. The password is sent as the MD5 Qobuz's own login flow
+expects; neither the password nor its MD5 is stored or logged. Each person signs in with their own
+account, and the node keeps only that person's session token.
 
-Paste the app ID (digits) and the secret into the two fields. You can paste a whole
-`app_id=… app_secret=…` block, a config section or JSON into either field: it is split into the
-two. **Show** reveals a secret while you type it.
+Errors are shown in place:
 
-**Check** asks Qobuz whether it takes the app, without saving anything and without your account:
+- **Wrong Qobuz email or password**: check them and try again.
+- **This Qobuz account is free**: full tracks need a paid Qobuz plan.
+- **Qobuz refused this sign-in**: Qobuz turned down this sign-in for a reason other than its app
+  values (for example, a mistyped email address); check the email and try again. Nobody else is
+  affected.
+- **Qobuz would not stream for this account**: Qobuz accepted the sign-in but turned down the
+  signed stream check for this account, for a reason other than its app values; try again later.
+  Nobody else is affected.
+- **Qobuz changed its web player**: automatic discovery failed, or Qobuz refused what it found;
+  the node looks again after five minutes.
+- **Could not reach Qobuz**: a network problem, a timeout or a busy Qobuz; "try again later" means
+  in about a minute.
+- **Qobuz setup was interrupted**: the last look at the web player did not finish (for example,
+  the page was closed during sign-in); try again in a minute.
 
-| It says | It means |
-| :-- | :-- |
-| OK: Qobuz accepts this app ID; the secret is checked at the first play | go on to step 2. Qobuz only checks the secret once it plays something for your account: a wrong one then shows as a Problem saying so |
-| Qobuz doesn't know this app ID | a typo, or the app was withdrawn; ask Qobuz |
-| Qobuz knows this app ID, but the secret doesn't go with it | the secret is wrong |
-| Couldn't reach Qobuz | the node has no way to Qobuz right now; try again later |
-
-**Save** keeps the app on the node like a sign-in. The secret is never shown again; the app ID is.
-An app set in the node's config (`[qobuz] app_id` and `app_secret`, or `PM_QOBUZ_APP_ID` and
-`PM_QOBUZ_APP_SECRET`) is used until you save one here.
-
-**Already use streamrip or qobuz-dl?** Open *Use its config* under step 1: pick its config file,
-or paste its contents. The node reads the app values and the sign-in from it and does both steps
-at once. The file is only read.
-
-## Step 2: Your Qobuz account
-
-Enter your Qobuz email and password. They go to Qobuz once, to sign in; the node keeps only the
-session token Qobuz answers with. Two refusals are said in place:
-
-- *This Qobuz account has no streaming plan*: full tracks need a paid plan; the account signed in,
-  but Qobuz won't stream to it.
-- *Qobuz doesn't know that email and password*: check them and try again.
-
-Signed in, the status says **Working** with the quality your plan allows, and a **Quality**
-setting lets you cap it (Max, CD, or MP3 320 kbps). **Sign out** forgets the session; the app
-stays.
+Signed in, the page shows the account, plan and available quality. **Quality** can cap playback at
+Max (up to 24-bit/192 kHz), CD (16-bit/44.1 kHz), or MP3 320 kbps. **Sign out** forgets only that
+person's session; the node-wide app cache stays.
 
 ## When it stops working
 
-If Qobuz refuses the app or ends the session, the node switches Qobuz off and the status says
-**Problem** with what happened; **Try again** switches it back on. Qobuz links keep opening on
-qobuz.com meanwhile. If the app was withdrawn, you need a new one from Qobuz.
+If Qobuz ends a session, or refuses the app values and the values a look at the web player finds
+do not work either, Qobuz switches itself off and the page says why. A track Qobuz refuses for
+another reason fails only that track. When Qobuz cannot be reached or is busy, also during a
+refresh and in the minute after a look that could not reach the web player or was interrupted, the
+track fails for now (a browser gets "service unavailable", not "not found") and Qobuz stays on. **Try again**
+switches it back on. A rotated app secret is refreshed without removing anyone's user token. Qobuz links keep opening on qobuz.com meanwhile.
 
-## What the node keeps
+## Admin override and backups
 
-The app ID and secret, and the session token, in the node's database, treated like a sign-in: a
-backup carries them only under your passphrase. The password is never stored or logged.
+Normally no configuration is necessary. An administrator can silently override discovery with
+`[qobuz] app_id` and `app_secret` in `node.toml`, or `PM_QOBUZ_APP_ID` and
+`PM_QOBUZ_APP_SECRET`. Both values are needed; one alone is ignored with a warning in the log.
+When set, those values win and web-player discovery and refreshes are skipped.
+
+The cached app values and each person's session token are treated like sign-ins: a backup carries
+them only under your passphrase. Passwords and password MD5s are never included.

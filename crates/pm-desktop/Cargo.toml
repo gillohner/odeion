@@ -75,10 +75,10 @@ pm-out-local = { path = "../pm-out-local", features = ["cpal"] }
 sha2 = "0.10"
 
 [features]
-# Android emulator CI only (.github/workflows/android-ring-transport.yml): the app routes a
+# Android emulator CI only (.github/workflows/android.yml, ring transport): the app routes a
 # fixture Pubky Ring grant exchange once at start and logs where it went. Never in releases.
 ring-transport-probe = ["dep:pubky", "dep:futures-util"]
-# Android emulator CI only (.github/workflows/android-update.yml): the build reads its update feed
+# Android emulator CI only (.github/workflows/android.yml, update): the build reads its update feed
 # from ODEION_UPDATE_FEED (plain http allowed) and logs a marker kept in the app's data. Never in releases.
 update-feed-fixture = []
 

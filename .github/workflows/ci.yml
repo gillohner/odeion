@@ -17,17 +17,24 @@ env:
 # WebKitGTK package names the desktop job installs are per release.
 # Every job has a timeout-minutes of about 4x its usual time, so a hang fails instead of
 # holding a merge (usual times from green runs, 2026-10-23).
+# The node is built once (`node`) and the jobs that only run it download it; the browser
+# audits are split over a few runners (`ui-controls`, `ui-screens`, `ui-fixtures`), so a head's
+# CI takes about as long as its slowest job rather than `check` plus the slowest audit.
 # Nothing here writes to the repository
 permissions:
   contents: read
 jobs:
-  # Docs-only changes (docs/, Markdown, NOTICE, LICENSE) skip every other job: `check`,
-  # `desktop` and `sidecar` wait on this, and the rest wait on `check`.
+  # Docs-only changes (docs/, Markdown, NOTICE, LICENSE) skip every other job but deploy-docs and
+  # branding. `docker` (the release image built from source, ~15 min) runs on pull requests only
+  # when what the image is made of changes: the Dockerfile, Cargo manifests or lock, deploy/docker,
+  # the release tooling or a workflow; always on main and by hand. A code change that breaks the
+  # build fails `check` and `node` on the same pull request.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      docker: ${{ steps.diff.outputs.docker }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -39,12 +46,15 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           if [ "$EVENT" = workflow_dispatch ] || [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
-            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+            printf 'code=true\ndocker=true\n' >> "$GITHUB_OUTPUT"; exit 0
           fi
           files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
           code=$(printf '%s\n' "$files" | grep -Ev '^(docs/|NOTICE$|LICENSE$)|\.md$' | grep -c . || true)
           echo "$(printf '%s\n' "$files" | grep -c . || true) files changed, $code outside the docs"
           if [ "$code" -gt 0 ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+          image=$(printf '%s\n' "$files" | grep -Ec '^(Dockerfile|\.dockerignore|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|rust-toolchain(\.toml)?|deploy/docker/|tools/release/|\.github/workflows/)' || true)
+          if [ "$EVENT" = push ] || [ "$image" -gt 0 ]; then echo "docker=true" >> "$GITHUB_OUTPUT"; else echo "docker=false" >> "$GITHUB_OUTPUT"; fi
+          echo "$image files the image is built from"
   check:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -70,6 +80,30 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+  # pm-node/odeiond and the big-library generator, built once for every job below that only runs
+  # them (slimproto, plex, webdav, connection, web-ui, speed, ui-controls, ui-screens). Line tables
+  # only: the same code, a smaller download.
+  node:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo build -p pm-node && cargo build -p pm-library --example big_library
+      - run: tar -czf node-debug.tgz -C target/debug pm-node odeiond examples/big_library && ls -la node-debug.tgz
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: node-debug
+          path: node-debug.tgz
+          compression-level: 0
+          retention-days: 2
   # The node's download archive carries README.md, docs/deploy.md and docs/guides/ at their repo
   # paths, so the links between them work unpacked; the TrueNAS file mounts as many paths as it
   # says to edit. Runs on docs-only changes too.
@@ -130,7 +164,8 @@ jobs:
   docker:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    needs: check
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -168,7 +203,8 @@ jobs:
     # so the check runs in a small KVM guest booting Ubuntu's generic kernel over the runner's own filesystem
     # (virtme-ng). A hung guest fails the job after 20 minutes instead of holding the run (it takes 4-5).
     runs-on: ubuntu-24.04
-    needs: check
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -225,15 +261,17 @@ jobs:
     # reconnects (tools/slim-squeezelite.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: check
+    needs: node
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends squeezelite
-      - run: cargo build -p pm-node
       - run: python3 -I tools/slim-squeezelite.py target/debug/pm-node /tmp/slim
       - if: failure()
         run: tail -n 50 /tmp/slim/node.log /tmp/slim/squeezelite.log
@@ -242,7 +280,7 @@ jobs:
     # version and checksum, unpacked and run without Docker (tools/plex-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: check
+    needs: node
     env:
       PMS_VERSION: 1.43.5.11029-6bf8af3f0
       PMS_SHA256: 562edf9456be338a24182f837fe5d532d7e75ba7b3d5f6bea2503083e77622e1
@@ -250,14 +288,16 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - name: Plex Media Server
         run: |
           curl -fsSLo /tmp/pms.deb "https://downloads.plex.tv/plex-media-server-new/$PMS_VERSION/debian/plexmediaserver_${PMS_VERSION}_amd64.deb"
           echo "$PMS_SHA256  /tmp/pms.deb" | sha256sum -c
           dpkg-deb -x /tmp/pms.deb /tmp/pms-root
-      - run: cargo build -p pm-node
       - run: python3 -I tools/plex-source.py target/debug/pm-node /tmp/pms-root /tmp/plex
       - if: failure()
         run: tail -n 50 /tmp/plex/node.log /tmp/plex/pms.log
@@ -266,7 +306,8 @@ jobs:
     # release (tag and commit), run without Docker (tools/abs-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    needs: check
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     env:
       ABS_TAG: v2.37.1
       ABS_COMMIT: 3563d49424d50170324de9236a24c591b6d965e9
@@ -297,7 +338,8 @@ jobs:
     # node manages it, what listens where, and that no generated password reaches a log.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: check
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -358,15 +400,17 @@ jobs:
     # password: scan, play in a zone, the browser stream, rescan, remove (tools/webdav-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    needs: check
+    needs: node
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - run: python3 -m venv /tmp/dav && /tmp/dav/bin/pip install -q wsgidav==4.3.3 cheroot==11.1.2
-      - run: cargo build -p pm-node
       - run: python3 -I tools/webdav-source.py target/debug/pm-node /tmp/dav/bin/wsgidav /tmp/webdav
       - if: failure()
         run: tail -n 50 /tmp/webdav/node.log /tmp/webdav/dav.log
@@ -374,17 +418,19 @@ jobs:
     # docs/CONNECTION.md: two browser controllers, the node killed and restored during playback.
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: check
+    needs: node
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
-      - run: cargo build -p pm-node
       - name: a node config and a four-minute track
         run: |
           mkdir -p /tmp/pc/data /tmp/pc/music /tmp/pc/shots
@@ -424,13 +470,16 @@ jobs:
   web-ui:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    needs: check
+    needs: node
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
@@ -442,7 +491,6 @@ jobs:
         run: node tools/tag-colour-check.js
       - name: installable web app (manifest, real icons, page links, routes, worker promises)
         run: node tools/pwa-check.js
-      - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |
           mkdir -p /tmp/pm/data /tmp/pm/music
@@ -473,31 +521,12 @@ jobs:
         run: python3 -I tools/console-links.py
       - name: no client secret, private key or keystore in the repository or the binary
         run: python3 -I tools/secret-scan.py --binary target/debug/pm-node
+      # The pages checked against fixtures (no node) run in ui-fixtures
       - name: TIDAL sign-in with an app and no secret, through the return page (mock TIDAL)
         run: |
           mkdir -p /tmp/tl/data /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
           npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
-          node $GITHUB_WORKSPACE/tools/ui-browser-library.js $GITHUB_WORKSPACE /tmp/pm/library-playback-shots
-          node $GITHUB_WORKSPACE/tools/ui-artist-links.js $GITHUB_WORKSPACE /tmp/pm/artist-link-shots
-          node $GITHUB_WORKSPACE/tools/ui-review-fixes.js $GITHUB_WORKSPACE /tmp/pm/review-fixes-shots
-          node $GITHUB_WORKSPACE/tools/ui-personal-play-share.js $GITHUB_WORKSPACE /tmp/pm/personal-play-share-shots
-          node $GITHUB_WORKSPACE/tools/ui-tablet.js $GITHUB_WORKSPACE /tmp/pm/tablet-shots
-          node $GITHUB_WORKSPACE/tools/ui-busy.js $GITHUB_WORKSPACE /tmp/pm/busy-shots
-          node $GITHUB_WORKSPACE/tools/ui-source-policy.js $GITHUB_WORKSPACE /tmp/pm/source-policy-shots
-          node $GITHUB_WORKSPACE/tools/ui-queue-covers.js $GITHUB_WORKSPACE /tmp/pm/queue-covers-shots
-          node $GITHUB_WORKSPACE/tools/ui-versions.js $GITHUB_WORKSPACE /tmp/pm/versions-shots
-          node $GITHUB_WORKSPACE/tools/ui-similar-tiles.js $GITHUB_WORKSPACE /tmp/pm/similar-shots
-          node $GITHUB_WORKSPACE/tools/ui-connect-ring.js $GITHUB_WORKSPACE /tmp/pm/connect-ring-shots
-          node $GITHUB_WORKSPACE/tools/ui-tap-highlight.js $GITHUB_WORKSPACE /tmp/pm/tap-highlight-shots
-          node $GITHUB_WORKSPACE/tools/ui-here-name.js $GITHUB_WORKSPACE /tmp/pm/here-name-shots
-          node $GITHUB_WORKSPACE/tools/ui-android-first.js $GITHUB_WORKSPACE /tmp/pm/android-first-shots
-          node $GITHUB_WORKSPACE/tools/ui-nowplaying-phone.js $GITHUB_WORKSPACE /tmp/pm/nowplaying-phone-shots
-          node $GITHUB_WORKSPACE/tools/ui-motion.js $GITHUB_WORKSPACE /tmp/pm/motion-shots
-          node $GITHUB_WORKSPACE/tools/ui-redesign.js $GITHUB_WORKSPACE /tmp/pm/redesign-shots
-          node $GITHUB_WORKSPACE/tools/ui-item-about.js $GITHUB_WORKSPACE /tmp/pm/item-about-shots
-          node $GITHUB_WORKSPACE/tools/ui-native-player.js $GITHUB_WORKSPACE /tmp/pm/native-player-shots
-          node $GITHUB_WORKSPACE/tools/ui-usb-dac.js $GITHUB_WORKSPACE /tmp/pm/usb-dac-shots
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
           (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \
             nohup $GITHUB_WORKSPACE/target/debug/pm-node -c /tmp/tl/node.toml serve > /tmp/tl/node.log 2>&1 &)
@@ -519,97 +548,92 @@ jobs:
         with:
           name: pwa-browser
           path: /tmp/pwa/out
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tablet-layout-shots
-          path: /tmp/pm/tablet-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: busy-and-loading-shots
-          path: /tmp/pm/busy-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: song-versions-shots
-          path: /tmp/pm/versions-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: similar-tiles-shots
-          path: /tmp/pm/similar-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: connect-ring-shots
-          path: /tmp/pm/connect-ring-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tap-highlight-shots
-          path: /tmp/pm/tap-highlight-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: here-name-shots
-          path: /tmp/pm/here-name-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: android-first-shots
-          path: /tmp/pm/android-first-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: nowplaying-phone-shots
-          path: /tmp/pm/nowplaying-phone-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: motion-shots
-          path: /tmp/pm/motion-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: redesign-shots
-          path: /tmp/pm/redesign-shots
-          if-no-files-found: ignore
-      - if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: item-about-shots
-          path: /tmp/pm/item-about-shots
-          if-no-files-found: ignore
       - if: failure()
         run: tail -n 50 /tmp/pm/node.log; tail -n 30 /tmp/fresh/node.log || true; tail -n 30 /tmp/tl/node.log || true; tail -n 30 /tmp/pwa/out/node.log || true
+
+  # The UI pages checked against fixtures in a real Chromium (tools/ui-fixture.js: the app's own
+  # files, no node, no build), split over two runners; every page is in exactly one half.
+  ui-fixtures:
+    name: ui-fixtures (${{ matrix.shard }}/2)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      - name: Playwright with Chromium
+        run: |
+          mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
+          npx playwright install --with-deps chromium >/dev/null
+      - name: the pages, against fixtures
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          cd /tmp/pw
+          n=0
+          while read -r script shots; do
+            n=$((n + 1))
+            [ $(( (n - 1) % 2 + 1 )) = "$SHARD" ] || continue
+            echo "::group::$script"
+            node "$GITHUB_WORKSPACE/tools/$script" "$GITHUB_WORKSPACE" "/tmp/pm/$shots" < /dev/null
+            echo "::endgroup::"
+          done <<'LIST'
+          ui-browser-library.js library-playback-shots
+          ui-artist-links.js artist-link-shots
+          ui-review-fixes.js review-fixes-shots
+          ui-personal-play-share.js personal-play-share-shots
+          ui-tablet.js tablet-shots
+          ui-busy.js busy-shots
+          ui-source-policy.js source-policy-shots
+          ui-queue-covers.js queue-covers-shots
+          ui-versions.js versions-shots
+          ui-similar-tiles.js similar-shots
+          ui-connect-ring.js connect-ring-shots
+          ui-tap-highlight.js tap-highlight-shots
+          ui-here-name.js here-name-shots
+          ui-android-first.js android-first-shots
+          ui-nowplaying-phone.js nowplaying-phone-shots
+          ui-motion.js motion-shots
+          ui-redesign.js redesign-shots
+          ui-item-about.js item-about-shots
+          ui-usb-dac.js usb-dac-shots
+          ui-native-player.js native-player-shots
+          LIST
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-fixtures-shots-${{ matrix.shard }}
+          path: /tmp/pm
+          if-no-files-found: ignore
 
   speed:
     # A big library stays fast (steward next-3): 5,000 generated tracks, scan and rescan
     # times, pages and search in a real browser, against tools/perf-budget.json.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    needs: check
+    needs: node
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
-      - run: cargo build -p pm-node && cargo build -p pm-library --example big_library
       - name: scan 5,000 tracks, then rescan with nothing changed
         run: |
           mkdir -p /tmp/big/data
@@ -648,20 +672,28 @@ jobs:
         run: tail -n 50 /tmp/big/node.log
 
   ui-controls:
-    # The controls audit on its own runner: it takes most of half an hour as the app grows.
+    # The controls audit, its controls split over three runners (tools/ui-controls.js UI_SHARD):
+    # each control is in exactly one third, by a hash of its view and kind.
+    name: ui-controls (${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
-    needs: check
+    timeout-minutes: 40
+    needs: node
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
-      - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |
           mkdir -p /tmp/pm/data /tmp/pm/music
@@ -684,29 +716,78 @@ jobs:
           # The node scans its config folders at start
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
       - name: every visible control does something (real browser)
-        timeout-minutes: 45
+        timeout-minutes: 25
+        env:
+          UI_SHARD: ${{ matrix.shard }}/3
+          UI_CONTROLS_REPORT: /tmp/ui-controls-${{ matrix.shard }}.json
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-controls.js ci-token http://127.0.0.1:7788
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-controls-${{ matrix.shard }}
+          path: /tmp/ui-controls-${{ matrix.shard }}.json
+          retention-days: 3
       - if: failure()
         run: tail -n 50 /tmp/pm/node.log
-  ui-screens:
-    # The other browser checks (accessibility, playback, YouTube, overlap, first run), split from
-    # ui-controls so neither runs into its time limit.
+  # The three thirds together: every control a third saw was in its own third's list too. A control
+  # that shows only after a click another third made (its node has that state, the owner's has not)
+  # would otherwise be clicked by none.
+  ui-controls-all:
+    name: ui-controls
+    needs: ui-controls
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    needs: check
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ui-controls-*
+          merge-multiple: true
+      - name: every control seen was in its owner's list
+        shell: python3 {0}
+        run: |
+          import glob, json, sys
+          runs = [json.load(open(f)) for f in sorted(glob.glob("ui-controls-*.json"))]
+          shards = {r["shard"] for r in runs}
+          if len(runs) != 3 or shards != {1, 2, 3}:
+              sys.exit(f"expected the reports of shards 1-3, got {sorted(shards)}")
+          # A control is its view and its key (its kind without the state it shows)
+          own = {r["shard"]: {(c["view"], c["key"]) for c in r["seen"]} for r in runs}
+          missed = sorted({(c["view"], c["sig"], c["owner"], r["shard"]) for r in runs for c in r["seen"]
+                           if (c["view"], c["key"]) not in own[c["owner"]]})
+          clicked = sum(len(r["clicked"]) for r in runs)
+          print(f"{clicked} controls clicked over 3 shards; {len(set().union(*own.values()))} kinds seen")
+          for view, sig, owner, by in missed:
+              print(f"NOT CLICKED {view}  ({sig}): seen by shard {by}, its shard {owner} never saw it")
+          if missed:
+              sys.exit(f"{len(missed)} controls clicked by no shard")
+  ui-screens:
+    # The other browser checks (accessibility, playback, YouTube, overlap, first run) over two
+    # runners: the overlap and accessibility audits in dark on one and light on the other
+    # (UI_SCHEMES), every other check on exactly one of them.
+    name: ui-screens (${{ matrix.part }}/2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    needs: node
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {part: 1, schemes: dark}
+          - {part: 2, schemes: light}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The node built once for the run (the `node` job), not again on every runner
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
-      - run: cargo build -p pm-node
       - name: start a node on the audio fixtures
         run: |
           mkdir -p /tmp/pm/data /tmp/pm/music
@@ -733,55 +814,75 @@ jobs:
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
       - name: sign-in choosers (imports, refusal, remembered way, sign out; desktop and phone)
+        if: matrix.part == 1
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin.js ci-token http://127.0.0.1:7788
       - name: copy the library to the homeserver (folder tree, totals, the job chip; a 20 000-file library stays quick; desktop and phone)
+        if: matrix.part == 1
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-copy-library.js ci-token http://127.0.0.1:7788
       - name: one volume, one source (the bar's slider or the volume popover, never both; every slider reads the zone's level; 1345 to 390 px)
+        if: matrix.part == 1
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-volume.js ci-token http://127.0.0.1:7788
       - name: item pages tell switching from leaving (Also on, Open in, the ⋯ menu's Open in…; 375, 820 and 1440 px)
+        if: matrix.part == 1
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-also-open.js ci-token http://127.0.0.1:7788
       - name: UX sweep follow-ups (a slow TIDAL collection, 40 px touch targets, hero rows, back or trail, tablet Now playing, file names, short notes; 390 to 1180 px)
+        if: matrix.part == 1
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-sweep-followups.js ci-token http://127.0.0.1:7788
       - name: guided setup for Qobuz and TIDAL full tracks (each state, Check, paste split, the code; desktop and phone)
+        if: matrix.part == 1
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-stream-setup.js ci-token http://127.0.0.1:7788
       - name: comments on item pages (post, replies, delete your own; desktop and phone)
+        if: matrix.part == 1
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-comments.js ci-token http://127.0.0.1:7788
       - name: artist release sections (Albums, EPs and singles, Other releases; View all paging and Back; loading, error, partial; desktop, tablet and phone)
+        if: matrix.part == 1
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-release-sections.js ci-token http://127.0.0.1:7788
       - name: People on phones and tablets (invite cards, paste and scan a key, folds, tag chips to touch; 390 and 768)
+        if: matrix.part == 2
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-people.js ci-token http://127.0.0.1:7788
       - name: tags in the top card (two scopes, pubky.app chips and taggers, overflow, unmatched; 1280, 820 and 390)
+        if: matrix.part == 2
         timeout-minutes: 8
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-tags-hero.js ci-token http://127.0.0.1:7788
       - name: collections with web links and posts show their cards in order (desktop and phone)
+        if: matrix.part == 2
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-collection-cards.js ci-token http://127.0.0.1:7788
       - name: service apps (built in or your own, limits, Advanced form, the secret kept back)
+        if: matrix.part == 2
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-service-apps.js ci-token http://127.0.0.1:7788
       - name: accessibility and 375 px (names, focus ring, keys, contrast, thumb targets)
         timeout-minutes: 15
+        env:
+          UI_SCHEMES: ${{ matrix.schemes }}
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-a11y.js ci-token http://127.0.0.1:7788
       - name: library FLACs play in the browser (also after a busy answer)
+        if: matrix.part == 2
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-playback.js ci-token http://127.0.0.1:7788
       - name: YouTube in this browser (YouTube's player API stood in; our controls drive it)
+        if: matrix.part == 2
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-youtube.js ci-token http://127.0.0.1:7788
       - name: no overlap on any screen (1440, 1024, 390 px; light and dark)
         timeout-minutes: 20
+        env:
+          UI_SCHEMES: ${{ matrix.schemes }}
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-overlap.js ci-token http://127.0.0.1:7788
       - name: setting a node up (Get started, config folders, grouping every kind of output, tokens)
+        if: matrix.part == 2
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-setup.js ci-token http://127.0.0.1:7788
       - name: first run from zero (a new node, no folders, contact or Pubky identity, until music plays)
+        if: matrix.part == 2
         timeout-minutes: 10
         run: |
           mkdir -p /tmp/fresh/home/Music /tmp/fresh/data
