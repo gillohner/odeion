@@ -40,6 +40,9 @@ pub struct Fake {
     pub refuse_pub: AtomicBool,
     /// Listings fail (more than the node reads, or too slow): the node can't catch up.
     pub list_fails: AtomicBool,
+    /// Only listings of all their posts fail (more than the node lists); one collection's own
+    /// folders still list.
+    pub whole_list_fails: AtomicBool,
     /// Files that can never be read (over the node's read cap), by path.
     pub unreadable: Mutex<HashSet<String>>,
     /// Their files (collections), by key and path.
@@ -144,7 +147,9 @@ impl PersonalHomeserver for Fake {
     async fn list(&self, key: &str, dir: &str, _expected: bool) -> Result<Vec<String>, PersonalError> {
         Self::moment().await;
         self.check(key, "list", dir)?;
-        if self.list_fails.load(Ordering::SeqCst) {
+        if self.list_fails.load(Ordering::SeqCst)
+            || (self.whole_list_fails.load(Ordering::SeqCst) && dir.ends_with("/social/v1/posts/"))
+        {
             return Err(PersonalError::Unreachable("the listing was cut".into()));
         }
         Ok(self.paths(key, dir))

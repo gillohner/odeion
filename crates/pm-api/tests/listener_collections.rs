@@ -1128,3 +1128,151 @@ async fn her_collection_plays_on_a_zone_open_to_her_and_nobody_elses_does() {
         "nothing else was queued: {q}"
     );
 }
+
+#[tokio::test]
+async fn changes_go_one_collection_at_a_time_when_all_her_posts_cant_be_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Mix", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    let phone = another_app_writes(&fake, &id, false, |c| {
+        let mut it = c["items"][0].clone();
+        it["uri"] = SONG_B.into();
+        c["items"].as_array_mut().unwrap().push(it);
+    });
+    // All of her posts are more than the node lists; this collection's own folder still lists
+    fake.whole_list_fails.store(true, Ordering::SeqCst);
+    let rename = |name: &str| Some(serde_json::json!({"name": name}));
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        rename("Mix 2"),
+    )
+    .await;
+    assert_eq!(
+        (st, v["summary"]["synced"].clone()),
+        (StatusCode::OK, serde_json::json!(true)),
+        "{v}"
+    );
+    let (path, content) = newest(&fake, ANN, &id);
+    assert!(path > phone, "{path} above her phone's {phone}");
+    assert_eq!(content["name"], "Mix 2");
+    assert_eq!(
+        item_uris(&content),
+        vec![SONG_A, SONG_B],
+        "caught up from its own folder first: {content}"
+    );
+    let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+    assert_eq!(
+        me["stale"], true,
+        "the page can say the node couldn't read everything: {me}"
+    );
+    // A change that waited (her homeserver away) still goes at the next read
+    fake.down.store(true, Ordering::SeqCst);
+    let (_, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        rename("Mix 3"),
+    )
+    .await;
+    assert_eq!(v["summary"]["synced"], false, "{v}");
+    fake.down.store(false, Ordering::SeqCst);
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+    assert_eq!(me["pending"], 0, "{me}");
+    assert_eq!(newest(&fake, ANN, &id).1["name"], "Mix 3");
+    // And a delete goes, every version
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).is_empty());
+}
+
+#[tokio::test]
+async fn a_version_the_node_cant_keep_is_never_written_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Small", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    // Another collection of hers, already on the node, brings its copy close to the 32 MiB cap
+    let key = format!("person.{ANN}.collections");
+    let shelf = || -> serde_json::Value {
+        serde_json::from_str(&s.library.lock().unwrap().get_setting(&key).unwrap().unwrap()).unwrap()
+    };
+    let bid = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() - 60_000_000_000);
+    let set_ballast = |bytes: usize| {
+        let mut sh = shelf();
+        let items = sh["items"].as_array_mut().unwrap();
+        items.retain(|k| k["id"] != bid.as_str());
+        let mut ballast = items[0].clone();
+        let path = format!("{DRAFTS}{bid}/{bid}.json");
+        let (draft, _) = newest(&fake, ANN, &id);
+        let body = fake.files.lock().unwrap()[ANN][&draft].clone();
+        fake.files
+            .lock()
+            .unwrap()
+            .get_mut(ANN)
+            .unwrap()
+            .insert(path.clone(), body);
+        ballast["id"] = bid.clone().into();
+        ballast["head"] = bid.clone().into();
+        ballast["versions"] = serde_json::json!([path]);
+        ballast["playlist"]["description"] = "x".repeat(bytes).into();
+        items.push(ballast);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&key, &sh.to_string())
+            .unwrap();
+    };
+    const CAP: usize = 32 * 1024 * 1024;
+    set_ballast(CAP - 300_000);
+    // Her phone makes this one about half a MiB: together over the cap, so not kept
+    let phone = another_app_writes(&fake, &id, false, |c| {
+        let one = c["items"][0].clone();
+        for i in 0..500 {
+            let mut it = one.clone();
+            it["uri"] = format!("https://example.com/{i}/{}", "a".repeat(990)).into();
+            c["items"].as_array_mut().unwrap().push(it);
+        }
+    });
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Renamed"})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "refused, not written over her phone's: {v}"
+    );
+    assert_eq!(
+        newest(&fake, ANN, &id).0,
+        phone,
+        "her phone's version stays the newest"
+    );
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let reads = fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.ends_with(&format!("read {phone}")))
+        .count();
+    assert_eq!(reads, 1, "not downloaded again on every read");
+    // Even with the copy over the cap, a delete goes, every version
+    set_ballast(CAP + 100_000);
+    let (st, v) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT, "{v}");
+    assert!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).is_empty());
+}

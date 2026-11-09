@@ -880,7 +880,8 @@ fn listener_key(c: &crate::accounts::Caller) -> Result<String, ApiError> {
     }
 }
 
-/// `GET /v1/me/homeserver`: `{connected, lost, pending}` for a listener.
+/// `GET /v1/me/homeserver`: `{connected, lost, pending, stale}` for a listener (`stale`: the node's
+/// last read of their collections couldn't list all of their posts).
 pub(crate) async fn status(
     axum::extract::State(s): axum::extract::State<Arc<NodeState>>,
     axum::Extension(c): axum::Extension<crate::accounts::Caller>,
@@ -892,7 +893,7 @@ pub(crate) async fn status(
         connected,
         lost: connected && copy.lost,
         pending: copy.pending.len() + crate::personal_collections::pending(&s, &key),
-        stale: false,
+        stale: connected && crate::personal_collections::behind(&s, &key),
     }))
 }
 
