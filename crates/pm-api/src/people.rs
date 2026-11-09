@@ -97,6 +97,44 @@ fn new_reports() -> String {
         .collect()
 }
 
+/// Reconcile a staged restore with this node's current music memberships. A backup never grants
+/// an old report identity: continuing members (paused ones too) keep the current value, including
+/// legacy `None`; regained access gets a new name. With no readable current roster, every music
+/// member gets a new name. Call while holding the roster lock, or with the node stopped.
+pub(crate) fn restore_report_memberships(
+    staged: &pm_library::Library,
+    here: Option<&str>,
+) -> Result<(), pm_library::LibraryError> {
+    let Some(value) = staged.get_setting(SETTING)? else {
+        return Ok(());
+    };
+    let mut restored: Roster =
+        serde_json::from_str(&value).map_err(|_| pm_library::LibraryError::Corrupt {
+            column: "people",
+            value: "the backup's people list cannot be read".into(),
+        })?;
+    let current = here
+        .and_then(|v| serde_json::from_str::<Roster>(v).ok())
+        .unwrap_or_default();
+    let before = restored.clone();
+    for person in &mut restored.people {
+        person.reports = if person.access.music() {
+            current
+                .people
+                .iter()
+                .find(|p| p.key == person.key && p.access.music())
+                .map(|p| p.reports.clone())
+                .unwrap_or_else(|| Some(new_reports()))
+        } else {
+            None
+        };
+    }
+    if restored != before {
+        staged.set_setting(SETTING, &serde_json::to_string(&restored).expect("serializes"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Roster {
     #[serde(default)]
@@ -611,7 +649,15 @@ pub(crate) async fn change(
 pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<String>) -> ApiResult<Roster> {
     let key = valid_key(&key)?;
     reconcile(&s).await?;
-    let ((), r) = update(&s, |r| {
+    let (removing, removed_key) = (s.clone(), key.clone());
+    let r = tokio::task::spawn_blocking(move || -> Result<Roster, ApiError> {
+        // The worker owns this lock through the last inbox delete, even if the HTTP request is
+        // cancelled. Re-adding someone cannot race an all-memberships cleanup left running.
+        let s = removing;
+        let key = removed_key;
+        let _one = s.roster.blocking_lock();
+        let mut r = load(&s);
+        let before = r.clone();
         let Some(i) = r.people.iter().position(|p| p.key == key) else {
             return Err(ApiError::not_found("no such person"));
         };
@@ -625,15 +671,21 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
         } else {
             r.people.remove(i);
         }
-        // Their problem reports go now, while no one can give them music again: done after,
-        // a report sent in between under a new membership would go too. If the inbox can't be
-        // written now, they go at the node's next housekeeping (feedback.rs)
+        // Save the revocation before deleting from the separate inbox. A failed roster write
+        // leaves access and reports intact. The library lock is released before waiting on SQLite
+        // in the inbox: a send can hold that inbox while rechecking its sign-in in the library.
+        if r != before {
+            store(&s, &r)?;
+        }
+        // No one can give them music again until this finishes. If the inbox can't be written
+        // now, their old membership's reports go at the next housekeeping (feedback.rs).
         if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), &key) {
             tracing::warn!("feedback: a removed listener's reports not removed now: {e}");
         }
-        Ok(())
+        Ok(r)
     })
-    .await?;
+    .await
+    .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "could not remove this person"))??;
     crate::accounts::forget_person(&s, &key)?;
     Ok(Json(r))
 }
