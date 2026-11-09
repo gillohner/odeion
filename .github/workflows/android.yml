@@ -61,7 +61,9 @@ on:
         default: true
 concurrency:
   group: android-${{ github.event_name }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: true
+  # A pull request's newer push replaces its older run; on main each push's run finishes (the next
+  # one checks only the files it changed)
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
 env:

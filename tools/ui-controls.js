@@ -8,14 +8,18 @@
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
 //   node tools/ui-controls.js <api token> [http://127.0.0.1:7788]
 // UI_SHARD=k/n clicks only the controls whose view and kind hash to k (CI splits the audit over
-// runners this way; every control falls in exactly one of the n shards).
+// runners this way; every control falls in exactly one of the n shards). UI_CONTROLS_REPORT=<file>
+// writes the controls this run saw and clicked, so CI can check that each one a shard saw was also
+// in its own shard's list (a control that appears only after another shard's click would otherwise
+// be clicked by none).
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [SHARD, SHARDS] = (process.env.UI_SHARD || '1/1').split('/').map(Number);
 if (!(SHARDS >= 1 && SHARD >= 1 && SHARD <= SHARDS)) { console.log(`UI_SHARD must be k/n with 1 <= k <= n, not ${process.env.UI_SHARD}`); process.exit(2); }
 // FNV-1a of the view and the control's kind
-const mine = (view, sig) => { let h = 2166136261; for (const ch of `${view}\n${sig}`) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; } return h % SHARDS === SHARD - 1; };
+const owner = (view, sig) => { let h = 2166136261; for (const ch of `${view}\n${sig}`) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; } return (h % SHARDS) + 1; };
+const mine = (view, sig) => owner(view, sig) === SHARD;
 const SKIP = /compact|comfortable|share on pubky|add my|bring my|make private|delete|remove|trash|sign (in|out)|sign in again|log ?out|forget|clear|reset|rescan|scan|sync|import|mirror|upload|download|backup|restore|tag my whole|identify|accept|write ids|write into|fixgo|tag every|copy library|bring files|restart|stop|change token|add folder|create|save|apply|disconnect|connect|pubky ring|copy/i;
 const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Authorization: 'Bearer ' + TOKEN } })).json();
 
@@ -38,6 +42,11 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   const pageErrors = [];
   p.on('pageerror', (e) => pageErrors.push(`${p.url()}: ${e.message}`));
   let requests = 0; p.on('request', (r) => { if (r.url().includes('/v1/') || r.url().includes('/mb/')) requests++; });
+  // Requests still open, and when the last one ended: a click's answer is handled (and may throw)
+  // when it arrives, so the audit moves on only once nothing is in flight
+  let inflight = 0; let lastDone = 0;
+  p.on('request', () => { inflight++; });
+  for (const ev of ['requestfinished', 'requestfailed']) p.on(ev, () => { inflight = Math.max(0, inflight - 1); lastDone = Date.now(); });
   const settle = async () => { await p.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {}); await sleep(400); };
   // Visible, enabled buttons, one per kind: class, data attributes and wording (digits dropped).
   const kinds = () => p.$$eval('button', (els) => {
@@ -56,12 +65,15 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
     return out;
   });
   const dead = []; const stuck = []; let stuckBudget = 60000; let clicked = 0; let skipped = 0;
+  const seen = []; const clickedSigs = [];
   for (const view of views) {
     await p.goto(BASE + view); await settle();
     const list = await kinds();
     for (const k of list) {
+      const lasting = SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig);
+      if (!lasting) seen.push({ view, sig: k.sig, owner: owner(view, k.sig) });
       if (!mine(view, k.sig)) continue;
-      if (SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig)) { skipped++; continue; }
+      if (lasting) { skipped++; continue; }
       await p.goto(BASE + view); await settle();
       const now = await kinds(); const target = now.find((x) => x.sig === k.sig);
       if (!target) continue;
@@ -70,15 +82,17 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       const el = await p.$(`button[data-audit-idx="${target.i}"]`);
       if (!el) continue;
       try { await el.click({ timeout: 3000 }); } catch { try { await el.click({ force: true, timeout: 2000 }); } catch { continue; } }
-      clicked++;
+      clicked++; clickedSigs.push({ view, sig: k.sig });
       // Moving the view (scrolling to a section) counts; moving focus alone does not: people do not see it.
-      // Up to 900 ms for the click to show, looked at every 100 ms: most controls show it at once, and a
-      // control that changes nothing is still watched for the whole 900 ms before it counts as dead.
+      // Up to 900 ms for the click to show, looked at every 100 ms. The audit moves on sooner only once
+      // the click showed, no request is open and the last one ended 150 ms ago (its answer handled, any
+      // error thrown); a control that changes nothing is still watched for the whole 900 ms.
       const clickedAt = Date.now(); let did = false;
       for (;;) {
         const after = await p.evaluate(() => ({ mut: window.__mut || 0, opened: window.__opened || 0, dialog: !!document.querySelector('dialog[open]'), scrolled: Math.abs((document.querySelector('#main') || document.scrollingElement).scrollTop + scrollY - window.__scroll) > 4 })).catch(() => ({ mut: 1 }));
         did = after.mut > 0 || after.opened > 0 || after.dialog || after.scrolled || p.url() !== before.url || requests > before.req;
-        if (did || Date.now() - clickedAt >= 900) break;
+        const quiet = inflight === 0 && Date.now() - lastDone >= 150;
+        if ((did && quiet) || Date.now() - clickedAt >= 900) break;
         await sleep(100);
       }
       if (!did) dead.push(`${view}  "${k.words}"  (${k.sig})`);
@@ -93,6 +107,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
     }
   }
   await browser.close();
+  if (process.env.UI_CONTROLS_REPORT) require('node:fs').writeFileSync(process.env.UI_CONTROLS_REPORT, JSON.stringify({ shard: SHARD, shards: SHARDS, seen, clicked: clickedSigs }));
   console.log(`${views.length} views, ${clicked} controls clicked, ${skipped} skipped (lasting effects)${SHARDS > 1 ? `, shard ${SHARD} of ${SHARDS}` : ''}`);
   for (const d of dead) console.log('DEAD ' + d);
   for (const d of stuck) console.log('STUCK ' + d);

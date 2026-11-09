@@ -295,13 +295,11 @@ def main():
             failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, "
                             f"but it sent to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')})")
     # The unused held client, back in the foreground, looks the homeserver up for the first time now.
-    # pkarr's CacheFirst lookup keeps the first signed packet a relay or DHT node answers with, which
-    # can be an older record of the homeserver's own: runs 42397028826 and 42379674214 decided on a
-    # record naming `localhost` as the ICANN endpoint while the newest names homeserver.riginode.xyz
-    # (logcat: "ICANN fallback to localhost" for this key). That is pkarr's choice of record, not the
-    # app's routing. So the request must go where the record it decided on says (its ICANN endpoint
-    # when the direct one is unreachable, never the raw key), and to homeserver.riginode.xyz whenever
-    # that record is the newest; a decision made on an older record is logged with both records.
+    # Runs 42397028826 and 42379674214 sent it to `localhost` (logcat: "ICANN fallback to localhost"
+    # for this key) while the newest record names homeserver.riginode.xyz. The failure says which
+    # signed record the client decided on (`decided_on`, read from its cache right after the request)
+    # next to the newest, so an older record pkarr kept tells itself apart from a routing bug. It
+    # fails either way: a sign-in sent to localhost fails for the user just the same.
     clean = ret.get("held_clean") or {}
     info = clean.get("info") or {}
     decided = clean.get("decided_on") or {}
@@ -310,15 +308,13 @@ def main():
     older = (isinstance(decided.get("timestamp_us"), int) and isinstance(newest.get("timestamp_us"), int)
              and decided["timestamp_us"] < newest["timestamp_us"])
     if found_icann and direct.get("reachable") is False and host != "homeserver.riginode.xyz":
+        why = ""
         if older and host and host != PUBLIC_KEY and host in (decided.get("targets") or []):
-            log(f"note: the unused held client decided on an older signed record of the homeserver's ({decided}) "
-                f"than the newest ({newest}) and sent to that record's ICANN endpoint {host!r}")
-            print(f"::warning::ring probe: pkarr kept an older signed record of the public homeserver "
-                  f"(ICANN endpoint {host}); the app routed as that record says")
-        else:
-            failures.append(f"public homeserver, unused held client back in the foreground: direct endpoint unreachable "
-                            f"and an ICANN endpoint exists, but it sent to {info.get('sent_to')!r} "
-                            f"({info.get('outcome') or info.get('error')}); decided on {decided}, newest {newest}")
+            why = (" (it decided on an older signed record of the homeserver's, which names that host: pkarr kept "
+                   "the first answer it got over the newest)")
+        failures.append(f"public homeserver, unused held client back in the foreground: direct endpoint unreachable "
+                        f"and an ICANN endpoint exists, but it sent to {info.get('sent_to')!r} "
+                        f"({info.get('outcome') or info.get('error')}); decided on {decided}, newest {newest}{why}")
     if not found_icann:
         failures.append("public homeserver: no lookup (relays, DHT, default) found its ICANN endpoint "
                         f"(relays: {steps.get('resolve_relays', {}).get('lookup')}, "
