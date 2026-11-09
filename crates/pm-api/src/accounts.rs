@@ -1034,7 +1034,19 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
+    // So do their homeserver grant and the node's copy of their bookmarks (personal.rs): a key to
+    // their homeserver and their data must not stay for when that identity is added again
+    let personal = {
+        let lib = s.library.lock().expect("library poisoned");
+        lib.settings_with_prefix(&format!("{PERSON_PREFIX}{key}."))
+            .and_then(|all| {
+                all.into_iter()
+                    .try_for_each(|(k, _)| lib.delete_setting(&k).map(drop))
+            })
+    };
+    crate::personal::forget(s, key);
     signed_out?;
+    personal?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
     crate::tidal::pending()
@@ -1060,7 +1072,6 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
             }
         }
     }
-    crate::personal::forget(s, key);
     let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
     crate::tidal::forget_streams_of(&on_node);
