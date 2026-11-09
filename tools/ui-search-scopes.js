@@ -174,6 +174,27 @@ const noOwnerReads = run => {
       });
     }
     for (const width of [360, 412]) {
+      for (const manual of [false, true]) {
+        await check(`${width}: Tab to a restored service ${manual ? 'then scroll away' : 'keeps focus visible'} during source discovery`, async () => {
+          const run = await fixture(browser, width, 'owner', true), { page, context } = run;
+          try {
+            await fx.go(page, '/search?q=Review&in=spotify');
+            await settled(page, 'spotify');
+            await page.focus('#search');
+            for (let tabs = 0; tabs < 12 && await page.evaluate(() => document.activeElement.dataset.scopeIn !== 'spotify'); tabs++) await page.keyboard.press('Tab');
+            assert.equal(await page.evaluate(() => document.activeElement.dataset.scopeIn), 'spotify', 'Tab reaches the restored service');
+            await selected(page, 'spotify');
+            await page.evaluate(() => { window.keptScopeButton = document.activeElement; });
+            if (manual) await scrollLeftByHand(page);
+            run.sources.release();
+            await page.locator('[data-scope-in="deezer"]').waitFor();
+            assert.equal(await page.evaluate(() => document.activeElement === window.keptScopeButton && window.keptScopeButton.isConnected), true, 'discovery retains the actual focused button');
+            if (manual) assert.equal(await page.locator('#scopechips').evaluate(row => row.scrollLeft), 0, 'discovery respects scrolling away from the focused service');
+            else await selected(page, 'spotify');
+            noOwnerReads(run);
+          } finally { run.tags.release(); run.sources.release(); await context.close(); }
+        });
+      }
       await check(`${width}: Tab into the source row keeps the focused choice visible when sources arrive`, async () => {
         const run = await fixture(browser, width, 'owner', true), { page, context } = run;
         try {

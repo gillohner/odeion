@@ -5004,6 +5004,9 @@
   const renderSearchScopes = (chips, run) => {
     const scope = run.scope;
     const scrollLeft = chips.scrollLeft;
+    const focused = document.activeElement;
+    const rowBefore = chips.getBoundingClientRect(), focusBefore = focused.parentElement === chips && focused.getBoundingClientRect();
+    const focusWasVisible = focusBefore && focusBefore.left >= Math.max(0, rowBefore.left) && focusBefore.right <= Math.min(innerWidth, rowBefore.right);
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
     const scopes = new Map([['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])]);
     // A listener does not read the owner's /sources. A requested service uses its public name,
@@ -5016,7 +5019,7 @@
     }
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };
     const buttons = new Map($$('[data-scope-in]', chips).map((b) => [b.dataset.scopeIn, b]));
-    const ordered = []; const focused = document.activeElement;
+    const ordered = [];
     for (const [id, name] of scopes) {
       const b = buttons.get(id) || document.createElement('button');
       b.type = 'button'; b.className = `chip scope ${scope === id ? 'on' : ''}`; b.dataset.scopeIn = id;
@@ -5044,13 +5047,18 @@
       chips.dataset.revealBound = '1';
       // Source discovery may insert choices before the selected one. Reveal it again only if
       // the person has not started moving through this row themselves.
-      for (const event of ['pointerdown', 'touchstart', 'wheel', 'keydown', 'focusin']) chips.addEventListener(event, () => { chips.dataset.manuallyMoved = '1'; }, { passive: true });
+      for (const event of ['pointerdown', 'touchstart', 'wheel', 'keydown', 'focusin']) chips.addEventListener(event, () => {
+        chips.dataset.manuallyMoved = '1';
+        if (event === 'focusin') delete chips.dataset.focusScrolled;
+        else if (event !== 'keydown') chips.dataset.focusScrolled = '1';
+      }, { passive: true });
     }
     const selected = $$('[data-scope-in]', chips).find((b) => b.dataset.scopeIn === scope);
-    // Counts can widen the chip after its label first appears. Keep it in view until the person
-    // takes over the row, without moving a chip that is already visible or scrolling the page.
-    if (selected && !chips.dataset.manuallyMoved) {
-      const row = chips.getBoundingClientRect(), button = selected.getBoundingClientRect();
+    // Discovery and counts can move a visible focused button. Keep it visible, but leave a
+    // deliberate scroll away intact. Otherwise reveal the selection until the person takes over.
+    const reveal = focusWasVisible && !chips.dataset.focusScrolled && focused.parentElement === chips ? focused : !chips.dataset.manuallyMoved ? selected : null;
+    if (reveal) {
+      const row = chips.getBoundingClientRect(), button = reveal.getBoundingClientRect();
       const padding = getComputedStyle(chips);
       if (button.left < row.left + parseFloat(padding.paddingLeft) || button.right > row.right - parseFloat(padding.paddingRight)) chips.scrollLeft += (button.left + button.right - row.left - row.right) / 2;
     }
