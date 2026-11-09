@@ -183,7 +183,9 @@ def run(h):
         settles(b2, (0, y1, W, y2), over=0.2)
         time.sleep(1.5)
         i4 = qi()
-        swipe(W * 7 // 8, H * 30 // 100, W // 8, H * 30 // 100, settle=3)
+        # (from inside the cover: on a short screen it is narrower than the screen, and a swipe that
+        # starts beside it is not the cover's)
+        swipe(W * 66 // 100, H * 30 // 100, W * 6 // 100, H * 30 // 100, settle=3)
         n2 = raw()
         i5 = until("the next song after a swipe on the cover", lambda: (qi(),) if qi() != i4 else None, timeout=15)[0]
         log(f"swipe left on the cover: queue {i4} -> {i5}")
