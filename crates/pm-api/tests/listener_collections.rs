@@ -876,3 +876,255 @@ async fn her_homeserver_cant_make_the_node_keep_more_than_a_thousand() {
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert_eq!(lib_shelf()["items"].as_array().unwrap().len(), 1_000);
 }
+
+#[tokio::test]
+async fn a_change_waits_when_her_homeserver_cant_be_read_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Mix", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    let phone = another_app_writes(&fake, &id, false, |c| c["name"] = "From her phone".into());
+    // Her folder can't be listed whole: the node can't see her phone's version, so it writes nothing
+    fake.list_fails.store(true, Ordering::SeqCst);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Mix 2"})),
+    )
+    .await;
+    assert_eq!(
+        (st, v["summary"]["synced"].clone()),
+        (StatusCode::OK, serde_json::json!(false)),
+        "{v}"
+    );
+    assert_eq!(
+        newest(&fake, ANN, &id).0,
+        phone,
+        "nothing written over a version it couldn't see"
+    );
+    // Listed again: the change goes, above her phone's version
+    fake.list_fails.store(false, Ordering::SeqCst);
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(names(&v), vec!["Mix 2"], "{v}");
+    assert!(newest(&fake, ANN, &id).0 > phone);
+
+    // A delete the same way: it waits, then every version goes, her phone's too
+    let (_, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Going", "uris": [SONG_A], "public": true})),
+    )
+    .await;
+    let gone = v["summary"]["id"].as_str().unwrap().to_string();
+    another_app_writes(&fake, &gone, true, |_| {});
+    fake.list_fails.store(true, Ordering::SeqCst);
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{gone}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(
+        !fake.paths(ANN, &format!("{DRAFTS}{gone}/")).is_empty(),
+        "nothing removed blind"
+    );
+    fake.list_fails.store(false, Ordering::SeqCst);
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(names(&v), vec!["Mix 2"], "{v}");
+    assert!(
+        fake.paths(ANN, &format!("{DRAFTS}{gone}/")).is_empty()
+            && fake.paths(ANN, &format!("{PUBLISHED}{gone}/")).is_empty(),
+        "every version went"
+    );
+}
+
+#[tokio::test]
+async fn her_other_apps_version_the_node_cant_hold_is_still_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Shared", "uris": [SONG_A], "public": true})),
+    )
+    .await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    // Another app writes a version the node can't hold (a name far over its limit); the node
+    // looks at it once and leaves it aside
+    let other = another_app_writes(&fake, &id, false, |c| c["name"] = "x".repeat(300).into());
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    // Then that app publishes it: the node still follows that version
+    let edit = other.trim_start_matches(&format!("{DRAFTS}{id}/")).to_string();
+    let body = fake.files.lock().unwrap()[ANN][&other].clone();
+    fake.files
+        .lock()
+        .unwrap()
+        .get_mut(ANN)
+        .unwrap()
+        .insert(format!("{PUBLISHED}{id}/{edit}"), body);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}/visibility"),
+        Some(serde_json::json!({"public": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(fake.paths(ANN, PUBLISHED).is_empty(), "its public copy went too");
+    assert!(
+        newest(&fake, ANN, &id).0 > other,
+        "the node's version is above it"
+    );
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(
+        fake.paths(ANN, DRAFTS).is_empty(),
+        "every version went, the one it couldn't hold too"
+    );
+}
+
+#[tokio::test]
+async fn a_version_that_can_never_be_read_doesnt_hold_up_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Here", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    let (draft, content) = newest(&fake, ANN, &id);
+    let post = fake.json(ANN, &draft);
+    // Two new ones from another app: the newer can never be read (too big), the older can
+    let put = |name: &str, at: i64| -> String {
+        let cid = pm_pubky::v1::id_of(at);
+        let mut c = content.clone();
+        c["name"] = name.into();
+        let mut p = post.clone();
+        p["content"] = c.to_string().into();
+        let path = format!("{DRAFTS}{cid}/{cid}.json");
+        fake.files
+            .lock()
+            .unwrap()
+            .get_mut(ANN)
+            .unwrap()
+            .insert(path.clone(), serde_json::to_vec(&p).unwrap());
+        path
+    };
+    let now = pm_pubky::ids::now_micros();
+    let big = put("Too big", now + 9_000_000);
+    put("Older", now + 5_000_000);
+    fake.unreadable.lock().unwrap().insert(big.clone());
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(
+        names(&v),
+        vec!["Here", "Older"],
+        "the one after it still came in: {v}"
+    );
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let tries = fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.ends_with(&format!("read {big}")))
+        .count();
+    assert_eq!(tries, 1, "and it isn't tried again on every read");
+}
+
+#[tokio::test]
+async fn a_collection_bigger_than_the_node_can_read_back_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    // About 1.1 MB of links: more than the node could ever read back from her homeserver
+    let uris: Vec<String> = (0..1_100)
+        .map(|i| format!("https://example.com/{i}/{}", "a".repeat(990)))
+        .collect();
+    let (st, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Huge", "uris": uris})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert!(fake.paths(ANN, DRAFTS).is_empty(), "nothing written");
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(v, serde_json::json!([]), "nor kept: {v}");
+}
+
+#[tokio::test]
+async fn her_collection_plays_on_a_zone_open_to_her_and_nobody_elses_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, bo, track) = node_with_zone(dir.path()).await;
+    for k in [ANN, BO] {
+        fake.connected.lock().unwrap().insert(k.to_string());
+    }
+    let app = router(s.clone());
+    let (st, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Hers", "uris": [SONG_A, RELEASE_A, "https://example.com/notes"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "The owner's", "uris": [SONG_A]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let oid = v["summary"]["id"].as_str().unwrap().to_string();
+    let play = async |who: &str, id: &str| {
+        call(
+            &app,
+            who,
+            "POST",
+            &format!("/v1/collections/{id}/play"),
+            Some(serde_json::json!({"zone": "null-output", "replace": true})),
+        )
+        .await
+    };
+    // Hers: the song and her album's song queue, in order; the web page doesn't play
+    let (st, v) = play(&ann, &id).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["queued"], 2, "{v}");
+    assert_eq!(
+        v["missing"],
+        serde_json::json!(["https://example.com/notes"]),
+        "{v}"
+    );
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/null-output/queue", None).await;
+    let queued: Vec<String> = q
+        .as_array()
+        .unwrap_or_else(|| panic!("a queue: {q}"))
+        .iter()
+        .map(|i| i["uri"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(queued, vec![format!("track:{track}"), format!("track:{track}")]);
+    // With that zone there: Bo can't play hers, and she can't play the owner's
+    let (st, v) = play(&bo, &id).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    let (st, v) = play(&ann, &oid).await;
+    assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/null-output/queue", None).await;
+    assert_eq!(
+        q.as_array().map(Vec::len),
+        Some(2),
+        "nothing else was queued: {q}"
+    );
+}

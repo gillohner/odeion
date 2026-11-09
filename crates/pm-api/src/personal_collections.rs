@@ -8,7 +8,9 @@
 //! - **The node's copy** (`person.<z32>.collections`) answers at once. A change made while their
 //!   homeserver is away waits there and is written at their next read or write: the newest state
 //!   of the collection, not every step. A newer version from their homeserver (written on
-//!   another device) replaces the copy's, and one deleted there goes here too.
+//!   another device) replaces the copy's, and one deleted there goes here too. A change that
+//!   waited is written whole as the node has it, its sharing included: the newest change wins,
+//!   so a rename made here while away unpublishes a share made since on another device.
 //! - **Routes:** `/v1/collections` and `/v1/playlists` answer each caller with their own: the
 //!   owner [`crate::playlists`], a listener this module. What only the owner has stays refused
 //!   (accounts.rs): node-only songs, play orders and pins, imports, Play from.
@@ -39,6 +41,25 @@ const READS_PER_REQUEST: usize = 16;
 /// beyond it aren't taken, and making one more here is refused. Their listings are bounded too
 /// (`personal::PERSONAL_LIST`), so their homeserver can't make the node hold more.
 const MAX_COLLECTIONS: usize = 1_000;
+
+/// At most this big, one of their collections as written (its social post): the node can't read
+/// back a bigger one ([`pm_pubky::homeserver::OBJECT_MAX`]).
+const MAX_COLLECTION_BYTES: usize = pm_pubky::homeserver::OBJECT_MAX;
+
+/// At most this big, the node's whole copy of one listener's collections, as stored.
+const MAX_SHELF_BYTES: usize = 32 * 1024 * 1024;
+
+fn bytes_of<T: Serialize>(x: &T) -> usize {
+    serde_json::to_vec(x).map_or(usize::MAX, |v| v.len())
+}
+
+/// How big `p` is as the social post the node writes for it.
+fn post_size(p: &Playlist) -> usize {
+    match v1::to_v1(&MusicContent::Playlist(p.clone())) {
+        Ok(v1::V1Post::Social(post)) => bytes_of(&post),
+        _ => 0,
+    }
+}
 
 /// The node's copy of one listener's collections.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -87,15 +108,14 @@ fn load(s: &NodeState, key: &str) -> Shelf {
 }
 
 fn save(s: &NodeState, key: &str, sh: &Shelf) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
     // Removed (People › Remove) while this request waited on their homeserver: nothing of
-    // theirs comes back
-    if !crate::people::may_use_music(s, key) {
+    // theirs comes back. Checked under the same hold as the write, so a removal can't land
+    // between the two
+    if !crate::people::listed_for_music(&lib, key.trim_start_matches("pubky")) {
         return Ok(());
     }
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(&shelf_key(key), &serde_json::to_string(sh).expect("serializes"))?;
+    lib.set_setting(&shelf_key(key), &serde_json::to_string(sh).expect("serializes"))?;
     Ok(())
 }
 
@@ -238,7 +258,9 @@ async fn refresh(
     // other posts)
     sh.items
         .retain(|k| k.pending || written.contains(&k.id) || private.contains_key(&k.id));
-    sh.other.retain(|p| private.values().any(|h| &h.path == p));
+    let heads: std::collections::HashSet<&str> = private.values().map(|h| h.path.as_str()).collect();
+    sh.other.retain(|p| heads.contains(p.as_str()));
+    let other: std::collections::HashSet<String> = sh.other.iter().cloned().collect();
 
     let mut wanted: Vec<(&String, &v1::Head)> = Vec::new();
     // New ones are downloaded only while the node keeps fewer than MAX_COLLECTIONS
@@ -249,8 +271,16 @@ async fn refresh(
         match sh.items.iter_mut().find(|k| &k.id == id) {
             // Still waiting (their homeserver stopped answering), or just written: the node's is newer
             Some(k) if k.pending || written.contains(&k.id) => {}
-            // Its newest version is no collection the node can hold (another app's): not read again
-            Some(_) if sh.other.contains(&head.path) => {}
+            // Its newest version is no collection the node can hold (another app's, or too big):
+            // not read again, but still followed, so a delete or "private again" reaches it and
+            // the node's next version goes above it
+            Some(k) if other.contains(&head.path) => {
+                k.versions = versions;
+                k.public = public.contains_key(id);
+                if head.edit_id.as_bytes() > k.head.as_bytes() {
+                    k.head = head.edit_id.clone();
+                }
+            }
             Some(k) => {
                 k.versions = versions;
                 k.public = public.contains_key(id);
@@ -258,7 +288,7 @@ async fn refresh(
                     wanted.push((id, head));
                 }
             }
-            None if sh.other.contains(&head.path) => {}
+            None if other.contains(&head.path) => {}
             None if room == 0 => {
                 tracing::warn!(%key, %id, "a listener has more than {MAX_COLLECTIONS} collections; this one isn't kept on the node");
             }
@@ -277,11 +307,19 @@ async fn refresh(
             .then_with(|| b.1.edit_id.cmp(&a.1.edit_id))
     });
     let mut stale = false;
+    let mut size = bytes_of(&*sh);
     for (id, head) in wanted.into_iter().take(READS_PER_REQUEST) {
         let bytes = match b.read(key, &head.path).await {
             Ok(Some(b)) => b,
             // Gone a moment ago
             Ok(None) => continue,
+            // It will never be read (too big, or refused for good): left aside like another app's
+            // post, so the ones after it still come in
+            Err(PersonalError::Rejected(m)) => {
+                tracing::warn!(%key, %id, "a listener's collection version can't be read; left aside: {m}");
+                sh.other.push(head.path.clone());
+                continue;
+            }
             Err(e) => {
                 stale = read_outcome(s, key, e)?;
                 break;
@@ -302,6 +340,14 @@ async fn refresh(
             pending: false,
             deleted: false,
         };
+        // The node's copy stays within MAX_SHELF_BYTES: what would go past it isn't kept
+        let was = sh.items.iter().find(|x| x.id == *id).map_or(0, bytes_of);
+        let grown = size.saturating_sub(was).saturating_add(bytes_of(&k));
+        if grown > MAX_SHELF_BYTES {
+            tracing::warn!(%key, %id, "a listener's collections are over {MAX_SHELF_BYTES} bytes on the node; this one isn't kept");
+            continue;
+        }
+        size = grown;
         match sh.items.iter_mut().find(|x| x.id == *id) {
             Some(x) => *x = k,
             None => sh.items.push(k),
@@ -400,7 +446,7 @@ async fn change(
     // What their homeserver has now (another device's newer version, this one first), so the
     // change starts from it, and a delete or "private again" reaches every version there
     let before = serde_json::to_string(&sh).expect("serializes");
-    refresh(s, b.as_ref(), key, &mut sh, id).await?;
+    let stale = refresh(s, b.as_ref(), key, &mut sh, id).await?;
     if serde_json::to_string(&sh).expect("serializes") != before {
         save(s, key, &sh)?;
     }
@@ -426,7 +472,43 @@ async fn change(
         let lib = s.library.lock().expect("library poisoned");
         edit(&lib, at.map(|i| sh.items[i].clone()))?
     };
+    // Within what the node can read back, and what it keeps for one listener
+    if !k.deleted && post_size(&k.playlist) > MAX_COLLECTION_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "This collection would be over {} MiB: make it smaller, or split it",
+                MAX_COLLECTION_BYTES >> 20
+            ),
+        ));
+    }
+    let was = at.map_or(0, |i| bytes_of(&sh.items[i]));
+    if bytes_of(&sh).saturating_sub(was).saturating_add(bytes_of(&k)) > MAX_SHELF_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Your collections on this node would be over {} MiB: delete or shorten some first",
+                MAX_SHELF_BYTES >> 20
+            ),
+        ));
+    }
     k.pending = true;
+    // Their homeserver didn't let the node catch up (it didn't answer, or its listing was more
+    // than the node reads): a change of one they have waits, rather than going out over a newer
+    // version it couldn't see. It goes once the node has read what is there.
+    if stale && id.is_some() {
+        tracing::info!(%key, id = %k.id, "a listener's homeserver couldn't be read first; the change waits");
+        match at {
+            Some(i) => sh.items[i] = k.clone(),
+            None => sh.items.push(k.clone()),
+        }
+        save(s, key, &sh)?;
+        if k.deleted {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+        let lib = s.library.lock().expect("library poisoned");
+        return Ok(Json(playlists::detail_of(&lib, &k.id, &k.playlist, k.public, false)).into_response());
+    }
     let before = k.versions.clone();
     let push = push(b.as_ref(), key, &mut k).await;
     // Whether part of it reached their homeserver before it failed

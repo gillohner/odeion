@@ -2220,17 +2220,33 @@
     startWait('play', state.zone, st.name, true);
     try { await api('POST', '/radio/play', { zone: state.zone, station: st }); startSent(); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
+  // A listener's own collection as what this library has of it, in its order: a song as itself, a
+  // library album as its songs (as the node's Play on a zone queues it); `out` counts the items
+  // with nothing here. Where songs play from is the owner's: no play-from for a listener.
+  const listenerSongs = async (d) => {
+    const albums = new Map();
+    const ids = [...new Set((d.entries || []).filter((e) => e && e.kind === 'album' && e.album && e.album.id != null).map((e) => e.album.id))];
+    await Promise.all(ids.map(async (aid) => { try { albums.set(aid, (await api('GET', `/library/albums/${aid}/tracks`)).tracks || []); } catch { albums.set(aid, []); } }));
+    albums.forEach((ts) => rememberTracks(ts));
+    rememberTracks(d.tracks);
+    const song = (t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms });
+    let out = 0;
+    const songs = d.playlist.items.flatMap((it, k) => {
+      const t = d.tracks[k]; const e = d.entries && d.entries[k];
+      const here = t ? [t] : e && e.kind === 'album' && e.album ? albums.get(e.album.id) || [] : [];
+      if (!here.length) out += 1;
+      return here.map(song);
+    });
+    return { songs, out };
+  };
+
   const playPlaylist = async (id) => {
     try {
       if (isBrowser() && isListener()) {
-        // A listener's own collection plays what this library has of it (where songs play from is
-        // the owner's: no play-from here)
         const d = await api('GET', `/playlists/${encodeURIComponent(id)}`);
-        rememberTracks(d.tracks);
-        const songs = d.tracks.filter(Boolean).map((t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms }));
+        const { songs, out } = await listenerSongs(d);
         if (!songs.length) return toast('None of its songs is in this library', 'error');
-        const out = d.playlist.items.length - songs.length;
-        if (out > 0) toast(`${countOf(out, 'items')} not in this library; left out of this browser's queue`);
+        if (out > 0) toast(`${countOf(out, 'items')} not in this library; left out of ${hereName().toLowerCase()}'s queue`);
         await playSongs(songs);
         return;
       }
@@ -6114,6 +6130,10 @@
             const kind = d.entries && d.entries[k] && d.entries[k].kind;
             if (kind === 'link' && mbSearchWords(it.uri)) return { no: k + 1, card: true, search: true, title: mbSearchWords(it.uri), page: it.uri };
             if (kind === 'link' || kind === 'post') return { no: k + 1, card: true, title: (() => { try { return new URL(it.uri).hostname.replace(/^www\./, ''); } catch { return it.uri; } })(), page: it.uri };
+            // A listener's library album shows as itself, in its place; Play and Shuffle play its
+            // songs there (listenerSongs), a row's own play skips it as it does any card
+            const ea = mine && kind === 'album' && d.entries[k].album;
+            if (ea) return { no: k + 1, card: true, title: ea.album_artist ? `${ea.title} · ${ea.album_artist}` : ea.title, page: it.uri };
             const t = d.tracks[k]; const r = pf && pf.items[k];
             const base = r ? { plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), pinLost: !!r.pin_unavailable, unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services'), sources: r.sources, connect: r.connect } : {};
             const lib = r && r.plays_from && r.plays_from.service === 'library';
@@ -6161,7 +6181,14 @@
           // In this browser only a library song or a stream plays: a row with neither (a Spotify
           // Connect pick, a song still being found) is left out and said, as the list's Play does,
           // never played alone in place of the rest (review of #258); a zone (Shuffle on a speaker) keeps them, as before
-          const playAll = (shuffle, anchorEl) => {
+          const playAll = async (shuffle, anchorEl) => {
+            // A listener's: what the library has of each item, albums as their songs, on any zone
+            if (mine) {
+              const { songs: list, out } = await listenerSongs(d);
+              if (!list.length) return toast('None of its songs is in this library', 'error');
+              if (out) toast(`${countOf(out, 'items')} not in this library; left out of the queue`);
+              return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
+            }
             const all = [...playable(songs), ...localSongs]; const list = isBrowser() ? all.filter((t) => t.track_id != null || t.uri) : all; const out = all.length - list.length;
             if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
             if (out) toast(`${countOf(out, 'songs')} left out of ${hereName().toLowerCase()}'s queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);

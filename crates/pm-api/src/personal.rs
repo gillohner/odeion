@@ -150,6 +150,10 @@ fn classify_grant(e: &HomeserverError) -> PersonalError {
 /// approve again, and the change keeps waiting.
 fn classify_call(e: &HomeserverError) -> PersonalError {
     let msg = e.to_string();
+    // A file over the node's read cap stays over it: never readable here, so never waited on
+    if matches!(e, HomeserverError::TooLarge { .. }) {
+        return PersonalError::Rejected(msg);
+    }
     match status_of(e) {
         Some(400 | 413 | 415 | 422) => PersonalError::Rejected(msg),
         Some(408 | 429) => PersonalError::Unreachable(msg),
@@ -1354,5 +1358,17 @@ mod tests {
             !covers_every_folder(&["/priv/social/v1/bookmarks/:rw".to_string()]),
             "bookmarks only (#261's grant): approve again"
         );
+    }
+
+    #[test]
+    fn a_file_over_the_read_cap_is_never_waited_on() {
+        assert!(matches!(
+            classify_call(&HomeserverError::TooLarge { max: 1 }),
+            PersonalError::Rejected(_)
+        ));
+        assert!(matches!(
+            classify_call(&HomeserverError::Timeout),
+            PersonalError::Unreachable(_)
+        ));
     }
 }

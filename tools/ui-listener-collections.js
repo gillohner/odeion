@@ -19,6 +19,7 @@ const OUT = process.argv[4] || null;
 const ANN = 'o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy';
 const SONG = 'https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69';
 const ID = '0034A0Z1Y2X3W';
+const RELEASE = 'https://musicbrainz.org/release/833f00e1-781f-4edd-90e4-e52712618862';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120" height="120"><rect width="4" height="4" fill="#fff"/><rect width="2" height="2" fill="#000"/></svg>';
 
@@ -36,12 +37,14 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       let listener = true; let hs = { connected: false, lost: false, pending: 0, stale: false }; let polls = 0;
       let mine = []; const asked = [];
       const summary = (c) => ({ id: c.id, name: c.name, items: c.items.length, created_at: 1, updated_at: 2, visibility: c.public ? 'public' : 'private', synced: !hs.pending, covers: [], layout: 'list', tracks_only: true });
-      const detail = (c) => ({ summary: summary(c), playlist: { name: c.name, items: c.items.map((uri) => ({ uri, added_at: 1 })), created_at: 1, updated_at: 2 }, tracks: c.items.map(() => null), entries: c.items.map((uri, index) => ({ index, uri, kind: 'track', added_at: 1 })), local_tracks: [] });
+      const detail = (c) => ({ summary: summary(c), playlist: { name: c.name, items: c.items.map((uri) => ({ uri, added_at: 1 })), created_at: 1, updated_at: 2 }, tracks: c.items.map(() => null), entries: c.items.map((uri, index) => (uri === RELEASE ? { index, uri, kind: 'album', added_at: 1, album: { id: 7, title: 'Lists', album_artist: 'Tester' } } : { index, uri, kind: 'track', added_at: 1 })), local_tracks: [] });
       const refused = (r) => r.fulfill({ status: 409, json: { error: 'Connect your homeserver first', needs_connect: true, lost: hs.lost } });
       await page.route(/\/v1\/me(\?.*)?$/, (r) => (listener ? r.fulfill({ json: { role: 'listener', key: ANN, zones: null } }) : r.fallback()));
       await page.route(/\/v1\/me\/homeserver(\?.*)?$/, (r) => r.fulfill({ json: hs }));
       await page.route(/\/v1\/me\/homeserver\/connect$/, (r) => { polls = 0; return r.fulfill({ json: { id: 'c1', url: 'pubkyauth:///?caps=/priv/social/v1/posts/:rw', qr_svg: QR } }); });
       await page.route(/\/v1\/me\/homeserver\/connect\/poll\?/, (r) => { polls += 1; if (polls < 2) return r.fulfill({ json: { state: 'pending' } }); hs = { connected: true, lost: false, pending: 0, stale: false }; return r.fulfill({ json: { state: 'ok' } }); });
+      // The library has that album: one song
+      await page.route(/\/v1\/library\/albums\/7\/tracks$/, (r) => r.fulfill({ json: { tracks: [{ id: 70, title: 'Album song', artists: [{ id: 1, name: 'Tester' }], album: { id: 7, title: 'Lists' }, duration_ms: 1000 }] } }));
       await page.route(/\/v1\/(playlists|collections|smart)(\/.*)?(\?.*)?$/, (r) => {
         if (!listener) return r.fallback();
         const req = r.request(); const m = req.method(); const u = new URL(req.url()).pathname.replace(/^\/v1/, '');
@@ -84,6 +87,12 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       await page.locator('[data-plplay]').first().click(); await sleep(600);
       assert.ok(!asked.some((x) => /play-from/.test(x)), `no play-from: ${asked.join(', ')}`);
       assert.match(await page.locator('#toast').innerText(), /None of its songs is in this library/);
+      // With a library album in it: its songs play here, as on a zone
+      mine[0].items.push(RELEASE);
+      const albumSong = page.waitForRequest((q) => /\/v1\/library\/history$/.test(q.url()) && /"track_id":70\b/.test(q.postData() || ''), { timeout: 5000 });
+      await page.locator('[data-plplay]').first().click();
+      await albumSong;
+      mine[0].items.pop();
 
       // ---- her collection's page: hers to change and share, nothing of the owner's ----
       await page.locator('[data-pl] .name').first().click();

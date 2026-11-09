@@ -38,6 +38,10 @@ pub struct Fake {
     pub rejects: Mutex<HashSet<String>>,
     /// Writes under /pub/ refused (a grant that lost its public folder).
     pub refuse_pub: AtomicBool,
+    /// Listings fail (more than the node reads, or too slow): the node can't catch up.
+    pub list_fails: AtomicBool,
+    /// Files that can never be read (over the node's read cap), by path.
+    pub unreadable: Mutex<HashSet<String>>,
     /// Their files (collections), by key and path.
     pub files: Mutex<HashMap<String, BTreeMap<String, Vec<u8>>>>,
 }
@@ -140,11 +144,17 @@ impl PersonalHomeserver for Fake {
     async fn list(&self, key: &str, dir: &str, _expected: bool) -> Result<Vec<String>, PersonalError> {
         Self::moment().await;
         self.check(key, "list", dir)?;
+        if self.list_fails.load(Ordering::SeqCst) {
+            return Err(PersonalError::Unreachable("the listing was cut".into()));
+        }
         Ok(self.paths(key, dir))
     }
     async fn read(&self, key: &str, path: &str) -> Result<Option<Vec<u8>>, PersonalError> {
         Self::moment().await;
         self.check(key, "read", path)?;
+        if self.unreadable.lock().unwrap().contains(path) {
+            return Err(PersonalError::Rejected("over the node's read cap".into()));
+        }
         Ok(self
             .files
             .lock()
@@ -207,13 +217,87 @@ pub async fn call(
 
 /// A node with an owner token, two listeners (Ann and Bo) and a fake homeserver for them.
 pub fn node(dir: &std::path::Path) -> (Arc<NodeState>, Arc<Fake>, String, String) {
+    node_on(dir, OutputRegistry::new(), vec![])
+}
+
+/// The library album of [`SONG_A`] in [`node_with_zone`].
+pub const RELEASE_A: &str = "https://musicbrainz.org/release/833f00e1-781f-4edd-90e4-e52712618862";
+
+/// The same node with a zone (`null-output`) and one library song, [`SONG_A`], on its album
+/// [`RELEASE_A`] (tagged, scanned). The song's track id too.
+pub async fn node_with_zone(dir: &std::path::Path) -> (Arc<NodeState>, Arc<Fake>, String, String, i64) {
+    let music = dir.join("music");
+    std::fs::create_dir_all(&music).unwrap();
+    let wav = music.join("song.wav");
+    let mut w = hound::WavWriter::create(
+        &wav,
+        hound::WavSpec {
+            channels: 2,
+            sample_rate: 44_100,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        },
+    )
+    .unwrap();
+    for i in 0..2205 {
+        w.write_sample((i % 50) as i16).unwrap();
+        w.write_sample(-((i % 50) as i16)).unwrap();
+    }
+    w.finalize().unwrap();
+    let mut tag = id3::Tag::new();
+    use id3::TagLike;
+    tag.set_title("Song");
+    tag.set_artist("Tester");
+    tag.set_album("Lists");
+    for (d, v) in [
+        ("MusicBrainz Track Id", SONG_A.rsplit('/').next().unwrap()),
+        ("MusicBrainz Album Id", RELEASE_A.rsplit('/').next().unwrap()),
+    ] {
+        tag.add_frame(id3::frame::ExtendedText {
+            description: d.into(),
+            value: v.into(),
+        });
+    }
+    tag.write_to_path(&wav, id3::Version::Id3v24).unwrap();
+    let outputs = OutputRegistry::new();
+    outputs.register(Arc::new(pm_zones::outputs::NullOutput::new()));
+    let (s, fake, ann, bo) = node_on(dir, outputs, vec![music]);
+    s.zones_for_all_outputs();
+    let app = pm_api::router(s.clone());
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/library/scan",
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    for _ in 0..500 {
+        if !s.is_scanning() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let (_, found) = call(&app, OWNER, "GET", "/v1/library/tracks?limit=10", None).await;
+    let track = found["tracks"][0]["id"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("scanned: {found}"));
+    (s, fake, ann, bo, track)
+}
+
+fn node_on(
+    dir: &std::path::Path,
+    outputs: OutputRegistry,
+    scan_folders: Vec<std::path::PathBuf>,
+) -> (Arc<NodeState>, Arc<Fake>, String, String) {
     let db = dir.join("lib.sqlite");
     let s = NodeState::new(
         NodeSettings {
             name: "t".into(),
             version: "0".into(),
             db_path: db.clone(),
-            scan_folders: vec![],
+            scan_folders,
             art_dir: dir.join("art"),
             mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
@@ -231,7 +315,7 @@ pub fn node(dir: &std::path::Path) -> (Arc<NodeState>, Arc<Fake>, String, String
             jamendo: Default::default(),
         },
         Library::open(&db).unwrap(),
-        OutputRegistry::new(),
+        outputs,
     );
     let roster = serde_json::json!({"people": [
         {"key": ANN, "access": "music", "music_enabled": true, "added_at": 0},
