@@ -46,6 +46,9 @@ pub struct Status {
     pub refused: Option<String>,
     /// The node took the output for its own zone: paused here, [`Status::error`] says so.
     pub taken: bool,
+    /// The stream broke mid-song: paused where it broke, [`Status::error`] says why (the page's
+    /// mid-song retry opens it there again).
+    pub broke: bool,
     /// The format and path of what plays, as a zone reports them.
     pub now_playing: Option<Playing>,
     pub output: OutputId,
@@ -122,9 +125,11 @@ struct Page {
     loading: bool,
     /// Pause pressed while a load opened: the song starts paused.
     hold: bool,
-    /// The current song's stream broke (a decode error, at this position): the zone's next
-    /// TrackEnded is no end.
-    breaking: Option<u64>,
+    /// The current song's stream broke (a decode error): the zone's next TrackEnded is no end.
+    breaking: bool,
+    /// Where the current song was last heard to be (the zone may already name the next one when
+    /// the page learns the stream broke).
+    heard_at: u64,
     /// It broke here: paused at this position (a play opens it again there; the page's retry).
     broke_at: Option<u64>,
 }
@@ -143,20 +148,23 @@ impl From<bool> for Heard {
 }
 
 impl Page {
-    /// The zone said `ev` (the current song at `position_ms`).
-    fn on(&mut self, ev: &ZoneEvent, position_ms: u64) -> Heard {
+    /// What the zone says plays now (its id and position): where the current song is.
+    fn note(&mut self, playing: Option<(u64, u64)>) {
+        if let Some((id, at)) = playing {
+            if Some(id) == self.current {
+                self.heard_at = at;
+            }
+        }
+    }
+
+    /// The zone said `ev`.
+    fn on(&mut self, ev: &ZoneEvent) -> Heard {
         match ev {
-            // The stream broke (the zone ends the song on a decode error): not its end. Paused
-            // where it broke, the zone stopped (not on to the song handed ahead); the page's
-            // mid-song retry opens it there again
-            ZoneEvent::TrackEnded { item, .. }
-                if Some(item.id) == self.current && self.breaking.is_some() =>
-            {
-                self.broke_at = self.breaking.take();
-                Heard {
-                    tell: true,
-                    stop: true,
-                }
+            // The stream broke (the zone ends the song on a decode error, and would go on to the
+            // song handed ahead): not its end. The TrackEnded that follows the error is swallowed
+            ZoneEvent::TrackEnded { item, .. } if Some(item.id) == self.current && self.breaking => {
+                self.breaking = false;
+                true.into()
             }
             ZoneEvent::TrackEnded { item, .. } if Some(item.id) == self.current => {
                 self.ended += 1;
@@ -175,7 +183,7 @@ impl Page {
             ZoneEvent::TrackStarted { item, .. } if Some(item.id) == self.current => {
                 self.error = None;
                 self.refused = None;
-                self.breaking = None;
+                self.breaking = false;
                 true.into()
             }
             // The song handed ahead didn't open: something the app can't play is the page's to
@@ -194,12 +202,19 @@ impl Page {
                 false.into()
             }
             ZoneEvent::Error { message } => {
-                if self.taken_at.is_none() {
-                    self.error = Some(message.clone());
-                    // (the zone says "decode: …" and then ends the song)
-                    if message.starts_with("decode:") {
-                        self.breaking = Some(position_ms);
-                    }
+                if self.taken_at.is_some() {
+                    return true.into();
+                }
+                self.error = Some(message.clone());
+                // The stream broke (the zone says "decode: …" and then ends the song): paused
+                // where it was last heard, at once, and the zone stops there
+                if message.starts_with("decode:") && self.current.is_some() && self.broke_at.is_none() {
+                    self.breaking = true;
+                    self.broke_at = Some(self.heard_at);
+                    return Heard {
+                        tell: true,
+                        stop: true,
+                    };
                 }
                 true.into()
             }
@@ -227,6 +242,7 @@ impl Page {
             error: self.error.clone(),
             refused: self.refused.clone(),
             taken: self.taken_at.is_some(),
+            broke: self.broke_at.is_some(),
             now_playing: mine.map(|np| Playing {
                 source_format: np.source_format,
                 output_format: np.output_format,
@@ -365,7 +381,7 @@ impl AppPlayer {
                 p.want_ahead = None;
                 p.taken_at = None;
                 p.broke_at = None;
-                p.breaking = None;
+                p.breaking = false;
                 if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                     z.stop();
                     z.clear();
@@ -382,7 +398,8 @@ impl AppPlayer {
         p.refused = None;
         p.taken_at = None;
         p.broke_at = None;
-        p.breaking = None;
+        p.breaking = false;
+        p.heard_at = at_ms;
         zone.clear();
         let ahead = p.want_ahead.clone();
         let mut items = vec![QueueItem::new(url)];
@@ -429,6 +446,8 @@ impl AppPlayer {
     /// Carry on: from the pause; after the node took the output, or once the zone stopped, from
     /// where it was (again through [`Self::load`], so call it from a blocking thread too).
     pub fn play(&self) -> Result<(), LoadError> {
+        // Play after a pause pressed while a song opened: it starts playing after all
+        self.page().hold = false;
         let (url, at, ahead, taken) = {
             let p = self.page();
             let at = p.taken_at.or(p.broke_at);
@@ -498,7 +517,7 @@ impl AppPlayer {
             p.want_ahead = None;
             p.ahead = None;
             p.broke_at = None;
-            p.breaking = None;
+            p.breaking = false;
             p.taken_at = None;
             p.url = None;
             p.current = None;
@@ -586,14 +605,18 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             Ok(ev) => {
                                 let Some(inner) = player.upgrade() else { return };
                                 let p = AppPlayer { inner };
-                                let at = state.borrow().now_playing.as_ref().map_or(0, |np| np.position_ms);
-                                let heard = p.page().on(&ev, at);
+                                let playing = state.borrow().now_playing.as_ref().map(|np| (np.item.id, np.position_ms));
+                                let mut pg = p.page();
+                                pg.note(playing);
+                                let heard = pg.on(&ev);
+                                // (under the page's lock: no load comes in between)
                                 if heard.stop {
                                     let z = p.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone();
                                     if let Some(z) = z {
                                         z.stop();
                                     }
                                 }
+                                drop(pg);
                                 Some((p, heard.tell))
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
@@ -603,7 +626,12 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             if ch.is_err() {
                                 return;
                             }
-                            player.upgrade().map(|inner| (AppPlayer { inner }, false))
+                            player.upgrade().map(|inner| {
+                                let p = AppPlayer { inner };
+                                let playing = state.borrow().now_playing.as_ref().map(|np| (np.item.id, np.position_ms));
+                                p.page().note(playing);
+                                (p, false)
+                            })
                         }
                         // A position that moves with nothing else changing still reaches the page
                         _ = tick => player.upgrade().map(|inner| (AppPlayer { inner }, false)),
@@ -1007,8 +1035,48 @@ mod tests {
 
     impl Page {
         fn on_test(&mut self, ev: &ZoneEvent) -> bool {
-            self.on(ev, 0).tell
+            self.on(ev).tell
         }
+    }
+
+    /// The break as the page learns it when the zone is already on the next song: paused where
+    /// the song was last heard, at once, and the end that follows is swallowed.
+    #[test]
+    fn a_break_is_paused_where_the_song_was_last_heard() {
+        let item = |id| QueueItem {
+            id,
+            ..QueueItem::new("u")
+        };
+        let mut pg = Page {
+            url: Some("a".into()),
+            current: Some(1),
+            ahead: Some(("b".into(), 2)),
+            ..Page::default()
+        };
+        pg.note(Some((1, 61_000)));
+        // The zone has already published the next song (at 0) when the error is handled
+        pg.note(Some((2, 0)));
+        let h = pg.on(&ZoneEvent::Error {
+            message: "decode: the stream broke off".into(),
+        });
+        assert!(h.tell && h.stop, "{h:?}");
+        assert_eq!(pg.broke_at, Some(61_000));
+        let out = NullOutput::new();
+        let st = pg.status(None, &out);
+        assert_eq!(
+            (st.transport, st.position_ms, st.broke),
+            (Transport::Paused, 61_000, true)
+        );
+        let h = pg.on(&ZoneEvent::TrackEnded {
+            item: item(1),
+            verify_ok: None,
+        });
+        assert!(!h.stop);
+        assert_eq!(
+            (pg.ended, pg.advanced, pg.url.as_deref()),
+            (0, 0, Some("a")),
+            "no end, not on to b"
+        );
     }
 
     /// A stream that breaks for good mid-song (the link gone): no end, the zone doesn't go on to
