@@ -31,13 +31,13 @@ const ownZone = { id: 'pixel-8-net', name: 'Pixel 8 · Speaker or headphones', o
 
 // The app's side, in the page: invoke() as Tauri's, a player that plays like the app's (each song
 // `len` ms, faster than life), its status sent as the app sends it
-const FAKE_APP = ({ nativePlayer, len }) => {
+const FAKE_APP = ({ nativePlayer, len, slow }) => {
   window.pmDesktop = { version: '0.2.2', platform: 'android', ...(nativePlayer ? { nativePlayer: true } : {}), outputs: ['net:192.168.1.20:7790/cpal:Speaker or headphones'], output: 'net:192.168.1.20:7790/cpal:Speaker or headphones' };
   const calls = window.__calls = []; window.__audioPlays = [];
   const play0 = HTMLMediaElement.prototype.play;
   HTMLMediaElement.prototype.play = function () { window.__audioPlays.push(this.src); return play0.call(this); };
   const fmt = { kind: 'pcm', rate_hz: 44100, bits: 16, channels: 2 };
-  const s = window.__app = { url: null, transport: 'stopped', position_ms: 0, duration_ms: null, ended: 0, error: null, refused: null, taken: false, now_playing: null, output: 'cpal:Speaker or headphones', device: null, ahead: null };
+  const s = window.__app = { url: null, transport: 'stopped', position_ms: 0, duration_ms: null, ended: 0, advanced: 0, error: null, refused: null, taken: false, now_playing: null, output: 'cpal:Speaker or headphones', device: null, ahead: null };
   const send = () => { const { ahead, ...st } = s; window.dispatchEvent(new CustomEvent('pmdesktop:native', { detail: JSON.parse(JSON.stringify(st)) })); };
   window.__send = send;
   const path = { stages: [{ name: 'decode', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }, { name: 'output', in_format: fmt, out_format: fmt, quality: 'bit_perfect', note: null }] };
@@ -47,14 +47,16 @@ const FAKE_APP = ({ nativePlayer, len }) => {
     s.position_ms += 100;
     if (s.position_ms >= len) {
       s.ended += 1;
-      if (s.ahead) { const a = s.ahead; s.ahead = null; s.url = a; s.position_ms = 0; } else { s.transport = 'stopped'; s.position_ms = 0; s.now_playing = null; }
+      if (s.ahead) { const a = s.ahead; s.ahead = null; s.url = a; s.position_ms = 0; s.advanced += 1; } else { s.transport = 'stopped'; s.position_ms = 0; s.now_playing = null; }
     }
     send();
   }, 100);
   const invoke = async (cmd, args) => {
     calls.push([cmd, args || {}]);
     if (cmd === 'native_load') {
-      if (/refuse/.test(args.url)) throw "can't decode it here: unsupported codec";
+      if (/refuse/.test(args.url)) throw { refused: true, message: "the app can't play this itself: unsupported codec" };
+      if (/busy/.test(args.url)) throw { refused: false, message: 'HTTP 503' };
+      if (slow) await new Promise((r) => setTimeout(r, slow));
       s.ahead = args.ahead || null; start(args.url, args.atMs || 0); return null;
     }
     if (cmd === 'native_ahead') { s.ahead = args.url || null; return null; }
@@ -154,6 +156,43 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
     await page.keyboard.press('Escape');
     check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
     await run.context.close();
+
+    // Review round 1: a busy node isn't a refusal; a restored position is where it opens; a pause
+    // while it opens holds; repeat one goes on without opening the song again
+    {
+      const r = await open(browser, w, { nativePlayer: true, len: 1500, slow: 400 });
+      const p = r.page;
+      await p.evaluate(() => window.pmPlayer.play([{ uri: 'http://odeion-fixture.test/v1/sources/x/stream/busy', title: 'Busy' }]));
+      await sleep(1200);
+      const ap = await p.evaluate(() => window.__audioPlays);
+      const nn = await p.evaluate(() => JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').some((x) => x.nativeNo));
+      check(ap.length === 0 && !nn, `${at}: a busy node is no refusal: still the app's, nothing marked (${JSON.stringify(ap)})`);
+      // Pause pressed while the song opens
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(80);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(900);
+      const pauses = (await calls(p, 'native_pause')).length;
+      check(pauses >= 1 && (await now(p)).paused, `${at}: a pause while it opens holds (${pauses} pauses)`);
+      // Repeat one: the app goes on with the same song; the page doesn't open it again
+      await p.evaluate(() => localStorage.setItem('pm.repeat', 'one'));
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1));
+      await sleep(700);
+      const loads0 = (await calls(p, 'native_load')).length;
+      const ah = (await calls(p, 'native_load')).pop();
+      check(ah && ah[1].ahead === fileUrl(1), `${at}: repeat one hands the same song ahead at once (${JSON.stringify(ah && ah[1].ahead)})`);
+      await sleep(2200);
+      check((await calls(p, 'native_load')).length === loads0 && !(await now(p)).paused, `${at}: and goes on with it without opening it again`);
+      check(!r.state.errors.length, `${at}: review checks: no page errors (${r.state.errors.join(' | ')})`);
+      await r.context.close();
+      // A restored song opens where it was
+      const r2 = await fx.create(browser, w, { tracks });
+      await r2.context.addInitScript(FAKE_APP, { nativePlayer: true, len: 60000 });
+      await r2.context.addInitScript((u) => { localStorage.setItem('pm.browserQueue', JSON.stringify([{ id: 1, uri: 'track:1', track_id: 1, title: 'Song 1' }])); localStorage.setItem('pm.browserAt', JSON.stringify({ index: 0, pos: 42 })); }, null);
+      await fx.go(r2.page, '/'); await r2.page.waitForFunction(() => !!window.pmPlayer); await sleep(700);
+      await r2.page.evaluate(() => document.querySelector('#toggle').click()); await sleep(600);
+      const l = (await calls(r2.page, 'native_load')).pop();
+      check(l && l[1].atMs === 42000, `${at}: a restored song opens where it was (${JSON.stringify(l && l[1].atMs)})`);
+      await r2.context.close();
+    }
 
     // A plain browser, and the app without the player: <audio>, nothing called
     for (const [what, app] of [['a plain browser', null], ['the app without its player', { nativePlayer: false, len: 1500 }]]) {

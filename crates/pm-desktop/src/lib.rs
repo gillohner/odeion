@@ -219,7 +219,7 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     state.store(Some(s.clone()));
     // The node's page may use the app's own player (its origin: the node's, or the tunnel's)
     #[cfg(any(desktop, target_os = "android"))]
-    native::allow_page(app, &s.origin().unwrap_or_default());
+    native::allow_page(app, &s.origin().unwrap_or_default(), native::Page::Node);
     show_node(app, &s)?;
     // Keep this device's downloads in step with the current node (read again at every round)
     if let Some(o) = &state.offline {
@@ -281,7 +281,7 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
     }
     let page = url::Url::parse(&o.page(&node_id).await?).map_err(|e| e.to_string())?;
     #[cfg(any(desktop, target_os = "android"))]
-    native::allow_page(&app, &page.origin().ascii_serialization());
+    native::allow_page(&app, &page.origin().ascii_serialization(), native::Page::Offline);
     app.get_webview_window(MAIN)
         .ok_or("the window is gone")?
         .navigate(page)

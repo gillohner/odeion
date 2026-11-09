@@ -175,8 +175,10 @@ impl Read for RangeReader {
             }
             self.body = None;
             if !self.ranges || tries >= RETRIES {
+                // Not UnexpectedEof: the decoder takes that for the song's end, and the zone would
+                // go on to the next song as if this one had finished
                 return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
+                    std::io::ErrorKind::ConnectionAborted,
                     "the stream broke off",
                 ));
             }
@@ -247,6 +249,10 @@ pub(crate) mod tests {
         pub no_ranges: bool,
         /// Break off the first body after this many bytes.
         pub break_at: Option<usize>,
+        /// ... and every body after it before its first byte.
+        pub break_always: bool,
+        /// Answer each request this late (a far node).
+        pub delay_ms: u64,
     }
 
     /// A one-file HTTP server on loopback: `GET` with `Range: bytes=a-` answers 206 from `a`.
@@ -284,6 +290,7 @@ pub(crate) mod tests {
                                 .and_then(|x| x.trim_end_matches('-').parse::<usize>().ok());
                         }
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(mode.delay_ms));
                     let mut w = s;
                     let len = body.len();
                     let (head, part) = match from {
@@ -301,10 +308,13 @@ pub(crate) mod tests {
                         ),
                     };
                     let _ = w.write_all(head.as_bytes());
+                    let first = broke.fetch_add(1, Ordering::SeqCst) == 0;
                     match mode.break_at {
-                        Some(n) if broke.fetch_add(1, Ordering::SeqCst) == 0 => {
+                        Some(n) if first => {
                             let _ = w.write_all(&part[..n.min(part.len())]);
                         }
+                        // Every later body breaks off before its first byte
+                        Some(_) if mode.break_always => {}
                         _ => {
                             let _ = w.write_all(part);
                         }
@@ -378,6 +388,21 @@ pub(crate) mod tests {
         r.read_to_end(&mut got).unwrap();
         assert_eq!(got, want);
         assert_eq!(*asked.lock().unwrap(), vec!["bytes=0-", "bytes=70000-"]);
+    }
+
+    /// A link that keeps breaking: an error the decoder doesn't take for the song's end.
+    #[test]
+    fn a_body_that_keeps_breaking_off_is_an_error_not_an_end() {
+        let mode = Mode {
+            break_at: Some(1000),
+            break_always: true,
+            ..Mode::default()
+        };
+        let (url, _) = serve(bytes(10_000), "audio/wav", mode);
+        let mut r = RangeReader::open(&client(), &url).unwrap().quick();
+        let mut got = Vec::new();
+        let e = r.read_to_end(&mut got).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::ConnectionAborted, "{e}");
     }
 
     #[test]

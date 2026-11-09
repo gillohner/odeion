@@ -11,5 +11,5 @@ pub mod engine;
 pub mod range;
 pub mod source;
 
-pub use engine::{AppPlayer, Notify, Playing, Status, TAKEN_BY_NODE};
+pub use engine::{AppPlayer, LoadError, Notify, Playing, Status, TAKEN_BY_NODE};
 pub use pm_zones::{OutputId, Transport};

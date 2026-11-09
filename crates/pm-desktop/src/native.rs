@@ -8,7 +8,7 @@
 //! `pmdesktop:native` event. The player takes the phone's output through the endpoint's owner, so
 //! it and the node's zone on the same output never play at once.
 
-use pm_app_player::{AppPlayer, Status};
+use pm_app_player::{AppPlayer, LoadError, Status};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
@@ -26,8 +26,33 @@ pub const PAGE_COMMANDS: &[&str] = &[
 ];
 
 static PLAYER: OnceLock<AppPlayer> = OnceLock::new();
-/// The origins the page may play from (the node's, through the tunnel too; the offline page's).
-static ORIGINS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The origins the page may play from: the node's in use (its address, or the tunnel's) and the
+/// offline page's. Each is replaced when it changes, so an old node's page plays nothing here.
+static ORIGINS: Mutex<Origins> = Mutex::new(Origins {
+    node: None,
+    offline: None,
+});
+
+struct Origins {
+    node: Option<String>,
+    offline: Option<String>,
+}
+
+impl Origins {
+    fn has(&self, origin: &str) -> bool {
+        [&self.node, &self.offline]
+            .into_iter()
+            .flatten()
+            .any(|o| o == origin)
+    }
+}
+
+/// Which page [`allow_page`] is for.
+#[derive(Clone, Copy)]
+pub enum Page {
+    Node,
+    Offline,
+}
 /// Whether the player said it plays (PlayerService keeps the app awake for it).
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
@@ -132,19 +157,25 @@ pub fn page_changed() {
     }
 }
 
-/// The page at `origin` may use the player (the node's page, or the offline page): its URLs may
-/// play, and its origin gets a capability for [`PAGE_COMMANDS`] only.
+/// The page at `origin` may use the player (the node's page, or the offline page, each in place
+/// of the one before): its own URLs may play, and its origin gets a capability for
+/// [`PAGE_COMMANDS`] only (Tauri keeps a capability once added; the commands check the origin).
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub fn allow_page(app: &AppHandle, origin: &str) {
+pub fn allow_page(app: &AppHandle, origin: &str, page: Page) {
     if !on() || origin.is_empty() {
         return;
     }
     {
         let mut o = ORIGINS.lock().unwrap_or_else(|e| e.into_inner());
-        if o.iter().any(|x| x == origin) {
+        let had = o.has(origin);
+        let slot = match page {
+            Page::Node => &mut o.node,
+            Page::Offline => &mut o.offline,
+        };
+        *slot = Some(origin.to_string());
+        if had {
             return;
         }
-        o.push(origin.to_string());
     }
     let mut cap = tauri::ipc::CapabilityBuilder::new(format!("page-player-{origin}"))
         .remote(format!("{origin}/*"))
@@ -157,51 +188,72 @@ pub fn allow_page(app: &AppHandle, origin: &str) {
     }
 }
 
-/// Whether `url` is on an origin the page may play from.
-fn may_play(url: &str, origins: &[String]) -> bool {
-    url::Url::parse(url).is_ok_and(|u| {
-        matches!(u.scheme(), "http" | "https")
-            && origins.iter().any(|o| *o == u.origin().ascii_serialization())
-    })
+/// Whether the page at `page` may play `url`: the URL is on the page's own origin, and that is
+/// the node's in use or the offline page's.
+fn may_play(url: &str, page: &str, origins: &Origins) -> bool {
+    let origin = |s: &str| {
+        url::Url::parse(s)
+            .ok()
+            .map(|u| (u.scheme().to_string(), u.origin().ascii_serialization()))
+    };
+    match (origin(url), origin(page)) {
+        (Some((scheme, u)), Some((_, p))) => {
+            matches!(scheme.as_str(), "http" | "https") && u == p && origins.has(&u)
+        }
+        _ => false,
+    }
 }
 
 fn player() -> Result<&'static AppPlayer, String> {
     PLAYER.get().ok_or_else(|| "the app's player is off".into())
 }
 
-fn checked(url: &str) -> Result<(), String> {
-    let origins = ORIGINS.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if may_play(url, &origins) {
+fn checked(url: &str, page: &tauri::Webview) -> Result<(), String> {
+    let page = page.url().map(|u| u.to_string()).unwrap_or_default();
+    if may_play(url, &page, &ORIGINS.lock().unwrap_or_else(|e| e.into_inner())) {
         Ok(())
     } else {
         Err("only the node's own streams play here".into())
     }
 }
 
-/// Play `url` from `at_ms`, `ahead` after it. `Err`: it can't play here (the page plays it).
+fn failed(message: impl Into<String>) -> LoadError {
+    LoadError {
+        refused: false,
+        message: message.into(),
+    }
+}
+
+/// Play `url` from `at_ms`, `ahead` after it. `Err` with `refused`: something the app can't play
+/// itself (the page plays it); else why it didn't start (the page tries again).
 #[tauri::command]
-pub async fn native_load(url: String, at_ms: Option<u64>, ahead: Option<String>) -> Result<(), String> {
-    checked(&url)?;
-    let ahead = ahead.filter(|a| checked(a).is_ok());
-    let p = player()?.clone();
+pub async fn native_load(
+    webview: tauri::Webview,
+    url: String,
+    at_ms: Option<u64>,
+    ahead: Option<String>,
+) -> Result<(), LoadError> {
+    checked(&url, &webview).map_err(failed)?;
+    let ahead = ahead.filter(|a| checked(a, &webview).is_ok());
+    let p = player().map_err(failed)?.clone();
     tauri::async_runtime::spawn_blocking(move || p.load(&url, at_ms.unwrap_or(0), ahead.as_deref()))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| failed(e.to_string()))?
 }
 
 #[tauri::command]
-pub fn native_ahead(url: Option<String>) -> Result<(), String> {
-    let url = url.filter(|u| checked(u).is_ok());
+pub fn native_ahead(webview: tauri::Webview, url: Option<String>) -> Result<(), String> {
+    let url = url.filter(|u| checked(u, &webview).is_ok());
     player()?.ahead(url.as_deref());
     Ok(())
 }
 
 #[tauri::command]
-pub async fn native_play() -> Result<(), String> {
-    let p = player()?.clone();
+pub async fn native_play() -> Result<(), LoadError> {
+    let p = player().map_err(failed)?.clone();
     tauri::async_runtime::spawn_blocking(move || p.play())
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|e| failed(e.to_string()))?
 }
 
 #[tauri::command]
@@ -233,20 +285,49 @@ mod tests {
 
     #[test]
     fn only_the_pages_own_origins_play() {
-        let o = vec![
-            "http://192.168.1.5:7788".to_string(),
-            "http://127.0.0.1:41234".to_string(),
-        ];
+        let o = Origins {
+            node: Some("http://192.168.1.5:7788".into()),
+            offline: Some("http://127.0.0.1:41234".into()),
+        };
+        let node = "http://192.168.1.5:7788/album/lib-7";
+        let offline = "http://127.0.0.1:41234/downloads";
         assert!(may_play(
             "http://192.168.1.5:7788/v1/library/tracks/3/file?token=x",
+            node,
             &o
         ));
-        assert!(may_play("http://127.0.0.1:41234/v1/library/tracks/3/file", &o));
-        assert!(!may_play("http://192.168.1.5:7789/v1/library/tracks/3/file", &o));
-        assert!(!may_play("http://other.example/x.flac", &o));
-        assert!(!may_play("file:///data/x.flac", &o));
-        assert!(!may_play("/v1/library/tracks/3/file", &o), "absolute URLs only");
-        assert!(!may_play("http://192.168.1.5:7788/x", &[]));
+        assert!(may_play(
+            "http://127.0.0.1:41234/v1/library/tracks/3/file",
+            offline,
+            &o
+        ));
+        // Another origin than the page's own, even an allowed one
+        assert!(!may_play(
+            "http://127.0.0.1:41234/v1/library/tracks/3/file",
+            node,
+            &o
+        ));
+        assert!(!may_play(
+            "http://192.168.1.5:7789/v1/library/tracks/3/file",
+            node,
+            &o
+        ));
+        assert!(!may_play(
+            "http://other.example/x.flac",
+            "http://other.example/",
+            &o
+        ));
+        assert!(!may_play("file:///data/x.flac", node, &o));
+        assert!(
+            !may_play("/v1/library/tracks/3/file", node, &o),
+            "absolute URLs only"
+        );
+        // An old node's page, after another node was connected
+        let now = Origins {
+            node: Some("http://192.168.1.9:7788".into()),
+            offline: None,
+        };
+        assert!(!may_play("http://192.168.1.5:7788/x", node, &now));
     }
 
     #[test]
@@ -257,6 +338,7 @@ mod tests {
             position_ms: 5,
             duration_ms: None,
             ended: 2,
+            advanced: 1,
             error: None,
             refused: None,
             taken: false,
@@ -281,6 +363,7 @@ mod tests {
             position_ms: 0,
             duration_ms: Some(1000),
             ended: 0,
+            advanced: 0,
             error: None,
             refused: None,
             taken: false,

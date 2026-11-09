@@ -12,6 +12,16 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// What a refusal's message starts with: the URL opened, but it is something the app can't play
+/// itself (a playlist, a web page, a codec it doesn't decode). Anything else (the node busy, the
+/// network gone) may pass, and the page tries again as with `<audio>`.
+pub const CANT_PLAY_HERE: &str = "the app can't play this itself: ";
+
+/// Whether an open's error is a refusal ([`CANT_PLAY_HERE`]).
+pub fn is_refusal(message: &str) -> bool {
+    message.contains(CANT_PLAY_HERE)
+}
+
 /// The container behind a content type, for symphonia's probe; `Err` for what is never audio
 /// it can decode (a playlist or a web page).
 pub fn ext_for(content_type: &str, url: &str) -> Result<Option<&'static str>, String> {
@@ -153,10 +163,10 @@ impl UrlSources {
             }
         }
         let reader = RangeReader::open(&self.client, url)?;
-        let ext = ext_for(reader.content_type(), url)?;
+        let ext = ext_for(reader.content_type(), url).map_err(|why| format!("{CANT_PLAY_HERE}{why}"))?;
         let bytes = reader.len();
         let inner = pm_audio::play::Source::from_media_source(Box::new(reader), ext, "the stream")
-            .map_err(|e| format!("can't decode it here: {e}"))?;
+            .map_err(|e| format!("{CANT_PLAY_HERE}{e}"))?;
         let mut info = inner.stream_info();
         if inner.is_lossy() {
             info.bitrate_kbps = match (bytes, inner.duration_ms()) {
@@ -167,13 +177,12 @@ impl UrlSources {
         Ok(Box::new(UrlSource { inner, info }))
     }
 
-    /// Open `url` now and keep it for the zone's open of the same URL.
-    pub fn prepare(&self, url: &str) -> Result<(), String> {
-        let s = self.open_url(url)?;
+    /// Keep `source` (opened for `url`) for the zone's open of the same URL, in place of any
+    /// other kept one.
+    pub fn ready(&self, url: &str, source: Box<dyn FrameSource>) {
         let mut ready = self.ready.lock().unwrap_or_else(|e| e.into_inner());
         ready.clear();
-        ready.insert(url.to_string(), s);
-        Ok(())
+        ready.insert(url.to_string(), source);
     }
 }
 

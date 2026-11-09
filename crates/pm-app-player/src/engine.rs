@@ -37,6 +37,9 @@ pub struct Status {
     pub duration_ms: Option<u64>,
     /// Songs that came to their end so far (the page's `ended`).
     pub ended: u64,
+    /// Of those, the ones the zone went on from to the song handed ahead (it already plays it,
+    /// `url` names it): the page's next `src` is that song, not a new one to open.
+    pub advanced: u64,
     /// The last thing that went wrong, until the next start.
     pub error: Option<String>,
     /// The URL could not be played here (opened or decoded): the page plays it itself.
@@ -62,6 +65,30 @@ pub struct Playing {
 /// Called with the status whenever it changes.
 pub type Notify = Arc<dyn Fn(&Status) + Send + Sync>;
 
+/// Why [`AppPlayer::load`] didn't start a song.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LoadError {
+    /// Something the app can't play itself (the page plays it in `<audio>`); otherwise it may
+    /// pass (the page tries again as it would with `<audio>`).
+    pub refused: bool,
+    pub message: String,
+}
+
+impl LoadError {
+    fn overtaken() -> Self {
+        Self {
+            refused: false,
+            message: "another song or a stop came first".into(),
+        }
+    }
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Where the page and the zone stand.
 #[derive(Debug, Default, Clone)]
 struct Page {
@@ -69,13 +96,19 @@ struct Page {
     /// The zone's queue id of `url`.
     current: Option<u64>,
     ahead: Option<(String, u64)>,
+    /// What the page last said comes next (applied once no load is under way).
+    want_ahead: Option<String>,
     ended: u64,
+    advanced: u64,
     error: Option<String>,
     refused: Option<String>,
     /// The node took the output: paused here at this position (a play loads it again there).
     taken_at: Option<u64>,
-    /// Stopped by this player itself (load, stop): that Stopped is no end.
-    stopping: bool,
+    /// Raised by every load and stop: a load that finds it raised since it began was overtaken
+    /// (another song, or a stop) and leaves the zone alone.
+    generation: u64,
+    /// A load is opening its URL (the zone still holds the previous song).
+    loading: bool,
 }
 
 impl Page {
@@ -88,6 +121,8 @@ impl Page {
                 if let Some((url, id)) = self.ahead.take() {
                     self.url = Some(url);
                     self.current = Some(id);
+                    self.advanced += 1;
+                    self.want_ahead = None;
                 }
                 true
             }
@@ -96,8 +131,14 @@ impl Page {
                 self.refused = None;
                 true
             }
+            // The song handed ahead didn't open: something the app can't play is the page's to
+            // play; anything else is an error (the page's retry runs)
             ZoneEvent::Skipped { item, reason } if Some(item.id) == self.current => {
-                self.refused = Some(reason.clone());
+                if crate::source::is_refusal(reason) {
+                    self.refused = Some(reason.clone());
+                } else {
+                    self.error = Some(reason.clone());
+                }
                 true
             }
             ZoneEvent::Skipped { item, .. } if self.ahead.as_ref().is_some_and(|(_, id)| *id == item.id) => {
@@ -111,10 +152,7 @@ impl Page {
                 }
                 true
             }
-            ZoneEvent::Stopped => {
-                self.stopping = false;
-                true
-            }
+            ZoneEvent::Stopped => true,
             ZoneEvent::Paused { .. } | ZoneEvent::Resumed | ZoneEvent::Seeked { .. } => true,
             _ => false,
         }
@@ -134,6 +172,7 @@ impl Page {
             position_ms,
             duration_ms: mine.and_then(|np| np.duration_ms),
             ended: self.ended,
+            advanced: self.advanced,
             error: self.error.clone(),
             refused: self.refused.clone(),
             taken: self.taken_at.is_some(),
@@ -235,44 +274,67 @@ impl AppPlayer {
     }
 
     /// Play `url` from `at_ms`, with `ahead` to follow it without a gap. Opens it first (network
-    /// I/O: call from a blocking thread); `Err` says why it can't play here, and nothing changed.
-    pub fn load(&self, url: &str, at_ms: u64, ahead: Option<&str>) -> Result<(), String> {
-        if let Err(why) = self.inner.sources.prepare(url) {
-            tracing::info!("the app's player leaves this one to the page: {why}");
-            return Err(why);
+    /// I/O: call from a blocking thread). `Err` leaves the zone as it was: [`LoadError::refused`]
+    /// when it is something the app can't play itself (the page plays it), else why it didn't open
+    /// (the node busy, the network gone; or another load or a stop overtook this one).
+    pub fn load(&self, url: &str, at_ms: u64, ahead: Option<&str>) -> Result<(), LoadError> {
+        let mine = {
+            let mut p = self.page();
+            p.generation += 1;
+            p.loading = true;
+            p.want_ahead = ahead.map(str::to_string);
+            p.generation
+        };
+        let opened = self.inner.sources.open_url(url);
+        let mut p = self.page();
+        if p.generation != mine {
+            return Err(LoadError::overtaken());
         }
+        p.loading = false;
+        let source = match opened {
+            Ok(s) => s,
+            Err(message) => {
+                tracing::info!("the app's player leaves this one to the page: {message}");
+                return Err(LoadError {
+                    refused: crate::source::is_refusal(&message),
+                    message,
+                });
+            }
+        };
+        // The queue changes under the page's lock, so no other load or stop comes in between
         let zone = self.zone();
-        {
-            let mut p = self.page();
-            p.stopping = zone.state().transport != Transport::Stopped;
-            p.error = None;
-            p.refused = None;
-            p.taken_at = None;
-        }
+        self.inner.sources.ready(url, source);
+        p.error = None;
+        p.refused = None;
+        p.taken_at = None;
         zone.clear();
+        let ahead = p.want_ahead.clone();
         let mut items = vec![QueueItem::new(url)];
-        items.extend(ahead.map(QueueItem::new));
+        items.extend(ahead.as_deref().map(QueueItem::new));
         let ids = zone.enqueue(items, Insert::End);
-        {
-            let mut p = self.page();
-            p.url = Some(url.to_string());
-            p.current = ids.first().copied();
-            p.ahead = ahead.zip(ids.get(1).copied()).map(|(u, id)| (u.to_string(), id));
-        }
+        p.url = Some(url.to_string());
+        p.current = ids.first().copied();
+        p.ahead = ahead.zip(ids.get(1).copied());
         zone.play_index(0);
         if at_ms > 1_000 {
             zone.seek_ms(at_ms);
         }
+        drop(p);
         self.changed(true);
         Ok(())
     }
 
-    /// What comes after what plays now (`None`: nothing, the end of the page's queue).
+    /// What comes after what plays now (`None`: nothing, the end of the page's queue). During a
+    /// load it waits for it.
     pub fn ahead(&self, url: Option<&str>) {
+        let mut p = self.page();
+        p.want_ahead = url.map(str::to_string);
+        if p.loading {
+            return;
+        }
         let Some(zone) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() else {
             return;
         };
-        let mut p = self.page();
         if p.ahead.as_ref().map(|(u, _)| u.as_str()) == url {
             return;
         }
@@ -285,20 +347,25 @@ impl AppPlayer {
         }
     }
 
-    /// Carry on: from the pause; after the node took the output, from where it was (again
-    /// through [`Self::load`], so call it from a blocking thread too).
-    pub fn play(&self) -> Result<(), String> {
+    /// Carry on: from the pause; after the node took the output, or once the zone stopped, from
+    /// where it was (again through [`Self::load`], so call it from a blocking thread too).
+    pub fn play(&self) -> Result<(), LoadError> {
         let (url, at, ahead, taken) = {
             let p = self.page();
             (
                 p.url.clone(),
                 p.taken_at,
-                p.ahead.as_ref().map(|a| a.0.clone()),
+                p.want_ahead
+                    .clone()
+                    .or_else(|| p.ahead.as_ref().map(|a| a.0.clone())),
                 p.taken_at.is_some(),
             )
         };
         let Some(url) = url else {
-            return Err("nothing to play".into());
+            return Err(LoadError {
+                refused: false,
+                message: "nothing to play".into(),
+            });
         };
         let st = self.zone_state();
         let stopped = st.as_ref().is_none_or(|s| s.transport == Transport::Stopped);
@@ -330,11 +397,14 @@ impl AppPlayer {
         }
     }
 
-    /// Stop and let the output go (the page plays something else, or on another zone).
+    /// Stop and let the output go (the page plays something else, or on another zone). A load
+    /// still opening its URL doesn't start afterwards.
     pub fn stop(&self) {
         {
             let mut p = self.page();
-            p.stopping = true;
+            p.generation += 1;
+            p.loading = false;
+            p.want_ahead = None;
             p.ahead = None;
             p.taken_at = None;
             p.url = None;
@@ -356,7 +426,6 @@ impl AppPlayer {
                 return;
             }
             p.taken_at = Some(at);
-            p.stopping = true;
             p.error = Some(TAKEN_BY_NODE.into());
         }
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
@@ -399,40 +468,54 @@ impl AppPlayer {
 fn watch(player: Weak<Inner>, zone: &Zone) {
     let mut events = zone.subscribe();
     let mut state = zone.watch();
-    let spawned = std::thread::Builder::new().name("app-player".into()).spawn(move || {
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_time().build() else {
-            return;
-        };
-        rt.block_on(async move {
-            loop {
-                let urgent = tokio::select! {
-                    ev = events.recv() => match ev {
-                        Ok(ev) => {
-                            let Some(inner) = player.upgrade() else { return };
-                            let p = AppPlayer { inner };
-                            let urgent = p.page().on(&ev);
-                            Some((p, urgent))
+    let spawned = std::thread::Builder::new()
+        .name("app-player".into())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                loop {
+                    // The position moves only while it plays: no wake-ups otherwise
+                    let ticking = state.borrow().transport == Transport::Playing;
+                    let tick = async {
+                        if ticking {
+                            tokio::time::sleep(POSITION_EVERY).await
+                        } else {
+                            std::future::pending::<()>().await
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
-                        Err(_) => return,
-                    },
-                    ch = state.changed() => {
-                        if ch.is_err() {
-                            return;
+                    };
+                    let urgent = tokio::select! {
+                        ev = events.recv() => match ev {
+                            Ok(ev) => {
+                                let Some(inner) = player.upgrade() else { return };
+                                let p = AppPlayer { inner };
+                                let urgent = p.page().on(&ev);
+                                Some((p, urgent))
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
+                            Err(_) => return,
+                        },
+                        ch = state.changed() => {
+                            if ch.is_err() {
+                                return;
+                            }
+                            player.upgrade().map(|inner| (AppPlayer { inner }, false))
                         }
-                        player.upgrade().map(|inner| (AppPlayer { inner }, false))
+                        // A position that moves with nothing else changing still reaches the page
+                        _ = tick => player.upgrade().map(|inner| (AppPlayer { inner }, false)),
+                    };
+                    match urgent {
+                        Some((p, urgent)) => p.changed(urgent),
+                        None if player.strong_count() == 0 => return,
+                        None => {}
                     }
-                    // A position that moves with nothing else changing still reaches the page
-                    _ = tokio::time::sleep(POSITION_EVERY) => player.upgrade().map(|inner| (AppPlayer { inner }, false)),
-                };
-                match urgent {
-                    Some((p, urgent)) => p.changed(urgent),
-                    None if player.strong_count() == 0 => return,
-                    None => {}
                 }
-            }
+            });
         });
-    });
     if let Err(e) = spawned {
         tracing::warn!("the app's player can't follow its zone: {e}");
     }
@@ -673,18 +756,22 @@ mod tests {
         let p = AppPlayer::new(Arc::new(NullOutput::new()), OutputOwner::new());
         let (html, _) = serve(b"<html>busy</html>".to_vec(), "text/html", Mode::default());
         let e = p.load(&html, 0, None).unwrap_err();
-        assert!(e.contains("instead of audio"), "{e}");
+        assert!(e.refused && e.message.contains("instead of audio"), "{e:?}");
         let (hls, _) = serve(
             b"#EXTM3U\n".to_vec(),
             "application/vnd.apple.mpegurl",
             Mode::default(),
         );
-        assert!(p.load(&hls, 0, None).unwrap_err().contains("playlist"));
+        let e = p.load(&hls, 0, None).unwrap_err();
+        assert!(e.refused && e.message.contains("playlist"), "{e:?}");
         let (junk, _) = serve(vec![7u8; 4096], "application/octet-stream", Mode::default());
-        assert!(p
-            .load(&junk, 0, None)
-            .unwrap_err()
-            .contains("can't decode it here"));
+        let e = p.load(&junk, 0, None).unwrap_err();
+        assert!(e.refused, "{e:?}");
+        // A node that doesn't answer is no refusal: the page tries again
+        let e = p
+            .load("http://127.0.0.1:9/v1/library/tracks/1/file", 0, None)
+            .unwrap_err();
+        assert!(!e.refused, "{e:?}");
         assert_eq!(p.status().url, None, "nothing changed");
     }
 
@@ -766,6 +853,58 @@ mod tests {
         wait(&p, "let go", |_| owner.holder(&id).is_none());
     }
 
+    /// A song tapped while another still opens (a far node): the later one plays, the earlier one
+    /// gives up; a stop while one opens leaves the zone silent.
+    #[test]
+    fn a_later_load_or_a_stop_overtakes_one_still_opening() {
+        let slow = Mode {
+            delay_ms: 600,
+            ..Mode::default()
+        };
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 3, 1);
+        let (b, _) = wav_bytes(48_000, 16, 48_000 * 3, 2);
+        let (ua, _) = serve(a.clone(), "audio/wav", slow);
+        let (ub, _) = serve(b, "audio/wav", Mode::default());
+        let p = AppPlayer::new(Arc::new(NullOutput::realtime()), OutputOwner::new());
+        let p2 = p.clone();
+        let ua2 = ua.clone();
+        let first = std::thread::spawn(move || p2.load(&ua2, 0, None));
+        std::thread::sleep(Duration::from_millis(100));
+        p.load(&ub, 0, None).unwrap();
+        let e = first.join().unwrap().unwrap_err();
+        assert!(!e.refused, "{e:?}");
+        let st = wait(&p, "the later song plays", |s| s.transport == Transport::Playing);
+        assert_eq!(st.url.as_deref(), Some(ub.as_str()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            p.status().url.as_deref(),
+            Some(ub.as_str()),
+            "still the later one"
+        );
+        // A stop while a song opens
+        let (uslow, _) = serve(a, "audio/wav", slow);
+        let p3 = p.clone();
+        let opening = std::thread::spawn(move || p3.load(&uslow, 0, None));
+        std::thread::sleep(Duration::from_millis(100));
+        p.stop();
+        assert!(opening.join().unwrap().is_err());
+        std::thread::sleep(Duration::from_millis(300));
+        let st = p.status();
+        assert_eq!((st.transport, st.url), (Transport::Stopped, None));
+    }
+
+    /// Repeat one hands the same song ahead: its end says the zone went on (`advanced`), so the
+    /// page keeps it playing instead of opening it again.
+    #[test]
+    fn the_same_song_handed_ahead_says_the_zone_went_on() {
+        let (a, _) = wav_bytes(44_100, 16, 20_000, 1);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let p = AppPlayer::new(Arc::new(NullOutput::new()), OutputOwner::new());
+        p.load(&ua, 0, Some(&ua)).unwrap();
+        let st = wait(&p, "the end of the first", |s| s.ended >= 1);
+        assert_eq!((st.advanced, st.url.as_deref()), (1, Some(ua.as_str())));
+    }
+
     #[test]
     fn the_page_hears_ends_only_for_its_own_songs() {
         let item = |id| QueueItem {
@@ -793,8 +932,8 @@ mod tests {
         // The adopted one refused by the opener: the page plays it itself
         assert!(pg.on(&ZoneEvent::Skipped {
             item: item(2),
-            reason: "can't decode it here".into()
+            reason: format!("{}unsupported codec", crate::source::CANT_PLAY_HERE)
         }));
-        assert_eq!(pg.refused.as_deref(), Some("can't decode it here"));
+        assert!(pg.refused.as_deref().is_some_and(crate::source::is_refusal));
     }
 }

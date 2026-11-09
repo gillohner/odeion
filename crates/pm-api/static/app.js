@@ -1484,7 +1484,7 @@
     // st: the app's last status (when it came); src: what the page set; at: where to start it
     // (restore, a seek before it plays); live: the app has src; adopt: the app already went on
     // to the song handed ahead; want: play pressed, the app not there yet; ahead: last handed
-    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null;
+    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false;
     const mine = () => live && !!st && st.url === src;
     const playing = () => mine() && st.transport === 'playing';
     window.addEventListener('pmdesktop:native', (e) => {
@@ -1492,8 +1492,9 @@
       if (!live) return;
       const ended = was && st.ended > was.ended;
       if (ended) {
-        // Handed ahead: the app already plays the next one; the page's next src is it
-        adopt = !!st.url && st.url !== src; want = false;
+        // Handed ahead: the app already plays the next one (the same one for repeat one); the
+        // page's next src is it
+        adopt = !!st.url && st.advanced > was.advanced; want = false;
         if (!adopt) done = true;
         fire('ended'); return;
       }
@@ -1537,17 +1538,25 @@
       load() { /* opened when it plays */ },
       async play() {
         if (!src) throw new Error('nothing to play');
-        done = false;
+        done = false; held = false;
         if (mine()) { if (st.transport !== 'playing') { want = true; await call('native_play'); } return; }
         // Its first events may come before the answer
         want = true; live = true; const u = src;
+        // A seek the page makes as the song loads (moving here from a zone, a restore) comes
+        // first: the song opens there
+        await new Promise((r) => setTimeout(r, 0));
+        if (src !== u) return;
+        fire('waiting');
         try { await call('native_load', { url: u, atMs: Math.round(at * 1000), ahead: ahead || null }); } catch (e) {
           if (src !== u) return;
           want = false; live = false;
-          const err = new Error(String((e && e.message) || e)); err.name = 'NativeRefused'; throw err;
+          // Only what the app can't play itself goes to <audio>; anything else may pass
+          const err = new Error(String((e && e.message) || e)); if (e && e.refused) err.name = 'NativeRefused'; throw err;
         }
+        // Paused while it opened
+        if (held && src === u) call('native_pause').catch(() => {});
       },
-      pause() { want = false; if (live) call('native_pause').catch(() => {}); },
+      pause() { want = false; held = true; if (live) call('native_pause').catch(() => {}); },
       stop() { want = false; adopt = false; done = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
       // What follows what plays now (the page's next song), for a gapless join
       ahead(u) { const a = u ? abs(u) : null; if (a === ahead) return; ahead = a; if (live) call('native_ahead', { url: a }).catch(() => {}); },
@@ -1642,7 +1651,7 @@
   const isLiveRadio = (it) => it.album === 'Internet radio' && /^https?:/.test(it.uri || '');
   setInterval(() => {
     try {
-      const keep = state.browserQueue.filter((it) => !isLiveRadio(it)).map((it) => { const { stream, ...rest } = it; return rest; });
+      const keep = state.browserQueue.filter((it) => !isLiveRadio(it)).map((it) => { const { stream, nativeNo, ...rest } = it; return rest; });
       const j = JSON.stringify(keep);
       if (j !== lastSavedQueue) { lastSavedQueue = j; localStorage.setItem('pm.browserQueue', j); }
       const cur = state.browserQueue[state.browserIndex];
@@ -2531,7 +2540,11 @@
     if (appPlatform() !== 'android') return null;
     // The app plays it itself: the same words as the phone's own zone
     if (state.natOn && !state.ytOn && z.now_playing && z.now_playing.signal_path) { const l = deviceOf(z) ? dacLine(z) : ''; return [l || 'Shared · Android mixer', '']; }
-    if (nativeOk()) return ['Android mixer · usually 48 kHz', `Not bit-perfect: the app can’t play this stream itself, so it goes through Android’s mixer.`];
+    if (nativeOk()) {
+      const cur = state.browserQueue[state.browserIndex];
+      if (state.ytOn) return ['Android mixer · usually 48 kHz', 'Not bit-perfect: YouTube plays in its own player, through Android’s mixer.'];
+      return cur && cur.nativeNo ? ['Android mixer · usually 48 kHz', 'Not bit-perfect: the app can’t play this stream itself, so it goes through Android’s mixer.'] : null;
+    }
     const id = window.pmDesktop.output;
     const own = id ? Object.values(state.zones || {}).find((x) => x.output === id) : null;
     const dac = appOutput();
