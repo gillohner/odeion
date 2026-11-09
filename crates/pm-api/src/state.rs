@@ -536,6 +536,13 @@ impl NodeState {
             weak.upgrade()
                 .is_some_and(|s| crate::accounts::is_node_token_if_free(&s, t))
         })));
+        // Every volume request for a zone is held to its volume limit (DSP settings) in the zone
+        // itself, whoever asks: the pages, announcements, UPnP controllers, Subsonic clients
+        let weak = Arc::downgrade(&node);
+        node.zones
+            .set_volume_limit(Some(Arc::new(move |o: &pm_zones::OutputId| {
+                weak.upgrade().and_then(|s| s.sources.volume_limit(o))
+            })));
         node
     }
 
@@ -569,6 +576,10 @@ impl NodeState {
         let mut state_rx = zone.watch();
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
+        // The queue version saved so far, taken before the saving task below starts: the task
+        // may first run only after the engine has published changes (a loaded machine), and
+        // those must still be saved
+        let mut saved_version = initial.queue_version;
         let _ = self.events.send(ApiEvent::Zone { state: initial });
         // The output's level, read back now and every few seconds (a Linn's own remote changes
         // it; the pages show what the device says), for outputs with a hardware volume. The
@@ -626,7 +637,6 @@ impl NodeState {
             });
         }
         tokio::spawn(async move {
-            let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {
                 let state = state_rx.borrow_and_update().clone();
                 if state.queue_version != saved_version {
@@ -735,6 +745,11 @@ impl NodeState {
 
     pub fn remove_zone(&self, id: &ZoneId) -> Option<Arc<Zone>> {
         let z = self.zones.remove(id)?;
+        // Two zones on the same speakers share the group entry: it goes with the last of them
+        let out = z.output().id();
+        if self.zones.for_output(&out).is_none() {
+            self.sources.forget_group(&out);
+        }
         let _ = self.events.send(ApiEvent::ZoneRemoved { zone: id.clone() });
         Some(z)
     }

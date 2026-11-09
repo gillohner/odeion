@@ -136,21 +136,26 @@ impl std::fmt::Debug for Check {
 }
 
 /// The `token` parameters a `/v1/` link loses: every one on the node's own links, and on a
-/// `/v1/` link of any other host those the node knows as its own sign-ins (`known`: a cover link
-/// made under a name the node doesn't list as its own, `localhost`, say, still carries the
-/// node's sign-in). A link on another host with a token the node doesn't know is someone
-/// else's and is left alone.
+/// `/v1/` link of any other host only those the node knows as its own sign-ins (`known`: a cover
+/// link made under a name the node doesn't list as its own, `localhost`, say, still carries the
+/// node's sign-in). Any other token on another host's link is someone else's (that server's own
+/// credential) and is left alone, even beside one of the node's. `None` when it loses none;
+/// else the query's bounds, whether the link is the node's, and the values dropped.
 fn tokens_to_drop(
     link: &str,
     origins: &[String],
     known: &dyn Fn(&str) -> bool,
-) -> Option<(usize, usize, Vec<String>)> {
+) -> Option<(usize, usize, bool, Vec<String>)> {
     let (q, end, ours) = v1_link_query(link, origins)?;
-    let tokens: Vec<String> = link[q + 1..end].split('&').filter_map(token_param).collect();
-    if tokens.is_empty() || (!ours && !tokens.iter().any(|t| known(t))) {
+    let tokens: Vec<String> = link[q + 1..end]
+        .split('&')
+        .filter_map(token_param)
+        .filter(|t| ours || known(t))
+        .collect();
+    if tokens.is_empty() {
         return None;
     }
-    Some((q, end, tokens))
+    Some((q, end, ours, tokens))
 }
 
 /// The value of a `token` query parameter, read the way the node reads its query (form
@@ -167,7 +172,7 @@ fn token_param(p: &str) -> Option<String> {
 /// Every `token` query parameter's value (decoded) that a `/v1/` link loses (`tokens_to_drop`):
 /// all of them on the node's own links, the node's own sign-ins on another host's.
 pub fn node_link_tokens(link: &str, origins: &[String], known: &dyn Fn(&str) -> bool) -> Vec<String> {
-    tokens_to_drop(link, origins, known).map_or_else(Vec::new, |(_, _, t)| t)
+    tokens_to_drop(link, origins, known).map_or_else(Vec::new, |(_, _, _, t)| t)
 }
 
 /// A `/v1/` link without the `token` query parameters it loses (`tokens_to_drop`); `None` when
@@ -178,11 +183,11 @@ pub fn node_link_without_token(
     origins: &[String],
     known: &dyn Fn(&str) -> bool,
 ) -> Option<String> {
-    let (q, end, _) = tokens_to_drop(link, origins, known)?;
+    let (q, end, ours, _) = tokens_to_drop(link, origins, known)?;
     let params: Vec<&str> = link[q + 1..end].split('&').collect();
     let kept: Vec<&str> = params
         .into_iter()
-        .filter(|p| !p.is_empty() && token_param(p).is_none())
+        .filter(|p| !p.is_empty() && token_param(p).is_none_or(|t| !ours && !known(&t)))
         .collect();
     let mut out = link[..q].to_string();
     if !kept.is_empty() {
@@ -707,7 +712,12 @@ mod tests {
         assert_eq!(
             k("https://node.example.ts.net/v1/library/tracks/1/file?a=1&token=s3cret&token=theirs#x")
                 .as_deref(),
-            Some("https://node.example.ts.net/v1/library/tracks/1/file?a=1#x")
+            Some("https://node.example.ts.net/v1/library/tracks/1/file?a=1&token=theirs#x"),
+            "another server's own token stays beside the node's"
+        );
+        assert_eq!(
+            k("http://localhost:7788/v1/x?Token=theirs&%74oken=pmo_mine&b=2").as_deref(),
+            Some("http://localhost:7788/v1/x?Token=theirs&b=2")
         );
         assert_eq!(
             node_link_tokens(
@@ -715,7 +725,7 @@ mod tests {
                 &me,
                 &mine
             ),
-            ["pmo_mine", "theirs"]
+            ["pmo_mine"]
         );
         for l in [
             "http://localhost:7788/v1/x?token=theirs",

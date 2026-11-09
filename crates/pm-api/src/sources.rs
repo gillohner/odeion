@@ -21,6 +21,9 @@ pub struct NodeSources {
     default_cfg: PipelineConfig,
     /// Per-output pipeline settings (DSP); the default applies otherwise.
     dsp: RwLock<HashMap<OutputId, PipelineConfig>>,
+    /// The speakers each group output plays on (a zone of several outputs), for the group's
+    /// volume limit: the strictest among them, read at every request.
+    groups: RwLock<HashMap<OutputId, Vec<OutputId>>>,
     /// TIDAL credentials and origins, for `tidal:track:` URIs on the audio thread.
     tidal: crate::tidal::SharedEndpoints,
     /// Deezer API origin, for `deezer:track:` URIs (previews).
@@ -73,6 +76,7 @@ impl NodeSources {
             files: LocalFiles::new(cfg.clone()),
             default_cfg: cfg,
             dsp: RwLock::new(dsp),
+            groups: RwLock::new(HashMap::new()),
             tidal,
             deezer,
             jamendo,
@@ -106,10 +110,53 @@ impl NodeSources {
             .unwrap_or_else(|| self.default_cfg.clone())
     }
 
+    /// `group` plays on `members` from now on ([`Self::forget_group`] when its zone goes): its
+    /// volume limit is the strictest among its own and theirs ([`Self::volume_limit`]).
+    pub fn note_group(&self, group: &OutputId, members: &[OutputId]) {
+        self.groups
+            .write()
+            .expect("groups lock")
+            .insert(group.clone(), members.to_vec());
+    }
+
+    /// The zone of `group` is gone.
+    pub fn forget_group(&self, group: &OutputId) {
+        self.groups.write().expect("groups lock").remove(group);
+    }
+
+    /// The volume limit in force for `output`: its own, and for a group of speakers the strictest
+    /// among theirs too, as they are now (each keeps its own limit in a group, and a limit lowered
+    /// while the group exists holds at its next request).
+    pub fn volume_limit(&self, output: &OutputId) -> Option<f32> {
+        let members = self
+            .groups
+            .read()
+            .expect("groups lock")
+            .get(output)
+            .cloned()
+            .unwrap_or_default();
+        std::iter::once(output)
+            .chain(members.iter())
+            .filter_map(|o| self.dsp_for(o).max_volume_db)
+            .reduce(f32::min)
+    }
+
     /// Play `to` with `from`'s settings until [`Self::forget_dsp`], without saving them: a listen-
-    /// along group sounds like the zone it came from (presence.rs).
-    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId) {
-        let cfg = self.dsp_for(from);
+    /// along group sounds like the zone it came from (presence.rs). Its volume limit is the
+    /// strictest among `members` (the speakers it plays on, `from`'s included): every speaker
+    /// keeps its own limit in the group, and the software volume stays under it.
+    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId, members: &[OutputId]) {
+        let mut cfg = self.dsp_for(from);
+        for m in members.iter().chain(std::iter::once(from)) {
+            if let Some(limit) = self.dsp_for(m).max_volume_db {
+                cfg.max_volume_db = Some(cfg.max_volume_db.map_or(limit, |l: f32| l.min(limit)));
+            }
+        }
+        if let (Some(v), Some(max)) = (cfg.volume_db, cfg.max_volume_db) {
+            if v > max {
+                cfg.volume_db = Some(max);
+            }
+        }
         self.dsp.write().expect("dsp lock").insert(to.clone(), cfg);
     }
 
@@ -611,20 +658,36 @@ fn read_playlist_within(
     if resp.content_length().is_some_and(|n| n > PLAYLIST_MAX) {
         return Err("the playlist is too big (over 64 KiB)".into());
     }
+    // Read on a thread of its own and wait for all of it at most `limit`: a read that sends
+    // nothing, a trickle, or an end that comes late are all given up then. The thread reads in
+    // chunks and stops (dropping the connection) once `limit` has passed, so it ends at most one
+    // stream wait (one read) after the deadline, however slowly the server trickles.
     let started = std::time::Instant::now();
-    let mut body = resp.take(PLAYLIST_MAX);
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        match body.read(&mut chunk).map_err(|e| e.to_string())? {
-            0 => break,
-            n => buf.extend_from_slice(&chunk[..n]),
-        }
-        if started.elapsed() > limit {
-            return Err("the playlist took too long to arrive".into());
-        }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("playlist-read".into())
+        .spawn(move || {
+            let mut body = resp.take(PLAYLIST_MAX);
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let r = loop {
+                match body.read(&mut chunk) {
+                    Ok(0) => break Ok(buf),
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(e) => break Err(e.to_string()),
+                }
+                if started.elapsed() > limit {
+                    break Err("past the deadline".into());
+                }
+            };
+            drop(body);
+            let _ = tx.send(r);
+        })
+        .map_err(|e| e.to_string())?;
+    match rx.recv_timeout(limit) {
+        Ok(r) => Ok(String::from_utf8_lossy(&r?).into_owned()),
+        Err(_) => Err("the playlist took too long to arrive".into()),
     }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// `limit`: the playlist's stream is a second request, not a redirect: it is checked here too.
@@ -1191,11 +1254,21 @@ mod tests {
     }
 
     /// A playlist whose server sends a byte at a time, each within the stream wait, is given
-    /// up after [`PLAYLIST_FOR`] in all: the open fails instead of waiting for the whole file.
+    /// up after [`PLAYLIST_FOR`] in all: the open fails instead of waiting for the whole file,
+    /// and the reading thread lets go of the connection soon after (the server sees it close).
     #[test]
     fn a_trickling_playlist_is_given_up() {
         use std::io::Write;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static CLOSED: AtomicBool = AtomicBool::new(false);
         let url = serve_each(|mut c| {
+            struct Closed;
+            impl Drop for Closed {
+                fn drop(&mut self) {
+                    CLOSED.store(true, Ordering::SeqCst);
+                }
+            }
+            let _closed = Closed;
             read_request(&mut c);
             let _ = c.write_all(
                 b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -1225,6 +1298,60 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+        // The trickle never ends on its own: only the reader letting go ends the server's loop
+        let gone = std::time::Instant::now();
+        while !CLOSED.load(Ordering::SeqCst) {
+            assert!(
+                gone.elapsed() < std::time::Duration::from_secs(5),
+                "the reader still holds the connection"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// A playlist whose server sends its headers and then nothing, or all of it but its end only
+    /// after the deadline, is given up at the deadline too (not after the stream wait).
+    #[test]
+    fn a_silent_or_late_ending_playlist_is_given_up_at_the_deadline() {
+        use std::io::Write;
+        let silent = serve_each(|mut c| {
+            read_request(&mut c);
+            let _ = c.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nTransfer-Encoding: chunked\r\n\r\n",
+            );
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        });
+        let late = serve_each(|mut c| {
+            read_request(&mut c);
+            let body = b"#EXTM3U\nhttp://127.0.0.1:9/a\n";
+            let _ = c.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/x-mpegurl\r\nContent-Length: {}\r\n\r\n",
+                    body.len() + 1
+                )
+                .as_bytes(),
+            );
+            let _ = c.write_all(body).and_then(|_| c.flush());
+            // The last byte (the end) after the deadline
+            std::thread::sleep(std::time::Duration::from_millis(1_500));
+            let _ = c.write_all(b"\n");
+        });
+        for url in [silent, late] {
+            let client = stream_client_builder(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let resp = client.get(&url).send().unwrap();
+            let t = std::time::Instant::now();
+            let r = within(std::time::Duration::from_secs(10), move || {
+                read_playlist_within(resp, std::time::Duration::from_millis(600))
+            });
+            assert!(r.as_ref().is_err_and(|e| e.contains("too long")), "{url}: {r:?}");
+            assert!(
+                t.elapsed() < std::time::Duration::from_millis(1_400),
+                "{url}: {:?}",
+                t.elapsed()
+            );
+        }
     }
 
     #[test]
