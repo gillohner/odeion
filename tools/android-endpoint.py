@@ -308,12 +308,30 @@ def media_controls(zid, track):
     assert nz, "no zone on the null output with a percent volume (PM_DEV_OUTPUTS)"
     api("POST", f"/v1/zones/{nz['id']}/volume", {"volume": {"percent": 3}})
     api("POST", f"/v1/zones/{nz['id']}/queue", {"track_ids": [track["id"]], "replace": True, "play": False})
+    def diagnose(what):
+        (out / f"ui-{what}.xml").write_text("\n".join(ui_nodes()))
+        lines = [l for l in logcat().splitlines() if "media controls" in l or "message port" in l]
+        (out / f"media-{what}.txt").write_text("\n".join(lines[-80:]))
     tap(lambda n: "choose where to play" in n, "the zone button")
-    tap(lambda n: "Null output (% volume)" in n, "the null output's zone")
+    # The picker may list the null output below what fits: scroll it into view
+    for _ in range(4):
+        if any("Null output (% volume)" in n for n in ui_nodes()):
+            break
+        adb("shell", "input", "swipe", "500", "1400", "500", "700", "300")
+        time.sleep(1)
+    try:
+        tap(lambda n: "Null output (% volume)" in n, "the null output's zone")
+    except RuntimeError:
+        diagnose("picker")
+        raise
     def remote():
         s = our_session()
         return s if "volumeType=2" in s else None
-    until("the session on the network zone, with its own volume (remote)", remote, timeout=20)
+    try:
+        until("the session on the network zone, with its own volume (remote)", remote, timeout=20)
+    except RuntimeError:
+        diagnose("network-zone")
+        raise
     before = stream_music()
     adb("shell", "input", "keyevent", "KEYCODE_VOLUME_UP")
     until("KEYCODE_VOLUME_UP: the network zone at 4 %", lambda: zone_percent(nz["id"]) == 4, timeout=20)

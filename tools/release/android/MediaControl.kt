@@ -110,6 +110,7 @@ class MediaControl private constructor() {
             if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
                 // Every origin may hold the port; only the main frame's messages are passed on, with
                 // its origin, and the Rust side takes only the node's (or the offline page's)
+                android.util.Log.i(TAG, "media controls: the page's message port is set up")
                 WebViewCompat.addWebMessageListener(webview, PORT, setOf("*")) { _, message, sourceOrigin, isMainFrame, _ ->
                     val data = message.data
                     if (isMainFrame && data != null && data.length <= PAGE_MAX) {
