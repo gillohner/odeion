@@ -60,10 +60,11 @@ const FAKE_APP = ({ nativePlayer, len, slow }) => {
       if (slow) await new Promise((r) => setTimeout(r, slow));
       // A later load overtook this one (as the app's generation does)
       if (gen !== s.gen) throw { refused: false, overtaken: true, message: 'another song or a stop came first' };
+      if (window.__failLoad) { Object.assign(s, { url: null }); send(); throw { refused: false, overtaken: false, message: 'the node did not answer' }; }
       s.ahead = args.ahead || null; start(args.url, args.atMs || 0); return null;
     }
     if (cmd === 'native_ahead') { s.ahead = args.url || null; return null; }
-    if (cmd === 'native_play') { if (window.__failPlay) throw { refused: false, overtaken: false, message: 'HTTP 503' }; if (s.transport !== 'playing') { s.transport = 'playing'; s.taken = false; s.broke = false; s.error = null; send(); } return null; }
+    if (cmd === 'native_play') { if (s.loading) return null; if (window.__failPlay) throw { refused: false, overtaken: false, message: 'HTTP 503' }; if (s.transport !== 'playing') { s.transport = 'playing'; s.taken = false; s.broke = false; s.error = null; send(); } return null; }
     if (cmd === 'native_pause') { if (s.transport === 'playing') { s.transport = 'paused'; send(); } return null; }
     if (cmd === 'native_seek') { s.position_ms = args.ms; send(); return null; }
     if (cmd === 'native_stop') { Object.assign(s, { url: null, transport: 'stopped', position_ms: 0, now_playing: null, ahead: null }); send(); return null; }
@@ -203,7 +204,18 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 0, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(2600);
       check((await calls(p, 'native_load')).length > b0, `${at}: a break at the very start is tried once more`);
       await p.evaluate(() => { Object.assign(window.__app, { broke: false, error: null }); });
-      // A DAC unplugged (paused with the reason, no break): said, and not reopened
+      // The same song reopened, pause and play while it opens, and the open fails: said, and the
+      // bar doesn't stay "playing"
+      await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
+      await p.evaluate(() => { window.__failLoad = true; }); 
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(60);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(120);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(900);
+      const fl = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
+      check(/did not start|can't play here/.test(fl) && (await now(p)).paused, `${at}: a reopen that fails after pause and play is said, not left "playing" (${fl}; ${JSON.stringify(await now(p))}; ${JSON.stringify((await calls(p)).slice(-6).map((c) => c[0]))}; ${JSON.stringify(r.state.errors)})`);
+      await p.evaluate(() => { window.__failLoad = false; }); await sleep(2500);
+
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
       let before = (await calls(p, 'native_load')).length;
