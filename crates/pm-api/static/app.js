@@ -3336,6 +3336,7 @@
     if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => { ic.style.animationDelay = `-${now - state.npPop}ms`; ic.classList.add('swap'); });
     // (the tick doesn't redraw again for this item)
     renderNowPlaying.lastItem = it; renderNowPlaying.lastTitle = np.stream_title;
+    renderNowPlaying.lastOutput = JSON.stringify(outputFacts(z));
     if (!one) {
       const tabs = $('.np-sheet-tabs', overlay); const on = tabs && $('.chip.on', tabs);
       if (tabs && on) {
@@ -3609,7 +3610,7 @@
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
     if (!np || !s || s.dataset.dragging) return;
-    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
+    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle || JSON.stringify(outputFacts(z)) !== renderNowPlaying.lastOutput) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     if ((z.transport || '') !== (overlay.dataset.transport || '')) {
       overlay.dataset.transport = z.transport || '';
       const playing = z.transport === 'playing';
