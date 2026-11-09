@@ -1908,6 +1908,8 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 
 /* Your library: tabs under the head, a one-line status, file rows with their size */
 .libtabs { margin: 10px 0 14px; }
+/* The Library's section tabs and Add music entry points share a comfortable phone target. */
+html[data-shell="phone"] :is(.libtabs .chip, #libadd, [data-addmusic]) { min-height: 44px; }
 .libstatus + .muted.small { margin: -6px 0 14px; }
 .libstatus { font-size: var(--fs-sm); color: var(--fg-2); margin: 0 0 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 .libstatus .spin { margin-right: 4px; }
