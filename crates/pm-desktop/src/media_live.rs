@@ -278,7 +278,7 @@ impl Media {
     /// The session to the app's side when it changed; the cover when it is another; the audio
     /// focus while the phone's own players play (or wait for a call to end).
     fn push(&self) {
-        let (json, art, focus) = {
+        let art = {
             let mut st = self.state();
             // A zone a call paused: any command since ours (from any controller), or another state,
             // means the listener chose, and the call's end leaves it be
@@ -311,14 +311,16 @@ impl Media {
             if let Some(f) = focus {
                 st.focus = f;
             }
-            (changed.then_some(json), art, focus)
+            // Handed over under the lock: two pushes at once (the feed, the queues) reach the
+            // app's side in the order they were decided (both calls only post to its main thread)
+            if changed {
+                self.native.update(&json);
+            }
+            if let Some((want, ducks)) = focus {
+                self.native.focus(want, ducks);
+            }
+            art
         };
-        if let Some(j) = json {
-            self.native.update(&j);
-        }
-        if let Some((want, ducks)) = focus {
-            self.native.focus(want, ducks);
-        }
         if let Some(art) = art {
             self.fetch_art(art);
         }
