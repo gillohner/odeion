@@ -237,13 +237,23 @@ pub fn session_for_zone(zone: &Value, phone: bool, scale: Option<Scale>) -> Sess
         .unwrap_or(0);
     let repeat_all = zone.get("repeat").and_then(Value::as_str) == Some("all");
     let level = zone.get("volume").filter(|v| v.is_object());
-    let volume = match (phone, scale.or_else(|| level.and_then(Scale::of_level))) {
+    // The phone's own scale is what the app says it is now (none: no volume of its own); another
+    // zone's, when its output's isn't known, its level's
+    let scale = if phone {
+        scale
+    } else {
+        scale.or_else(|| level.and_then(Scale::of_level))
+    };
+    let volume = match (phone, scale) {
         // The phone's own: Android's media volume, unless the DAC's own (dB, Exclusive USB)
         (true, Some(s @ Scale::Db { .. })) => SessionVolume::Remote {
             max: s.steps(),
             current: level.and_then(|v| s.step_of(v)).unwrap_or(0),
         },
-        (true, _) => SessionVolume::Local,
+        (true, Some(Scale::Percent)) => SessionVolume::Local,
+        // No volume of its own now (Exclusive USB without a unit, bit-perfect at full level by
+        // agreement): the keys can't change what plays
+        (true, None) => SessionVolume::Fixed,
         (false, Some(s)) => SessionVolume::Remote {
             max: s.steps(),
             current: level.and_then(|v| s.step_of(v)).unwrap_or(0),
@@ -664,6 +674,12 @@ mod tests {
             pct.volume,
             SessionVolume::Local,
             "the keys move STREAM_MUSIC themselves"
+        );
+        let none = session_for_zone(&zone("playing", json!({"percent": 100})), true, None);
+        assert_eq!(
+            none.volume,
+            SessionVolume::Fixed,
+            "no volume of its own: the keys do nothing"
         );
         let unit = Scale::Db {
             min: -127.0,

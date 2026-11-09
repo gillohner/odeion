@@ -442,6 +442,40 @@ pub fn holds(dac_id: i32) -> bool {
     with_held(|h| h.as_ref().is_some_and(|h| h.dac_id == dac_id))
 }
 
+/// The DAC (by its USB ids) whose Exclusive USB didn't start under Auto: Auto plays it through
+/// Android until it is unplugged or the settings change.
+static AUTO_FAILED: Mutex<Option<UsbIds>> = Mutex::new(None);
+
+/// Auto's Exclusive USB didn't start on this DAC: Android's paths from the next song.
+pub fn auto_failed(dac: &Dac) {
+    *AUTO_FAILED.lock().unwrap_or_else(|e| e.into_inner()) = ids(dac);
+}
+
+/// Whether Auto skips Exclusive USB for this DAC ([`auto_failed`]).
+fn auto_skips(dac: &Dac) -> bool {
+    let failed = *AUTO_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+    failed.is_some() && failed == ids(dac)
+}
+
+fn forget_auto_failed() {
+    AUTO_FAILED.lock().unwrap_or_else(|e| e.into_inner()).take();
+}
+
+/// The listener muted the zone on this DAC (kept while the app gives it back): Auto doesn't go on
+/// to Android's paths for it then (they don't know that mute: they would play).
+pub fn listener_muted(dac: &Dac) -> bool {
+    let held = with_held(|h| {
+        h.as_ref()
+            .filter(|h| h.dac_id == dac.id)
+            .map(|h| h.listener_muted)
+    });
+    if let Some(m) = held {
+        return m;
+    }
+    let id = backend().and_then(|b| ids(dac).and_then(|u| b.identity_of(u)));
+    remembered_listener(id.as_ref()).0
+}
+
 /// Whether the app holds any DAC.
 pub fn holding() -> bool {
     with_held(|h| h.is_some())
@@ -695,6 +729,10 @@ pub fn decide(
     if !keep && !chosen(settings.mode, crate::bit_perfect::offer(dac).is_ok(), permission) {
         return None;
     }
+    // Auto: this DAC's Exclusive USB didn't start before; Android plays it
+    if settings.mode == PreferredMode::Auto && !held && auto_skips(dac) {
+        return None;
+    }
     if !permission {
         return Some(Err(
             "Exclusive USB needs Android's permission for the DAC: allow it when Android asks (choose Exclusive USB again in Settings to ask)".into(),
@@ -766,6 +804,8 @@ pub fn live_caps(
 /// permission for the DAC when it isn't given (the only place it is asked; choosing it again asks
 /// again); a mode that doesn't use it gives the DAC back.
 pub fn settings_changed(mode: PreferredMode) {
+    // Auto tries Exclusive USB again after any choice in Settings
+    forget_auto_failed();
     match mode {
         PreferredMode::Exclusive => {
             let usb = usb_dac::current_dac().as_ref().and_then(ids);
@@ -797,6 +837,10 @@ pub fn release() {
 
 /// The DAC went or another took its place: let go of it at once (its sink stops with Gone).
 pub fn dac_changed(dac_id: Option<i32>) {
+    // Unplugged: plugged in again, Auto tries Exclusive USB again
+    if dac_id.is_none() {
+        forget_auto_failed();
+    }
     let gone = with_held(|h| match h.as_ref() {
         Some(x) if Some(x.dac_id) != dac_id => h.take(),
         _ => None,
@@ -2426,6 +2470,51 @@ pub(crate) mod tests {
         ));
         let note = usb_dac::current().unwrap().note.unwrap_or_default();
         assert!(note.contains("another app holds"), "{note}");
+    }
+
+    /// Auto, an Exclusive USB that won't start (the DAC refuses its volume): nothing plays now
+    /// (never another path mid-take), and from the next song Android plays the DAC; unplugged and
+    /// plugged in again (or a choice in Settings), Auto tries Exclusive USB again. Chosen by hand,
+    /// it never goes to Android.
+    #[test]
+    fn auto_plays_through_android_after_exclusive_usb_wont_start() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true, Some(100));
+        app.dac.state().refuse_volume = true;
+        exclusive(PreferredMode::Auto);
+        match open_phone(id(), AudioFormat::pcm(48_000, 16, 2)) {
+            PhoneOpen::Failed(why) => assert!(why.contains("from the next song"), "{why}"),
+            _ => panic!("nothing plays mid-take"),
+        }
+        let opened = *app.opened.lock().unwrap();
+        // Android lists the DAC again after the give-back
+        assert!(usb_dac::apply_report(
+            &ka17_report(33, "").replace("\"id\":41", "\"id\":42")
+        ));
+        assert!(matches!(
+            open_phone(id(), AudioFormat::pcm(48_000, 16, 2)),
+            PhoneOpen::Shared { .. }
+        ));
+        assert_eq!(
+            *app.opened.lock().unwrap(),
+            opened,
+            "Exclusive USB not tried again"
+        );
+        // Unplugged and plugged in again: tried again
+        usb_dac::set_dac(None);
+        assert!(usb_dac::apply_report(&ka17_report(33, "")));
+        app.dac.state().refuse_volume = false;
+        drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        // Chosen by hand: never Android's paths
+        release();
+        app.dac.state().refuse_volume = true;
+        exclusive(PreferredMode::Exclusive);
+        let _ = usb_dac::apply_report(&ka17_report(33, "").replace("\"id\":41", "\"id\":43"));
+        let r = open_phone(id(), AudioFormat::pcm(48_000, 16, 2));
+        assert!(
+            !matches!(r, PhoneOpen::Shared { .. } | PhoneOpen::BitPerfect(_)),
+            "chosen: no Android path"
+        );
     }
 
     #[test]

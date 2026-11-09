@@ -41,8 +41,11 @@ pub struct Media {
     native: Arc<dyn Native>,
     offline_origin: Arc<Mutex<Option<String>>>,
     st: Mutex<State>,
-    /// Every event, handled one after another (a call's pause and its end's play never cross).
+    /// Every event, handled one after another; audio focus and "becoming noisy" on a queue of
+    /// their own (a call's pause and its end's play never cross, and never wait behind a slow
+    /// request for something else).
     queue: tokio::sync::mpsc::UnboundedSender<Event>,
+    focus_queue: tokio::sync::mpsc::UnboundedSender<Event>,
 }
 
 #[derive(Default)]
@@ -59,10 +62,11 @@ struct State {
     art: Option<String>,
     /// The audio focus as last asked: held, and whether Android may duck it.
     focus: (bool, bool),
-    /// The phone's zone paused by a call (or a prompt): it plays on when that ends, unless someone
-    /// played, paused or stopped it meanwhile (`true` once the node said it is paused; any other
-    /// state after that drops it).
-    paused_for_now: Vec<(String, bool)>,
+    /// The phone's zone paused by a call (or a prompt): it plays on when that ends, unless anyone
+    /// sent it a command meanwhile (from any controller: the zone's `acked` count moved past the
+    /// one the node answered our pause with), or it isn't paused any more. `None` while our pause
+    /// is on its way.
+    paused_for_now: Vec<(String, Option<u64>)>,
     /// Counts media volume changes: only the newest tells the node.
     volume_seq: u64,
 }
@@ -85,16 +89,24 @@ pub fn init(
     let m = MEDIA
         .get_or_init(|| {
             let (queue, mut rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+            let (focus_queue, mut focus_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
             let m = Arc::new(Media {
                 app: app.clone(),
                 native,
                 offline_origin,
                 st: Mutex::new(State::default()),
                 queue,
+                focus_queue,
             });
             let me = m.clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(ev) = rx.recv().await {
+                    me.clone().handle(ev).await;
+                }
+            });
+            let me = m.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(ev) = focus_rx.recv().await {
                     me.clone().handle(ev).await;
                 }
             });
@@ -145,7 +157,10 @@ impl Media {
 
     /// An event from the app's side, in its turn.
     pub fn send(&self, ev: Event) {
-        let _ = self.queue.send(ev);
+        let _ = match ev {
+            Event::Focus(_) | Event::Noisy => self.focus_queue.send(ev),
+            _ => self.queue.send(ev),
+        };
     }
 
     /// Connected to a node (again): follow its zones.
@@ -265,16 +280,19 @@ impl Media {
     fn push(&self) {
         let (json, art, focus) = {
             let mut st = self.state();
-            // A zone a call paused: once the node says it is paused, anything else (someone played,
-            // paused or stopped it) means the listener chose, and the call's end leaves it be
+            // A zone a call paused: any command since ours (from any controller), or another state,
+            // means the listener chose, and the call's end leaves it be
             let zones = std::mem::take(&mut st.zones);
-            st.paused_for_now.retain_mut(|(z, seen)| {
-                let paused =
-                    zones.get(z.as_str()).and_then(|z| z.get("transport")?.as_str()) == Some("paused");
-                if paused {
-                    *seen = true;
-                }
-                paused || !*seen
+            st.paused_for_now.retain(|(z, ours)| {
+                let Some(z) = zones.get(z.as_str()) else {
+                    return false;
+                };
+                let Some(ours) = ours else {
+                    return true;
+                };
+                let paused = z.get("transport").and_then(Value::as_str) == Some("paused");
+                let acked = z.get("acked").and_then(Value::as_u64).unwrap_or(0);
+                paused && acked <= *ours
             });
             st.zones = zones;
             let s = Self::session(&st);
@@ -350,7 +368,7 @@ impl Media {
                 let playing = Self::phone_playing(&self.state());
                 self.state().paused_for_now.clear();
                 for z in playing {
-                    self.pause(&z).await;
+                    let _ = self.pause(&z).await;
                 }
                 self.push();
             }
@@ -365,37 +383,40 @@ impl Media {
         }
     }
 
-    async fn post(&self, url: Option<String>, body: Value) -> bool {
+    /// POST to the node; its answer (JSON, or null) when it took it.
+    async fn post(&self, url: Option<String>, body: Value) -> Result<Value, ()> {
         let Some(s) = self.state().settings.clone() else {
-            return false;
+            return Err(());
         };
         let (Some(url), Some(c)) = (url, client()) else {
-            return false;
+            return Err(());
         };
         match c.post(url).bearer_auth(&s.token).json(&body).send().await {
-            Ok(r) if r.status().is_success() => true,
+            Ok(r) if r.status().is_success() => Ok(r.json().await.unwrap_or(Value::Null)),
             Ok(r) => {
                 tracing::info!(status = %r.status(), "media controls: the node said no");
-                false
+                Err(())
             }
             Err(e) => {
                 tracing::info!("media controls: the node did not answer: {e}");
-                false
+                Err(())
             }
         }
     }
 
-    async fn transport(&self, zone: &str, body: Value) {
+    /// A transport command; the zone's state after it, as the node answers.
+    async fn transport(&self, zone: &str, body: Value) -> Result<Value, ()> {
         let base = self.state().settings.as_ref().map(|s| s.base().to_string());
         let url = base.and_then(|b| media::zone_url(&b, zone, "transport"));
-        self.post(url, body).await;
+        self.post(url, body).await
     }
 
-    async fn pause(&self, zone: &str) {
+    async fn pause(&self, zone: &str) -> Result<Value, ()> {
         if zone == media::BROWSER {
             self.eval(media::page_action_script("pause", None));
+            Ok(Value::Null)
         } else {
-            self.transport(zone, serde_json::json!({"action": "pause"})).await;
+            self.transport(zone, serde_json::json!({"action": "pause"})).await
         }
     }
 
@@ -403,7 +424,7 @@ impl Media {
         if zone == media::BROWSER {
             self.eval(media::page_action_script("play", None));
         } else {
-            self.transport(zone, serde_json::json!({"action": "play"})).await;
+            let _ = self.transport(zone, serde_json::json!({"action": "play"})).await;
         }
     }
 
@@ -418,7 +439,7 @@ impl Media {
         if let Some(body) = c.transport() {
             // The listener chose: a call's end doesn't play it again
             self.state().paused_for_now.retain(|(z, _)| *z != zone);
-            self.transport(&zone, body).await;
+            let _ = self.transport(&zone, body).await;
             return;
         }
         if let Command::Mute(m) = c {
@@ -430,7 +451,8 @@ impl Media {
                 .unwrap_or(false);
             let base = self.state().settings.as_ref().map(|s| s.base().to_string());
             let url = base.and_then(|b| media::zone_url(&b, &zone, "volume"));
-            self.post(url, serde_json::json!({"volume": {"mute": m.unwrap_or(!muted)}}))
+            let _ = self
+                .post(url, serde_json::json!({"volume": {"mute": m.unwrap_or(!muted)}}))
                 .await;
             return;
         }
@@ -473,11 +495,24 @@ impl Media {
             (body, st.settings.as_ref().map(|s| s.base().to_string()), level)
         };
         let (body, base, was) = body;
+        let shown = self
+            .state()
+            .zones
+            .get(&zone)
+            .and_then(|z| z.get("volume").cloned());
         self.push();
         let url = base.and_then(|b| media::zone_url(&b, &zone, "volume"));
-        if !self.post(url, serde_json::json!({ "volume": body })).await {
+        if self
+            .post(url, serde_json::json!({ "volume": body }))
+            .await
+            .is_err()
+        {
+            // Put back only what this set showed: a newer level (the node's, another
+            // controller's) stays
             if let Some(z) = self.state().zones.get_mut(&zone) {
-                z["volume"] = was;
+                if z.get("volume") == shown.as_ref() {
+                    z["volume"] = was;
+                }
             }
             self.push();
         }
@@ -537,7 +572,7 @@ impl Media {
                     if action == FocusAction::PauseForNow {
                         for z in &playing {
                             if !st.paused_for_now.iter().any(|(x, _)| x == z) {
-                                st.paused_for_now.push((z.clone(), false));
+                                st.paused_for_now.push((z.clone(), None));
                             }
                         }
                     } else {
@@ -545,7 +580,20 @@ impl Media {
                     }
                 }
                 for z in playing {
-                    self.pause(&z).await;
+                    let answer = self.pause(&z).await;
+                    let mut st = self.state();
+                    // The command count our pause left: any later one is someone's choice
+                    match answer.as_ref().ok().and_then(|v| v.get("acked")?.as_u64()) {
+                        Some(a) => {
+                            for (x, ours) in st.paused_for_now.iter_mut() {
+                                if *x == z && ours.is_none() {
+                                    *ours = Some(a);
+                                }
+                            }
+                        }
+                        // Not paused (or no answer to tell): never played again by the call's end
+                        None => st.paused_for_now.retain(|(x, _)| *x != z),
+                    }
                 }
             }
             FocusAction::Resume => {

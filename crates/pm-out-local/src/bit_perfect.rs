@@ -636,6 +636,19 @@ pub fn open_phone(id: OutputId, fmt: AudioFormat) -> PhoneOpen {
         why_not =
             match crate::exclusive::decide(&dac, usb_dac::settings(), usb_dac::full_level_consent(), media) {
                 Some(Ok(warning)) => match open_exclusive(id.clone(), &dac, fmt, warning, media, media_db) {
+                    // Auto: an Exclusive USB that took the DAC and won't start plays nothing now
+                    // (never another path mid-take); from the next song Auto plays this DAC through
+                    // Android (bit-perfect, then shared), unless the listener muted the zone on it
+                    // (Android's paths don't know that mute: they would play)
+                    Ok(PhoneOpen::Failed(why))
+                        if usb_dac::settings().mode == PreferredMode::Auto
+                            && !crate::exclusive::listener_muted(&dac) =>
+                    {
+                        crate::exclusive::auto_failed(&dac);
+                        return PhoneOpen::Failed(format!(
+                            "{why}. Auto plays it through Android from the next song"
+                        ));
+                    }
                     Ok(o) => return o,
                     Err(why) => {
                         tracing::warn!(format = %fmt, "no Exclusive USB: {why}");
