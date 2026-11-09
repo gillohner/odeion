@@ -136,12 +136,16 @@ pub fn load(s: &NodeState) -> Roster {
         .unwrap_or_default()
 }
 
+/// Someone with music access: their key, and their reports' name for this membership
+/// ([`Person::reports`]).
+pub type MusicPerson = (String, Option<String>);
+
 /// The people with music access, each with their reports' name for this membership
 /// ([`Person::reports`]); a paused music switch still counts, People › Remove takes access away,
 /// also from someone kept listed for their homeserver account. `None` when the roster can't be
 /// read (a damaged setting): unlike [`load`], never an empty roster in its place, so what deletes
 /// by it never takes everyone's.
-pub fn music_reporters(s: &NodeState) -> Option<Vec<(String, Option<String>)>> {
+pub fn music_reporters(s: &NodeState) -> Option<Vec<MusicPerson>> {
     match s.library.lock().expect("library poisoned").get_setting(SETTING) {
         Ok(None) => Some(Vec::new()),
         Ok(Some(j)) => serde_json::from_str::<Roster>(&j).ok().map(|r| {

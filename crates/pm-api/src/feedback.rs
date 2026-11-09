@@ -351,8 +351,8 @@ fn no_one_else_writes(dir: &Path) -> Result<(), InboxError> {
 fn private_beside(dir: &Path) -> Result<(), InboxError> {
     for ext in ["-journal", "-wal", "-shm"] {
         let side = dir.join(format!("{FILE}{ext}"));
-        if let Some((_, mode)) = own_file(&side)? {
-            make_private(&side, mode)?;
+        if let Some(found) = own_file(&side)? {
+            make_private(&side, found.mode)?;
         }
     }
     Ok(())
@@ -381,10 +381,18 @@ fn not_ours(what: &str) -> InboxError {
     InboxError::Store(format!("{FILE} {what}; the inbox isn't opened"))
 }
 
-/// What is at `path`, looked at without following a link: `None` when nothing is there, else its
-/// identity (device, inode) and mode. Refused unless it is a regular file with this one name.
+/// A regular file with one name, as [`own_file`] found it.
 #[cfg(unix)]
-fn own_file(path: &Path) -> Result<Option<((u64, u64), u32)>, InboxError> {
+struct Found {
+    /// Which file it is: its device and inode.
+    id: (u64, u64),
+    mode: u32,
+}
+
+/// What is at `path`, looked at without following a link: `None` when nothing is there, else its
+/// identity and mode. Refused unless it is a regular file with this one name.
+#[cfg(unix)]
+fn own_file(path: &Path) -> Result<Option<Found>, InboxError> {
     use std::os::unix::fs::MetadataExt;
     let m = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -405,7 +413,10 @@ fn own_file(path: &Path) -> Result<Option<((u64, u64), u32)>, InboxError> {
             "{name} has another name (a hard link); the inbox isn't opened"
         )));
     }
-    Ok(Some(((m.dev(), m.ino()), m.mode())))
+    Ok(Some(Found {
+        id: (m.dev(), m.ino()),
+        mode: m.mode(),
+    }))
 }
 
 /// The node's private inbox.
@@ -454,10 +465,10 @@ impl Inbox {
         #[cfg(unix)]
         {
             let now = own_file(&path)?.ok_or_else(|| not_ours("went away while it was opened"))?;
-            if before.0 != now.0 {
+            if before.id != now.id {
                 return Err(not_ours("changed while it was opened"));
             }
-            make_private(&path, now.1)?;
+            make_private(&path, now.mode)?;
             private_beside(dir)?;
         }
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -1103,7 +1114,7 @@ pub fn forget_listener(dir: &Path, key: &str) -> Result<usize, InboxError> {
 /// finished here (Kimi review of fc1dca51, M1), also for someone kept listed for their homeserver
 /// account (Claude review of 9ee7e1e3, Medium 1), and so is a restore that brought back a roster
 /// without them. The owner's stay. How many went.
-pub fn forget_unlisted(dir: &Path, listed: &[(String, Option<String>)]) -> Result<usize, InboxError> {
+pub fn forget_unlisted(dir: &Path, listed: &[crate::people::MusicPerson]) -> Result<usize, InboxError> {
     let Some(inbox) = Inbox::open_existing(dir)? else {
         return Ok(0);
     };
