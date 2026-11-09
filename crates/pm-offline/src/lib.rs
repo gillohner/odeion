@@ -8,12 +8,15 @@
 //! - [`sync()`]: with the node reachable, send the queue, tell the node what the device keeps and
 //!   has (`/v1/devices/{id}/downloads`), download what it still wants (resuming), and drop what
 //!   nothing keeps any more.
+//! - [`downloads`]: what the device keeps, for the app's storage screen and its marks.
 //! - [`server`]: with the node out of reach, a server on `127.0.0.1` that serves the web UI in
 //!   its offline mode from the store.
 
+pub mod downloads;
 pub mod server;
 pub mod store;
 pub mod sync;
 
-pub use store::{node_dir, Event, Format, Index, Keep, KeptTrack, Store};
-pub use sync::{flush, sync, Node, SyncError, SyncOptions, SyncReport};
+pub use downloads::{summary, Summary};
+pub use store::{node_dir, Event, Format, Index, Keep, KeepItem, KeptTrack, Label, Store};
+pub use sync::{flush, sync, Node, Progress, ProgressSink, SyncError, SyncOptions, SyncReport};

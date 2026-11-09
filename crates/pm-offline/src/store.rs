@@ -96,6 +96,78 @@ pub struct Index {
     /// The last sync that finished (Unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synced_at: Option<i64>,
+    /// What the person saw when they kept something (`album:7` → its title and artist), for the
+    /// storage screen before its songs arrive.
+    #[serde(default)]
+    pub labels: BTreeMap<String, Label>,
+}
+
+/// A kept item's name as the page showed it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Label {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sub: String,
+}
+
+/// One thing a person keeps on the device, or stops keeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeepItem {
+    Track(i64),
+    Album(i64),
+    Playlist(String),
+}
+
+impl KeepItem {
+    /// `track:3`, `album:7`, `playlist:<id>`.
+    pub fn key(&self) -> String {
+        match self {
+            KeepItem::Track(id) => format!("track:{id}"),
+            KeepItem::Album(id) => format!("album:{id}"),
+            KeepItem::Playlist(id) => format!("playlist:{id}"),
+        }
+    }
+
+    /// From the page's kind and id; `None` for anything else.
+    pub fn parse(kind: &str, id: &str) -> Option<Self> {
+        match kind {
+            "track" => id.parse().ok().map(KeepItem::Track),
+            "album" => id.parse().ok().map(KeepItem::Album),
+            "playlist" if !id.is_empty() && id.len() <= 128 => Some(KeepItem::Playlist(id.to_string())),
+            _ => None,
+        }
+    }
+}
+
+impl Keep {
+    /// Keep `item` (`on`) or stop keeping it; true when that changed anything.
+    pub fn set(&mut self, item: &KeepItem, on: bool) -> bool {
+        fn toggle<T: PartialEq + Clone>(v: &mut Vec<T>, x: &T, on: bool) -> bool {
+            let has = v.contains(x);
+            if on && !has {
+                v.push(x.clone());
+                true
+            } else if !on && has {
+                v.retain(|y| y != x);
+                true
+            } else {
+                false
+            }
+        }
+        match item {
+            KeepItem::Track(id) => toggle(&mut self.tracks, id, on),
+            KeepItem::Album(id) => toggle(&mut self.albums, id, on),
+            KeepItem::Playlist(id) => toggle(&mut self.playlists, id, on),
+        }
+    }
+
+    /// Nothing kept (the copy's format stays as chosen).
+    pub fn clear(&mut self) {
+        *self = Keep {
+            format: self.format.take(),
+            ..Keep::default()
+        };
+    }
 }
 
 fn version() -> u32 {
@@ -249,6 +321,32 @@ impl Store {
     }
 
     /// Choose what to keep (sent to the node at the next sync).
+    /// Keep `item` or stop keeping it, with what the page called it; the next sync fetches or
+    /// drops its songs. True when that changed anything.
+    pub fn keep(&self, item: &KeepItem, on: bool, label: Option<Label>) -> std::io::Result<bool> {
+        self.update(|ix| {
+            let changed = ix.keep.set(item, on);
+            match (on, label) {
+                (true, Some(l)) if !l.title.is_empty() => {
+                    ix.labels.insert(item.key(), l);
+                }
+                (false, _) => {
+                    ix.labels.remove(&item.key());
+                }
+                _ => {}
+            }
+            changed
+        })
+    }
+
+    /// Stop keeping everything: the next sync drops the device's copies (only those).
+    pub fn keep_nothing(&self) -> std::io::Result<()> {
+        self.update(|ix| {
+            ix.keep.clear();
+            ix.labels.clear();
+        })
+    }
+
     pub fn set_keep(&self, keep: Keep) -> std::io::Result<()> {
         self.update(|ix| ix.keep = keep)
     }

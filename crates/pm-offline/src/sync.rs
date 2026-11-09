@@ -142,13 +142,114 @@ impl Node {
     }
 }
 
-/// Who this install is, for the node's device list.
-#[derive(Debug, Clone)]
+/// Who this install is, for the node's device list, and how much it may keep.
+#[derive(Debug, Clone, Default)]
 pub struct SyncOptions {
     /// Shown in Settings, e.g. "Pixel 8".
     pub name: String,
     /// `android`, `ios`, `desktop` or `browser`.
     pub kind: String,
+    /// The most the downloads may take, in bytes (`None`: no limit of their own).
+    pub cap_bytes: Option<u64>,
+    /// Never leave less than this free on the device's disk.
+    pub keep_free: u64,
+    /// Told where the sync stands after each song (a storage screen shows it).
+    pub progress: Option<ProgressSink>,
+}
+
+/// Where a sync stands.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Progress {
+    pub running: bool,
+    /// Songs to download in this sync, and their size (the originals').
+    pub wanted: usize,
+    pub bytes_wanted: u64,
+    pub done: usize,
+    pub bytes_done: u64,
+    pub failed: usize,
+    /// The song downloading now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    /// Why downloading stopped short (the limit, the disk).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full: Option<String>,
+}
+
+/// Where [`Progress`] goes.
+#[derive(Clone)]
+pub struct ProgressSink(pub std::sync::Arc<dyn Fn(&Progress) + Send + Sync>);
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
+}
+
+impl SyncOptions {
+    fn tell(&self, p: &Progress) {
+        if let Some(s) = &self.progress {
+            (s.0)(p);
+        }
+    }
+}
+
+/// Free bytes on the disk holding `path` (`None` where it can't be read).
+#[cfg(unix)]
+pub fn free_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = path.ancestors().find(|p| p.exists())?;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid C string and a zeroed struct for the call to fill
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+pub fn free_bytes(_: &std::path::Path) -> Option<u64> {
+    None
+}
+
+/// Whether one more song of `bytes` fits: under the limit with what the device has, and leaving
+/// `keep_free` on the disk; else why not.
+pub fn fits(
+    have: u64,
+    bytes: u64,
+    cap: Option<u64>,
+    free: Option<u64>,
+    keep_free: u64,
+) -> std::result::Result<(), String> {
+    if let Some(c) = cap {
+        if have + bytes > c {
+            return Err(format!(
+                "Downloads stopped at the limit of {}: raise it or remove something.",
+                size_words(c)
+            ));
+        }
+    }
+    if free.is_some_and(|f| f < bytes + keep_free) {
+        return Err(format!(
+            "Downloads stopped: this device would have less than {} free.",
+            size_words(keep_free)
+        ));
+    }
+    Ok(())
+}
+
+/// "10 GB", "500 MB".
+pub fn size_words(b: u64) -> String {
+    if b >= 1_000_000_000 {
+        let gb = b as f64 / 1e9;
+        if (gb - gb.round()).abs() < 0.05 {
+            format!("{} GB", gb.round() as u64)
+        } else {
+            format!("{gb:.1} GB")
+        }
+    } else {
+        format!("{} MB", (b as f64 / 1e6).round() as u64)
+    }
 }
 
 /// What one sync did.
@@ -162,6 +263,9 @@ pub struct SyncReport {
     pub removed: Vec<i64>,
     /// Songs that failed, and why.
     pub failed: Vec<(i64, String)>,
+    /// Downloading stopped short, and why (the limit, the disk); the rest waits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full: Option<String>,
 }
 
 /// Is this refusal for good (drop the event) rather than "try again later"?
@@ -546,8 +650,60 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
         report.removed.push(id);
     }
     let format = store.index().keep.format;
-    for id in ids("wanted") {
-        match download(store, node, id, format.as_ref()).await {
+    // The songs to fetch with their size (the original's), and what the screen shows meanwhile
+    let wanted: Vec<(i64, u64, String)> = manifest
+        .get("wanted")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|w| {
+                    let id = w.as_i64().or_else(|| w.get("track_id").and_then(Value::as_i64))?;
+                    let bytes = w.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+                    let title = w
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    Some((id, bytes, title))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut progress = Progress {
+        running: true,
+        wanted: wanted.len(),
+        bytes_wanted: wanted.iter().map(|w| w.1).sum(),
+        ..Progress::default()
+    };
+    opts.tell(&progress);
+    for (id, bytes, title) in wanted {
+        // The limit and the disk, before each song: what is there stays, the rest waits
+        if let Err(why) = fits(
+            store.index().bytes(),
+            bytes,
+            opts.cap_bytes,
+            free_bytes(store.dir()),
+            opts.keep_free,
+        ) {
+            tracing::info!("offline: {why}");
+            progress.full = Some(why.clone());
+            report.full = Some(why);
+            break;
+        }
+        progress.current = Some(title);
+        opts.tell(&progress);
+        let got = download(store, node, id, format.as_ref()).await;
+        progress.current = None;
+        match &got {
+            Ok(Got::Done(k)) => {
+                progress.done += 1;
+                progress.bytes_done += k.bytes;
+            }
+            Ok(Got::Preparing) => {}
+            Err(_) => progress.failed += 1,
+        }
+        opts.tell(&progress);
+        match got {
             Ok(Got::Done(kept)) => {
                 let album = kept.track.pointer("/album/id").and_then(Value::as_i64);
                 let old = store.update(|ix| ix.tracks.insert(id, kept.clone()))?;
@@ -560,10 +716,18 @@ pub async fn sync(store: &Store, node: &Node, opts: &SyncOptions) -> Result<Sync
                 report.downloaded.push(id);
             }
             Ok(Got::Preparing) => report.preparing.push(id),
-            Err(e @ SyncError::Unreachable(_)) => return Err(e),
+            Err(e @ SyncError::Unreachable(_)) => {
+                opts.tell(&Progress {
+                    running: false,
+                    ..progress
+                });
+                return Err(e);
+            }
             Err(e) => report.failed.push((id, e.to_string())),
         }
     }
+    progress.running = false;
+    opts.tell(&progress);
     // Covers for songs kept before a cover could be fetched
     let albums: Vec<i64> = store
         .index()

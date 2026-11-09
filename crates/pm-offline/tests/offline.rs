@@ -232,6 +232,7 @@ async fn a_device_syncs_then_plays_offline() {
     let opts = SyncOptions {
         name: "Pixel 8".into(),
         kind: "android".into(),
+        ..Default::default()
     };
     let r = pm_offline::sync(&store, &node, &opts).await.unwrap();
     assert_eq!(r.sent, 3, "two sent, one refused for good (an unknown song)");
@@ -379,6 +380,7 @@ async fn an_unreachable_node_keeps_the_queue() {
     let opts = SyncOptions {
         name: "Laptop".into(),
         kind: "desktop".into(),
+        ..Default::default()
     };
     assert!(matches!(
         pm_offline::sync(&store, &node, &opts).await,
@@ -391,6 +393,7 @@ fn opts() -> SyncOptions {
     SyncOptions {
         name: "Laptop".into(),
         kind: "desktop".into(),
+        ..Default::default()
     }
 }
 
@@ -625,4 +628,71 @@ async fn the_offline_page_keeps_its_install_script() {
         );
         assert!(r.ends_with(body), "{path}: {r}");
     }
+}
+
+/// The limit the person set: a sync downloads what fits, stops before the next song, says why
+/// and where it stood; removing something (stop keeping it) frees room for the rest. Keeping and
+/// letting go are the device's own: nothing on the node changes but the device's record.
+#[tokio::test]
+async fn a_sync_stops_at_the_limit_and_says_so() {
+    use pm_offline::{KeepItem, Label, Progress, ProgressSink};
+    let seen: Fake = Arc::default();
+    let base = start_node(seen.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let label = Label {
+        title: "Album".into(),
+        sub: "Artist".into(),
+    };
+    assert!(store.keep(&KeepItem::Album(7), true, Some(label)).unwrap());
+    let told: Arc<Mutex<Vec<Progress>>> = Arc::default();
+    let t2 = told.clone();
+    let one = song(1).len() as u64;
+    let capped = SyncOptions {
+        cap_bytes: Some(one + 10),
+        progress: Some(ProgressSink(Arc::new(move |p| {
+            t2.lock().unwrap().push(p.clone())
+        }))),
+        ..opts()
+    };
+    let node = Node::new(&base, "tok").unwrap();
+    let r = pm_offline::sync(&store, &node, &capped).await.unwrap();
+    assert_eq!(r.downloaded, [1]);
+    let why = r.full.clone().expect("stopped at the limit");
+    assert!(why.contains("limit"), "{why}");
+    let last = told.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        (last.running, last.wanted, last.done, last.full.as_deref()),
+        (false, 2, 1, Some(why.as_str()))
+    );
+    assert!(told
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|p| p.current.as_deref() == Some("Song 1")));
+    let s = pm_offline::summary(&store.index());
+    assert_eq!(
+        (s.items[0].here, s.items[0].bytes, s.track_ids.clone()),
+        (1, one, vec![1])
+    );
+
+    // A disk that would be left too full stops it the same way
+    let full = SyncOptions {
+        keep_free: u64::MAX / 4,
+        ..opts()
+    };
+    let r = pm_offline::sync(&store, &node, &full).await.unwrap();
+    if pm_offline::sync::free_bytes(dir.path()).is_some() {
+        assert!(r.full.as_deref().is_some_and(|w| w.contains("free")), "{r:?}");
+        assert!(r.downloaded.is_empty());
+    }
+
+    // Let it go: the device's copy goes at the next sync, and only the device's record changed
+    assert!(store.keep(&KeepItem::Album(7), false, None).unwrap());
+    let r = pm_offline::sync(&store, &node, &capped).await.unwrap();
+    assert_eq!(r.removed, [1]);
+    assert!(store.index().tracks.is_empty() && store.index().labels.is_empty());
+    assert!(!dir.path().join("files/1.flac").exists());
+    let last = seen.lock().unwrap().manifests.last().cloned().unwrap();
+    assert_eq!(last["keep"]["albums"], json!([]));
 }
