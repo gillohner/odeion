@@ -733,8 +733,9 @@ async fn other_commands_during_a_pass_are_served_after_it() {
                 .unwrap()
                 .clone();
                 assert!(st.now_playing.is_some(), "{cmd}: {st:?}");
-                // ...and Play resumes it
-                r.gate.allow(1000);
+                // ...and Play resumes it. The gate stays shut until the resume shows: with
+                // blocks flowing, the 300 ms track plays out before a watcher looks, and the
+                // state watch folds Playing into the Stopped that follows
                 r.zone.play();
                 tokio::time::timeout(
                     Duration::from_secs(2),
@@ -743,6 +744,7 @@ async fn other_commands_during_a_pass_are_served_after_it() {
                 .await
                 .unwrap_or_else(|_| panic!("{cmd}: Play resumes"))
                 .unwrap();
+                r.gate.allow(1000);
             }
             _ => assert_eq!(st.transport, Transport::Playing, "{cmd}: {st:?}"),
         }
