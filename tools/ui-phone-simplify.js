@@ -262,6 +262,14 @@ const overflow = (page) => page.evaluate(() => {
     const [bx, by] = await mid('.np-bsheet .np-sheet-body');
     await touch(line(bx + 120, by, -240, 6)); await sleep(800);
     check(await page.$eval('.np-bsheet', (s) => s.dataset.tab) === 'lyrics', `${at}: a finger's sideways swipe on the sheet's list moves to Lyrics`);
+    // (the list redrawn under the finger, as Sources is when its answer comes: still the tabs, not the songs)
+    const t0 = [sent(state, 'next'), sent(state, 'previous')];
+    const [b2x, b2y] = await mid('.np-bsheet .np-sheet-body');
+    await touch(line(b2x - 120, b2y, 240, 4), { mid: () => { const b = document.querySelector('.np-bsheet .np-sheet-body'); b.innerHTML = b.innerHTML; } }); await sleep(800);
+    check(await page.$eval('.np-bsheet', (s) => s.dataset.tab) === 'queue' && sent(state, 'next') === t0[0] && sent(state, 'previous') === t0[1], `${at}: a swipe whose list is redrawn under the finger still changes the tab (back to Up next), never the song`);
+    await page.click('.np-stabs [data-npsheet="lyrics"]'); await sleep(400);
+    const under = await page.evaluate(() => ['.shell > .content', '.bottomnav'].every((q) => document.querySelector(q).inert));
+    check(under, `${at}: the page under Now playing is out of reach (inert) while it is open`);
     const inert = await page.evaluate(() => ['.np-top', '.np-body', '.np-dock'].every((s) => document.querySelector(`#nowplaying ${s}`).inert));
     check(inert, `${at}: what the sheet covers is out of reach (inert) while it shows`);
     await page.keyboard.press('Escape'); await sleep(400);
@@ -272,7 +280,7 @@ const overflow = (page) => page.evaluate(() => {
     await page.keyboard.press('Escape'); await sleep(300);
     check(inPanel && await page.evaluate(() => document.querySelector('#qpanel').hidden && document.activeElement && document.activeElement.id === 'npmore' && document.querySelector('#npmore').getAttribute('aria-expanded') !== 'true'), `${at}: Sound opens from Now playing's ··· with the focus in it, and the focus comes back to ··· (in the panel: ${inPanel})`);
     await page.keyboard.press('Escape'); await sleep(300);
-    check(await page.evaluate(() => document.querySelector('#nowplaying').hidden && !document.querySelector('.shell').inert), `${at}: Escape again closes Now playing (the page behind is in reach again)`);
+    check(await page.evaluate(() => document.querySelector('#nowplaying').hidden && !document.querySelector('.shell > .content').inert && !document.querySelector('.bottomnav').inert), `${at}: Escape again closes Now playing (the page behind is in reach again)`);
     // a playlist page keeps its own header (the album layout is for the item pages)
     await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await sleep(400);
     const pl = await page.evaluate(() => { const hero = document.querySelector('#main > .hero'); const kids = [...hero.querySelectorAll(':scope > div:not(.art) > *')].map((e) => Math.round(e.getBoundingClientRect().width)); return { item: hero.classList.contains('item-hero'), min: Math.min(...kids.filter((x) => x > 0)), sw: document.documentElement.scrollWidth, vw: innerWidth }; });
@@ -296,7 +304,6 @@ const overflow = (page) => page.evaluate(() => {
     await page.keyboard.press('Escape'); await sleep(200); await page.keyboard.press('Escape'); await sleep(300);
     check(/Linn/.test(idl.zone) && idl.sound && pop && idl.sw <= idl.vw && await page.evaluate(() => document.querySelector('#nowplaying').hidden), `${at}: with nothing playing, Now playing names the zone ("${idl.zone}"), opens Play to (${pop}) and has Sound (${idl.sound}); Escape twice closes Play to, then it`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
-    check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     await context.close();
   }
   // ---- a desktop window 700 px wide: the phone arrangement above the player bar ----
@@ -309,6 +316,16 @@ const overflow = (page) => page.evaluate(() => {
     await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-dock'); await sleep(400);
     const d = await page.evaluate(() => { const bar = document.querySelector('.player').getBoundingClientRect().top; const dock = document.querySelector('.np-dock').getBoundingClientRect().bottom; const pg = document.querySelector('.np-page'); return { shell: document.documentElement.dataset.shell, bar, dock, over: pg.scrollHeight - pg.clientHeight }; });
     check(d.shell === 'desktop' && d.dock <= d.bar + 0.5 && d.over <= 1, `700x900 desktop: Now playing's first screen ends above the player bar (buttons end at ${Math.round(d.dock)}, the bar at ${Math.round(d.bar)}, overflow ${d.over})`);
+    const reach = await page.evaluate(() => ({ content: document.querySelector('.shell > .content').inert, side: document.querySelector('.shell > .sidebar').inert, bar: document.querySelector('.player').inert || !!document.querySelector('.player').closest('[inert]') }));
+    check(reach.content && reach.side && !reach.bar, `700x900 desktop: what Now playing covers is inert, the player bar is not (${JSON.stringify(reach)})`);
+    // a phone turned sideways with Now playing open: the wide layout's player bar comes back, usable
+    await page.setViewportSize({ width: 360, height: 800 }); await sleep(400);
+    await page.setViewportSize({ width: 851, height: 393 }); await sleep(600);
+    const rot = await page.evaluate(() => { const b = document.querySelector('.player'); return { bar: !!b.closest('[inert]'), shown: b.getClientRects().length > 0, content: document.querySelector('.shell > .content').inert }; });
+    const tg0 = sent(state, 'toggle') + sent(state, 'pause') + sent(state, 'play');
+    if (rot.shown) await page.click('#toggle'); await sleep(400);
+    check(!rot.bar && rot.content && rot.shown && sent(state, 'toggle') + sent(state, 'pause') + sent(state, 'play') > tg0, `851x393 (turned): the player bar is usable, the covered page is not (${JSON.stringify(rot)})`);
+    await page.setViewportSize({ width: 700, height: 900 }); await sleep(500);
     await page.click('.np-dock [data-npsheet="lyrics"]'); await page.waitForSelector('.np-bsheet:not([hidden])'); await sleep(400);
     const sb = await page.evaluate(() => ({ s: document.querySelector('.np-bsheet').getBoundingClientRect().bottom, bar: document.querySelector('.player').getBoundingClientRect().top }));
     check(sb.s <= sb.bar + 0.5, `700x900 desktop: the sheet ends above the player bar (${Math.round(sb.s)} / ${Math.round(sb.bar)})`);
@@ -330,6 +347,18 @@ const overflow = (page) => page.evaluate(() => {
     const shown = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); return s && !s.hidden ? s.dataset.tab : null; });
     await page.goBack(); await sleep(400);
     check(shown === 'lyrics' && await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `1024 → 680: the open Lyrics becomes the phone's sheet (${shown}) and Back closes it first`);
+    // Lyrics chosen on the wide screen, Now playing closed there, the window made narrow, Now playing
+    // opened again: the sheet shows, and Back still closes it before Now playing
+    await page.goBack(); await sleep(300);
+    await page.setViewportSize({ width: 1024, height: 800 }); await sleep(500);
+    await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden]) .np-sheet-tabs'); await sleep(300);
+    await page.click('.np-sheet-tabs [data-npsheet="lyrics"]'); await sleep(300);
+    await page.click('#npclose'); await sleep(400);
+    await page.setViewportSize({ width: 680, height: 800 }); await sleep(500);
+    await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])'); await sleep(500);
+    const again = await page.evaluate(() => { const s = document.querySelector('.np-bsheet'); return s && !s.hidden ? s.dataset.tab : null; });
+    await page.goBack(); await sleep(400);
+    check(again === 'lyrics' && await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `1024 → close → 680 → open: the sheet shows (${again}) and Back closes it first`);
     check(!state.errors.length, `1024 → 680: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     await context.close();
   }

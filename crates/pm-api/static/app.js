@@ -182,9 +182,11 @@
     const kbMove = () => {
       const h = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
       document.documentElement.style.setProperty('--kb', `${h}px`);
+      // (the keyboard's height is the viewport's lost height; a pan moves offsetTop only)
+      const kbH = Math.round(window.innerHeight - vv.height);
       const a = document.activeElement;
-      if (h !== kbWas && a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) requestAnimationFrame(() => a.scrollIntoView({ block: 'center' }));
-      kbWas = h;
+      if (kbH !== kbWas && a && a.matches && a.matches('input, textarea') && a.closest('.np-bsheet')) requestAnimationFrame(() => a.scrollIntoView({ block: 'center' }));
+      kbWas = kbH;
       const t = document.getElementById('toast'); if (t && t.classList.contains('show')) placeToast(t);
     };
     vv.addEventListener('resize', kbMove); vv.addEventListener('scroll', kbMove);
@@ -3235,9 +3237,9 @@
     document.body.classList.toggle('np-open', open);
     // (a toast on screen moves with the bars: Now playing hides the mini player and the tabs)
     { const t = $('#toast'); if (t.classList.contains('show')) placeToast(t); }
-    // (on a phone Now playing covers the whole page: what is under it is out of reach for Tab and
-    // screen readers)
-    $('.shell').inert = open && shellMode() === 'phone';
+    // (what it covers is out of reach for Tab and screen readers while it is open: the side bar, the
+    // page and the phone's tabs; a desktop's player bar is not under it and stays)
+    $$('.shell > .sidebar, .shell > .content, .shell > .bottomnav').forEach((el) => { el.inert = open; });
     if (open) { if (!was) { transients.push(npTr); pushTransient(); } renderNowPlaying(); return; }
     const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
     const ks = transients.indexOf(npSheetTr); if (ks >= 0) transients.splice(ks, 1);
@@ -3261,7 +3263,7 @@
       if (e.pointerType === 'mouse' || !e.isPrimary) return;
       reset();
       if ((o.when && !o.when(e)) || e.target.closest('input, textarea, select, [data-noswipe]')) return;
-      s = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, dir: null, from: e.target, move: o.move ? o.move(e) : null, xok: o.x ? o.x(e) : true };
+      s = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, dir: null, from: o.origin ? o.origin(e) : null, move: o.move ? o.move(e) : null, xok: o.x ? o.x(e) : true };
     });
     el.addEventListener('pointermove', (e) => {
       if (!s || e.pointerId !== s.id) return;
@@ -3528,15 +3530,19 @@
   // sheet a swipe down on its head closes it, and sideways anywhere on it moves between its tabs
   {
     const npStep = (d) => { const ks = NP_COMPACT.map(([k]) => k); const j = ks.indexOf(state.npSheet) + d; if (j >= 0 && j < ks.length) { state.npSheet = ks[j]; renderNowPlaying(); const f = $(`.np-sheet-tabs [data-npsheet="${ks[j]}"]`, overlay); if (f) f.focus({ preventScroll: true }); } };
-    const onSheet = (t) => !!(t && t.closest && t.closest('.np-bsheet'));
+    // (where the press was, decided when it happens: the sheet's list can be redrawn under the finger,
+    // Sources when its answer comes, and then the pressed element is no longer in the sheet)
+    const origin = (e) => (e.target.closest('.np-sheet-head') ? 'head' : e.target.closest('.np-bsheet') ? 'sheet' : e.target.closest('.np-big') ? 'cover' : 'screen');
+    const inSheet = (o) => o === 'head' || o === 'sheet';
     swipeable(overlay, {
       when: () => npCompact() && !!$('.np2.compact:not(.np-idle)', overlay),
-      move: (e) => (!state.npSheet && e.target.closest('.np-big') ? $('.np-big', overlay) : null),
-      x: (e) => (state.npSheet ? onSheet(e.target) : !!e.target.closest('.np-big')),
-      left: (t) => { if (onSheet(t)) npStep(1); else { $('#next').click(); setTimeout(renderNowPlaying, 400); } },
-      right: (t) => { if (onSheet(t)) npStep(-1); else { $('#prev').click(); setTimeout(renderNowPlaying, 400); } },
-      up: (t) => { if (!state.npSheet && !onSheet(t)) { state.npSheet = 'queue'; renderNowPlaying(); const f = $('.np-sheet-tabs [data-npsheet="queue"]', overlay); if (f) f.focus({ preventScroll: true }); } },
-      down: (t) => { if (onSheet(t)) { if (t.closest('.np-sheet-head')) closeNpSheet(); } else if (!state.npSheet) toggleNowPlaying(); },
+      origin,
+      move: (e) => (!state.npSheet && origin(e) === 'cover' ? $('.np-big', overlay) : null),
+      x: (e) => (state.npSheet ? inSheet(origin(e)) : origin(e) === 'cover'),
+      left: (o) => { if (inSheet(o)) npStep(1); else if (o === 'cover') { $('#next').click(); setTimeout(renderNowPlaying, 400); } },
+      right: (o) => { if (inSheet(o)) npStep(-1); else if (o === 'cover') { $('#prev').click(); setTimeout(renderNowPlaying, 400); } },
+      up: (o) => { if (!state.npSheet && !inSheet(o)) { state.npSheet = 'queue'; renderNowPlaying(); const f = $('.np-sheet-tabs [data-npsheet="queue"]', overlay); if (f) f.focus({ preventScroll: true }); } },
+      down: (o) => { if (o === 'head') closeNpSheet(); else if (!inSheet(o) && !state.npSheet) toggleNowPlaying(); },
     });
   }
   // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
@@ -5822,8 +5828,10 @@
             const more = $('#idmore'); if (more) more.onclick = async () => { more.disabled = true; const gen = listGen; try { const p = await api('GET', `/library/suggestions/albums?limit=50&${next}`); if (!live() || gen !== listGen) return; albums.push(...p.albums.filter((a) => !albums.some((x) => x.key === a.key))); next = cursor(p); draw(); } catch (e) { if (!live() || gen !== listGen) return; toast(e.message, 'error'); more.disabled = false; } };
           };
           // One album drawn again from what is known here, after a confirm or a "Not this" (the
-          // rest of the page, its choices and where it is scrolled stay; nothing is fetched)
+          // rest of the page, its choices and where it is scrolled stay; nothing is fetched; the
+          // note at the top was for the first draw and goes)
           const redraw = (ai) => {
+            { const n = $('.idnote', main); if (n) n.remove(); }
             const sec = $(`[data-album="${ai}"]`, main); if (!sec) return;
             const html = albumHtml(albums[ai], ai);
             if (!html) { sec.remove(); } else { sec.insertAdjacentHTML('afterend', html); sec.remove(); wire($(`[data-album="${ai}"]`, main)); }

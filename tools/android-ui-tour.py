@@ -76,8 +76,9 @@ def run(h):
         def went_back():
             z = api("GET", f"/v1/zones/{zid}")
             i = z.get("queue_index"); pos = ((z.get("now_playing") or {}).get("position_ms")) or 0
-            return i if i is not None and (i < idx1 or pos < pos1 - 1000) else None
-        idx2 = until("the previous song (or this one's start) after a swipe right", went_back, timeout=15)
+            # (a tuple: index 0 is an answer too; a restart only counts on the same song)
+            return (i,) if i is not None and (i < idx1 or (i == idx1 and pos < pos1 - 1000)) else None
+        idx2 = until("the previous song (or this one's start) after a swipe right", went_back, timeout=15)[0]
         log(f"swipe right on the mini player: queue {idx1} -> {idx2}")
         # A vertical scroll of the page doesn't change the song
         w = int(re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).group(1))
