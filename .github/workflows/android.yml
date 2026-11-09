@@ -180,6 +180,20 @@ jobs:
           npx tauri android init --ci --skip-targets-install
           npx tauri icon ../pm-api/static/icon.svg
           python3 -I ../../tools/release/android-patch.py .
+      # The Gradle wrapper fetches its distribution once, with a 10 s timeout and no second try: run
+      # 42567812866 failed there ("Downloading ... gradle-9.6.1-bin.zip failed: timeout (10000ms)").
+      # A two-minute timeout and up to three fetches, before any build needs it.
+      - name: Gradle
+        working-directory: crates/pm-desktop/gen/android
+        run: |
+          props=gradle/wrapper/gradle-wrapper.properties
+          if grep -q '^networkTimeout=' "$props"; then sed -i 's/^networkTimeout=.*/networkTimeout=120000/' "$props"
+          else echo 'networkTimeout=120000' >> "$props"; fi
+          for i in 1 2 3; do
+            ./gradlew --version && break
+            [ "$i" = 3 ] && exit 1
+            sleep 20
+          done
       - name: a throwaway signing key, and the signing helper
         run: |
           keytool -genkeypair -keystore "$RUNNER_TEMP/ci.p12" -storetype PKCS12 -storepass ci-only -keypass ci-only \
