@@ -163,7 +163,7 @@ async function launchSafety(browser) {
     const VIA = `http://127.0.0.1:${P.server.address().port}`;
     const { ctx, page } = await caseContext(browser, VIA);
     const k = (await kept(page)).map((x) => x.path);
-    ok(['/', '/pwa.js', '/app.js', '/app.css', '/pwa.css'].every((f) => k.includes(f)), 'full copy (precondition): the page and its blocking files are kept');
+    ok(['/', '/pwa.js', '/app.js', '/app.css', '/pwa.css', '/feedback.js', '/feedback.css'].every((f) => k.includes(f)), 'full copy (precondition): the page and its blocking files are kept');
     // M10: the proxy sends 200 headers for the page, then nothing
     P.st.mode = 'stallBody';
     const r = await launchUntil(page, VIA + '/albums', 10000);

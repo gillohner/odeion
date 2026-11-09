@@ -68,9 +68,10 @@ async function copyOf(path) {
   return (await canonical(path, r)) ? r : null;
 }
 
-// The files the page can't start without (it waits for them in its head): a kept page is used only
-// with all of them kept too, or it would wait for the node with no end and show nothing
-const BLOCKING = ['/pwa.js', '/app.js', '/app.css', '/pwa.css'];
+// The files the page can't start without (its stylesheets and scripts without async or defer): a
+// kept page is used only with all of them kept too, or it would wait for the node with no end and
+// show nothing (tools/pwa-check.js checks this list against index.html)
+const BLOCKING = ['/pwa.js', '/app.js', '/app.css', '/pwa.css', '/feedback.js', '/feedback.css'];
 async function keptPage() {
   const root = await copyOf('/');
   if (!root) return null;

@@ -214,7 +214,7 @@
   window.PM_FEEDBACK = {
     mount(host, o) {
       opts = o || {};
-      if (!document.querySelector('link[data-fb-css]')) document.head.append(h('link', { rel: 'stylesheet', href: '/feedback.css', 'data-fb-css': true }));
+      if (!document.querySelector('link[rel="stylesheet"][href="/feedback.css"]')) document.head.append(h('link', { rel: 'stylesheet', href: '/feedback.css' }));
       helpBtn = h('button', { class: 'btn fb-help', type: 'button', 'aria-label': 'Help and problem reports', 'aria-haspopup': 'menu', 'aria-expanded': 'false', text: '?',
         onclick: () => (closeMenu ? closeMenu() : menu()) });
       host.append(h('span', { class: 'fb-anchor' }, helpBtn));
