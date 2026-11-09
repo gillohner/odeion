@@ -154,14 +154,17 @@
       const sent = dr;
       const body = { kind: sent.kind, text: text.value, client_id: sent.client_id };
       if (sent.details) body.details = sent.details;
-      send.disabled = true; send.textContent = 'Sending…'; status.textContent = 'Sending…';
+      // Nothing in it changes while it is on its way: an edit then would be lost when the answer
+      // clears the draft (Kimi review of a58e5a5a, Low 9)
+      const hold = (on) => { text.readOnly = on; tick.disabled = on; for (const r of kinds.querySelectorAll('input')) r.disabled = on; };
+      send.disabled = true; send.textContent = 'Sending…'; status.textContent = 'Sending…'; hold(true);
       let r;
       try { r = await request('POST', '/feedback', body); } catch (e) { r = null; }
       const saved = r && (r.status === 201 || r.status === 200);
       if (saved && draft === sent) draft = null;
       // Closed meanwhile: the answer is for no one here now
       if (!d.isConnected) return;
-      send.disabled = false; send.textContent = 'Send'; status.textContent = '';
+      send.disabled = false; send.textContent = 'Send'; status.textContent = ''; hold(false);
       // Someone else signed in meanwhile: nothing of the answer is shown to them
       if (sent.who !== who()) { cleared(); return; }
       if (saved) {

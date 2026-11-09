@@ -316,6 +316,66 @@ fn make_if_absent(path: &Path) -> Result<(), InboxError> {
     Ok(())
 }
 
+/// The inbox's folder may be changed by the node's user alone (Kimi review of a58e5a5a, M3):
+/// putting another file in the inbox's place, or swapping one in while it is opened, takes write
+/// access to the folder, which its owner can always give themselves. So the folder must belong to
+/// the node's user (or root) and be writable by no group or other user. pm-node makes its data
+/// folder so at start, but only warns when it can't; the operator's commands and the API come
+/// through here too, so such a folder is refused for the inbox itself. The folders above it, and
+/// a data folder reached through links, are the operator's setup, like any service's state folder:
+/// not checked here.
+#[cfg(unix)]
+fn no_one_else_writes(dir: &Path) -> Result<(), InboxError> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(dir)?;
+    // SAFETY: geteuid has no preconditions and can't fail
+    let me = unsafe { libc::geteuid() };
+    if m.uid() != me && m.uid() != 0 {
+        return Err(InboxError::Store(format!(
+            "{} belongs to another user, who could put another file in the inbox's place; the inbox isn't opened",
+            dir.display()
+        )));
+    }
+    if m.mode() & 0o022 != 0 {
+        return Err(InboxError::Store(format!(
+            "{} can be written in by other users; make it the node's user's alone (chmod go-w), the inbox isn't opened",
+            dir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// SQLite's files beside the inbox (`-journal`, `-wal`, `-shm`), the ones that are there: no
+/// links, made the node's user's alone.
+#[cfg(unix)]
+fn private_beside(dir: &Path) -> Result<(), InboxError> {
+    for ext in ["-journal", "-wal", "-shm"] {
+        let side = dir.join(format!("{FILE}{ext}"));
+        if let Some((_, mode)) = own_file(&side)? {
+            make_private(&side, mode)?;
+        }
+    }
+    Ok(())
+}
+
+/// Makes `path` 0600 when its `mode` isn't: by path, right after [`own_file`] found a regular
+/// file with one name there, in a folder only the node's user may write in.
+#[cfg(unix)]
+fn make_private(path: &Path, mode: u32) -> Result<(), InboxError> {
+    use std::os::unix::fs::PermissionsExt;
+    if mode & 0o777 != 0o600 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            InboxError::Store(format!(
+                "{} can't be made private ({e}): it belongs to another user; run as the node's user",
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn not_ours(what: &str) -> InboxError {
     InboxError::Store(format!("{FILE} {what}; the inbox isn't opened"))
@@ -359,11 +419,13 @@ impl Inbox {
     /// Open the inbox in `dir` if the node has made one: the operator's commands never make it
     /// (made by another user, it would lock the node out of its own inbox).
     pub fn open_existing(dir: &Path) -> Result<Option<Inbox>, InboxError> {
-        // Anything there counts, a link too: it is refused below, never taken for no inbox
-        if std::fs::symlink_metadata(dir.join(FILE)).is_err() {
-            return Ok(None);
+        // Anything there counts, a link too: it is refused below, never taken for no inbox; and an
+        // inbox that can't be looked at is an error, not none (Kimi review of a58e5a5a, Low 7)
+        match std::fs::symlink_metadata(dir.join(FILE)) {
+            Ok(_) => Inbox::open(dir).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
         }
-        Inbox::open(dir).map(Some)
     }
 
     /// Open (or make) the inbox in `dir`.
@@ -375,30 +437,28 @@ impl Inbox {
         // through a descriptor of the node's own: closing one drops every SQLite lock this process
         // holds on the file, and another process could then take a write in progress for a crashed
         // one (POSIX; sqlite.org/howtocorrupt.html 2.2; Claude review of 9ee7e1e3, Medium 2)
+        #[cfg(unix)]
+        no_one_else_writes(dir)?;
         make_if_absent(&path)?;
         #[cfg(unix)]
         let before = own_file(&path)?.ok_or_else(|| not_ours("went away before it was opened"))?;
+        // SQLite's own files beside it are no links and the node's user's alone before SQLite can
+        // read them: a -wal or -shm left readable stays so as SQLite uses it (Kimi review of
+        // a58e5a5a, M4)
+        #[cfg(unix)]
+        private_beside(dir)?;
         let mut conn = Connection::open_with_flags(&path, open_flags())?;
         // Before anything is written: still the file looked at, the node's user's alone (an inbox
         // made before the node made it itself may not be yet), and SQLite's own files beside it are
         // no links either
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let now = own_file(&path)?.ok_or_else(|| not_ours("went away while it was opened"))?;
             if before.0 != now.0 {
                 return Err(not_ours("changed while it was opened"));
             }
-            if now.1 & 0o777 != 0o600 {
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
-                    InboxError::Store(format!(
-                        "{FILE} can't be made private ({e}): it belongs to another user; run as the node's user"
-                    ))
-                })?;
-            }
-            for ext in ["-journal", "-wal", "-shm"] {
-                own_file(&dir.join(format!("{FILE}{ext}")))?;
-            }
+            make_private(&path, now.1)?;
+            private_beside(dir)?;
         }
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // What the inbox lets go of (a purged report, a cleared digest) is overwritten in this
@@ -693,6 +753,14 @@ fn sender(c: &Caller) -> Option<Sender> {
 /// Whether the caller a token gives `now` is still the person it gave `then`: the owner, or the
 /// same listener. Not the whole `Caller`: the owner's key can load during a request (the node's
 /// identity syncing), which is no sign-out (held Low 3 of the Claude review of 2d2f0a8a).
+/// A listener's membership name now ([`crate::people::reports_of`]); the owner has none.
+fn membership_of(s: &NodeState, who: &Sender) -> Option<String> {
+    match who {
+        Sender::Owner => None,
+        Sender::Listener(k) => crate::people::reports_of(s, k),
+    }
+}
+
 fn same_person(then: &Caller, now: Option<&Caller>) -> bool {
     match (sender(then), now.and_then(sender)) {
         (Some(Sender::Owner), Some(Sender::Owner)) => true,
@@ -719,13 +787,29 @@ impl Inbox {
     /// Who sent a report, as the inbox keeps it: the owner, or a listener's key hashed with this
     /// inbox's own secret. The inbox never holds anyone's key, and its short names can't be matched
     /// to a public key or to the same person on another node.
-    fn reporter_of(&self, who: &Sender) -> String {
+    ///
+    /// A listener's is followed by `/` and their membership's name ([`crate::people::Person::reports`])
+    /// when they have one: reports from an earlier time they had music are never theirs again
+    /// (Kimi review of a58e5a5a, M1), while every one of theirs can still be found by their key.
+    fn reporter_of(&self, who: &Sender, membership: Option<&str>) -> String {
         match who {
             Sender::Owner => OWNER.into(),
-            Sender::Listener(k) => blake3::keyed_hash(&self.secret, k.as_bytes())
-                .to_hex()
-                .to_string(),
+            Sender::Listener(k) => {
+                let them = self.listener(k);
+                match membership {
+                    Some(m) => format!("{them}/{m}"),
+                    None => them,
+                }
+            }
         }
+    }
+
+    /// A listener's key hashed with this inbox's secret: what every one of their reporter names
+    /// starts with.
+    fn listener(&self, key: &str) -> String {
+        blake3::keyed_hash(&self.secret, key.trim_start_matches("pubky").as_bytes())
+            .to_hex()
+            .to_string()
     }
 }
 
@@ -896,10 +980,11 @@ pub async fn send(
         Ok(text) => text,
         Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
     };
+    let membership = membership_of(&s, &who);
     let dir = s.data_dir();
     let saved = tokio::task::spawn_blocking(move || {
         let mut inbox = Inbox::open(&dir)?;
-        let reporter = inbox.reporter_of(&who);
+        let reporter = inbox.reporter_of(&who, membership.as_deref());
         inbox.add(&reporter, &r, now(), &signed_in)
     })
     .await;
@@ -968,10 +1053,11 @@ pub async fn mine(
     if !signed_in() {
         return refuse(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
     }
+    let membership = membership_of(&s, &who);
     let dir = s.data_dir();
     match tokio::task::spawn_blocking(move || {
         let list = match Inbox::open_existing(&dir)? {
-            Some(inbox) => inbox.mine(&inbox.reporter_of(&who))?,
+            Some(inbox) => inbox.mine(&inbox.reporter_of(&who, membership.as_deref()))?,
             None => Vec::new(),
         };
         if !signed_in() {
@@ -1003,24 +1089,32 @@ pub fn forget_listener(dir: &Path, key: &str) -> Result<usize, InboxError> {
     let Some(inbox) = Inbox::open_existing(dir)? else {
         return Ok(0);
     };
-    let reporter = inbox.reporter_of(&Sender::Listener(key.trim_start_matches("pubky").to_string()));
-    Ok(inbox
-        .conn
-        .execute("DELETE FROM report WHERE reporter = ?1", params![reporter])?)
+    // Every time they had music: their key's name alone (before memberships had names), or it
+    // with a membership's after `/` (hex, so nothing in it is a LIKE wildcard)
+    let them = inbox.listener(key);
+    Ok(inbox.conn.execute(
+        "DELETE FROM report WHERE reporter = ?1 OR reporter LIKE ?1 || '/%'",
+        params![them],
+    )?)
 }
 
-/// Listeners' reports whose sender no longer has music access (`listed`: the keys of those who
-/// do, [`crate::people::music_keys`]) go: a People › Remove the inbox was too busy or broken for is
+/// Listeners' reports whose sender no longer has music access, or had it only at an earlier time
+/// (`listed`: those who have it, each with their membership, [`crate::people::music_reporters`]) go: a People › Remove the inbox was too busy or broken for is
 /// finished here (Kimi review of fc1dca51, M1), also for someone kept listed for their homeserver
 /// account (Claude review of 9ee7e1e3, Medium 1), and so is a restore that brought back a roster
 /// without them. The owner's stay. How many went.
-pub fn forget_unlisted(dir: &Path, listed: &[String]) -> Result<usize, InboxError> {
+pub fn forget_unlisted(dir: &Path, listed: &[(String, Option<String>)]) -> Result<usize, InboxError> {
     let Some(inbox) = Inbox::open_existing(dir)? else {
         return Ok(0);
     };
     let keep: std::collections::HashSet<String> = listed
         .iter()
-        .map(|k| inbox.reporter_of(&Sender::Listener(k.trim_start_matches("pubky").to_string())))
+        .map(|(k, m)| {
+            inbox.reporter_of(
+                &Sender::Listener(k.trim_start_matches("pubky").to_string()),
+                m.as_deref(),
+            )
+        })
         .chain([OWNER.to_string()])
         .collect();
     let reporters: Vec<String> = inbox
@@ -1052,7 +1146,11 @@ pub fn start_housekeeping(s: &Arc<NodeState>) {
                 if let Err(e) = housekeeping(&dir, now()) {
                     tracing::warn!("feedback: expired reports not removed: {e}");
                 }
-                match crate::people::music_keys(&s).map(|keys| forget_unlisted(&dir, &keys)) {
+                // The roster read and the deletes by it are one step, never during a change to the
+                // roster (People, restores): a report sent after someone is given music again is
+                // never taken for one from before (Kimi review of a58e5a5a, M2)
+                let _roster = s.roster.blocking_lock();
+                match crate::people::music_reporters(&s).map(|people| forget_unlisted(&dir, &people)) {
                     Some(Ok(0)) => {}
                     Some(Ok(n)) => {
                         tracing::info!(n, "feedback: reports of people without music access removed")

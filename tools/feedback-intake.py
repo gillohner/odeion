@@ -189,7 +189,7 @@ def receipt(cfg, report_id, state):
 
 
 def open_private(path, flags, what):
-    """Opens `path` never through a link, as a regular file that is the operator's alone (0600),
+    """Opens `path` never through a link, symbolic or hard, as a regular file that is the operator's alone (0600),
     whatever it was before: a copy made by hand or an older file is made private here (Kimi review
     of fc1dca51, M4). Without waiting: a FIFO there is refused, never waited on while the intake
     holds its lock (Claude review of 9ee7e1e3, Low 2)."""
@@ -203,6 +203,10 @@ def open_private(path, flags, what):
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise IntakeError(f"{what} isn't a regular file")
+        # Another name for it (a hard link) would leave it outside the intake's keeping: changed
+        # or removed through that name (Kimi review of a58e5a5a, M5). Refused before any change
+        if st.st_nlink != 1:
+            raise IntakeError(f"{what} has another name (a hard link)")
         if stat.S_IMODE(st.st_mode) != 0o600:
             os.fchmod(fd, 0o600)
     except BaseException:

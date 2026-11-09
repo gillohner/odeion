@@ -1024,19 +1024,14 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
-/// devices, their problem reports, and what was fetched with their sign-ins (TIDAL tracks, search
-/// answers, item pages).
+/// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
+/// Their problem reports go in People › Remove before this, while the roster is held.
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let signed_out = sign_out_everywhere(s, key);
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
-    // Their problem reports too (feedback.rs); if the inbox can't be written now, they go at the
-    // node's next housekeeping (at start and hourly), which takes the reports of anyone without
-    // music access (Remove takes it away, also from someone kept listed for their homeserver account)
-    if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), key) {
-        tracing::warn!("feedback: a removed listener's reports not removed: {e}");
-    }
+    // Their problem reports go in People › Remove itself, while the roster is held (people.rs)
     signed_out?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());

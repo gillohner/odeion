@@ -78,10 +78,23 @@ pub struct Person {
     /// the node keeps what it last set (`PATCH /v1/people/{key} {homeserver_enabled}`).
     #[serde(default = "on")]
     pub homeserver_enabled: bool,
+    /// Their problem reports' name for this time they have music access, new each time they are
+    /// given it: reports from an earlier time are never theirs again, and go at the next
+    /// housekeeping (feedback.rs). `None` for someone listed before the node kept one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports: Option<String>,
 }
 
 fn on() -> bool {
     true
+}
+
+/// A new name for someone's problem reports (random, 16 bytes in hex).
+fn new_reports() -> String {
+    rand::random::<[u8; 16]>()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -123,22 +136,33 @@ pub fn load(s: &NodeState) -> Roster {
         .unwrap_or_default()
 }
 
-/// The keys of the people with music access (a paused music switch still counts; People › Remove
-/// takes it away, also from someone kept listed for their homeserver account), or `None` when the
-/// roster can't be read (a damaged setting): unlike [`load`], never an empty roster in its place,
-/// so what deletes by it never takes everyone's.
-pub fn music_keys(s: &NodeState) -> Option<Vec<String>> {
+/// The people with music access, each with their reports' name for this membership
+/// ([`Person::reports`]); a paused music switch still counts, People › Remove takes access away,
+/// also from someone kept listed for their homeserver account. `None` when the roster can't be
+/// read (a damaged setting): unlike [`load`], never an empty roster in its place, so what deletes
+/// by it never takes everyone's.
+pub fn music_reporters(s: &NodeState) -> Option<Vec<(String, Option<String>)>> {
     match s.library.lock().expect("library poisoned").get_setting(SETTING) {
         Ok(None) => Some(Vec::new()),
         Ok(Some(j)) => serde_json::from_str::<Roster>(&j).ok().map(|r| {
             r.people
                 .into_iter()
                 .filter(|p| p.access.music())
-                .map(|p| p.key)
+                .map(|p| (p.key, p.reports))
                 .collect()
         }),
         Err(_) => None,
     }
+}
+
+/// `key`'s reports' name for this membership ([`Person::reports`]), if they are listed with one.
+pub fn reports_of(s: &NodeState, key: &str) -> Option<String> {
+    let key = key.trim_start_matches("pubky");
+    load(s)
+        .people
+        .into_iter()
+        .find(|p| p.key == key)
+        .and_then(|p| p.reports)
 }
 
 fn store(s: &NodeState, r: &Roster) -> Result<(), ApiError> {
@@ -246,6 +270,7 @@ fn add_used(r: &mut Roster, used: &[(String, String)]) {
                 music_enabled: inv.access.music(),
                 added_at: now(),
                 homeserver_enabled: true,
+                reports: inv.access.music().then(new_reports),
             });
         }
         false
@@ -415,6 +440,7 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
                 p.music_enabled = true;
                 if p.access == Access::Homeserver {
                     p.access = Access::HomeserverMusic;
+                    p.reports = Some(new_reports());
                 }
             } else {
                 r.people.push(Person {
@@ -424,6 +450,7 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
                     music_enabled: true,
                     added_at: now(),
                     homeserver_enabled: true,
+                    reports: Some(new_reports()),
                 });
             }
             Ok(())
@@ -555,6 +582,7 @@ pub(crate) async fn change(
             p.music_enabled = m;
             if m && p.access == Access::Homeserver {
                 p.access = Access::HomeserverMusic;
+                p.reports = Some(new_reports());
             }
         }
         if let Some(name) = rename {
@@ -588,9 +616,16 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
             p.music_enabled = false;
             if p.access == Access::HomeserverMusic {
                 p.access = Access::Homeserver;
+                p.reports = None;
             }
         } else {
             r.people.remove(i);
+        }
+        // Their problem reports go now, while no one can give them music again: done after,
+        // a report sent in between under a new membership would go too. If the inbox can't be
+        // written now, they go at the node's next housekeeping (feedback.rs)
+        if let Err(e) = crate::feedback::forget_listener(&s.data_dir(), &key) {
+            tracing::warn!("feedback: a removed listener's reports not removed now: {e}");
         }
         Ok(())
     })
