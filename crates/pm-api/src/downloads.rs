@@ -196,24 +196,37 @@ fn cache_cap_bytes(s: &NodeState) -> u64 {
         * 1024
 }
 
-/// Oldest-first eviction until the cache is under its cap (the file just made stays).
+/// A cache file this young is being opened or served by the request that made it: never
+/// evicted (the cap is a budget the cache settles under, not a hard limit).
+const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Oldest-first eviction until the cache is under its cap. One eviction at a time, and it
+/// spares the file just made, files being made (their key lock held) and files younger than
+/// [`FRESH_FOR`]: two large downloads finishing together used to evict each other's file.
 fn evict(dir: &FsPath, cap: u64, keep: &FsPath) {
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let now = std::time::SystemTime::now();
+    let making: std::collections::HashSet<String> =
+        locks().lock().expect("download locks").keys().cloned().collect();
     let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = rd
         .flatten()
         .filter_map(|e| {
             let m = e.metadata().ok()?;
-            (m.is_file() && !e.file_name().to_string_lossy().ends_with(".part"))
+            let name = e.file_name().to_string_lossy().into_owned();
+            (m.is_file() && !name.ends_with(".part") && !making.contains(&name))
                 .then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), e.path()))
         })
         .collect();
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     files.sort();
-    for (_, len, p) in files {
+    for (modified, len, p) in files {
         if total <= cap {
             break;
         }
-        if p != keep && std::fs::remove_file(&p).is_ok() {
+        let fresh = now.duration_since(modified).is_ok_and(|age| age < FRESH_FOR);
+        if p != keep && !fresh && std::fs::remove_file(&p).is_ok() {
             total = total.saturating_sub(len);
         }
     }
@@ -592,6 +605,42 @@ mod tests {
         assert!(target(&q(Some("wav"), None)).is_err());
         assert!(target(&q(Some("mp3"), Some(32))).is_err());
         assert!(target(&q(Some("mp3"), Some(500))).is_err());
+    }
+
+    /// Eviction spares the file just made, files being made (their key lock held) and files
+    /// younger than [`FRESH_FOR`]: only old, idle files go, oldest first.
+    #[tokio::test]
+    async fn eviction_spares_fresh_files_and_files_being_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, [0u8; 100]).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+                .unwrap();
+            p
+        };
+        let fresh = |name: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, [0u8; 100]).unwrap();
+            p
+        };
+        let (a, b) = (old("old-a"), old("old-b"));
+        let made = old("being-made");
+        let (c, d) = (fresh("fresh-c"), fresh("fresh-d"));
+        let _held = lock_for("being-made").await;
+        // 500 bytes over a cap of 1: everything that may go, goes
+        evict(dir.path(), 1, &d);
+        assert!(!a.exists() && !b.exists(), "old idle files go first");
+        assert!(made.exists(), "a file being made stays");
+        assert!(c.exists() && d.exists(), "fresh files stay");
+        // Without the lock and once old, the one being made goes too
+        drop(_held);
+        let f = std::fs::File::options().write(true).open(&made).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        evict(dir.path(), 1, &d);
+        assert!(!made.exists());
     }
 
     #[tokio::test]

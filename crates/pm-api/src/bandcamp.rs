@@ -803,6 +803,32 @@ fn jobs() -> &'static std::sync::Mutex<HashMap<String, DownloadJob>> {
     J.get_or_init(Default::default)
 }
 
+/// Claim the download of purchase `id`: a `queued` job, unless one for it is still running
+/// (409). The check and the entry happen under one lock, before any network call.
+fn claim_job(id: &str) -> Result<(), ApiError> {
+    let mut jobs = jobs().lock().expect("bandcamp jobs");
+    if jobs
+        .get(id)
+        .is_some_and(|j| !matches!(j.state.as_str(), "done" | "failed"))
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "That download is already running",
+        ));
+    }
+    jobs.insert(
+        id.to_string(),
+        DownloadJob {
+            id: id.to_string(),
+            title: id.to_string(),
+            state: "queued".into(),
+            at: now(),
+            ..Default::default()
+        },
+    );
+    Ok(())
+}
+
 fn set_job(id: &str, f: impl FnOnce(&mut DownloadJob)) {
     if let Some(j) = jobs().lock().expect("bandcamp jobs").get_mut(id) {
         f(j);
@@ -907,42 +933,46 @@ pub(crate) async fn download(
             return Err(ApiError::bad_request("unknown download format"));
         }
     }
-    if jobs()
-        .lock()
-        .expect("bandcamp jobs")
-        .get(&id)
-        .is_some_and(|j| !matches!(j.state.as_str(), "done" | "failed"))
-    {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "That download is already running",
-        ));
+    // The job is claimed before any network call: two requests for one purchase at once make
+    // one download, the other is told so (the check and the entry under one lock)
+    claim_job(&id)?;
+    let looked_up = async {
+        let (items, urls) = collection_of(&s, &cookie, &fan).await?;
+        let p = items
+            .into_iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| ApiError::not_found("That isn't in your Bandcamp collection"))?;
+        let page = urls.get(&id).cloned().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::CONFLICT,
+                "Bandcamp offers no download for this purchase",
+            )
+        })?;
+        Ok::<_, ApiError>((p, page))
     }
-    let (items, urls) = collection_of(&s, &cookie, &fan).await?;
-    let p = items
-        .into_iter()
-        .find(|p| p.id == id)
-        .ok_or_else(|| ApiError::not_found("That isn't in your Bandcamp collection"))?;
-    let page = urls.get(&id).cloned().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::CONFLICT,
-            "Bandcamp offers no download for this purchase",
-        )
-    })?;
+    .await;
+    let (p, page) = match looked_up {
+        Ok(x) => x,
+        Err(e) => {
+            // The claim ends as a failed job, so the page shows why and a retry is possible
+            set_job(&id, |j| {
+                j.state = "failed".into();
+                j.error = Some(e.message.clone());
+            });
+            return Err(e);
+        }
+    };
     let want = body
         .and_then(|b| b.format)
         .unwrap_or_else(|| load(&s.library.lock().expect("library poisoned")).format);
-    let job = DownloadJob {
-        id: id.clone(),
-        title: format!("{} - {}", p.artist.clone().unwrap_or_default(), p.title),
-        state: "queued".into(),
-        at: now(),
-        ..Default::default()
-    };
-    jobs()
+    let title = format!("{} - {}", p.artist.clone().unwrap_or_default(), p.title);
+    set_job(&id, |j| j.title = title.clone());
+    let job = jobs()
         .lock()
         .expect("bandcamp jobs")
-        .insert(id.clone(), job.clone());
+        .get(&id)
+        .cloned()
+        .unwrap_or_default();
     let s2 = s.clone();
     tokio::spawn(async move {
         let r = run_download(&s2, &id, &cookie, &page, &want, &p).await;
@@ -1205,6 +1235,25 @@ pub(crate) async fn put(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A purchase's download is claimed once: a second request while it runs is told so, and a
+    /// finished or failed one can be claimed again. The claim happens before any network call.
+    #[test]
+    fn a_download_is_claimed_once() {
+        let id = "claimtest1";
+        assert!(claim_job(id).is_ok());
+        let again = claim_job(id).unwrap_err();
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        assert_eq!(
+            jobs().lock().unwrap().get(id).map(|j| j.state.clone()),
+            Some("queued".into())
+        );
+        set_job(id, |j| j.state = "failed".into());
+        assert!(claim_job(id).is_ok());
+        set_job(id, |j| j.state = "done".into());
+        assert!(claim_job(id).is_ok());
+        jobs().lock().unwrap().remove(id);
+    }
 
     #[test]
     fn links_tracks_and_pages_parse() {

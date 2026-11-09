@@ -93,6 +93,8 @@ pub(crate) fn note_unsubscribed(s: &NodeState, url: &str) {
     note(s, url, false);
 }
 
+/// Called with [`podcasts::documents`] held by the caller (the subscribe and unsubscribe
+/// handlers), so the note and the feed change land together.
 fn note(s: &NodeState, url: &str, add: bool) {
     if account(s).is_none() {
         return;
@@ -319,18 +321,22 @@ async fn sync_with(s: &NodeState, a: &mut Account) -> Result<SyncReport, String>
     report.added = fetched.len();
     let server_added: HashSet<String> = changes.add.iter().map(|u| u.trim().to_string()).collect();
     // Keep what came from the server even if the node's list changed meanwhile.
-    let mut now_feeds = podcasts::feeds(s);
-    now_feeds.retain(|f| !removed.contains(f.url.as_str()));
-    for f in fetched {
-        if !now_feeds.iter().any(|x| x.id == f.id) {
-            now_feeds.push(f);
+    let (now_feeds, mut pending) = {
+        let _docs = podcasts::documents();
+        let mut now_feeds = podcasts::feeds(s);
+        now_feeds.retain(|f| !removed.contains(f.url.as_str()));
+        for f in fetched {
+            if !now_feeds.iter().any(|x| x.id == f.id) {
+                now_feeds.push(f);
+            }
         }
-    }
-    podcasts::store(s, podcasts::FEEDS, &now_feeds).map_err(|e| e.message)?;
+        podcasts::store(s, podcasts::FEEDS, &now_feeds).map_err(|e| e.message)?;
+        let pending: Pending = podcasts::load(s, PENDING);
+        (now_feeds, pending)
+    };
     let mut since = changes.timestamp;
 
     // 2. The node's own changes (on the first sync, every subscription).
-    let mut pending: Pending = podcasts::load(s, PENDING);
     if first {
         for f in &now_feeds {
             if !pending.add.contains(&f.url) {
@@ -346,7 +352,17 @@ async fn sync_with(s: &NodeState, a: &mut Account) -> Result<SyncReport, String>
         report.sent_subscriptions = pending.add.len() + pending.remove.len();
         since = since.max(up.timestamp);
     }
-    podcasts::store(s, PENDING, &Pending::default()).map_err(|e| e.message)?;
+    // Only what went up (or came down) leaves the list: a subscription made or dropped on the
+    // node while the upload ran stays for the next sync
+    {
+        let _docs = podcasts::documents();
+        let mut now: Pending = podcasts::load(s, PENDING);
+        now.add
+            .retain(|u| !pending.add.contains(u) && !server_added.contains(u));
+        now.remove
+            .retain(|u| !pending.remove.contains(u) && !removed.contains(u.as_str()));
+        podcasts::store(s, PENDING, &now).map_err(|e| e.message)?;
+    }
     a.subs_since = since;
 
     // 3. Positions: the node's changes out, then the server's in.

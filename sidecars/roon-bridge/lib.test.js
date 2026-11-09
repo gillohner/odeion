@@ -46,6 +46,21 @@ test("scrobbles once per track after the halfway mark, keyed per zone", async ()
   assert.equal(s.seekUpdate({ zone_id: "unknown", seek_position: 1 }), null);
 });
 
+test("a failure that isn't a refusal is tried again at the next report", async () => {
+  let fail = true;
+  const { fetchImpl, calls } = fakeFetch(() => (fail ? [503, { error: "busy" }] : [200, { uri: "https://musicbrainz.org/recording/x" }]));
+  const s = new Scrobbler(makeApi({ fetchImpl }), quiet);
+  const zone = (seek) => ({ zone_id: "z", state: "playing", now_playing: { three_line: { line1: "Get Lucky", line2: "Daft Punk", line3: "RAM" }, length: 369, seek_position: seek } });
+  assert.equal(await s.maybeScrobble(zone(10)), false, "not yet");
+  assert.equal(await s.maybeScrobble(zone(200)), false, "the node was busy");
+  assert.equal(calls.length, 1);
+  fail = false;
+  assert.equal(await s.maybeScrobble(zone(210)), true, "tried again, posted");
+  assert.equal(calls.length, 2);
+  assert.equal(await s.maybeScrobble(zone(220)), false, "posted once");
+  assert.equal(calls.length, 2);
+});
+
 test("a 422 from the node is a skip, not a failure", async () => {
   const { fetchImpl } = fakeFetch(() => [422, { error: "no canonical identity" }]);
   const s = new Scrobbler(makeApi({ fetchImpl }), quiet);

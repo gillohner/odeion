@@ -196,6 +196,8 @@ pub struct NodeState {
     /// Held across one sync of the node's sign-ins with the vault (`vault_cache`), and across
     /// "Sign out everywhere", so two never interleave.
     pub vault_pass: tokio::sync::Mutex<()>,
+    /// One scheduled backup at a time (`backup::run_scheduled`).
+    pub backup_run: tokio::sync::Mutex<()>,
     /// Folder watcher, kept alive here.
     pub watcher: Mutex<Option<notify::RecommendedWatcher>>,
     /// Sleep timers: the zone pauses when its deadline passes.
@@ -479,6 +481,7 @@ impl NodeState {
             sources_off,
             sync: Mutex::new(None),
             vault_pass: tokio::sync::Mutex::new(()),
+            backup_run: tokio::sync::Mutex::new(()),
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
             roster: tokio::sync::Mutex::new(()),

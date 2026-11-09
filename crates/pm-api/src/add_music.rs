@@ -164,6 +164,54 @@ fn free_name(dest: &std::path::Path, hash: &str) -> Option<std::path::PathBuf> {
     unreachable!("an endless range")
 }
 
+/// One lock per destination in the mirror folder: two files for the same path, at once, get the
+/// free name one after the other, never the same one.
+fn mirror_locks() -> &'static std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
+    static L: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    L.get_or_init(Default::default)
+}
+
+/// Put `bytes` (content `hash`) at `dest` in the mirror folder without replacing anything: the
+/// same song there already is kept, anything else gets the next free name (`free_name`). Under
+/// the destination's lock from the name to the rename, with a part file of this write's own, so
+/// two uploads of different songs to one path both land, whole, under two names. Returns the
+/// path written, `None` when the same song was there.
+pub(crate) async fn place_in_mirror(
+    dest: &std::path::Path,
+    hash: &str,
+    bytes: Vec<u8>,
+) -> Result<Option<PathBuf>, String> {
+    let lock = mirror_locks()
+        .lock()
+        .expect("mirror locks")
+        .entry(dest.to_path_buf())
+        .or_default()
+        .clone();
+    let _held = lock.lock().await;
+    let free = {
+        let (dest, hash) = (dest.to_path_buf(), hash.to_string());
+        tokio::task::spawn_blocking(move || free_name(&dest, &hash))
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let Some(dest) = free else {
+        return Ok(None);
+    };
+    // Written beside it and moved into place: a failed write leaves no half a song
+    let part = dest.with_file_name(format!(
+        ".{}.{}.part",
+        dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        crate::tidal::random_urlsafe(6)
+    ));
+    if let Err(e) = tokio::fs::write(&part, bytes).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(e.to_string());
+    }
+    tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
+    Ok(Some(dest))
+}
+
 /// What happened to one file.
 pub(crate) enum Stored {
     /// Sent to the homeserver, at this path.
@@ -259,26 +307,7 @@ pub(crate) async fn store(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        // Never over another file: the same song there already is kept, anything else gets the
-        // next free name
-        let free = {
-            let (dest, hash) = (dest.clone(), hash.clone());
-            tokio::task::spawn_blocking(move || free_name(&dest, &hash))
-                .await
-                .map_err(|e| e.to_string())?
-        };
-        if let Some(dest) = free {
-            // Written beside it and moved into place: a failed write leaves no half a song
-            let part = dest.with_file_name(format!(
-                ".{}.part",
-                dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-            ));
-            if let Err(e) = tokio::fs::write(&part, bytes).await {
-                let _ = tokio::fs::remove_file(&part).await;
-                return Err(e.to_string());
-            }
-            tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
-        }
+        place_in_mirror(&dest, &hash, bytes).await?;
         let root = s.mirror_dir.clone();
         let known = s
             .library
@@ -379,46 +408,46 @@ pub(crate) async fn start(
     {
         return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
     }
-    // And the disk it waits on until whole, with what the other uploads still have to send
-    let coming: u64 = s
-        .music_uploads
-        .lock()
-        .expect("uploads")
-        .values()
-        .filter(|u| u.state == "receiving")
-        .map(|u| u.size - u.offset)
-        .sum();
-    if let Some(why) = crate::copy_guard::room_for_staging(&s, &parts_dir(&s))
-        .space()
-        .and_then(|sp| sp.too_little(coming + b.size))
-    {
-        return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
-    }
     tokio::fs::create_dir_all(parts_dir(&s))
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let id = crate::tidal::random_urlsafe(12);
-    tokio::fs::write(part_path(&s, &id), b"")
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut u = s.music_uploads.lock().expect("uploads");
-    expire(&mut u, &s);
-    u.insert(
-        id.clone(),
-        Upload {
-            id: id.clone(),
-            name,
-            relative_path: b.relative_path.map(|r| r.chars().take(400).collect()),
-            size: b.size,
-            offset: 0,
-            state: "receiving".into(),
-            error: None,
-            full: false,
-            stored_as: None,
-            touched: Some(Instant::now()),
-            writing: false,
-        },
-    );
+    // The disk it waits on until whole, with what the other uploads still have to send: counted,
+    // checked and this upload added in one step under the uploads' lock, so two starts at once
+    // can't both pass on the same room
+    {
+        let room = crate::copy_guard::room_for_staging(&s, &parts_dir(&s));
+        let mut u = s.music_uploads.lock().expect("uploads");
+        expire(&mut u, &s);
+        let coming: u64 = u
+            .values()
+            .filter(|x| x.state == "receiving")
+            .map(|x| x.size - x.offset)
+            .sum();
+        if let Some(why) = room.space().and_then(|sp| sp.too_little(coming + b.size)) {
+            return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
+        }
+        u.insert(
+            id.clone(),
+            Upload {
+                id: id.clone(),
+                name,
+                relative_path: b.relative_path.map(|r| r.chars().take(400).collect()),
+                size: b.size,
+                offset: 0,
+                state: "receiving".into(),
+                error: None,
+                full: false,
+                stored_as: None,
+                touched: Some(Instant::now()),
+                writing: false,
+            },
+        );
+    }
+    if let Err(e) = tokio::fs::write(part_path(&s, &id), b"").await {
+        s.music_uploads.lock().expect("uploads").remove(&id);
+        return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+    }
     Ok(Json(UploadStarted {
         id: Some(id),
         offset: 0,
@@ -568,6 +597,11 @@ async fn finish(s: &Arc<NodeState>, id: &str) {
             ));
         }
         let mut have = present(sync.as_ref()).await?;
+        // Cancelled while the chunks were looked at: nothing goes to the homeserver or the
+        // library (a request already under way can't be called back; this is before it)
+        if get_upload(s, id).is_err() {
+            return Err("cancelled".into());
+        }
         let room = crate::copy_guard::room_for_store(s);
         store(
             s,

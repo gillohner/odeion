@@ -65,6 +65,28 @@ impl AppState {
             *cur = s;
         }
     }
+
+    /// Store `s` only while the current settings still name `node_url`: the check and the store
+    /// under one lock, so a registration that finishes after the app connected to another node
+    /// never writes that node's settings over the new one's. Whether it was stored.
+    fn store_if_node(&self, node_url: &str, s: Settings) -> bool {
+        store_if_node(&self.settings, &self.path, node_url, s)
+    }
+}
+
+/// [`AppState::store_if_node`] on the settings cell itself (also for tests).
+fn store_if_node(cell: &Mutex<Option<Settings>>, path: &Path, node_url: &str, s: Settings) -> bool {
+    let Ok(mut cur) = cell.lock() else {
+        return false;
+    };
+    if cur.as_ref().map(|c| c.node_url.as_str()) != Some(node_url) {
+        return false;
+    }
+    if let Err(e) = settings::save(path, Some(&s)) {
+        tracing::warn!("cannot save the app settings: {e}");
+    }
+    *cur = Some(s);
+    true
 }
 
 /// Links that would open a second window (`target="_blank"`, a
@@ -236,8 +258,8 @@ async fn register_player(app: AppHandle, s: Settings) {
     let player = app.state::<AppState>().player.clone();
     let s = player::register(s, player).await;
     let state = app.state::<AppState>();
-    if state.current().map(|c| c.node_url) == Some(s.node_url.clone()) {
-        state.store(Some(s));
+    let node_url = s.node_url.clone();
+    if state.store_if_node(&node_url, s) {
         let script = player::output_script();
         if let (false, Some(w)) = (script.is_empty(), app.get_webview_window(MAIN)) {
             let _ = w.eval(script);
@@ -937,6 +959,33 @@ fn page_event(app: &tauri::AppHandle, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A registration that ends after the app connected to another node never writes that
+    /// node's settings over the new one's: the check and the store happen under one lock.
+    #[test]
+    fn a_late_registration_never_replaces_a_newer_connection() {
+        let dir = std::env::temp_dir().join(format!("pm-desktop-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let node = |url: &str, player: &str| Settings {
+            node_url: url.into(),
+            player_address: player.into(),
+            ..Settings::default()
+        };
+        let cell = Mutex::new(Some(node("http://b:7788", "")));
+        // A's registration, late: refused, B stays
+        assert!(!store_if_node(&cell, &path, "http://a:7788", node("http://a:7788", "a-player")));
+        assert_eq!(cell.lock().unwrap().as_ref().unwrap().node_url, "http://b:7788");
+        assert!(!path.exists(), "nothing written");
+        // B's own: stored
+        assert!(store_if_node(&cell, &path, "http://b:7788", node("http://b:7788", "b-player")));
+        assert_eq!(cell.lock().unwrap().as_ref().unwrap().player_address, "b-player");
+        let saved: Settings = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.player_address, "b-player");
+        // No side file left behind
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Stands in at the claimed address: answers `/v1/info` as the node would, and hands every
     /// request it gets to the test.

@@ -48,6 +48,8 @@ struct Mock {
     actions: HashMap<String, serde_json::Value>,
     /// Bodies the node posted, as "<path> <json>".
     posted: Vec<String>,
+    /// How long the subscriptions upload takes to answer (the node's changes go up slowly).
+    delay_ms: u64,
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -117,6 +119,10 @@ async fn mock(listener: tokio::net::TcpListener, shared: Shared) {
     ) -> axum::response::Response {
         if !authorised(&h) {
             return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let delay = m.lock().unwrap().delay_ms;
+        if delay > 0 && uri.path().contains("/subscriptions/") {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
         m.lock().unwrap().posted.push(format!("{} {body}", uri.path()));
         axum::Json(serde_json::json!({"timestamp": 150, "update_urls": []})).into_response()
@@ -309,4 +315,96 @@ async fn subscriptions_and_positions_sync_both_ways() {
     assert_eq!(status["configured"], false);
     let (_, subs) = call(&app, "GET", "/v1/podcasts/subscriptions", None).await;
     assert_eq!(subs["subscriptions"].as_array().unwrap().len(), 1);
+}
+
+fn node(dir: &std::path::Path) -> Arc<NodeState> {
+    let db = dir.join("lib.sqlite");
+    NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.join("art"),
+            mirror_dir: dir.join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    )
+}
+
+/// A subscription made on the node while a sync is sending the node's changes up isn't lost:
+/// only what went up leaves the list of changes to send, and the next sync sends it.
+#[tokio::test]
+async fn a_subscription_made_during_the_upload_goes_up_at_the_next_sync() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let (fa, fb, fc) = (
+        format!("{base}/feeds/a.xml"),
+        format!("{base}/feeds/b.xml"),
+        format!("{base}/feeds/c.xml"),
+    );
+    let shared: Shared = Arc::new(Mutex::new(Mock {
+        base: base.clone(),
+        ..Mock::default()
+    }));
+    tokio::spawn(mock(listener, shared.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let app = router(s.clone());
+    let subscribe = |feed: String| {
+        let app = app.clone();
+        async move {
+            let (st, _) = call(
+                &app,
+                "POST",
+                "/v1/podcasts/subscriptions",
+                Some(serde_json::json!({"feed": feed})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+        }
+    };
+    subscribe(fa.clone()).await;
+    let right = serde_json::json!({"server": format!("{base}/"), "username": "ann", "password": "secret"});
+    let (st, body) = call(&app, "PUT", "/v1/podcasts/gpodder", Some(right)).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    // C is subscribed and waits to go up; the upload is slow, and B is subscribed meanwhile
+    subscribe(fc.clone()).await;
+    shared.lock().unwrap().delay_ms = 600;
+    let sync = {
+        let app = app.clone();
+        tokio::spawn(async move { call(&app, "POST", "/v1/podcasts/gpodder/sync", None).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    subscribe(fb.clone()).await;
+    let (st, r) = sync.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["sent_subscriptions"], 1, "C went up: {r}");
+    // The next sync sends B, which was noted while C went up
+    shared.lock().unwrap().delay_ms = 0;
+    let (st, r) = call(&app, "POST", "/v1/podcasts/gpodder/sync", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["sent_subscriptions"], 1, "B goes up: {r}");
+    let m = shared.lock().unwrap();
+    let last = m
+        .posted
+        .iter()
+        .rev()
+        .find(|p| p.contains("/subscriptions/"))
+        .unwrap();
+    assert!(last.contains(&fb) && !last.contains(&fc), "{last}");
 }

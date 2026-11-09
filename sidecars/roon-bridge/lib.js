@@ -97,8 +97,13 @@ export class Scrobbler {
       this.log.log(`scrobbled: ${l.line1} — ${l.line2} → ${r.uri}`);
       return true;
     } catch (e) {
-      if (e.status === 422) this.log.log(`skipped (no canonical identity): ${l.line1} — ${l.line2}`);
-      else this.log.error(`scrobble failed: ${e.message}`);
+      if (e.status === 422) {
+        this.log.log(`skipped (no canonical identity): ${l.line1} — ${l.line2}`);
+      } else {
+        // A timeout or a 5xx is tried again at the next report; only a refusal is final
+        st.posted = false;
+        this.log.error(`scrobble failed: ${e.message}`);
+      }
       return false;
     }
   }
