@@ -498,7 +498,6 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/qobuz/unofficial",
             get(qobuz::get_status).put(qobuz::put),
         )
-        .route("/sources/qobuz/unofficial/app/check", post(qobuz::check_app))
         .route(
             "/sources/qobuz/unofficial/login",
             post(qobuz::login).delete(qobuz::logout),
@@ -7567,7 +7566,7 @@ mod tests {
             &app,
             "POST",
             "/v1/outputs/upnp",
-            Some(serde_json::json!({"address": "127.0.0.1:1"})),
+            Some(serde_json::json!({"address": "127.0.0.2:1"})),
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{e}");
@@ -10064,40 +10063,68 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let secret_ok = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let expected_format = Arc::new(std::sync::atomic::AtomicU32::new(27));
+        let expected_format = Arc::new(std::sync::atomic::AtomicU32::new(5));
         let file_base = base.clone();
         let ok2 = secret_ok.clone();
         let format2 = expected_format.clone();
         let mp3 = b"synthetic MP3 stream";
+        use base64::Engine;
+        let fixture = |secret: &str, zone: &str| {
+            let padded = format!(
+                "{}{}",
+                base64::engine::general_purpose::STANDARD.encode(secret),
+                "A".repeat(44)
+            );
+            let (seed, rest) = padded.split_at(8);
+            let (info, extras) = rest.split_at(8);
+            format!("a.initialSeed(\"{seed}\",window.utimezone.{});name:\"Region/{zone}\",info:\"{info}\",extras:\"{extras}\";", zone.to_ascii_lowercase())
+        };
+        let bundle = format!(
+            "production:{{api:{{appId:\"100000000\",appSecret:\"{}\"}}}};{}{}",
+            "a".repeat(32),
+            fixture("wrongSecret", "First"),
+            fixture("s3cret", "Second")
+        );
         let album = serde_json::json!({"id": "0060253780968", "title": "Random Access Memories", "artist": {"name": "Daft Punk"}, "upc": "0886443927087",
             "release_date_original": "2013-05-17", "image": {"large": "https://img/600.jpg"}, "maximum_bit_depth": 24, "maximum_sampling_rate": 88.2,
             "tracks": {"items": [{"id": 5966783, "title": "Get Lucky", "track_number": 8, "duration": 369, "performer": {"name": "Daft Punk"}, "isrc": "USQX91300108"}]}});
         let mock = Router::new()
+            .route("/login", get(|| async { "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>" }))
+            .route("/resources/1.2.3-a004/bundle.js", get(move || { let bundle = bundle.clone(); async move { bundle } }))
             .route(
                 "/user/login",
-                post(|headers: axum::http::HeaderMap, body: String| async move {
+                get(|headers: axum::http::HeaderMap, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
                     assert_eq!(headers.get("x-app-id").unwrap(), "100000000");
-                    let f: std::collections::HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes()).into_owned().collect();
-                    let want = format!("{:x}", md5::Md5::digest(b"hunter2"));
-                    assert_eq!(f["password"], want, "the password goes as its MD5");
-                    if f["email"] == "free@example.com" {
-                        return Json(serde_json::json!({"user_auth_token": "t-free", "user": {"id": 2, "credential": {"parameters": null}}}));
+                    assert_eq!(q["app_id"], "100000000");
+                    let password = if q["email"] == "wrong@example.com" { "wrong" } else { "hunter2" };
+                    assert_eq!(q["password"], format!("{:x}", md5::Md5::digest(password.as_bytes())), "the password goes as its MD5");
+                    if q["email"] == "wrong@example.com" {
+                        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"message": "private refusal"})));
                     }
-                    Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "display_name": "Listener", "country_code": "CH",
-                        "credential": {"label": "Studio", "parameters": {"lossless_streaming": true, "hires_streaming": true}}}}))
+                    if q["email"] == "free@example.com" {
+                        return (StatusCode::OK, Json(serde_json::json!({"user_auth_token": "t-free", "user": {"id": 2, "credential": {"parameters": null}}})));
+                    }
+                    (StatusCode::OK, Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "display_name": "Listener", "country_code": "CH",
+                        "credential": {"label": "Studio", "parameters": {"lossless_streaming": true, "hires_streaming": true}}}})))
                 }),
             )
             .route("/catalog/search", get({ let album = album.clone(); move |headers: axum::http::HeaderMap| { let album = album.clone(); async move {
                 assert_eq!(headers.get("x-user-auth-token").unwrap(), "t-1");
+                assert!(headers["user-agent"].to_str().unwrap().contains("Firefox"), "Qobuz gets the browser User-Agent");
                 Json(serde_json::json!({"albums": {"items": [album.clone()]}, "tracks": {"items": [{"id": 5966783, "title": "Get Lucky", "duration": 369, "performer": {"name": "Daft Punk"}, "isrc": "USQX91300108", "album": album}]},
                     "artists": {"items": [{"id": 36819, "name": "Daft Punk"}]}}))
             } } }))
-            .route("/album/get", get({ let album = album.clone(); move || { let album = album.clone(); async move { Json(album) } } }))
+            .route("/album/get", get({ let album = album.clone(); move |headers: axum::http::HeaderMap| { let album = album.clone(); async move {
+                assert!(headers["user-agent"].to_str().unwrap().contains("Firefox"), "Qobuz gets the browser User-Agent");
+                Json(album)
+            } } }))
             .route(
                 "/track/getFileUrl",
                 get(move |headers: axum::http::HeaderMap, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
                     let (base, ok, format) = (file_base.clone(), ok2.clone(), format2.clone());
                     async move {
+                        // The browser stream, the zone's (blocking) one and the probes alike
+                        assert!(headers["user-agent"].to_str().unwrap().contains("Firefox"), "Qobuz gets the browser User-Agent");
                         if headers.get("x-app-id").is_some_and(|a| a != "100000000") {
                             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "code": 400, "message": "Invalid Request Parameters app_id"})));
                         }
@@ -10123,6 +10150,7 @@ mod tests {
             .route("/file.mp3", get(move || async move { mp3.as_slice() }));
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
 
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
@@ -10138,69 +10166,41 @@ mod tests {
                 .to_string()
         };
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
-        assert!(row(&srcs).starts_with("not configured"), "no built-in app");
+        assert_eq!(row(&srcs), "needs sign-in");
+        let (st, q) = call(&app, "GET", "/v1/sources/qobuz/signin", None).await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(q["ways"].as_array().unwrap().len(), 1);
+        assert_eq!(q["ways"][0]["id"], "own");
+        assert!(q["imports"].as_array().is_none_or(|v| v.is_empty()));
         let (st, _) = call(
             &app,
             "POST",
-            "/v1/sources/qobuz/unofficial/login",
-            Some(serde_json::json!({"email": "a@b.c", "password": "x"})),
+            "/v1/sources/qobuz/signin/import",
+            Some(serde_json::json!({"text": "anything"})),
         )
         .await;
-        assert_eq!(st, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(
             &app,
-            "PUT",
-            "/v1/sources/qobuz/unofficial",
-            Some(serde_json::json!({"app_id": "abc", "app_secret": "s3cret"})),
+            "POST",
+            "/v1/sources/qobuz/unofficial/app/check",
+            Some(serde_json::json!({"app_id": "100000000", "app_secret": "s3cret"})),
         )
         .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST);
-        // The app check (the step card's Check): a malformed, an unknown, a wrong-secret and a
-        // good app each in its own words, without an account and saving nothing
-        let check = |id: &str, secret: &str| {
-            let app = app.clone();
-            let body = serde_json::json!({"app_id": id, "app_secret": secret});
-            async move {
-                call(&app, "POST", "/v1/sources/qobuz/unofficial/app/check", Some(body))
-                    .await
-                    .1
-            }
-        };
-        let r = check("abc", "s3cret").await;
-        assert!(
-            r["ok"] == false && r["detail"].as_str().unwrap().contains("digits"),
-            "{r}"
-        );
-        let r = check("200000000", "s3cret").await;
-        assert!(
-            r["ok"] == false && r["detail"].as_str().unwrap().contains("doesn't know this app ID"),
-            "{r}"
-        );
-        let r = check("100000000", "wrong").await;
-        assert!(
-            r["ok"] == false && r["detail"].as_str().unwrap().contains("secret"),
-            "{r}"
-        );
-        let r = check("100000000", "s3cret").await;
-        assert!(
-            r["ok"] == true && r["detail"].as_str().unwrap().contains("account is next"),
-            "{r}"
-        );
-        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
-        assert!(q.get("app_from").is_none(), "a check saves nothing: {q}");
-        let (st, q) = call(
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        // A free account and a wrong password are refused in plain words; discovery happens on sign-in.
+        let (st, r) = call(
             &app,
-            "PUT",
-            "/v1/sources/qobuz/unofficial",
-            Some(serde_json::json!({"app_id": "100000000", "app_secret": "s3cret", "enabled": true})),
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some(serde_json::json!({"email": "wrong@example.com", "password": "wrong"})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{q}");
-        assert_eq!(q["app_from"], "settings");
-        assert!(
-            q.to_string().find("s3cret").is_none(),
-            "the secret never comes back: {q}"
-        );
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert!(r["error"]
+            .as_str()
+            .unwrap()
+            .contains("Wrong Qobuz email or password"));
         // A free account is refused; a paid one signs in and only its token is kept
         let (st, _) = call(
             &app,
@@ -10219,13 +10219,29 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{q}");
         assert_eq!(
-            (q["signed_in"].clone(), q["plan"].clone(), q["hires"].clone()),
             (
+                q["signed_in"].clone(),
+                q["enabled"].clone(),
+                q["plan"].clone(),
+                q["hires"].clone()
+            ),
+            (
+                serde_json::json!(true),
                 serde_json::json!(true),
                 serde_json::json!("Studio"),
                 serde_json::json!(true)
             )
         );
+        assert!(!q.to_string().contains("s3cret") && !q.to_string().contains("t-1"));
+        let cached = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(qobuz::APP_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(cached.contains("s3cret") && cached.contains("1.2.3-a004/bundle.js"));
+        expected_format.store(27, std::sync::atomic::Ordering::SeqCst);
         let kept = s
             .library
             .lock()
@@ -10234,8 +10250,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(
-            !kept.contains("hunter2") && !kept.contains("me@example.com"),
-            "neither password nor email is stored"
+            !kept.contains("hunter2")
+                && !kept.contains("me@example.com")
+                && !kept.contains(&format!("{:x}", md5::Md5::digest(b"hunter2"))),
+            "neither password, its MD5 nor email is stored"
         );
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
         assert_eq!(row(&srcs), "signed in");
@@ -10315,7 +10333,7 @@ mod tests {
                 "{quality}"
             );
         }
-        // Qobuz refusing the app switches the source off, says why, and Retry switches it on
+        // Persistent refusal after one rediscovery switches the source off without removing the session.
         secret_ok.store(false, std::sync::atomic::Ordering::SeqCst);
         let req = Request::builder()
             .uri("/v1/sources/qobuz/stream/5966783")
@@ -10328,7 +10346,7 @@ mod tests {
         let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
         assert_eq!(q["enabled"], false, "{q}");
         assert!(
-            q["health"]["detail"].as_str().unwrap().contains("app secret"),
+            q["health"]["detail"].as_str().unwrap().contains("web player"),
             "{q}"
         );
         let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
@@ -10347,26 +10365,9 @@ mod tests {
             (q["enabled"].clone(), q["health"].clone()),
             (serde_json::json!(true), serde_json::Value::Null)
         );
-        // A qobuz-dl config pasted into the Sign in chooser: its app values and the email with the
-        // password's MD5 sign in the same way; the answer names the way, never the token
-        let (_, _) = call(&app, "DELETE", "/v1/sources/qobuz/signin", None).await;
-        let ini = format!(
-            "[DEFAULT]\nemail = me@example.org\npassword = {:x}\napp_id = 100000000\nsecrets = s3cret\n",
-            md5::Md5::digest(b"hunter2")
-        );
-        let (st, r) = call(
-            &app,
-            "POST",
-            "/v1/sources/qobuz/signin/import",
-            Some(serde_json::json!({"text": ini})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "{r}");
-        assert_eq!(r["in_use"]["way"], "paste");
-        assert_eq!(r["in_use"]["label"], "Pasted config");
-        assert_eq!(r["in_use"]["user"], "Listener");
-        assert_eq!(r["line"], "Pasted config · hi-res");
-        assert_eq!(r["details"]["unofficial"]["app_from"], "import");
+        let (_, r) = call(&app, "DELETE", "/v1/sources/qobuz/signin", None).await;
+        assert!(r["in_use"].is_null());
+        assert_eq!(r["ways"].as_array().unwrap().len(), 1);
         assert!(!r.to_string().contains("t-1"), "{r}");
     }
 
@@ -13648,42 +13649,32 @@ exec sleep 300
     async fn imported_sign_ins_win_over_a_synced_sessions_refresh() {
         use vault_cache::{account, carried, decide, hash, Do, Side, Synced, VaultSide, Wipe, BRIDGES};
 
-        let _qobuz_guard = qobuz::API_TEST_LOCK.lock().await;
         let _lastfm_guard = lastfm::API_TEST_LOCK.lock().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        qobuz::set_api_base(&base);
         lastfm::set_api_base(&format!("{base}/lastfm"));
-        let mock = Router::new()
-            .route("/user/get", get(|headers: axum::http::HeaderMap| async move {
-                assert_eq!(headers["x-app-id"], "100000000");
-                assert_eq!(headers["x-user-auth-token"], "imported-session");
-                Json(serde_json::json!({"id": 42, "credential": {"parameters": {"hires_streaming": true}}}))
-            }))
-            .route("/lastfm", post(|body: String| async move {
-                let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes()).collect();
+        let mock = Router::new().route(
+            "/lastfm",
+            post(|body: String| async move {
+                let form: std::collections::HashMap<_, _> =
+                    url::form_urlencoded::parse(body.as_bytes()).collect();
                 assert_eq!(form["method"], "user.getInfo");
                 assert_eq!(form["sk"], "imported-session");
                 Json(serde_json::json!({"user": {"name": "listener"}}))
-            }));
+            }),
+        );
         let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
         let mut decisions = Vec::new();
-        for (service, app_key, session_key, app, session, text) in [
-            (
-                "qobuz", qobuz::APP_KEY, qobuz::STATE_KEY,
-                serde_json::json!({"id": "100000000", "secret": "s3cret", "from": "settings"}),
-                serde_json::json!({"session": {"token": "old-session", "user_id": "42", "hires": true}}),
-                "[qobuz]\nuse_auth_token = true\nemail_or_userid = \"42\"\npassword_or_token = \"imported-session\"\napp_id = \"100000000\"\nsecrets = [\"s3cret\"]\n",
-            ),
-            (
-                "lastfm", lastfm::APP_KEY, lastfm::SESSION_KEY,
-                serde_json::json!({"api_key": "0123456789abcdef0123456789abcdef", "api_secret": "fedcba9876543210fedcba9876543210", "from": "settings"}),
-                serde_json::json!({"key": "old-session", "user": "listener", "submit": true}),
-                "0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210\nimported-session\n",
-            ),
-        ] {
+        for (service, app_key, session_key, app, session, text) in [(
+            "lastfm",
+            lastfm::APP_KEY,
+            lastfm::SESSION_KEY,
+            serde_json::json!({"api_key": "0123456789abcdef0123456789abcdef", "api_secret": "fedcba9876543210fedcba9876543210", "from": "settings"}),
+            serde_json::json!({"key": "old-session", "user": "listener", "submit": true}),
+            "0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210\nimported-session\n",
+        )] {
             let bridge = BRIDGES.iter().find(|b| b.service == service).unwrap();
             let lineage_key = format!("vault.lineage.{service}");
             let seen = {
@@ -13712,10 +13703,18 @@ exec sleep 300
                 from_a_node: true,
                 our_app: true,
             };
-            signin::source(service).unwrap().import(&s, &accounts::Who::Owner, signin::ImportBody {
-                text: Some(text.into()),
-                ..Default::default()
-            }).await.unwrap();
+            signin::source(service)
+                .unwrap()
+                .import(
+                    &s,
+                    &accounts::Who::Owner,
+                    signin::ImportBody {
+                        text: Some(text.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
             let lib = s.library.lock().unwrap();
             let travels = carried(&lib, bridge).unwrap().unwrap();
             let imported = Side {
@@ -13725,10 +13724,13 @@ exec sleep 300
                 ..Default::default()
             };
             assert_ne!(imported.hash, seen.hash, "{service}: the new session was saved");
-            decisions.push((service, decide(Some(&seen), Some(&imported), Some(&vault), &Wipe::default())));
+            decisions.push((
+                service,
+                decide(Some(&seen), Some(&imported), Some(&vault), &Wipe::default()),
+            ));
         }
         server.abort();
-        assert_eq!(decisions, [("qobuz", Do::Push), ("lastfm", Do::Push)]);
+        assert_eq!(decisions, [("lastfm", Do::Push)]);
     }
 
     /// (STEWARD-CREDENTIALS-REUSE.md step 3): other apps' own session files are listed from the
@@ -13737,17 +13739,6 @@ exec sleep 300
     #[tokio::test]
     async fn the_other_sources_have_sign_in_ways_and_picked_files_stay_private() {
         let _home_guard = imports::HOME_TEST_LOCK.lock().await;
-        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        qobuz::set_api_base(&format!("http://{}", listener.local_addr().unwrap()));
-        let mock = Router::new().route("/user/get", get(|h: axum::http::HeaderMap| async move {
-            assert_eq!(h.get("x-app-id").unwrap(), "100000000");
-            if h.get("x-user-auth-token").unwrap() != "qobuz-token-secret" {
-                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"message": "bad token"})));
-            }
-            (StatusCode::OK, Json(serde_json::json!({"id": 42, "display_name": "Listener", "credential": {"parameters": {"hires_streaming": true}}})))
-        }));
-        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".config/streamrip")).unwrap();
         std::fs::write(
@@ -13786,63 +13777,22 @@ exec sleep 300
                 .unwrap()
                 .clone()
         };
-        // Qobuz: streamrip's token sign-in is listed and used on a click
+        // Qobuz has one email/password way and never scans streamrip's Qobuz section.
         let (st, q) = call(&app, "GET", "/v1/sources/qobuz/signin", None).await;
         assert_eq!(st, StatusCode::OK, "{q}");
-        assert_eq!(ids(&q), ["own", "import", "paste"]);
-        assert_eq!(q["imports"][0]["id"], "streamrip");
-        assert_eq!(q["imports"][0]["user"], "42");
-        assert_eq!(q["imports"][0]["usable"], true, "{q}");
-        assert_eq!(q["ways"][1]["available"], true);
-        assert!(
-            !q.to_string().contains("qobuz-token-secret") && !q.to_string().contains("s3cret"),
-            "{q}"
-        );
-        let (st, r) = call(
+        assert_eq!(ids(&q), ["own"]);
+        assert!(q["imports"].as_array().is_none_or(|v| v.is_empty()));
+        assert!(q["places"].as_array().is_none_or(|v| v.is_empty()));
+        assert!(!q.to_string().contains("qobuz-token-secret") && !q.to_string().contains("s3cret"));
+        assert_eq!(q["line"], "Not signed in");
+        let (st, _) = call(
             &app,
             "POST",
             "/v1/sources/qobuz/signin/import",
             Some(serde_json::json!({"id": "streamrip"})),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{r}");
-        assert_eq!(r["in_use"]["way"], "import");
-        assert_eq!(r["in_use"]["label"], "streamrip's sign-in");
-        assert_eq!(r["line"], "streamrip's sign-in · hi-res");
-        assert_eq!(r["details"]["unofficial"]["signed_in"], true);
-        assert_eq!(r["details"]["unofficial"]["app_from"], "import");
-        assert!(!r.to_string().contains("qobuz-token-secret"), "{r}");
-        let original = std::fs::read_to_string(home.path().join(".config/streamrip/config.toml")).unwrap();
-        let (st, refused) = call(
-            &app,
-            "POST",
-            "/v1/sources/qobuz/signin/import",
-            Some(serde_json::json!({"text": original.replace("qobuz-token-secret", "expired-token")})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{refused}");
-        assert!(!refused.to_string().contains("expired-token"));
-        let (_, current) = call(&app, "GET", "/v1/sources/qobuz/signin", None).await;
-        assert_eq!(current["in_use"]["user"], "Listener");
-        assert_eq!(current["in_use"]["way"], "import");
-        assert_eq!(
-            std::fs::read_to_string(home.path().join(".config/streamrip/config.toml")).unwrap(),
-            original
-        );
-        let (_, srcs) = call(&app, "GET", "/v1/sources", None).await;
-        assert_eq!(row(&srcs, "qobuz")["sign_in"], "streamrip's sign-in · hi-res");
-        let (st, r) = call(
-            &app,
-            "POST",
-            "/v1/sources/qobuz/signin/import",
-            Some(serde_json::json!({"text": "garbage"})),
-        )
-        .await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
-        assert!(r["error"].as_str().unwrap().starts_with("Not usable"), "{r}");
-        let (_, r) = call(&app, "DELETE", "/v1/sources/qobuz/signin", None).await;
-        assert!(r["in_use"].is_null(), "{r}");
-        assert_eq!(r["line"], "Not signed in");
+        assert_eq!(st, StatusCode::NOT_FOUND);
         // Last.fm: rescrobbled's files are listed (the import itself is in the Last.fm mock test)
         let (st, l) = call(&app, "GET", "/v1/sources/lastfm/signin", None).await;
         assert_eq!(st, StatusCode::OK, "{l}");
@@ -16876,6 +16826,265 @@ exec sleep 300
         );
         assert!(opened[3].is_err(), "nobody's item plays with no one's account");
         assert_eq!(*seen.lock().unwrap(), ["t-owner", "t-anna"]);
+    }
+
+    #[tokio::test]
+    async fn qobuz_admin_override_wins_and_skips_discovery() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use md5::Digest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let discoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mock = Router::new()
+            .route("/login", get({
+                let discoveries = discoveries.clone();
+                move || async move {
+                    discoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    "discovery must not run"
+                }
+            }))
+            .route("/user/login", get(|headers: HeaderMap, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                assert_eq!(headers.get("x-app-id").unwrap(), "200000000");
+                assert_eq!(q["app_id"], "200000000");
+                assert_eq!(q["password"], format!("{:x}", md5::Md5::digest(b"hunter2")));
+                Json(serde_json::json!({"user_auth_token": "configured-token", "user": {"id": 1, "credential": {"parameters": {"hires_streaming": true}}}}))
+            }))
+            .route("/track/getFileUrl", get(|axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id5966783{}configuredSecret", q["format_id"], q["request_ts"]).as_bytes()));
+                assert_eq!(q["request_sig"], want);
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})))
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let old = r#"{"id":"100000000","secret":"cachedSecret","from":"web","bundle_url":"old"}"#;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(qobuz::APP_KEY, old)
+            .unwrap();
+        qobuz::set_test_config_app(Some(qobuz::App {
+            id: "200000000".into(),
+            secret: "configuredSecret".into(),
+            from: "config".into(),
+            bundle_url: None,
+        }));
+        let app = router(s.clone());
+        let (st, q) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some(serde_json::json!({"email": "owner@example.com", "password": "hunter2"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(discoveries.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // A signature 400 on a stream refreshes nothing: the admin's values are the admin's
+        let req = Request::builder()
+            .uri("/v1/sources/qobuz/stream/5966783")
+            .body(Body::empty())
+            .unwrap();
+        let status = app.clone().oneshot(req).await.unwrap().status();
+        qobuz::set_test_config_app(None);
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(discoveries.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(qobuz::APP_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(old)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn qobuz_users_are_isolated_and_rotation_keeps_their_sessions() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use base64::Engine;
+        use md5::Digest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let fixture = |secret: &str, zone: &str| {
+            let padded = format!(
+                "{}{}",
+                base64::engine::general_purpose::STANDARD.encode(secret),
+                "A".repeat(44)
+            );
+            let (seed, rest) = padded.split_at(8);
+            let (info, extras) = rest.split_at(8);
+            format!("a.initialSeed(\"{seed}\",window.utimezone.{});name:\"Region/{zone}\",info:\"{info}\",extras:\"{extras}\";", zone.to_ascii_lowercase())
+        };
+        let bundle = |secret: &str| {
+            format!(
+                "production:{{api:{{appId:\"100000000\",appSecret:\"{}\"}}}};{}{}",
+                "a".repeat(32),
+                fixture("wrongSecret", "First"),
+                fixture(secret, "Second")
+            )
+        };
+        let current = Arc::new(std::sync::RwLock::new(("s3cret".to_string(), bundle("s3cret"))));
+        let discoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reject_next_login = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = Router::new()
+            .route("/login", get(|| async { "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>" }))
+            .route("/resources/1.2.3-a004/bundle.js", get({
+                let current = current.clone();
+                let discoveries = discoveries.clone();
+                move || async move {
+                    discoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    current.read().unwrap().1.clone()
+                }
+            }))
+            .route("/user/login", get({
+                let reject_next_login = reject_next_login.clone();
+                move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let reject_next_login = reject_next_login.clone();
+                    async move {
+                        assert_eq!(q["password"], format!("{:x}", md5::Md5::digest(b"hunter2")));
+                        if reject_next_login.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid or missing app_id parameter"})));
+                        }
+                        let (token, id) = if q["email"] == "anna@example.com" { ("t-anna", 2) } else { ("t-owner", 1) };
+                        (StatusCode::OK, Json(serde_json::json!({"user_auth_token": token, "user": {"id": id, "display_name": id.to_string(), "credential": {"label": "Studio", "parameters": {"hires_streaming": true}}}})))
+                    }
+                }
+            }))
+            .route("/track/getFileUrl", get({
+                let current = current.clone();
+                let file_base = base.clone();
+                move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let current = current.clone();
+                    let base = file_base.clone();
+                    async move {
+                        let secret = current.read().unwrap().0.clone();
+                        let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}{secret}", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
+                        if q["request_sig"] != want {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "bad signature"})));
+                        }
+                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "format_id": 27})))
+                    }
+                }
+            }))
+            .route("/file.flac", get(|| async { "synthetic audio" }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(accounts::SOURCE_POLICY_KEY, "own")
+            .unwrap();
+        let app = router(s.clone());
+        let anna_token = accounts::mint(&s, anna).unwrap();
+        for (token, email) in [
+            ("s3cret", "owner@example.com"),
+            (anna_token.as_str(), "anna@example.com"),
+        ] {
+            let (st, q, _) = send_as(
+                &app,
+                "POST",
+                "/v1/sources/qobuz/unofficial/login",
+                Some(token),
+                &[],
+                Some(serde_json::json!({"email": email, "password": "hunter2"})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{q}");
+        }
+        assert_eq!(
+            discoveries.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the second user reuses the node app"
+        );
+        let (owner, theirs) = {
+            let lib = s.library.lock().unwrap();
+            (
+                lib.get_setting(qobuz::STATE_KEY).unwrap().unwrap(),
+                lib.get_setting(&format!("person.{anna}.{}", qobuz::STATE_KEY))
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
+        assert!(owner.contains("t-owner") && !owner.contains("t-anna"));
+        assert!(theirs.contains("t-anna") && !theirs.contains("t-owner"));
+        *current.write().unwrap() = ("newSecret".into(), bundle("newSecret"));
+        // Past the discovery rate limit, so the refused values can be looked up again
+        qobuz::age_discovery(std::time::Duration::from_secs(6 * 60));
+        let req = Request::builder()
+            .uri("/v1/sources/qobuz/stream/5966783")
+            .header("authorization", "Bearer s3cret")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            discoveries.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one refresh after 400"
+        );
+        let (owner_after, theirs_after, cached) = {
+            let lib = s.library.lock().unwrap();
+            (
+                lib.get_setting(qobuz::STATE_KEY).unwrap().unwrap(),
+                lib.get_setting(&format!("person.{anna}.{}", qobuz::STATE_KEY))
+                    .unwrap()
+                    .unwrap(),
+                lib.get_setting(qobuz::APP_KEY).unwrap().unwrap(),
+            )
+        };
+        let owner_before: serde_json::Value = serde_json::from_str(&owner).unwrap();
+        let theirs_before: serde_json::Value = serde_json::from_str(&theirs).unwrap();
+        let owner_after: serde_json::Value = serde_json::from_str(&owner_after).unwrap();
+        let theirs_after: serde_json::Value = serde_json::from_str(&theirs_after).unwrap();
+        assert_eq!(owner_after["session"], owner_before["session"]);
+        assert_eq!(theirs_after["session"], theirs_before["session"]);
+        assert!(cached.contains("newSecret") && cached.contains("bundle.js"));
+        reject_next_login.store(true, std::sync::atomic::Ordering::SeqCst);
+        *current.write().unwrap() = ("newerSecret".into(), bundle("newerSecret"));
+        qobuz::age_discovery(std::time::Duration::from_secs(6 * 60));
+        let (st, _, _) = send_as(
+            &app,
+            "DELETE",
+            "/v1/sources/qobuz/unofficial/login",
+            Some("s3cret"),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, q, _) = send_as(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some("s3cret"),
+            &[],
+            Some(serde_json::json!({"email": "owner@example.com", "password": "hunter2"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(
+            discoveries.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "one refresh after login 400"
+        );
+        let theirs_after_login = {
+            let lib = s.library.lock().unwrap();
+            lib.get_setting(&format!("person.{anna}.{}", qobuz::STATE_KEY))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&theirs_after_login).unwrap()["session"],
+            theirs_before["session"]
+        );
+        server.abort();
     }
 
     /// A request with a node token, and its status, JSON body and headers.
@@ -23386,6 +23595,683 @@ exec sleep 300
             "a long-unseen renderer isn't asked before it is dropped"
         );
         assert_eq!(named(&s, "Gone"), 0);
+    }
+
+    #[tokio::test]
+    async fn qobuz_retries_reuse_one_discovery_and_a_track_400_keeps_the_source_on() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use base64::Engine;
+        use md5::Digest;
+        use std::sync::atomic::Ordering::SeqCst;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let fixture = |secret: &str, zone: &str| {
+            let padded = format!(
+                "{}{}",
+                base64::engine::general_purpose::STANDARD.encode(secret),
+                "A".repeat(44)
+            );
+            let (seed, rest) = padded.split_at(8);
+            let (info, extras) = rest.split_at(8);
+            format!("a.initialSeed(\"{seed}\",window.utimezone.{});name:\"Region/{zone}\",info:\"{info}\",extras:\"{extras}\";", zone.to_ascii_lowercase())
+        };
+        let bundle = format!(
+            "production:{{api:{{appId:\"100000000\",appSecret:\"{}\"}}}};{}{}",
+            "a".repeat(32),
+            fixture("wrongSecret", "First"),
+            fixture("s3cret", "Second")
+        );
+        let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mock = Router::new()
+            .route("/login", get({
+                let looks = looks.clone();
+                move || async move {
+                    looks.fetch_add(1, SeqCst);
+                    "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>"
+                }
+            }))
+            .route("/resources/1.2.3-a004/bundle.js", get(move || { let bundle = bundle.clone(); async move { bundle } }))
+            .route("/user/login", get(|axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                match q["email"].as_str() {
+                    "wrong@example.com" => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"message": "refused"}))),
+                    "free@example.com" => (StatusCode::OK, Json(serde_json::json!({"user_auth_token": "t-free", "user": {"id": 2, "credential": {"parameters": null}}}))),
+                    _ => (StatusCode::OK, Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "credential": {"label": "Studio", "parameters": {"hires_streaming": true}}}}))),
+                }
+            }))
+            .route("/track/getFileUrl", get({
+                let busy = busy.clone();
+                move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    let busy = busy.load(SeqCst);
+                    async move {
+                        if busy {
+                            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({})));
+                        }
+                        let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
+                        if q["request_sig"] != want {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})));
+                        }
+                        if q["format_id"] != "5" {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "This format is not available for this track"})));
+                        }
+                        (StatusCode::OK, Json(serde_json::json!({"url": "https://stream.invalid/mock"})))
+                    }
+                }
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let sign_in = |email: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"email": email, "password": "hunter2"});
+            async move { call(&app, "POST", "/v1/sources/qobuz/unofficial/login", Some(body)).await }
+        };
+        let cached = || s.library.lock().unwrap().get_setting(qobuz::APP_KEY).unwrap();
+        // A wrong password and a free account: one look at the web player for both
+        assert_eq!(sign_in("wrong@example.com").await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(sign_in("free@example.com").await.0, StatusCode::FORBIDDEN);
+        // A busy Qobuz during the secret probe: a plain temporary error, nothing cached or kept
+        busy.store(true, SeqCst);
+        let (st, r) = sign_in("me@example.com").await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{r}");
+        assert_eq!(r["error"], "Could not reach Qobuz. Try again later.");
+        assert_eq!(cached(), None);
+        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+        assert_eq!(q["signed_in"], false, "{q}");
+        busy.store(false, SeqCst);
+        let (st, q) = sign_in("me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert!(cached().unwrap().contains("s3cret"));
+        assert_eq!(looks.load(SeqCst), 1);
+        // A 400 about the track, not the app: this track fails, nothing is rediscovered, Qobuz stays on
+        let req = Request::builder()
+            .uri("/v1/sources/qobuz/stream/5966783")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(looks.load(SeqCst), 1);
+        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+        assert_eq!(
+            (q["enabled"].clone(), q["health"].clone()),
+            (serde_json::json!(true), serde_json::Value::Null),
+            "{q}"
+        );
+        server.abort();
+    }
+
+    /// A fake web player for the Qobuz tests below: the bundle carries a wrong secret first, then
+    /// each of `secrets`.
+    fn qobuz_mock_bundle(secrets: &[&str]) -> String {
+        use base64::Engine;
+        let piece = |secret: &str, zone: &str| {
+            let padded = format!(
+                "{}{}",
+                base64::engine::general_purpose::STANDARD.encode(secret),
+                "A".repeat(44)
+            );
+            let (seed, rest) = padded.split_at(8);
+            let (info, extras) = rest.split_at(8);
+            format!("a.initialSeed(\"{seed}\",window.utimezone.{});name:\"Region/{zone}\",info:\"{info}\",extras:\"{extras}\";", zone.to_ascii_lowercase())
+        };
+        let zones = ["First", "Second", "Third"];
+        format!(
+            "production:{{api:{{appId:\"100000000\",appSecret:\"{}\"}}}};{}",
+            "a".repeat(32),
+            std::iter::once("wrongSecret")
+                .chain(secrets.iter().copied())
+                .zip(zones)
+                .map(|(secret, zone)| piece(secret, zone))
+                .collect::<String>()
+        )
+    }
+
+    #[tokio::test]
+    async fn qobuz_a_cut_off_or_refused_look_does_not_hold_sign_in_back() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use md5::Digest;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bundle = qobuz_mock_bundle(&["s3cret"]);
+        let looks = Arc::new(AtomicUsize::new(0));
+        let logins = Arc::new(AtomicUsize::new(0));
+        let hold = Arc::new(AtomicBool::new(false));
+        let held = Arc::new(tokio::sync::Notify::new());
+        let refuse_app = Arc::new(AtomicBool::new(false));
+        let mock = Router::new()
+            .route("/login", get({
+                let looks = looks.clone();
+                move || async move {
+                    looks.fetch_add(1, SeqCst);
+                    "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>"
+                }
+            }))
+            .route("/resources/1.2.3-a004/bundle.js", get({
+                let (hold, held) = (hold.clone(), held.clone());
+                move || {
+                    let (bundle, hold, held) = (bundle.clone(), hold.load(SeqCst), held.clone());
+                    async move {
+                        if hold {
+                            // The bundle never comes: the sign-in waiting for it is dropped
+                            held.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                        bundle
+                    }
+                }
+            }))
+            .route("/user/login", get({
+                let (logins, refuse_app) = (logins.clone(), refuse_app.clone());
+                move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    logins.fetch_add(1, SeqCst);
+                    let refuse_app = refuse_app.load(SeqCst);
+                    async move {
+                        assert_eq!(q["password"], format!("{:x}", md5::Md5::digest(b"hunter2")));
+                        if refuse_app {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid app_id"})));
+                        }
+                        if q["email"] == "wrong@example.com" {
+                            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"message": "refused"})));
+                        }
+                        (StatusCode::OK, Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "credential": {"label": "Studio", "parameters": {"hires_streaming": true}}}})))
+                    }
+                }
+            }))
+            .route("/track/getFileUrl", get(|axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
+                if q["request_sig"] != want {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})));
+                }
+                (StatusCode::OK, Json(serde_json::json!({"url": "https://stream.invalid/mock"})))
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let sign_in = |app: &Router, email: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"email": email, "password": "hunter2"});
+            async move { call(&app, "POST", "/v1/sources/qobuz/unofficial/login", Some(body)).await }
+        };
+        let cut_off = |app: &Router| {
+            hold.store(true, SeqCst);
+            let task = tokio::spawn(sign_in(app, "me@example.com"));
+            let (hold, held) = (hold.clone(), held.clone());
+            async move {
+                held.notified().await;
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                hold.store(false, SeqCst);
+            }
+        };
+        let cached = |s: &Arc<NodeState>| s.library.lock().unwrap().get_setting(qobuz::APP_KEY).unwrap();
+
+        // Candidates found by an earlier look survive a look that is cut off: a sign-in on a node
+        // with nothing cached gets them at once, one whose cached values were refused hears that
+        // the look was interrupted
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        assert_eq!(
+            sign_in(&app, "wrong@example.com").await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(looks.load(SeqCst), 1);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                qobuz::APP_KEY,
+                r#"{"id":"100000000","secret":"oldSecret","from":"web","bundle_url":"old"}"#,
+            )
+            .unwrap();
+        qobuz::age_discovery(std::time::Duration::from_secs(6 * 60));
+        cut_off(&app).await;
+        assert_eq!(looks.load(SeqCst), 2);
+        let (st, r) = sign_in(&app, "me@example.com").await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{r}");
+        assert_eq!(r["error"], "Qobuz setup was interrupted. Try again in a minute.");
+        assert_eq!(looks.load(SeqCst), 2);
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = state(other_dir.path(), None).await;
+        let (st, r) = sign_in(&router(other.clone()), "me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(cached(&other).unwrap().contains("s3cret"));
+        assert_eq!(looks.load(SeqCst), 2);
+
+        // With nothing found yet, a cut-off look says so plainly and holds the next one back only
+        // a minute
+        qobuz::forget_discovery();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        cut_off(&app).await;
+        let (st, r) = sign_in(&app, "me@example.com").await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{r}");
+        assert_eq!(r["error"], "Qobuz setup was interrupted. Try again in a minute.");
+        assert_eq!(looks.load(SeqCst), 3);
+        qobuz::age_discovery(std::time::Duration::from_secs(61));
+        let (st, r) = sign_in(&app, "me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(looks.load(SeqCst), 4);
+        assert!(cached(&s).unwrap().contains("s3cret"));
+
+        // An app ID Qobuz refuses at sign-in is not offered again: the next sign-in says so at
+        // once, and the one after the rate limit looks again
+        qobuz::forget_discovery();
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        refuse_app.store(true, SeqCst);
+        let (st, r) = sign_in(&app, "me@example.com").await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{r}");
+        assert!(
+            r["error"].as_str().unwrap().contains("changed its web player"),
+            "{r}"
+        );
+        assert_eq!(looks.load(SeqCst), 5);
+        refuse_app.store(false, SeqCst);
+        let before = logins.load(SeqCst);
+        let (st, r) = sign_in(&app, "me@example.com").await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{r}");
+        assert_eq!((looks.load(SeqCst), logins.load(SeqCst)), (5, before));
+        qobuz::age_discovery(std::time::Duration::from_secs(6 * 60));
+        let (st, r) = sign_in(&app, "me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(looks.load(SeqCst), 6);
+        assert!(cached(&s).unwrap().contains("s3cret"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn qobuz_a_stream_refresh_off_only_when_the_web_player_values_fail() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use md5::Digest;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        // What Qobuz takes now, and what the web player offers
+        let secret = Arc::new(std::sync::RwLock::new("s3cret".to_string()));
+        let bundle = Arc::new(std::sync::RwLock::new(qobuz_mock_bundle(&["s3cret"])));
+        let looks = Arc::new(AtomicUsize::new(0));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let down = Arc::new(AtomicBool::new(false));
+        let mock = Router::new()
+            .route("/login", get({
+                let looks = looks.clone();
+                move || async move {
+                    looks.fetch_add(1, SeqCst);
+                    "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>"
+                }
+            }))
+            .route("/resources/1.2.3-a004/bundle.js", get({
+                let (bundle, down) = (bundle.clone(), down.clone());
+                move || {
+                    let (bundle, down) = (bundle.read().unwrap().clone(), down.load(SeqCst));
+                    async move {
+                        if down {
+                            Err(StatusCode::SERVICE_UNAVAILABLE)
+                        } else {
+                            Ok(bundle)
+                        }
+                    }
+                }
+            }))
+            .route("/user/login", get(|| async {
+                Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "credential": {"label": "Studio", "parameters": {"hires_streaming": true}}}}))
+            }))
+            .route("/track/getFileUrl", get({
+                let (secret, asked, file_base) = (secret.clone(), asked.clone(), base.clone());
+                move |headers: HeaderMap, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                    asked.fetch_add(1, SeqCst);
+                    let (secret, base) = (secret.read().unwrap().clone(), file_base.clone());
+                    async move {
+                        assert!(headers["user-agent"].to_str().unwrap().contains("Firefox"), "Qobuz gets the browser User-Agent");
+                        let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}{secret}", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
+                        // Track 7 is refused with a signature 400 whatever it is signed with
+                        if q["request_sig"] != want || q["track_id"] == "7" {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})));
+                        }
+                        (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac")})))
+                    }
+                }
+            }))
+            .route("/file.flac", get(|| async { "synthetic audio" }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let (st, q) = call(
+            &app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            Some(serde_json::json!({"email": "me@example.com", "password": "hunter2"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(looks.load(SeqCst), 1);
+        let stream = |id: &str| {
+            let app = app.clone();
+            let req = Request::builder()
+                .uri(format!("/v1/sources/qobuz/stream/{id}"))
+                .body(Body::empty())
+                .unwrap();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        let mode = || {
+            let app = app.clone();
+            async move {
+                let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+                (
+                    q["enabled"].as_bool().unwrap(),
+                    q["health"]["detail"].as_str().unwrap_or("").to_string(),
+                )
+            }
+        };
+        let switch_on = || {
+            let app = app.clone();
+            async move {
+                let (st, _) = call(
+                    &app,
+                    "PUT",
+                    "/v1/sources/qobuz/unofficial",
+                    Some(serde_json::json!({"enabled": true})),
+                )
+                .await;
+                assert_eq!(st, StatusCode::OK);
+            }
+        };
+        // Qobuz rotates its secret while its web player can't be reached: the stream fails for
+        // now (503, not "no such track") and the source stays on
+        *secret.write().unwrap() = "newSecret".into();
+        down.store(true, SeqCst);
+        qobuz::age_discovery(std::time::Duration::from_secs(6 * 60));
+        assert_eq!(stream("5966783").await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(looks.load(SeqCst), 2);
+        assert_eq!(mode().await, (true, String::new()));
+        // Within the minute after that, no look and no probe of the candidates found before:
+        // still 503, and the source stays on
+        down.store(false, SeqCst);
+        let before = asked.load(SeqCst);
+        assert_eq!(stream("5966783").await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(asked.load(SeqCst), before + 1);
+        assert_eq!(looks.load(SeqCst), 2);
+        assert_eq!(mode().await, (true, String::new()));
+        // A look that reaches the web player finds only the old values: Qobuz refuses them all,
+        // so the source switches off and says why
+        qobuz::age_discovery(std::time::Duration::from_secs(61));
+        assert_eq!(stream("5966783").await, StatusCode::BAD_GATEWAY);
+        assert_eq!(looks.load(SeqCst), 3);
+        let (on, why) = mode().await;
+        assert!(!on && why.contains("web player"), "{why}");
+        // Those candidates are not probed again until a new look: one ask, the stream's own
+        switch_on().await;
+        let before = asked.load(SeqCst);
+        assert_eq!(stream("5966783").await, StatusCode::BAD_GATEWAY);
+        assert_eq!(asked.load(SeqCst), before + 1);
+        assert_eq!(looks.load(SeqCst), 3);
+        // A new look finds values that work for the probe, but this track's stream still answers
+        // a signature 400 with them: the source switches off
+        *bundle.write().unwrap() = qobuz_mock_bundle(&["newSecret"]);
+        qobuz::age_discovery(std::time::Duration::from_secs(6 * 60));
+        switch_on().await;
+        assert_eq!(stream("7").await, StatusCode::BAD_GATEWAY);
+        assert_eq!(looks.load(SeqCst), 4);
+        let (on, why) = mode().await;
+        assert!(!on && why.contains("refused the app secret"), "{why}");
+        let cached = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(qobuz::APP_KEY)
+            .unwrap()
+            .unwrap();
+        assert!(cached.contains("newSecret"));
+        // The refreshed values play every other track
+        switch_on().await;
+        assert_eq!(stream("5966783").await, StatusCode::OK);
+        assert!(mode().await.0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn qobuz_a_400_not_about_the_app_fails_only_that_sign_in() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use md5::Digest;
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bundle = qobuz_mock_bundle(&["s3cret"]);
+        let looks = Arc::new(AtomicUsize::new(0));
+        let mock = Router::new()
+            .route("/login", get({
+                let looks = looks.clone();
+                move || async move {
+                    looks.fetch_add(1, SeqCst);
+                    "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>"
+                }
+            }))
+            .route("/resources/1.2.3-a004/bundle.js", get(move || { let bundle = bundle.clone(); async move { bundle } }))
+            .route("/user/login", get(|axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                let token = match q["email"].as_str() {
+                    "typo@example" => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid email parameter"}))),
+                    "anna@example.com" => "t-anna",
+                    "odd@example.com" => "t-odd",
+                    _ => "t-owner",
+                };
+                (StatusCode::OK, Json(serde_json::json!({"user_auth_token": token, "user": {"id": 1, "credential": {"label": "Studio", "parameters": {"hires_streaming": true}}}})))
+            }))
+            .route("/track/getFileUrl", get(|headers: HeaderMap, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                if headers["x-user-auth-token"] == "t-odd" {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Something about this account"})));
+                }
+                let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
+                if q["request_sig"] != want {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})));
+                }
+                (StatusCode::OK, Json(serde_json::json!({"url": "https://stream.invalid/mock"})))
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(accounts::SOURCE_POLICY_KEY, "own")
+            .unwrap();
+        let app = router(s.clone());
+        let anna_token = accounts::mint(&s, anna).unwrap();
+        let sign_in = |token: &str, email: &str| {
+            let (app, token) = (app.clone(), token.to_string());
+            let body = serde_json::json!({"email": email, "password": "hunter2"});
+            async move {
+                let (st, q, _) = send_as(
+                    &app,
+                    "POST",
+                    "/v1/sources/qobuz/unofficial/login",
+                    Some(&token),
+                    &[],
+                    Some(body),
+                )
+                .await;
+                (st, q)
+            }
+        };
+        let cached = |s: &Arc<NodeState>| s.library.lock().unwrap().get_setting(qobuz::APP_KEY).unwrap();
+        let refused = "Qobuz refused this sign-in. Check your email address and try again.";
+        let no_stream = "Qobuz would not stream for this account. Try again later.";
+        // The owner's sign-in gets a 400 that is not about the app: theirs alone fails, and Anna's
+        // right after it works with what the same look found
+        let (st, q) = sign_in("s3cret", "typo@example").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{q}");
+        assert_eq!(q["error"], refused);
+        assert_eq!(looks.load(SeqCst), 1);
+        let (st, q) = sign_in(&anna_token, "anna@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(looks.load(SeqCst), 1);
+        let app_values = cached(&s).unwrap();
+        assert!(app_values.contains("s3cret"));
+        // With values cached: the same 400 at sign-in, or a probe 400 that is not about the app,
+        // changes nothing for anyone
+        for (email, status, error) in [
+            ("typo@example", StatusCode::BAD_REQUEST, refused),
+            ("odd@example.com", StatusCode::BAD_GATEWAY, no_stream),
+        ] {
+            let (st, q) = sign_in("s3cret", email).await;
+            assert_eq!(st, status, "{q}");
+            assert_eq!(q["error"], error);
+        }
+        let (st, q) = sign_in(&anna_token, "anna@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(cached(&s).unwrap(), app_values);
+        assert_eq!(looks.load(SeqCst), 1);
+        // On a node with nothing cached, a probe 400 that is not about the app fails only that
+        // sign-in: the candidates are not refused, the next sign-in uses them
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = state(other_dir.path(), None).await;
+        let other_app = router(other.clone());
+        let body = |email: &str| Some(serde_json::json!({"email": email, "password": "hunter2"}));
+        let (st, q) = call(
+            &other_app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            body("odd@example.com"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{q}");
+        assert_eq!(q["error"], no_stream);
+        assert_eq!(cached(&other), None);
+        let (st, q) = call(
+            &other_app,
+            "POST",
+            "/v1/sources/qobuz/unofficial/login",
+            body("me@example.com"),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert!(cached(&other).unwrap().contains("s3cret"));
+        assert_eq!(looks.load(SeqCst), 1);
+        let owner = s.library.lock().unwrap().get_setting(qobuz::STATE_KEY).unwrap();
+        assert!(owner.is_none_or(|st| !st.contains("t-owner") && !st.contains("t-odd")));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn qobuz_cached_values_qobuz_retired_with_an_unexpected_400_do_not_block_sign_in() {
+        let _api_guard = qobuz::API_TEST_LOCK.lock().await;
+        use md5::Digest;
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bundle = qobuz_mock_bundle(&["s3cret"]);
+        let looks = Arc::new(AtomicUsize::new(0));
+        let sig = |q: &std::collections::HashMap<String, String>, secret: &str| {
+            format!(
+                "{:x}",
+                md5::Md5::digest(
+                    format!(
+                        "trackgetFileUrlformat_id{}intentstreamtrack_id{}{}{secret}",
+                        q["format_id"], q["track_id"], q["request_ts"]
+                    )
+                    .as_bytes()
+                )
+            )
+        };
+        let mock = Router::new()
+            .route("/login", get({
+                let looks = looks.clone();
+                move || async move {
+                    looks.fetch_add(1, SeqCst);
+                    "<script src=\"/resources/1.2.3-a004/bundle.js\"></script>"
+                }
+            }))
+            .route("/resources/1.2.3-a004/bundle.js", get(move || { let bundle = bundle.clone(); async move { bundle } }))
+            .route("/user/login", get(|axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                // A retired app ID, and one account, get a 400 that says nothing
+                if q["app_id"] == "999999999" || q["email"] == "typo@example" {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({})));
+                }
+                (StatusCode::OK, Json(serde_json::json!({"user_auth_token": "t-1", "user": {"id": 1, "credential": {"label": "Studio", "parameters": {"hires_streaming": true}}}})))
+            }))
+            .route("/track/getFileUrl", get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                if q["request_sig"] == sig(&q, "s3cret") {
+                    return (StatusCode::OK, Json(serde_json::json!({"url": "https://stream.invalid/mock"})));
+                }
+                // A retired secret refused in words that are not about the signature
+                if q["request_sig"] == sig(&q, "oldSecret") {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Not permitted"})));
+                }
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"})))
+            }));
+        let server = tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        qobuz::set_api_base(&base);
+        qobuz::set_player(&base);
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let sign_in = |email: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"email": email, "password": "hunter2"});
+            async move { call(&app, "POST", "/v1/sources/qobuz/unofficial/login", Some(body)).await }
+        };
+        let cache = |values: &str| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(qobuz::APP_KEY, values)
+                .unwrap()
+        };
+        let cached = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(qobuz::APP_KEY)
+                .unwrap()
+                .unwrap()
+        };
+
+        // The cached app ID's `user/login` answers `400 {}`: the web player's candidate works, the
+        // sign-in succeeds and caches it
+        cache(r#"{"id":"999999999","secret":"s3cret","from":"web","bundle_url":"old"}"#);
+        let (st, q) = sign_in("me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(looks.load(SeqCst), 1);
+        let app_values = cached();
+        assert!(
+            app_values.contains("100000000") && app_values.contains("s3cret"),
+            "{app_values}"
+        );
+
+        // A 400 that the web player's values get too is this person's own: it stands, nothing is
+        // refused or looked at again, and the next sign-in works
+        let (st, q) = sign_in("typo@example").await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{q}");
+        assert_eq!(
+            q["error"],
+            "Qobuz refused this sign-in. Check your email address and try again."
+        );
+        assert_eq!(looks.load(SeqCst), 1);
+        assert_eq!(cached(), app_values);
+        let (st, q) = sign_in("me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+
+        // The cached secret's stream check answers a 400 not about the signature: the web
+        // player's other secret is tried and cached
+        cache(r#"{"id":"100000000","secret":"oldSecret","from":"web","bundle_url":"old"}"#);
+        let (st, q) = sign_in("me@example.com").await;
+        assert_eq!(st, StatusCode::OK, "{q}");
+        assert_eq!(looks.load(SeqCst), 1);
+        assert!(cached().contains("s3cret"));
+        server.abort();
     }
 
     /// `GET /v1/zones/{id}/volume` reads the device now and publishes it (the app asks this after
