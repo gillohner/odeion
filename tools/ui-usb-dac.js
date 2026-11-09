@@ -187,6 +187,15 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       await nodePlug(run, BP);
       const o2 = await detailsOutput();
       check(o2 === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit', `${at}: Details' Output line, confirmed: "${o2}"`);
+      // Keep Details open: a changed route must not leave an old bit-perfect claim on screen.
+      await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, media_volume: 60, note: VOL });
+      await page.waitForFunction((reason) => document.querySelector('#nowplaying .np-output')?.textContent === `Shared · FiiO KA17 · ${reason}`, VOL);
+      check(true, `${at}: open Details follows the same song from bit-perfect to shared`);
+      await nodePlug(run, BP);
+      await page.waitForFunction(() => document.querySelector('#nowplaying .np-output')?.textContent === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit');
+      await nodePlug(run, null);
+      await page.waitForFunction(() => !document.querySelector('#nowplaying .np-output'));
+      check(true, `${at}: open Details drops the DAC claim when the output disappears`);
       await page.keyboard.press('Escape'); await sleep(300);
       await setZone(run, zone); await nodePlug(run, KA17);
     }
