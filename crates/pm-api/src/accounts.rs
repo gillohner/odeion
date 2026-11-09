@@ -41,10 +41,11 @@ pub(crate) const OWNER_SESSIONS_TOKEN: &str = "accounts.owner_sessions_token";
 /// The start of an owner's browser session token.
 pub const OWNER_PREFIX: &str = "pmo_";
 const ZONES: &str = "accounts.listener_zones";
-/// The hashes of the sign-ins found in saved queues at a start whose cleaning didn't finish:
-/// still counted as this node's own when the queues are looked at again, after the sign-ins
-/// themselves have ended (`clean_saved_queues`).
-const QUEUE_CLEANUP_PENDING: &str = "accounts.queue_cleanup_pending";
+/// The hashes of this node's own sign-ins found in saved queues at a start whose cleaning didn't
+/// finish: still counted as this node's own when the queues are looked at again, after the
+/// sign-ins themselves have ended (`clean_saved_queues`). This node's only, never in a backup
+/// (`backup::NODE_OWN`): a hash of the API token is a way to guess a short one offline.
+pub(crate) const QUEUE_CLEANUP_PENDING: &str = "accounts.queue_cleanup_pending";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1330,9 +1331,11 @@ pub struct CleanedQueues {
 ///
 /// What ends, and the API token's warning, is saved before any queue is cleaned: a failure on
 /// the way leaves the sign-ins in the queues, so the next start finds them and does it again
-/// (each step can be done twice). The sign-ins found are noted first of all: once they have
-/// ended they are no longer this node's own, and a link under another of the node's names
-/// loses only those, so the note keeps them known until every queue has been written.
+/// (each step can be done twice). The node's own sign-ins found are noted first of all: once
+/// they have ended they are no longer this node's own, and a link under another of the node's
+/// names loses only those, so the note keeps them known until every queue has been written. A
+/// token this node doesn't know isn't noted: its own links lose every token anyway, and noting it
+/// would strip the same token from a link to another server at the next start.
 pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut out = CleanedQueues::default();
     let origins = s.node_origins();
@@ -1377,10 +1380,12 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
             cleaned.push((key, v.to_string()));
         }
     }
-    // Before anything ends: what was found, so a start after a failure still knows it
-    if !found.is_empty() {
+    // Before anything ends: the node's own that were found, so a start after a failure still
+    // knows them (a token that isn't the node's is dropped from its own links whatever it is)
+    let own: Vec<&String> = found.iter().filter(|t| known_set.has(t)).collect();
+    if !own.is_empty() {
         let mut noted = pending.clone();
-        noted.extend(found.iter().map(|t| hash(t)));
+        noted.extend(own.iter().map(|t| hash(t)));
         lib.set_setting(
             QUEUE_CLEANUP_PENDING,
             &serde_json::to_string(&noted).expect("serializes"),

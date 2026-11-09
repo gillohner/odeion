@@ -649,3 +649,46 @@ async fn a_token_ended_before_a_failed_queue_write_is_still_stripped_at_the_next
     );
     assert_eq!(setting("accounts.queue_cleanup_pending"), None);
 }
+
+/// A token this node doesn't know, found in one of its own links (every token is dropped from
+/// those), isn't noted for a retry: the note makes a token count as the node's own at the next
+/// start, and a link to another server with the same token would then lose it too. After a
+/// failure on the queue's write, the next start still cleans the node's own link and leaves the
+/// other server's alone.
+#[tokio::test]
+async fn an_unknown_token_in_a_local_link_is_not_noted_for_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    let key = "queue.somewhere";
+    let saved = serde_json::json!({"items": [
+        {"id": 1, "uri": "track:1", "image": "/v1/library/albums/1/cover?token=not-ours-fixture"},
+        {"id": 2, "uri": "track:2", "image": "http://other.example/v1/library/albums/2/cover?token=not-ours-fixture"}],
+        "repeat": "off", "radio": false, "shuffle": false, "order": []})
+    .to_string();
+    s.library.lock().unwrap().set_setting(key, &saved).unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_queue BEFORE UPDATE ON settings WHEN NEW.key = 'queue.somewhere'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+    )
+    .unwrap();
+    assert!(accounts::clean_saved_queues(&s).is_err());
+    let setting = |k: &str| s.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(setting(key).as_deref(), Some(saved.as_str()));
+    let note = setting("accounts.queue_cleanup_pending").unwrap_or_default();
+    assert!(
+        !note.contains(&blake3::hash(b"not-ours-fixture").to_hex().to_string()),
+        "a token that isn't the node's is noted: {note}"
+    );
+    db.execute_batch("DROP TRIGGER no_queue;").unwrap();
+    // The next start: the node's own link loses the token, the other server's keeps it
+    let cleaned = accounts::clean_saved_queues(&s).unwrap();
+    assert_eq!(cleaned.items, 1, "{cleaned:?}");
+    let json = setting(key).unwrap();
+    assert!(json.contains("\"/v1/library/albums/1/cover\""), "{json}");
+    assert!(
+        json.contains("\"http://other.example/v1/library/albums/2/cover?token=not-ours-fixture\""),
+        "{json}"
+    );
+    assert_eq!(setting("accounts.queue_cleanup_pending"), None);
+}
