@@ -81,7 +81,9 @@ phone (albums, playlists, songs, each with its size), the total against the limi
 downloading now, **Remove** for each, and **Remove all downloads**. Removing takes away the
 phone's copy only; your library and playlists stay as they are. The limit is 10 GB until you change
 it there, and downloads always leave 1 GB free on the phone; when they reach either, they stop and
-the screen says so. Songs on the phone carry a small download mark in lists and on album tiles.
+the screen says so. Unfinished song copies count against the limit too, and the app checks the
+bytes as they arrive even if the node's file size is out of date. Songs on the phone carry a small
+download mark in lists and on album tiles.
 The app brings its copies up to date every 15 minutes while it reaches your node, and when a file
 changes on the node (replaced, retagged), the phone gets the new one.
 

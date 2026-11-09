@@ -130,7 +130,11 @@ impl Offline {
     pub fn state(&self, node_id: &str) -> DownloadsState {
         let summary = self
             .store(node_id)
-            .map(|s| pm_offline::summary(&s.index()))
+            .map(|s| {
+                let mut summary = pm_offline::summary(&s.index());
+                summary.bytes = pm_offline::sync::download_bytes(s.dir()).unwrap_or(summary.bytes);
+                summary
+            })
             .unwrap_or_default();
         DownloadsState {
             summary,
@@ -254,7 +258,7 @@ impl Offline {
         Ok(format!("{origin}/downloads"))
     }
 
-    /// Bytes the device keeps for nodes other than this one (their `index.json`s).
+    /// Completed and partial song bytes for the other nodes on this device.
     fn other_bytes(&self, node_id: &str) -> u64 {
         let mine = pm_offline::node_dir(&self.base, node_id);
         let Ok(dirs) = std::fs::read_dir(&self.base) else {
@@ -263,10 +267,8 @@ impl Offline {
         dirs.flatten()
             .map(|d| d.path())
             .filter(|p| p.is_dir() && *p != mine)
-            .filter_map(|p| std::fs::read(p.join("index.json")).ok())
-            .filter_map(|b| serde_json::from_slice::<pm_offline::Index>(&b).ok())
-            .map(|ix| ix.bytes())
-            .sum()
+            .map(|p| pm_offline::sync::download_bytes(&p).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add)
     }
 
     /// How a sync of the node with this id runs: the limit, the other nodes' bytes, its progress
@@ -559,6 +561,21 @@ mod tests {
         o.keep_nothing("node-1").unwrap();
         assert!(o.state("node-1").summary.items.is_empty());
         assert_eq!(told.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_songs_count_in_storage_and_the_other_nodes_budget() {
+        let dir = tempfile_dir();
+        let o = Offline::open(dir.clone(), Arc::default()).unwrap();
+        let mine = o.store("node-1").unwrap();
+        let other = o.store("node-2").unwrap();
+        std::fs::write(mine.dir().join("files/1.flac.part"), [0u8; 200]).unwrap();
+        std::fs::write(other.dir().join("files/2.flac.part"), [0u8; 500]).unwrap();
+        std::fs::write(other.dir().join("files/2.flac.etag"), "etag").unwrap();
+        let st = o.state("node-1");
+        assert_eq!((st.summary.bytes, st.other_bytes), (200, 500));
+        assert_eq!(o.options("node-1", 0).other_bytes, 500);
         let _ = std::fs::remove_dir_all(dir);
     }
 
