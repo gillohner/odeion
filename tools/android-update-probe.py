@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Android app updating itself, on an emulator (CI: android-update.yml).
+"""The Android app updating itself, on an emulator (CI: android.yml, update).
 
 Two x86_64 builds signed with one throwaway key, both with the `update-feed-fixture` feature
 (crates/pm-desktop/src/update.rs): build N (versionCode 1000) and build N+1 (1001). Their feed
