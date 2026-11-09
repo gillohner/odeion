@@ -10,8 +10,6 @@ const TOKEN = process.argv[2] || 'ci-token';
 const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const SHOTS = process.argv[4];
 const WARN = 'This uses a private API the service has not approved for other apps.';
-// A Qobuz app secret is 32 characters; the splitter wants at least 8
-const SECRET = 'abcdef0123456789abcdef0123456789';
 const problems = [];
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) problems.push(what); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -44,41 +42,21 @@ const inTheApp = async (ctx, shellJs) => ctx.addInitScript(([t, js]) => {
 
 const qobuzMocks = async (p, log) => {
   const U = { enabled: false, signed_in: false, hires: false, quality: 'max', warning: WARN };
-  const SI = { ways: [], imports: [], places: ['streamrip: ~/.config/streamrip/config.toml (not read)'], in_use: null, chosen: null, line: 'Not signed in', details: {} };
   await p.route(/\/v1\/sources\/qobuz\/unofficial$/, (r) => {
     if (r.request().method() === 'PUT') {
       const b = r.request().postDataJSON(); log.push(['PUT', b]);
-      if (b.app_id !== undefined) { if (b.app_id) { U.app_from = 'settings'; U.app_id = b.app_id; } else { delete U.app_from; delete U.app_id; } }
       if (b.enabled !== undefined) { U.enabled = b.enabled; if (b.enabled) delete U.health; }
       if (b.quality) U.quality = b.quality;
     }
     return r.fulfill({ json: U });
   });
-  await p.route(/\/v1\/sources\/qobuz\/unofficial\/app\/check$/, (r) => {
-    const b = r.request().postDataJSON(); log.push(['CHECK', b]);
-    const out = !/^\d+$/.test(b.app_id) ? { ok: false, detail: 'A Qobuz app ID is digits only' }
-      : b.app_id !== '100000000' ? { ok: false, detail: "Qobuz doesn't know this app ID. Check it, or ask Qobuz for API access." }
-      : b.app_secret !== SECRET ? { ok: false, detail: "Qobuz knows this app ID, but the secret doesn't go with it. Check the secret." }
-      : { ok: true, detail: 'OK: Qobuz accepts this app ID; the secret is checked at the first play. Your Qobuz account is next.' };
-    return r.fulfill({ json: out });
-  });
   await p.route(/\/v1\/sources\/qobuz\/unofficial\/login$/, (r) => {
     if (r.request().method() === 'DELETE') { U.signed_in = false; delete U.user; delete U.plan; U.enabled = false; return r.fulfill({ json: U }); }
     const b = r.request().postDataJSON(); log.push(['LOGIN', b.email]);
-    if (!U.app_from) return r.fulfill({ status: 412, json: { error: 'Enter a Qobuz app ID and secret first' } });
-    if (b.email === 'free@example.com') return r.fulfill({ status: 403, json: { error: 'This Qobuz account has no streaming plan: full tracks need a paid Qobuz plan' } });
-    if (b.password === 'wrong') return r.fulfill({ status: 401, json: { error: "Qobuz doesn't know that email and password. Check them and try again (Invalid Username or password)" } });
+    if (b.email === 'free@example.com') return r.fulfill({ status: 403, json: { error: 'This Qobuz account is free; full tracks need a paid Qobuz plan' } });
+    if (b.password === 'wrong') return r.fulfill({ status: 401, json: { error: 'Wrong Qobuz email or password' } });
     Object.assign(U, { signed_in: true, user: 'Listener', plan: 'Studio', hires: true, enabled: true, health: { ok: true, detail: 'streams play', at: 1 } });
     return r.fulfill({ json: U });
-  });
-  await p.route(/\/v1\/sources\/qobuz\/signin(\/import)?$/, (r) => {
-    if (r.request().method() === 'POST') {
-      const b = r.request().postDataJSON(); log.push(['IMPORT', b.text]);
-      if (b.text === 'not a sign-in') return r.fulfill({ status: 400, json: { error: 'Not usable: no app values and no sign-in in this' } });
-      Object.assign(U, { app_from: 'import', app_id: '100000000', signed_in: true, user: 'listener', plan: 'Studio', hires: true, enabled: true }); delete U.health;
-      SI.in_use = { way: 'import', label: 'Pasted config', user: 'listener', gives: 'hi-res' };
-    }
-    return r.fulfill({ json: SI });
   });
   return U;
 };
@@ -148,61 +126,34 @@ const tidalMocks = async (p, log, si0) => {
         const log = []; const U = await qobuzMocks(p, log);
         await p.goto(BASE + '/sources/qobuz');
         const root = '#signin-qobuz';
-        await p.waitForSelector(`${root} .setup-step`, { timeout: 20000 });
-        check(await pillOf(p, root) === 'Needs app', `${w} Qobuz: fresh, the status says it needs an app`);
-        check(await p.locator(`${root} .setup-step[data-step="1"]:not(.done) #qbapp`).count() === 1 && await p.locator(`${root} .setup-step[data-step="2"] input[name=email]`).isDisabled(), `${w} Qobuz: step 1 open, step 2 waits for it`);
-        check(/api@qobuz\.com/.test(await p.getAttribute(`${root} .setup-step[data-step="1"] a[href^="mailto:"]`, 'href')) && await p.locator(`${root} a[href*="guides/qobuz.md"]`).count() >= 1, `${w} Qobuz: says whom to ask, and links the guide`);
-        check(await p.getAttribute(`${root} #qbapp input[name=secret]`, 'type') === 'password', `${w} Qobuz: the secret is hidden`);
-        await p.click(`${root} #qbapp .showpw`);
-        check(await p.getAttribute(`${root} #qbapp input[name=secret]`, 'type') === 'text' && await p.getAttribute(`${root} #qbapp .showpw`, 'aria-pressed') === 'true', `${w} Qobuz: Show shows it`);
-        await p.click(`${root} #qbapp .showpw`);
-        // A pasted block or JSON splits into the two fields
-        await pasteInto(p, `${root} #qbapp input[name=id]`, `app_id = 100000000\napp_secret = ${SECRET}\n`);
-        check(await p.inputValue(`${root} #qbapp input[name=id]`) === '100000000' && await p.inputValue(`${root} #qbapp input[name=secret]`) === SECRET, `${w} Qobuz: a pasted app_id=… app_secret=… block is split`);
-        await p.fill(`${root} #qbapp input[name=id]`, ''); await p.fill(`${root} #qbapp input[name=secret]`, '');
-        await pasteInto(p, `${root} #qbapp input[name=secret]`, `{"app_id": "100000000", "app_secret": "${SECRET}"}`);
-        check(await p.inputValue(`${root} #qbapp input[name=id]`) === '100000000' && await p.inputValue(`${root} #qbapp input[name=secret]`) === SECRET, `${w} Qobuz: pasted JSON is split too`);
-        // Check says the exact problem, or OK
-        await p.fill(`${root} #qbapp input[name=secret]`, 'nope'); await p.click('#qbcheck');
-        check(await until(async () => /secret doesn't go with it/.test(await p.textContent('#qbcheckout'))) && await p.$eval('#qbcheckout', (e) => e.classList.contains('bad')), `${w} Qobuz: Check names a wrong secret`);
-        await p.fill(`${root} #qbapp input[name=id]`, '200000000'); await p.click('#qbcheck');
-        check(await until(async () => /doesn't know this app ID/.test(await p.textContent('#qbcheckout'))), `${w} Qobuz: Check names an unknown app ID`);
-        await p.fill(`${root} #qbapp input[name=id]`, '100000000'); await p.fill(`${root} #qbapp input[name=secret]`, SECRET); await p.click('#qbcheck');
-        check(await until(async () => /^OK/.test(await p.textContent('#qbcheckout'))) && await p.$eval('#qbcheckout', (e) => e.classList.contains('ok')), `${w} Qobuz: Check says OK`);
-        await shot('qobuz-step1');
-        await p.click('#qbapp button[type=submit]');
-        check(await until(async () => (await pillOf(p, root)) === 'Needs sign-in'), `${w} Qobuz: saved, the status moves on to the sign-in`);
-        const put = log.find((l) => l[0] === 'PUT' && l[1].app_id);
-        check(!!put && put[1].app_secret === SECRET, `${w} Qobuz: the app went to the node once`);
-        check(await p.locator(`${root} .setup-step[data-step="1"].done`).count() === 1 && /100000000/.test(await p.textContent(`${root} .setup-step[data-step="1"]`)) && await p.locator(`${root} .setup-step[data-step="2"] input[name=email]`).isEnabled(), `${w} Qobuz: step 1 done with the ID shown, step 2 open`);
-        check(await p.evaluate(() => document.activeElement && document.activeElement.name === 'email'), `${w} Qobuz: the email field has the focus`);
-        // The account: no plan, wrong password, then in
+        await p.waitForSelector(`${root} #qbin`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Needs sign-in', `${w} Qobuz: fresh, the status asks for the account`);
+        check(await p.locator(`${root} h3:text("Sign in with your Qobuz account")`).count() === 1 && await p.locator(`${root} #qbin input[name=email]`).isEnabled(), `${w} Qobuz: one account card, ready for email and password`);
+        check(await p.locator(`${root} #qbapp, ${root} #qbcheck, ${root} #qbimport, ${root} .setup-step`).count() === 0 && !/api@qobuz\.com|streamrip|App ID and secret/.test(await p.textContent(root)), `${w} Qobuz: no app step, Check or config import`);
+        check(await p.locator(`${root} a[href*="guides/qobuz.md"]`).count() >= 1, `${w} Qobuz: the guide stays linked`);
+        check(await p.getAttribute(`${root} #qbin input[name=password]`, 'type') === 'password', `${w} Qobuz: the password is hidden`);
+        await p.click(`${root} #qbin .showpw`);
+        check(await p.getAttribute(`${root} #qbin input[name=password]`, 'type') === 'text' && await p.getAttribute(`${root} #qbin .showpw`, 'aria-pressed') === 'true', `${w} Qobuz: Show shows it`);
+        await p.click(`${root} #qbin .showpw`);
         await p.fill('#qbin input[name=email]', 'free@example.com'); await p.fill('#qbin input[name=password]', 'hunter2'); await p.click('#qbin button[type=submit]');
-        check(await until(async () => /no streaming plan/.test(await p.textContent('#qbinerr'))) && await p.isVisible('#qbinerr'), `${w} Qobuz: an account without a plan is told so, in place`);
+        check(await until(async () => /account is free/.test(await p.textContent('#qbinerr'))) && await p.isVisible('#qbinerr'), `${w} Qobuz: an account without a plan is told so, in place`);
         await p.fill('#qbin input[name=email]', 'me@example.com'); await p.fill('#qbin input[name=password]', 'wrong'); await p.click('#qbin button[type=submit]');
-        check(await until(async () => /doesn't know that email and password/.test(await p.textContent('#qbinerr'))), `${w} Qobuz: a wrong password is told so`);
+        check(await until(async () => /Wrong Qobuz email or password/.test(await p.textContent('#qbinerr'))), `${w} Qobuz: a wrong password is told so`);
         await p.fill('#qbin input[name=password]', 'hunter2'); await p.click('#qbin button[type=submit]');
         check(await until(async () => (await pillOf(p, root)) === 'Working'), `${w} Qobuz: signed in, Working`);
-        check(/up to 24-bit\/192 kHz/.test(await p.textContent(`${root} .set-row`)) && await p.isVisible('#qbout') && await p.locator('#qbq').count() === 1, `${w} Qobuz: the quality, Sign out and the quality setting`);
-        check(/Unofficial: can stop working, uses your Qobuz account/.test(await p.textContent(`${root}`)), `${w} Qobuz: the one-line warning`);
-        check(await p.locator(`${root} .setup-step.done`).count() === 2 && await p.locator('#qbin').count() === 0, `${w} Qobuz: both steps done, no password field left`);
+        check(/Listener · Studio · hi-res/.test(await p.textContent(root)) && await p.isVisible('#qbout') && await p.locator('#qbq').count() === 1, `${w} Qobuz: who, plan, quality and Sign out`);
+        check(/Unofficial: can stop working; needs a paid Qobuz plan/.test(await p.textContent(root)), `${w} Qobuz: the one-line warning`);
+        check(await p.locator('#qbin').count() === 0 && log.filter((l) => l[0] === 'LOGIN').length === 3, `${w} Qobuz: no password field remains after sign-in`);
         await shot('qobuz-working');
-        // Off, a problem, sign out
         await p.click('#qbon');
         check(await until(async () => (await pillOf(p, root)) === 'Off'), `${w} Qobuz: switched off`);
-        U.health = { ok: false, detail: 'Qobuz refused the app secret', at: 1 }; U.enabled = false;
-        await p.reload(); await p.waitForSelector(`${root} .setup-step`, { timeout: 20000 });
+        U.health = { ok: false, detail: 'Qobuz changed its web player', at: 1 }; U.enabled = false;
+        await p.reload(); await p.waitForSelector(`${root} #qbout`, { timeout: 20000 });
         check(await pillOf(p, root) === 'Problem' && await p.isVisible('#qbretry'), `${w} Qobuz: a failure is a Problem with Try again`);
         await p.click('#qbout');
-        check(await until(async () => (await pillOf(p, root)) === 'Needs sign-in'), `${w} Qobuz: Sign out goes back to step 2`);
-        // streamrip's / qobuz-dl's config, under step 1: a refusal stays in place; a good one signs in
-        await p.click(`${root} #qbimport summary`);
-        await p.fill('#qbimppaste textarea', 'not a sign-in'); await p.click('#qbimppaste button');
-        check(await until(async () => await p.isVisible('#qbimperr') && /Not usable/.test(await p.textContent('#qbimperr'))), `${w} Qobuz: a refused config is said in place`);
-        await p.fill('#qbimppaste textarea', `[qobuz]\napp_id = "100000000"\nsecrets = ["${SECRET}"]\nemail_or_userid = "listener@example.org"\npassword_or_token = "0000"\n`); await p.click('#qbimppaste button');
-        check(await until(async () => (await pillOf(p, root)) === 'Working'), `${w} Qobuz: streamrip’s config signs in at once`);
+        check(await until(async () => (await pillOf(p, root)) === 'Needs sign-in' && await p.locator('#qbin').count() === 1), `${w} Qobuz: Sign out returns to the one account card`);
         check(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${w} Qobuz: no horizontal overflow`);
-        for (const re of [/\/v1\/sources\/qobuz\/unofficial$/, /\/v1\/sources\/qobuz\/unofficial\/app\/check$/, /\/v1\/sources\/qobuz\/unofficial\/login$/, /\/v1\/sources\/qobuz\/signin(\/import)?$/]) await p.unroute(re);
+        for (const re of [/\/v1\/sources\/qobuz\/unofficial$/, /\/v1\/sources\/qobuz\/unofficial\/login$/]) await p.unroute(re);
       }
 
       // ---- TIDAL full tracks ----
