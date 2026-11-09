@@ -4854,6 +4854,7 @@ dependencies = [
  "base64 0.23.1",
  "chacha20poly1305",
  "curve25519-dalek",
+ "ed25519-dalek",
  "getrandom 0.3.4",
  "hkdf",
  "serde",
@@ -4874,6 +4875,7 @@ dependencies = [
  "pm-endpoint",
  "pm-model",
  "pm-offline",
+ "pm-out-local",
  "pm-pubky",
  "pm-remote",
  "pm-stream",
@@ -4957,7 +4959,10 @@ dependencies = [
  "async-trait",
  "cpal",
  "pm-model",
+ "pm-usb-audio",
  "pm-zones",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -5009,10 +5014,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-usb-audio"
+version = "0.2.2"
+dependencies = [
+ "libc",
+ "serde",
+]
+
+[[package]]
 name = "pm-zones"
 version = "0.2.2"
 dependencies = [
  "async-trait",
+ "form_urlencoded",
  "hound",
  "pm-model",
  "serde",

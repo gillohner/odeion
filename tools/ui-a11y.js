@@ -7,10 +7,13 @@
 //   * contrast: visible text meets WCAG AA (4.5:1, 3:1 for large text) against what is behind it;
 //   * 375 px: no horizontal scroll; the player's buttons are at least 40 px for a thumb.
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
-//   node tools/ui-a11y.js <api token> [http://127.0.0.1:7788]
+//   node tools/ui-a11y.js <api token> [http://127.0.0.1:7788]   (UI_SCHEMES=dark|light for one scheme)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// UI_SCHEMES=dark or light: one colour scheme only (CI runs each on its own runner); both by default
+const SCHEMES = (process.env.UI_SCHEMES || 'dark,light').split(',').map((s) => s.trim()).filter(Boolean);
+if (!SCHEMES.length || SCHEMES.some((s) => s !== 'dark' && s !== 'light')) { console.log(`UI_SCHEMES must be dark, light or both, not ${process.env.UI_SCHEMES}`); process.exit(2); }
 const problems = [];
 const add = (where, what) => { problems.push(`${where}: ${what}`); };
 
@@ -57,7 +60,7 @@ const inspect = () => {
   const browser = await chromium.launch();
   const screens = [['Home', '/'], ['Search', '/search?q=queen'], ['Album', '/album/lib-1'], ['Song', '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69'], ['Albums', '/albums'], ['Tracks', '/tracks'], ['Playlists', '/playlists'], ['Queue', '/queue'], ['Settings', '/settings'], ...['playback', 'accounts', 'apps', 'nodehome', 'discover', 'backup', 'import', 'appearance', 'about'].map((t) => [`Settings › ${t}`, `/settings/${t}`]),
     ...['library', 'tidal', 'qobuz', 'soundcloud', 'bandcamp', 'spotify', 'jamendo', 'subsonic', 'jellyfin', 'deezer', 'archive', 'audius', 'radio', 'youtube'].map((id) => [`Sources › ${id}`, `/sources/${id}`])];
-  for (const scheme of ['dark', 'light']) {
+  for (const scheme of SCHEMES) {
     for (const width of [1280, 375]) {
       const ctx = await browser.newContext({ viewport: { width, height: width < 600 ? 812 : 900 }, colorScheme: scheme, reducedMotion: 'reduce' });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; }, TOKEN);
@@ -107,5 +110,5 @@ const inspect = () => {
   await browser.close();
   for (const pr of problems) console.log('A11Y ' + pr);
   if (problems.length) { console.log(`${problems.length} problems`); process.exit(1); }
-  console.log('accessibility and 375 px checks pass');
+  console.log(`accessibility and 375 px checks pass (${SCHEMES.join(' and ')})`);
 })();

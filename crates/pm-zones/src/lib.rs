@@ -24,13 +24,18 @@ pub mod sink;
 pub mod source;
 pub mod zone;
 
-pub use queue::{FetchLimit, Insert, Queue, QueueItem, Repeat};
+pub use queue::{
+    node_link_path, node_link_tokens, node_link_without_token, FetchLimit, Insert, Queue, QueueItem,
+    QueueSnapshot, Repeat, TokenCheck,
+};
 pub use registry::OutputRegistry;
 pub use sink::{
-    AudioSink, BufferLevel, ClockSource, Describe, MemberStatus, Output, OutputId, OutputInfo, SinkError,
-    SyncClass, TrackMeta,
+    amplitude_percent, AudioSink, BufferLevel, ClockSource, Describe, DeviceKind, DeviceMode, DeviceSettings,
+    DsdKind, MemberStatus, Output, OutputDevice, OutputId, OutputInfo, PreferredMode, SinkError, SyncClass,
+    TrackMeta, UsbIds, GONE,
 };
+pub use sink::{caps_for_source, DeviceFormat};
 pub use source::{
-    FrameSource, Processor, ReplayGain, SourceError, SourceFactory, StreamInfo, WithReplayGain,
+    FrameSource, Processor, ReplayGain, SkipFrames, SourceError, SourceFactory, StreamInfo, WithReplayGain,
 };
-pub use zone::{NowPlaying, Transport, Zone, ZoneEvent, ZoneId, ZoneState, Zones};
+pub use zone::{cap_volume, NowPlaying, Transport, VolumeLimit, Zone, ZoneEvent, ZoneId, ZoneState, Zones};

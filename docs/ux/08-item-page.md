@@ -12,8 +12,12 @@ A section with nothing to show keeps its heading and says so in one line; it nev
 
 1. **Hero:** art, eyebrow (`Album · plays from TIDAL`), title, artist · year (both links).
    Actions: Play, Shuffle (album, artist, playlist), Play on… (zones), ♥, ⋯.
-2. **Songs:** an album's or playlist's tracks; an artist's top songs, then albums as tiles. A song page
-   shows the album it is on.
+2. **Songs:** an album's or playlist's tracks; an artist's top songs, then the releases as tiles in
+   sections: Albums, EPs & singles, Other releases (compilations and releases the service gives no
+   type; one "Releases" section when nothing is typed, as for library artists). Each is newest first,
+   shows 12 and has View all (`/artist/<id>/releases/albums|eps-singles|other`, 48 a page, Back to the
+   artist). Loading, an error with Retry, a partial list and a list cut at 500 each say so. A song
+   page shows the album it is on.
 3. **Versions:** the library copy and every "Also on" link, one play button per service it streams from.
 4. **On Pubky:** everyone's tags with counts and the number of taggers, scoped 🌐 Everywhere / ▣ This version.
 5. **Yours:** my tags, my rating, my notes.

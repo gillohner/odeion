@@ -54,6 +54,9 @@ pub(crate) struct Link {
     /// The last volume set (16.16), sent again on every connection: squeezelite starts at gain 0
     /// and plays silence until it gets an `audg`.
     gain: Mutex<Option<u32>>,
+    /// The last level set that wasn't a mute: what unmuting goes back to (the zone held it to
+    /// its limit); full gain only when none was ever set.
+    unmuted: Mutex<Option<u32>>,
 }
 
 impl Link {
@@ -237,6 +240,11 @@ impl Output for SlimOutput {
         &self.caps
     }
 
+    /// Mute is a gain of zero here: unmuting is the gain set before, or full when none was.
+    fn unmute_restores_level(&self) -> bool {
+        false
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if fmt.kind != SampleKind::Pcm || !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
@@ -272,19 +280,28 @@ impl Output for SlimOutput {
         }))
     }
 
+    /// Percent is a squared gain here (`set_volume`): `10^(dB/40)`, rounded down for a cap.
+    fn percent_for_db(&self, db: f32) -> u8 {
+        squared_percent(db)
+    }
+
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        let gain = match v {
-            Volume::Db(db) => 10f64.powf(db.clamp(-60.0, 0.0) as f64 / 20.0),
-            Volume::Percent(p) => (p.min(100) as f64 / 100.0).powi(2),
-            Volume::Mute(true) => 0.0,
-            Volume::Mute(false) => 1.0,
+        let g = match v {
+            // Below -60 dB too: a volume limit under it still holds
+            Volume::Db(db) => (10f64.powf(db.min(0.0) as f64 / 20.0) * FIXED_ONE as f64).round() as u32,
+            Volume::Percent(p) => ((p.min(100) as f64 / 100.0).powi(2) * FIXED_ONE as f64).round() as u32,
+            Volume::Mute(true) => 0,
+            // Back to the level set before the mute, not to full gain
+            Volume::Mute(false) => self.link.unmuted.lock().expect("gain").unwrap_or(FIXED_ONE),
             Volume::Up | Volume::Down => {
                 return Err(SinkError::Device(
                     "slimproto volume needs an absolute level".into(),
                 ));
             }
         };
-        let g = (gain * FIXED_ONE as f64).round() as u32;
+        if !matches!(v, Volume::Mute(_)) {
+            *self.link.unmuted.lock().expect("gain") = Some(g);
+        }
         *self.link.gain.lock().expect("gain") = Some(g);
         self.send(b"audg", &audg(g))
     }
@@ -304,6 +321,12 @@ struct SlimSink {
     written: u64,
     /// Frames written before the player's current stream started (it counts from zero).
     base: u64,
+}
+
+/// The highest percent at or below `db` when percent is a squared gain (`(p/100)²`). Only the
+/// top is clamped: a limit under -60 dB still caps below it.
+fn squared_percent(db: f32) -> u8 {
+    (10f64.powf(f64::from(db.min(0.0)) / 40.0) * 100.0).floor() as u8
 }
 
 /// How far the node runs ahead of what the player has played. Socket and player buffers would
@@ -508,6 +531,16 @@ impl Drop for SlimSink {
 mod tests {
     use super::*;
     use crate::read_frame_server;
+
+    #[test]
+    fn a_volume_limit_caps_percent_on_the_squared_gain() {
+        // 17 % is a gain of 0.0289, -30.8 dB: under a -30 dB limit (the linear 50 % was -12 dB)
+        assert_eq!(squared_percent(-30.0), 17);
+        assert_eq!(squared_percent(0.0), 100);
+        // Under -60 dB too: -80 dB is 1 % (a gain of 1e-4), never the 3 % of -60 dB
+        assert!(squared_percent(-80.0) <= 1);
+        assert_eq!(squared_percent(-90.0), 0);
+    }
     use std::io::Write;
     use std::net::TcpListener;
 
@@ -619,6 +652,19 @@ mod tests {
         assert_eq!(&op, b"audg");
         let g = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
         assert!((g as f64 / FIXED_ONE as f64 - 0.501).abs() < 0.01, "{g}");
+        // Muted, then unmuted: back to -6 dB, not to full gain
+        out.set_volume(Volume::Mute(true)).await.unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
+        assert_eq!(&op, b"audg");
+        assert_eq!(&data[10..14], &0u32.to_be_bytes());
+        out.set_volume(Volume::Mute(false)).await.unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
+        assert_eq!(&op, b"audg");
+        assert_eq!(
+            &data[10..14],
+            &g.to_be_bytes(),
+            "unmuting goes back to the level set before"
+        );
 
         // STAT updates the status, once the player has confirmed the new stream (STMf):
         // a report already on its way describes the old one.

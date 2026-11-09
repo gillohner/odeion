@@ -486,6 +486,14 @@ jobs:
             docker buildx imagetools create -t "ghcr.io/gillohner/odeion:$t" "ghcr.io/gillohner/pubky-music-node:$t"
           done
 
+  # A version tag: every Android check on every version (android.yml; pushes to main run it on their
+  # own). The phone-as-zone check above runs on the signed release APK as well.
+  android-checks:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/android.yml
+    with:
+      full: true
+
   publish:
     needs: [meta, app, android, binaries, image]
     if: needs.meta.outputs.publish == 'true'

@@ -9,7 +9,13 @@
 //   - what Confirm does to the files, as "Write IDs into my files" is set (on, off, unknown), and
 //     files the IDs couldn't be written to are said;
 //   - more than 500 chosen songs: the first 500 confirmed, the rest stay;
-//   - "Not this" and "Which song is this?" send the song and recording they show.
+//   - "Not this" and "Which song is this?" send the song and recording they show;
+//   - review is optional: the card's wording, Skip all unsure with Undo, Leave as is per album; the
+//     focus goes to the Undo when the pressed button is gone; an answer after the page was left still
+//     shows the toast and its Undo; one change at a time per album (the others wait); an Undo says
+//     at once that it works and the review page gives the focus back; an album's Undo says it brings
+//     back that album's skipped songs; "Bring back N skipped" asks a second press; no Skip all on the
+//     card while a run goes.
 // Any request outside the loopback server fails the run.
 //   node tools/ui-identify-fixture.js [static dir] [screenshot dir]
 const http = require('http');
@@ -283,6 +289,166 @@ const server = http.createServer(async (req, res) => {
       await until(async () => (await page.locator('section.idalbum').count()) === 1);
       await page.locator('section.idalbum [data-confirm]').click();
       check(await until(async () => /Nothing to confirm/.test(await page.locator('#main').textContent())), `${W} after the last song is confirmed the page says there is nothing to confirm`);
+
+      // 8. Review is optional (TASK-identify-less-review-1106): the card says Finished with the unsure
+      // songs as a secondary line, Identify stays the main button; "Skip all unsure" marks them
+      // reviewed without an identity (undoable); on the review page "Leave as is" does it per album
+      const skipRoutes = () => ({
+        // (the count answered is the album's only when its key was sent: the toast then proves the key)
+        // (counts.skipped is the node's total after the skip: the page knows of 3 skipped before, two more
+        // were left as they are elsewhere since, so 11 after all 6: the label must come from this count)
+        'POST /library/suggestions/skip': async (_, b) => [200, { skipped: b.all ? 6 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: { skipped: b.all ? 11 : 7 } }],
+        'POST /library/suggestions/unskip': async (_, b) => [200, { restored: b.all ? 11 : (b.albums || []).includes('/music/Band/Album') ? 4 : 0, counts: { skipped: 0 } }],
+      });
+      fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
+      await page.goto(`${BASE}/library/node`);
+      check(await until(async () => (await page.locator('#idbox .idbar').count()) === 1), `${W} the Identify card draws`);
+      const card = await page.evaluate(() => { const q = (s) => document.querySelector(s); const legend = q('#idbox .idlegend') ? q('#idbox .idlegend').textContent.replace(/\s+/g, ' ') : ''; return { phase: q('#idphase') && q('#idphase').textContent.trim(), warn: !!(q('#idphase') && q('#idphase').classList.contains('warn-text')), unsure: q('#idunsure') && q('#idunsure').textContent.trim(), review: (() => { const b = q('#idbox .actions [data-view="identify"]'); return b ? { text: b.textContent.trim(), primary: b.classList.contains('primary') } : null; })(), runPrimary: !!(q('#idrun') && q('#idrun').classList.contains('primary')), legend, skipAll: !!q('#idskipall'), unskip: q('#idunskip') && q('#idunskip').textContent.trim() }; });
+      check(card.phase === 'Finished' && !card.warn, `${W} the card says "Finished" with no warning tone (${card.phase})`);
+      check(/^6 songs unsure \(optional\): songs play and show as usual, identified or not\./.test(card.unsure || ''), `${W} the unsure songs are a secondary line: "${card.unsure}"`);
+      check(card.review && /^Review 6 unsure$/.test(card.review.text) && !card.review.primary && card.runPrimary, `${W} Identify stays the main button; "${card.review && card.review.text}" is a plain one`);
+      check(/6 unsure \(2 to re-check\)/.test(card.legend) && /3 left as they are/.test(card.legend) && !/^.*\b2 to re-check\b(?!\))/.test(card.legend.replace(/\(2 to re-check\)/, '')), `${W} the legend counts unsure (with those to re-check among them, not again) and left as they are (${card.legend.slice(0, 120)})`);
+      check(card.skipAll && card.unskip === 'Bring back 3 skipped', `${W} "Skip all unsure" and "Bring back 3 skipped" are offered`);
+      // "Bring back 3 skipped" undoes every Leave as is: a second press to confirm
+      await page.locator('#idunskip').dblclick(); await sleep(300);
+      check(asked('POST', '/library/suggestions/unskip').length === 0 && /Press again/.test(await page.locator('#idunskip').textContent()), `${W} "Bring back" asks a second press first, a double-click being one (${await page.locator('#idunskip').textContent()})`);
+      check(/Press again to bring back all 3/.test(await page.locator('#toast').textContent()), `${W} …and says so where a screen reader hears it (the toast)`);
+      await sleep(300); // (a press a moment later, not part of the double-click)
+      await page.locator('#idunskip').click();
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and the second press brings them back`);
+      check(await until(async () => page.evaluate(() => !!document.activeElement && document.activeElement.matches('.set-block .set-name') && !!document.activeElement.closest('.set-block').querySelector('#idcard'))), `${W} …then the focus is on the card's title, which a held Enter can't press (${await page.evaluate(() => (document.activeElement && (document.activeElement.className || document.activeElement.tagName)) || '')})`);
+      fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
+      fx.log.length = 0;
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idbox .idbar').count()) === 1);
+      await page.locator('#idskipall').click();
+      check(await until(async () => asked('POST', '/library/suggestions/skip').length === 1), `${W} Skip all unsure asks the node to skip all`);
+      const skipBody = asked('POST', '/library/suggestions/skip')[0].body;
+      check(skipBody && skipBody.all === true && Object.keys(skipBody).length === 1, `${W} …with exactly {all: true} (${JSON.stringify(skipBody)})`);
+      check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} a toast says 6 songs were left as they are, with Undo`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
+      check(/^Undo \(brings back all 11 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim()), `${W} …and the Undo says it brings back the earlier skips too, from the node's count (11, not the page's 3 + 6)`);
+      // (the toast waits while its Undo has the focus: past its 8 s, the Undo and the focus are still there)
+      await sleep(9000);
+      check(await page.evaluate(() => document.querySelector('#toast').classList.contains('show') && !!document.activeElement && document.activeElement.matches('#toast .toast-act')), `${W} …and the toast waits while its Undo has the focus (still there after 9 s)`);
+      if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && asked('POST', '/library/suggestions/unskip')[0].body.all === true), `${W} Undo asks the node to bring them all back`);
+      check(await until(async () => /11 songs back for review/.test(await page.locator('#toast').textContent())), `${W} …and the toast says how many came back`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('.set-block .set-name') && !!document.activeElement.closest('.set-block').querySelector('#idcard'))), `${W} the focus is back on the card after Undo, on its title (a held Enter can't press it)`);
+      // The card's Undo with a slow unskip: a focus the user moves meanwhile stays where they put it
+      { const slow = skipRoutes(); const un0 = slow['POST /library/suggestions/unskip'];
+        slow['POST /library/suggestions/unskip'] = async (u, b) => [...(await un0(u, b)).slice(0, 2), 700];
+        fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 3, outdated: 2, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: slow }); }
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idskipall').count()) === 1);
+      await page.locator('#idskipall').click();
+      await until(async () => (await page.locator('#toast .toast-act').count()) === 1);
+      await page.locator('#toast .toast-act').click();
+      const movedTo = await page.evaluate(() => { const b = [...document.querySelectorAll('.nav-item, .bnav')].find((x) => x.getClientRects().length); if (!b) return ''; b.focus(); return b.dataset.view || b.dataset.bnav || ''; });
+      check(await until(async () => /back for review/.test(await page.locator('#toast').textContent()), 4000), `${W} …the card's slow Undo is answered`); await sleep(400);
+      check(await page.evaluate((v) => !!document.activeElement && (document.activeElement.dataset.view === v || document.activeElement.dataset.bnav === v), movedTo), `${W} the card's Undo leaves a focus moved meanwhile where it was put (${movedTo}; now ${await page.evaluate(() => (document.activeElement && (document.activeElement.dataset.view || document.activeElement.dataset.bnav || document.activeElement.id || document.activeElement.tagName)) || '')})`);
+      // A node without the route (405: the path is another method's route there) says to update it
+      fx = base({ status: { counts: { total: 120, identified: 90, suggested: 6, skipped: 0, outdated: 0, unknown: 4, unchecked: 0, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: { 'POST /library/suggestions/skip': async () => [405, {}] } });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idskipall').count()) === 1);
+      await page.locator('#idskipall').click();
+      check(await until(async () => /doesn’t offer that yet: update it first/.test(await page.locator('#toast').textContent())), `${W} on an older node Skip all says to update it (405)`);
+      check((await page.locator('#toast .toast-act').count()) === 0, `${W} …with no Undo`);
+      // While a run goes the card is drawn again every 1.5 s: no Skip all there (a press would be taken
+      // twice, its Undo replaced)
+      fx = base({ status: { phase: 'running', progress: { running: true, total: 30, done: 10, identified: 5, suggested: 6, unknown: 0, errors: 0 }, counts: { total: 120, identified: 90, suggested: 6, skipped: 0, outdated: 0, unknown: 4, unchecked: 20, by: { tags: 10, album: 70, fingerprint: 8, you: 2 } } }, routes: skipRoutes() });
+      await page.goto(`${BASE}/library/node`);
+      await until(async () => (await page.locator('#idbox .idbar').count()) === 1);
+      check((await page.locator('#idskipall').count()) === 0 && (await page.locator('#idbox [data-view="identify"]').count()) > 0, `${W} while a run goes the card offers the review but no Skip all`);
+      // The review page: Skip all unsure, then Leave as is on one album (the unskip answers slowly, so
+      // the Undo's word at once is surely before its answer)
+      const slowUnskip = skipRoutes(); const unskip0 = slowUnskip['POST /library/suggestions/unskip'];
+      slowUnskip['POST /library/suggestions/unskip'] = async (u, b) => [...(await unskip0(u, b)).slice(0, 2), 700];
+      fx = base({ routes: slowUnskip });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      await page.locator('#idskipall').click();
+      check(await until(async () => /6 songs left as they are/.test(await page.locator('#toast').textContent()) && /^Undo \(brings back all 11 skipped\)$/.test((await page.locator('#toast .toast-act').textContent()).trim())), `${W} on the review page Skip all says what its Undo brings back (from the node's count)`);
+      check(await until(async () => /Nothing to confirm/.test(await page.locator('#main').textContent())), `${W} …and the page empties`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => /Bringing the songs back/.test(await page.locator('#toast').textContent()), 600), `${W} …the Undo says at once that it is bringing the songs back`);
+      // (a focus the user moves while the songs come back stays where they put it)
+      const moved = await page.evaluate(() => { const b = [...document.querySelectorAll('.nav-item, .bnav')].find((x) => x.getClientRects().length); if (!b) return ''; b.focus(); return b.dataset.view || b.dataset.bnav || ''; });
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && (await page.locator('section.idalbum').count()) === 2), `${W} Undo brings the albums back on the page`);
+      await sleep(400);
+      check(await page.evaluate((v) => !!document.activeElement && (document.activeElement.dataset.view === v || document.activeElement.dataset.bnav === v), moved), `${W} …a focus moved meanwhile stays where it was put (${moved}; now ${await page.evaluate(() => (document.activeElement && (document.activeElement.dataset.view || document.activeElement.dataset.bnav || document.activeElement.id || document.activeElement.tagName)) || '')})`);
+      // (left on the page, it goes to the heading after the next Undo)
+      await page.locator('#idskipall').click();
+      await until(async () => (await page.locator('#toast .toast-act').count()) === 1);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => page.evaluate(() => !!document.activeElement && document.activeElement.matches('#main .page-head h2'))), `${W} …and left on the page, the focus is on the page's heading again, not its body (${await page.evaluate(() => (document.activeElement && (document.activeElement.id || document.activeElement.tagName)) || '')})`);
+      fx = base({ routes: skipRoutes() });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      const loads0 = asked('GET', '/library/suggestions/albums').length;
+      check((await page.locator('#idskipall').count()) === 1, `${W} the review page offers Skip all unsure`);
+      await section(0).locator('[data-skip]').click();
+      check(await until(async () => asked('POST', '/library/suggestions/skip').length === 1), `${W} Leave as is asks the node to skip the album`);
+      const leave = asked('POST', '/library/suggestions/skip')[0].body;
+      check(leave && Array.isArray(leave.albums) && leave.albums.length === 1 && leave.albums[0] === '/music/Band/Album', `${W} …by its key (${JSON.stringify(leave)})`);
+      check(await until(async () => (await page.locator('section.idalbum').count()) === 1), `${W} the album leaves the page`);
+      check(asked('GET', '/library/suggestions/albums').length === loads0, `${W} the page isn't loaded again after Leave as is`);
+      check(await until(async () => /4 songs left as they are/.test(await page.locator('#toast').textContent())), `${W} the toast says 4 songs were left as they are`);
+      check(/this album/.test(await page.locator('#toast .toast-act').textContent()), `${W} …and its Undo says it brings back this album's skipped songs (${await page.locator('#toast .toast-act').textContent()})`);
+      check(await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act'))), `${W} …and the focus is on its Undo (the pressed button is gone: not on the page, out of a keyboard's reach)`);
+      await page.locator('#toast .toast-act').click();
+      check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1 && JSON.stringify(asked('POST', '/library/suggestions/unskip')[0].body) === JSON.stringify({ albums: ['/music/Band/Album'] })), `${W} Undo asks the node to bring that album back`);
+      check(await until(async () => asked('GET', '/library/suggestions/albums').length > loads0 && (await page.locator('section.idalbum').count()) === 2), `${W} …and the page is loaded again with it`);
+      // A skip answered after the page was left (Back, from the card) still says so with its Undo: the
+      // songs are skipped all the same. It doesn't take the focus on the other page
+      for (const which of ['Leave as is', 'Skip all unsure']) {
+        const late = skipRoutes(); const skip = late['POST /library/suggestions/skip'];
+        late['POST /library/suggestions/skip'] = async (u, b) => [...(await skip(u, b)).slice(0, 2), 1500];
+        fx = base({ routes: late });
+        await page.goto(`${BASE}/library/node`);
+        await until(async () => (await page.locator('#idbox [data-view="identify"]').count()) > 0);
+        await page.locator('#idbox [data-view="identify"]').first().click();
+        await until(async () => (await page.locator('section.idalbum').count()) === 2);
+        await (which === 'Skip all unsure' ? page.locator('#idskipall') : section(0).locator('[data-skip]')).click();
+        await until(async () => asked('POST', '/library/suggestions/skip').length === 1);
+        await page.evaluate(() => history.back());
+        check(await until(async () => (await page.locator('#idbox').count()) === 1 && (await page.locator('section.idalbum').count()) === 0) && !/left as they are/.test(await page.locator('#toast').textContent()), `${W} ${which}: the page is left before the node answers`);
+        check(await until(async () => /left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1), `${W} …the answer still shows its toast, with Undo`);
+        check(await page.evaluate(() => !document.activeElement || !document.activeElement.matches('#toast .toast-act')), `${W} …without taking the focus`);
+        if ((await page.locator('#toast .toast-act').count()) === 1) await page.locator('#toast .toast-act').click();
+        check(await until(async () => asked('POST', '/library/suggestions/unskip').length === 1), `${W} …and its Undo brings the songs back`);
+      }
+      // A toast whose Undo had the focus goes 4 s after the focus left (not at its 8 s)
+      fx = base({ routes: skipRoutes() });
+      await page.goto(`${BASE}/identify`);
+      await until(async () => (await page.locator('section.idalbum').count()) === 2);
+      await page.locator('#idskipall').click();
+      await until(async () => await page.evaluate(() => !!document.activeElement && document.activeElement.matches('#toast .toast-act')));
+      await page.evaluate(() => document.activeElement.blur());
+      const left = Date.now();
+      check(await until(async () => !(await page.evaluate(() => document.querySelector('#toast').classList.contains('show'))), 7000) && Date.now() - left > 3500 && Date.now() - left < 6000, `${W} …it goes about 4 s after the focus left its Undo (${Date.now() - left} ms)`);
+      // One change at a time per album: while Leave as is (or Confirm) is on its way, the album's other
+      // changes and Skip all wait, so the songs come off the count once and a later toast can't replace
+      // the Undo. (The presses are a script's clicks: a disabled button takes none.)
+      for (const first of ['Leave as is', 'Confirm']) {
+        const slow = skipRoutes(); const skip = slow['POST /library/suggestions/skip'];
+        if (first === 'Leave as is') slow['POST /library/suggestions/skip'] = async (u, b) => [...(await skip(u, b)).slice(0, 2), 1200];
+        fx = base({ routes: slow, confirmDelay: first === 'Confirm' ? 1200 : 0 });
+        await page.goto(`${BASE}/identify`);
+        await until(async () => (await page.locator('section.idalbum').count()) === 2);
+        const before = await page.evaluate(() => ({ count: Number(document.querySelector('.page-head .count').textContent), rows: document.querySelectorAll('[data-album="0"] .idrow').length }));
+        await section(0).locator(first === 'Leave as is' ? '[data-skip]' : '[data-confirm]').click();
+        await until(async () => asked('POST', first === 'Leave as is' ? '/library/suggestions/skip' : '/library/suggestions/confirm').length === 1);
+        const waiting = await page.evaluate(() => { const q = (s) => document.querySelector(s); const others = ['[data-album="0"] [data-confirm]', '[data-album="0"] [data-skip]', '[data-album="0"] [data-reject]', '#idskipall'].map(q).filter(Boolean); others.forEach((b) => b.click()); return others.filter((b) => b.disabled).length; });
+        await sleep(1600);
+        const sent = { skip: asked('POST', '/library/suggestions/skip').length, confirm: asked('POST', '/library/suggestions/confirm').length, reject: fx.log.filter((x) => x.method === 'DELETE').length };
+        check(sent.skip === (first === 'Leave as is' ? 1 : 0) && sent.confirm === (first === 'Confirm' ? 1 : 0) && sent.reject === 0, `${W} ${first} on its way: the album's other changes and Skip all wait (${JSON.stringify(sent)}; ${waiting} buttons disabled)`);
+        const confirmed = first === 'Confirm' ? asked('POST', '/library/suggestions/confirm')[0].body.choices.length : before.rows;
+        check(await until(async () => Number(await page.locator('.page-head .count').textContent()) === before.count - confirmed), `${W} …the songs come off the count once (${before.count} - ${confirmed})`);
+        if (first === 'Leave as is') check(/left as they are/.test(await page.locator('#toast').textContent()) && (await page.locator('#toast .toast-act').count()) === 1, `${W} …and the toast keeps its Undo`);
+        check(await until(async () => await page.evaluate(() => [...document.querySelectorAll('[data-album] [data-skip], [data-album] [data-reject], #idskipall')].every((b) => !b.disabled))), `${W} …and the buttons take presses again after the answer`);
+      }
 
       check(!errors.length, `${W} no page errors ${errors.slice(0, 3).join(' | ')}`);
       check(!outside.length, `${W} nothing asked outside the loopback server ${outside.slice(0, 3).join(' ')}`);

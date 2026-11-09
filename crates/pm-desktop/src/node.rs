@@ -221,9 +221,10 @@ pub async fn poll_sign_in(s: &Settings, started: &SignInStarted) -> Result<Optio
     accepted(&st, &started.owner)
 }
 
-/// Register this machine's player with its key: one zone per DAC appears in the UI.
+/// Register this machine's player with its key: one zone per DAC appears in the UI. Answers the
+/// node's ids for the player's outputs (`net:<address>/<output>`).
 #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
-pub async fn add_endpoint(s: &Settings, address: &str, key: &pm_stream::Key) -> Result<(), String> {
+pub async fn add_endpoint(s: &Settings, address: &str, key: &pm_stream::Key) -> Result<Vec<String>, String> {
     let resp = client()
         .map_err(|e| e.to_string())?
         .post(api(s, "outputs/endpoints"))
@@ -232,7 +233,12 @@ pub async fn add_endpoint(s: &Settings, address: &str, key: &pm_stream::Key) -> 
         .send()
         .await
         .map_err(|e| e.to_string())?;
-    resp.error_for_status().map(|_| ()).map_err(|e| e.to_string())
+    let resp = resp.error_for_status().map_err(|e| e.to_string())?;
+    let outputs: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+    Ok(outputs
+        .iter()
+        .filter_map(|o| o.get("id").and_then(|v| v.as_str()).map(str::to_owned))
+        .collect())
 }
 
 /// Forget an old player address, so the zone list does not fill with ghosts.

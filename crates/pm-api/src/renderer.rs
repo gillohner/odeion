@@ -4,8 +4,9 @@
 //! - `SetAVTransportURI` replaces the queue with that URI (an HTTP stream the zone decodes);
 //!   `Play` starts it. `SetNextAVTransportURI` queues the next one right after the current.
 //! - Transport, seek and next/previous are the zone's own.
-//! - Volume and mute go to the zone's output when it has hardware volume; the level is
-//!   remembered for `GetVolume` (outputs do not report theirs).
+//! - Volume and mute go to the zone's output when it has hardware volume, through the zone, so
+//!   the zone's volume limit holds here too; `GetVolume` answers the level the zone took (its
+//!   read-back), else the level last set.
 
 use crate::state::NodeState;
 use pm_model::Volume;
@@ -138,12 +139,21 @@ impl Host for ZoneRenderers {
                 z.set_volume(Volume::Percent(v))
                     .await
                     .map_err(|e| e.to_string())?;
+                // What the zone took (its limit applied, the device's own reading), once the
+                // engine published it, as the output's percent; the level asked when the zone
+                // has none
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), z.wait_acked()).await;
+                let took = match z.state().volume.map(|zv| zv.level) {
+                    Some(pm_model::VolumeLevel::Percent(p)) => p,
+                    Some(pm_model::VolumeLevel::Db(d)) => z.output().percent_for_db(d),
+                    None => v,
+                };
                 self.levels
                     .lock()
                     .expect("levels")
                     .entry(zone.to_string())
                     .or_insert((100, false))
-                    .0 = v;
+                    .0 = took;
             }
             Act::Mute(m) => {
                 z.set_volume(Volume::Mute(m)).await.map_err(|e| e.to_string())?;

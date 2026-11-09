@@ -412,6 +412,8 @@ fn zone(s: &NodeState, id: &str) -> Result<Arc<Zone>, ApiError> {
 async fn move_music(from: &Zone, to: &Zone, empty_from: bool) -> ZoneState {
     let st = from.state();
     from.stop();
+    // The shuffle mode with its original order, read before the source may be emptied
+    let shuffle = crate::kept_shuffle(from);
     let _ = tokio::time::timeout(Duration::from_secs(5), from.wait_stopped()).await;
     if empty_from {
         from.clear();
@@ -425,13 +427,14 @@ async fn move_music(from: &Zone, to: &Zone, empty_from: bool) -> ZoneState {
         position_ms,
         st.transport,
         st.repeat,
+        shuffle,
         st.radio,
     )
     .await
 }
 
 /// The group zone for `a`: the host's speakers first (the leader), then each joiner's, through
-/// the host zone's DSP.
+/// the host zone's DSP, with the strictest volume limit among all of them.
 async fn build(s: &Arc<NodeState>, a: &Along) -> Result<Arc<Zone>, ApiError> {
     let mut name = a.host_name.clone();
     let mut ids = a.host_outputs.clone();
@@ -443,7 +446,8 @@ async fn build(s: &Arc<NodeState>, a: &Along) -> Result<Arc<Zone>, ApiError> {
         ids.extend(j.outputs.iter().cloned());
     }
     let output = crate::zone_output(s, &name, &ids).await?;
-    s.sources.carry_dsp(&a.host_output, &output.id());
+    let members: Vec<pm_zones::OutputId> = ids.iter().map(|i| pm_zones::OutputId(i.clone())).collect();
+    s.sources.carry_dsp(&a.host_output, &output.id(), &members);
     Ok(s.create_zone(&name, output))
 }
 

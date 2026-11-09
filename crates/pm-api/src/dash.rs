@@ -1,7 +1,9 @@
 //! A small MPEG-DASH reader for single-representation audio manifests (TIDAL's unofficial
 //! playback answers with one): the initialization segment, then every media segment in order,
-//! read as one fragmented-MP4 stream. Live manifests, several representations and encryption
-//! are not handled; an encrypted stream is refused before it gets here.
+//! read as one fragmented-MP4 stream (`segmented::SegmentReader`). Each segment's start comes from
+//! the `SegmentTimeline`, so a seek can start from the segment that holds the position. Live
+//! manifests, several representations and encryption are not handled; an encrypted stream is
+//! refused before it gets here.
 
 use quick_xml::events::Event;
 
@@ -12,6 +14,22 @@ pub struct DashManifest {
     pub sample_rate: Option<u32>,
     /// The initialization segment, then the media segments in play order.
     pub urls: Vec<String>,
+    /// Where each media segment starts, in ms from the first.
+    pub starts_ms: Vec<u64>,
+    /// Where the last one ends.
+    pub end_ms: u64,
+}
+
+impl DashManifest {
+    /// The segments with their times, for a seekable stream.
+    pub fn segments(&self) -> crate::segmented::Segments {
+        crate::segmented::Segments {
+            init: self.urls.first().cloned(),
+            media: self.urls.iter().skip(1).cloned().collect(),
+            starts_ms: Some(self.starts_ms.clone()),
+            end_ms: Some(self.end_ms),
+        }
+    }
 }
 
 fn attr(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
@@ -26,13 +44,17 @@ fn attr(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
 }
 
 /// Parse a manifest: the first representation's `SegmentTemplate` with its `SegmentTimeline`
-/// (each `S` is one segment plus `r` repeats).
+/// (each `S` is one segment of `d` plus `r` repeats, starting at `t` when given, else where the
+/// one before ended; in units of the template's `timescale`).
 pub fn parse(xml: &str) -> Result<DashManifest, String> {
     let mut reader = quick_xml::Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let (mut codecs, mut mime, mut rate) = (String::new(), String::new(), None);
     let (mut init, mut media, mut start) = (None::<String>, None::<String>, 1u64);
     let mut segments: u64 = 0;
+    let mut timescale: u64 = 1;
+    // Segment starts in timescale units; `now` is where the next one starts
+    let (mut starts, mut now) = (Vec::<u64>::new(), None::<u64>);
     let mut in_rep = false;
     let mut done_rep = false;
     loop {
@@ -57,9 +79,20 @@ pub fn parse(xml: &str) -> Result<DashManifest, String> {
                         init = attr(&e, "initialization");
                         media = attr(&e, "media");
                         start = attr(&e, "startNumber").and_then(|v| v.parse().ok()).unwrap_or(1);
+                        timescale = attr(&e, "timescale")
+                            .and_then(|v| v.parse().ok())
+                            .filter(|t| *t > 0)
+                            .unwrap_or(1);
                     }
                     "S" if in_rep || !done_rep => {
                         let r: i64 = attr(&e, "r").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let d: u64 = attr(&e, "d").and_then(|v| v.parse().ok()).unwrap_or(0);
+                        let mut at = attr(&e, "t").and_then(|v| v.parse().ok()).or(now).unwrap_or(0);
+                        for _ in 0..1 + r.max(0) as u64 {
+                            starts.push(at);
+                            at = at.saturating_add(d);
+                        }
+                        now = Some(at);
                         segments += 1 + r.max(0) as u64;
                     }
                     _ => {}
@@ -84,53 +117,16 @@ pub fn parse(xml: &str) -> Result<DashManifest, String> {
     for n in start..start + segments {
         urls.push(media.replace("$Number$", &n.to_string()));
     }
+    let first = starts.first().copied().unwrap_or(0);
+    let ms = |t: u64| (t.saturating_sub(first) as u128 * 1000 / timescale as u128) as u64;
     Ok(DashManifest {
         codecs,
         mime_type: mime,
         sample_rate: rate,
         urls,
+        starts_ms: starts.iter().map(|t| ms(*t)).collect(),
+        end_ms: ms(now.unwrap_or(first)),
     })
-}
-
-/// The segments, read one after another as one stream (blocking; for the audio thread).
-pub struct DashReader {
-    client: &'static reqwest::blocking::Client,
-    urls: std::collections::VecDeque<String>,
-    current: Option<reqwest::blocking::Response>,
-}
-
-impl DashReader {
-    pub fn new(client: &'static reqwest::blocking::Client, urls: Vec<String>) -> Self {
-        Self {
-            client,
-            urls: urls.into(),
-            current: None,
-        }
-    }
-}
-
-impl std::io::Read for DashReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            if let Some(r) = self.current.as_mut() {
-                let n = r.read(buf)?;
-                if n > 0 {
-                    return Ok(n);
-                }
-                self.current = None;
-            }
-            let Some(url) = self.urls.pop_front() else {
-                return Ok(0);
-            };
-            let resp = self
-                .client
-                .get(&url)
-                .send()
-                .and_then(|r| r.error_for_status())
-                .map_err(|e| std::io::Error::other(format!("segment: {}", e.without_url())))?;
-            self.current = Some(resp);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -161,6 +157,30 @@ mod tests {
         assert_eq!(m.urls[0], "https://cdn.example/init.mp4?t=1");
         assert_eq!(m.urls[1], "https://cdn.example/1.mp4?t=1");
         assert_eq!(m.urls[46], "https://cdn.example/46.mp4?t=1");
+        // 383936 / 96000 s each (3.999 s), the last one 2.23 s: 182.2 s in all
+        assert_eq!(m.starts_ms.len(), 46);
+        assert_eq!(&m.starts_ms[..3], &[0, 3999, 7998]);
+        assert_eq!(m.starts_ms[45], 45 * 383_936 * 1000 / 96_000);
+        assert_eq!(m.end_ms, 182_200);
+        let segs = m.segments();
+        assert_eq!(segs.at(8_000), Some((2, 7998)));
+        assert_eq!(
+            segs.urls_from(45),
+            vec![
+                "https://cdn.example/init.mp4?t=1",
+                "https://cdn.example/46.mp4?t=1"
+            ]
+        );
         assert!(parse("<MPD></MPD>").is_err());
+    }
+
+    #[test]
+    fn segment_times_follow_t_and_the_timescale() {
+        // A timeline that starts late and gives a `t` midway: times count from the first segment
+        let xml = r#"<MPD><Period><AdaptationSet mimeType="audio/mp4"><Representation codecs="mp4a.40.2"><SegmentTemplate timescale="1000" initialization="i.mp4" media="$Number$.m4s" startNumber="0"><SegmentTimeline><S t="5000" d="2000" r="1"/><S t="10000" d="1500"/></SegmentTimeline></SegmentTemplate></Representation></AdaptationSet></Period></MPD>"#;
+        let m = parse(xml).unwrap();
+        assert_eq!(m.urls, vec!["i.mp4", "0.m4s", "1.m4s", "2.m4s"]);
+        assert_eq!(m.starts_ms, vec![0, 2000, 5000]);
+        assert_eq!(m.end_ms, 6500);
     }
 }

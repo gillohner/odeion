@@ -86,7 +86,7 @@ Android's installer: Android asks the user to confirm and installs only over an 
 the release key above. The first time, Android asks to allow "Install unknown apps" for Odeion;
 the app explains it and opens that setting. The `.aab` is built without the updater
 (`android-patch.py --without-updater`: no `REQUEST_INSTALL_PACKAGES`, no update check), because
-an app from Google Play may update only through Play. CI: `android-update.yml` installs build N
+an app from Google Play may update only through Play. CI: `android.yml` (its update check) installs build N
 on Android 15 and 17 emulators, updates it to N+1 from a local feed and checks that a tampered
 download is refused.
 
