@@ -170,6 +170,8 @@ output with the phone zone's path (Auto, bit-perfect, Exclusive USB), at home an
 access. Checked in CI on an emulator (`android-emulator`): a song started in the page plays in the
 app in real time, in the background with the screen off, and the node's zone on the phone takes the
 output over (the app pauses). Not checked there: a USB DAC, remote access, a real phone's battery.
+Downloads (Download in the ⋯ menu, the storage screen, the mark) are checked on a fixture page
+(`tools/ui-app-downloads.js`) and the sync with a stand-in node (`crates/pm-offline/tests/offline.rs`).
 
 ```
 Edge or CI APK of the top PR of the stack. Start with the KA17's volume low (0-5 %).
@@ -179,7 +181,12 @@ Edge or CI APK of the top PR of the stack. Start with the KA17's volume low (0-5
    "Shared · FiiO KA17 · <why>" with Settings > This phone on Shared).
 2. Screen off for 3 minutes while it plays: the next song starts by itself; the lock-screen
    buttons (pause, next) work.
-3. If anything fails: `adb logcat -s pubky-music` (lines "the app's own player: …" say what it
+3. Download an album (its page's ⋯ menu > Download). Your library > Downloads lists it with its
+   size and the download under way; when it is done, its songs and its tile carry the download mark.
+4. A TIDAL song (search for one, or a playlist with one): its ⋯ menu has no Download.
+5. Your library > Downloads > Remove on the album: it goes from the list, the marks go, and the
+   album still plays from the node.
+6. If anything fails: `adb logcat -s pubky-music` (lines "the app's own player: …" say what it
    plays and the path), the phone's model and Android version.
 ```
 

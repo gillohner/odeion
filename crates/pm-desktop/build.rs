@@ -1,6 +1,7 @@
 // The app's commands, each allowed by name: the connect page (capabilities/default.json) gets
-// the connect page's, the node's page (and the offline page) only the player's, through a
-// capability the app adds for their origin (src/native.rs, `PAGE_COMMANDS`).
+// the connect page's; the node's page (and the offline page) only the player's and the
+// downloads', through a capability the app adds for their origin (src/native.rs,
+// `PAGE_COMMANDS`).
 const COMMANDS: &[&str] = &[
     "saved",
     "open_saved",
@@ -23,6 +24,10 @@ const COMMANDS: &[&str] = &[
     "native_seek",
     "native_stop",
     "native_status",
+    "downloads_state",
+    "downloads_keep",
+    "downloads_remove_all",
+    "downloads_limit",
 ];
 
 fn main() {

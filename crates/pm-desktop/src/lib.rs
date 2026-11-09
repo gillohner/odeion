@@ -801,7 +801,11 @@ pub fn run() {
             native::native_pause,
             native::native_seek,
             native::native_stop,
-            native::native_status
+            native::native_status,
+            offline::downloads_state,
+            offline::downloads_keep,
+            offline::downloads_remove_all,
+            offline::downloads_limit
         ])
         .setup(|app| {
             if let Ok(dir) = app.path().app_local_data_dir() {
@@ -829,6 +833,11 @@ pub fn run() {
                 .app_local_data_dir()
                 .ok()
                 .and_then(|d| offline::Offline::open(d.join("offline"), offline_origin.clone()));
+            // The page hears what this device keeps and how its downloads go
+            if let Some(o) = &offline {
+                let h = app.handle().clone();
+                o.on_change(move || offline::push_state(&h));
+            }
             app.manage(AppState {
                 settings: shared.clone(),
                 path,

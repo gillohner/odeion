@@ -13,8 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
 
-/// The commands the node's page (and the offline page) may call. build.rs lists them with the
-/// connect page's in the app's manifest; [`allow_page`] allows only these for the page's origin.
+/// The commands the node's page (and the offline page) may call: the player's and the
+/// downloads' (src/offline.rs). build.rs lists them with the connect page's in the app's
+/// manifest; [`allow_page`] allows only these for the page's origin.
 pub const PAGE_COMMANDS: &[&str] = &[
     "native_load",
     "native_ahead",
@@ -23,6 +24,10 @@ pub const PAGE_COMMANDS: &[&str] = &[
     "native_seek",
     "native_stop",
     "native_status",
+    "downloads_state",
+    "downloads_keep",
+    "downloads_remove_all",
+    "downloads_limit",
 ];
 
 static PLAYER: OnceLock<AppPlayer> = OnceLock::new();

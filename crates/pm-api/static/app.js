@@ -1591,6 +1591,62 @@
     const it = q[n]; const u = it && itemUrl(it);
     nat.ahead(it && nativeFor(it, u) ? u : null);
   };
+  // ---- Downloads in the Android app: songs, albums and playlists kept on this phone ----
+  // The app keeps them (pm-offline) and says what it has (`pmdesktop:downloads`); online, the
+  // Downloads view is its storage screen. Only the library's own files: a streaming service's
+  // songs get no Download.
+  const appDl = () => nativeOk() && !isOffline();
+  const dlCall = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s downloads are off')); };
+  const dlSet = (d) => { state.dl = d || null; state.dlTracks = new Set((d && d.track_ids) || []); state.dlAlbums = new Set((d && d.album_ids) || []); };
+  const dlMark = () => `<span class="dl-mark" role="img" aria-label="On this phone" title="On this phone">${icon('download')}</span>`;
+  // The mark on song rows and album tiles kept on this phone
+  const markDownloads = () => {
+    if (!state.dl) return;
+    const put = (el, on) => { const m = el && $('.dl-mark', el); if (on && el && !m) el.insertAdjacentHTML('beforeend', dlMark()); else if (!on && m) m.remove(); };
+    for (const r of $$('.track[data-tid]')) put($('.title', r), state.dlTracks.has(Number(r.dataset.tid)));
+    for (const b of $$('.tile[data-album]')) put($('.t', b), state.dlAlbums.has(Number(b.dataset.album)));
+  };
+  const dlLoad = () => { document.body.classList.toggle('app-dl', appDl()); return appDl() ? dlCall('downloads_state').then((d) => { dlSet(d); markDownloads(); return d; }).catch(() => null) : Promise.resolve(null); };
+  window.addEventListener('pmdesktop:downloads', (e) => { dlSet(e.detail); markDownloads(); if (state.view === 'downloads' && !isOffline()) render(); });
+  // Download (or Remove download) for a song, a library album or a playlist, in its ⋯ menu
+  const dlKeep = async (kind, id, on, title, sub, online) => {
+    try {
+      dlSet(await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null })); markDownloads();
+      toast(on ? `Downloading “${title}” to this phone${online ? `; ${online === 1 ? '1 song not in your library stays' : `${online} songs not in your library stay`} online` : ''}` : `“${title}” removed from this phone`);
+    } catch (e) { toast(String((e && e.message) || e), 'error'); }
+  };
+  const dlItem = (kind, id, title, sub, online) => {
+    if (!appDl() || id == null || id === '' || (kind === 'playlist' && !isOwner())) return [];
+    const kept = !!(state.dl && state.dl.items.some((x) => x.kind === kind && x.id === String(id)));
+    // On the phone through its album or a playlist: removed there
+    if (!kept && kind === 'track' && state.dlTracks && state.dlTracks.has(Number(id))) return [];
+    return [{ label: kept ? 'Remove download' : 'Download', icon: kept ? 'trash' : 'download', run: () => dlKeep(kind, id, !kept, title, sub, online) }];
+  };
+  document.addEventListener('click', (e) => { const b = e.target.closest && e.target.closest('[data-dlgo]'); if (b) setView('downloads'); });
+  setTimeout(dlLoad, 0);
+  // The storage screen (Downloads in the app, online): what this phone keeps, its size against
+  // the limit, the downloads under way, Remove per item and Remove all (the phone's copies only)
+  const DL_LIMITS = [2e9, 5e9, 10e9, 20e9, 50e9, null];
+  const drawStorage = async (main) => {
+    const d = await dlLoad();
+    if (state.view !== 'downloads') return;
+    if (!d) { main.innerHTML = pageHead('Downloads', null) + '<div class="notice">The app’s downloads can’t be read just now. Try again in a moment.</div>'; return; }
+    const p = d.progress || {};
+    const facts = [`${fileSize(d.bytes) || '0 bytes'}${d.limit ? ` of ${fileSize(d.limit)}` : ''} on this phone`, countOf(d.songs, 'songs'), d.free != null ? `${fileSize(d.free)} free` : ''].filter(Boolean).join(' · ');
+    const now = p.running ? `Downloading ${Math.min(p.done + 1, p.wanted)} of ${p.wanted}${p.current ? `: ${esc(p.current)}` : ''}` : p.full ? esc(p.full) : p.failed ? `${countOf(p.failed, 'songs')} didn’t download; they are tried again at the next sync.` : '';
+    const sub = (i) => [i.sub, i.kind === 'track' ? '' : `${i.here} of ${countOf(i.songs, 'songs')} here`, i.online ? `${i.online} stay online` : '', i.bytes ? fileSize(i.bytes) : i.here ? '' : 'waiting'].filter(Boolean).map(esc).join(' · ');
+    const rows = (kind) => d.items.map((x, k) => [x, k]).filter(([x]) => x.kind === kind).map(([x, k]) => `<div class="list-row"><div class="grow"><div class="name">${esc(x.title)}</div><div class="sub">${sub(x)}</div></div><button class="btn sm ghost" data-dlrm="${k}">Remove</button></div>`).join('');
+    const section = (kind, title) => { const r = rows(kind); return r ? `<section class="section"><div class="section-head"><h3>${title}</h3></div><div class="list">${r}</div></section>` : ''; };
+    const limit = `<label class="set-row"><span class="set-label"><span class="set-name">Limit</span><span class="set-help">Downloads stop there, and always leave ${fileSize(d.keep_free)} free on this phone.</span></span><select class="input" id="dllimit" aria-label="Downloads limit">${DL_LIMITS.map((v) => `<option value="${v == null ? '' : v}" ${(d.limit == null ? v == null : v === d.limit) ? 'selected' : ''}>${v == null ? 'No limit' : fileSize(v)}</option>`).join('')}</select></label>`;
+    const body = d.items.length
+      ? section('album', 'Albums') + section('playlist', 'Playlists') + section('track', 'Songs')
+        + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
+      : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
+    main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${esc(facts)}${now ? `<br>${now}` : ''}</p>` + body + `<div class="set-group">${limit}</div>`;
+    $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; if (x) dlKeep(x.kind, x.id, false, x.title); });
+    const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); toast('Downloads removed from this phone'); render(); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); render(); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
+  };
   // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays
   const ytPanel = (it) => { const p = $('#ytpanel'); if (!p) return; if (it) { $('#yttitle').textContent = it.title || 'YouTube'; p.hidden = false; } else p.hidden = true; };
   $('#ytmin').onclick = () => { const p = $('#ytpanel'); const small = !p.classList.contains('small'); p.classList.toggle('small', small); $('#ytmin').setAttribute('aria-expanded', String(!small)); $('#ytmin').title = small ? 'Show the video' : 'Make the video smaller'; };
@@ -4593,6 +4649,7 @@
       { label: 'Play next', icon: 'playnext', run: () => playTracks(tracks, false, 'next') },
       { label: 'Add to queue', icon: 'plus', run: () => playTracks(tracks, false, 'end') },
       ...favItem,
+      ...(single && single.id != null ? dlItem('track', single.id, single.title, artists(single)) : []),
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
       ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
@@ -4877,6 +4934,7 @@
       { label: 'Play next', icon: 'playnext', run: () => playSongs(o.songs || [], 0, 'next', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', trackIds.length === (o.songs || []).length && trackIds.length ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } }) },
+      ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
       ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav); render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); toast('Radio: similar music follows when the queue ends'); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
@@ -5577,7 +5635,7 @@
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }
-    const drawn = () => { drawing.on = false; }; p.then(drawn, drawn);
+    const drawn = () => { drawing.on = false; markDownloads(); }; p.then(drawn, drawn);
     return p;
   };
   const renderPage = async (api) => {
@@ -6271,7 +6329,7 @@
             try { await api('PUT', `/playlists/${d.summary.id}`, { [key]: r.text }); state.playlists = await api('GET', '/playlists'); toast(key === 'name' ? `Renamed to “${r.text}”` : 'Description saved'); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
-          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) },
+          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
             ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
@@ -6999,7 +7057,7 @@
             try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
-          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
+          $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, dl: kind === 'album' && /^lib-\d+$/.test(String(id)) ? { kind: 'album', id: String(id).slice(4), sub: pg.artist && pg.artist.name } : null, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
           const playVersion = async (v, b) => { if (v.source === 'library') { if (v.uri && v.uri.startsWith('track:')) { const t = await api('GET', `/library/tracks/${v.uri.slice(6)}`); return playTracks([t], true); } return setView('item', { kind: 'album', id: 'lib-' + v.id }); } if (v.uri) return playSourceItems([qOf({ uri: v.uri, title: pg.title }, fallback)], true); if (ytOf(v.url)) return playSourceItems([qOf({ uri: `youtube:video:${ytOf(v.url)}`, title: pg.title }, fallback)], true); return discoverPlay({ uri: v.url, page: v.url, title: pg.title, artist: fallback.artist }, null, b); };
           $$('[data-vplay]', main).forEach((b) => b.onclick = () => playVersion(pg.versions[Number(b.dataset.vplay)], b));
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playVersion(pg.also_on[Number(b.dataset.aplay)], b));
@@ -7194,7 +7252,7 @@
           const owner = isOwner();
           const tab = !owner ? 'mine' : state.viewArg === 'node' || state.viewArg === 'import' ? state.viewArg : 'mine';
           const tabsHtml = `<div class="chips libtabs" role="tablist" aria-label="Your library">${[['mine', 'My music'], ...(owner ? [['node', 'Node library'], ['import', 'Import']] : [])].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" role="tab" aria-selected="${tab === k}" aria-controls="libpanel" id="libtab-${k}" data-libtab="${k}">${l}</button>`).join('')}</div>`;
-          const head = pageHead('Your library', null, owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '') + tabsHtml;
+          const head = pageHead('Your library', null, (appDl() ? `<button class="btn" data-dlgo>${icon('download')} Downloads</button>` : '') + (owner ? `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>` : '')) + tabsHtml;
           if (tab === 'mine') {
             if (!owner) {
               main.innerHTML = head + libPanel(tab, '<div class="card"><p>Your own music lives on your Pubky homeserver: the Odeion app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>');
@@ -7298,6 +7356,7 @@
         }
         case 'downloads': {
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
+          if (!isOffline() && appDl()) { await drawStorage(main); break; }
           if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Odeion app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
           let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'downloads') return;

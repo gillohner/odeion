@@ -1748,6 +1748,11 @@ body.listener #npfav, body.listener .np-tags, body.listener [data-sel="playlist"
 /* Offline (the app's local server): only what this device keeps (STEWARD-DOWNLOADS.md) */
 .nav-item.nav-offline { display: none; }
 body.offline .nav-item.nav-offline { display: flex; }
+/* Downloads in the Android app: in the sidebar while online too, and the mark on songs and
+   albums kept on the phone */
+body.app-dl .nav-item.nav-offline { display: flex; }
+.dl-mark { display: inline-flex; align-items: center; margin-left: 6px; color: var(--accent); vertical-align: middle; }
+.dl-mark .ic { width: 14px; height: 14px; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
 body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #quality,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,

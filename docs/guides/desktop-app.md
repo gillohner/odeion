@@ -68,6 +68,23 @@ Android's mixer instead; Details › Output then says "Android mixer". The phone
 the node for other controllers; while the app plays, the node starting that zone pauses the app
 (one stream at a time on the phone's output), and the app playing again takes it back.
 
+### Downloads (Android)
+
+In the app, the ⋯ menu of a song, an album or a playlist of your library has **Download**: the
+app copies the original files to the phone (its own storage, nothing else on the phone sees them)
+and plays them without your node. A playlist keeps its songs from your library; songs it has from a
+streaming service (TIDAL and the like) stay online and are not downloaded. Streaming services'
+songs have no Download.
+
+**Your library › Downloads** (or Downloads in the sidebar) is the storage screen: what is on the
+phone (albums, playlists, songs, each with its size), the total against the limit, what is
+downloading now, **Remove** for each, and **Remove all downloads**. Removing takes away the
+phone's copy only; your library and playlists stay as they are. The limit is 10 GB until you change
+it there, and downloads always leave 1 GB free on the phone; when they reach either, they stop and
+the screen says so. Songs on the phone carry a small download mark in lists and on album tiles.
+The app brings its copies up to date every 15 minutes while it reaches your node, and when a file
+changes on the node (replaced, retagged), the phone gets the new one.
+
 ## Updates
 
 On macOS, Windows and the Linux AppImage, the app checks for a new version when it starts and
