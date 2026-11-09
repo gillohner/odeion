@@ -2044,8 +2044,8 @@ async fn enqueue(
     };
     let ids = zone.enqueue(items, at);
     // A queue replaced with shuffle on plays shuffled, the order sent kept as the original one
-    if body.replace && zone.shuffle() {
-        zone.shuffle_from(None);
+    if body.replace {
+        zone.shuffle_replacement();
     }
     if body.play {
         if body.replace {

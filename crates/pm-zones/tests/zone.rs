@@ -2280,9 +2280,13 @@ async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
     let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
     let tracks: Vec<(&str, u32, u64)> = names.iter().map(|n| (*n, RATE, 100_000)).collect();
     let r = rig(&tracks);
+    r.zone.enqueue(
+        names.iter().rev().map(|n| QueueItem::new(*n)).collect(),
+        Insert::End,
+    );
+    // Deterministic play order, with the original order recorded separately.
     r.zone
-        .enqueue(names.iter().map(|n| QueueItem::new(*n)).collect(), Insert::End);
-    r.zone.set_shuffle(true);
+        .restore_shuffle(&(0..names.len()).rev().collect::<Vec<_>>());
     let shuffled: Vec<String> = r
         .zone
         .wait_acked()
@@ -2291,7 +2295,7 @@ async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
         .iter()
         .map(|i| i.uri.clone())
         .collect();
-    assert_ne!(shuffled, names, "eight items shuffled into their own order");
+    assert_ne!(shuffled, names, "the fixture has a non-identity play order");
     // An item the shuffle moved
     let k = (0..names.len()).find(|k| shuffled[*k] != names[*k]).unwrap();
     let uri = shuffled[k].clone();
@@ -2329,4 +2333,41 @@ async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
     r.gate.blocked().await;
     let st = r.zone.wait_acked().await;
     assert_eq!(same_place(&st), want);
+}
+
+/// A replacement delayed at the former mode-read/mutation boundary must respect shuffle-off.
+#[tokio::test]
+async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller() {
+    let r = rig(&[("a", RATE, 100_000), ("b", RATE, 100_000)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+    r.zone.set_shuffle(true);
+    let boundary = Arc::new(std::sync::Barrier::new(2));
+    let proceed = Arc::new(std::sync::Barrier::new(2));
+    let replacement = {
+        let zone = r.zone.clone();
+        let boundary = boundary.clone();
+        let proceed = proceed.clone();
+        std::thread::spawn(move || {
+            assert!(zone.shuffle());
+            boundary.wait();
+            proceed.wait();
+            zone.shuffle_replacement();
+        })
+    };
+    boundary.wait();
+    r.zone.set_shuffle(false);
+    proceed.wait();
+    replacement.join().unwrap();
+    assert!(!r.zone.shuffle());
+    assert_eq!(
+        r.zone
+            .wait_acked()
+            .await
+            .queue
+            .iter()
+            .map(|i| i.uri.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b"]
+    );
 }
