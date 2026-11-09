@@ -1494,7 +1494,11 @@
     let nativeCommand = 0; let external = null;
     window.addEventListener('pmdesktop:native-command', (e) => {
       const d = e.detail || {}; if (!(d.id > nativeCommand)) return;
-      nativeCommand = d.id; if (!opening || !['play', 'seek'].includes(d.action)) ++seq; external = null;
+      // A seek or queue notice cancels an older direct-command error, but the pending local
+      // open still owns its reply (including the timer before native_load). A new local play
+      // supplies its own token; only an explicit system pause cancels and settles this open.
+      nativeCommand = d.id; external = null;
+      if (d.action === 'pause') ++seq;
       if (d.action === 'play') { if (st && st.url === src) at = st.position_ms / 1000; held = false; want = true; external = { id: d.id, seq }; }
       else if (d.action === 'pause') { held = true; want = false; opening = false; fire('pause'); }
       else if (d.action === 'resume') held = false;
