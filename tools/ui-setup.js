@@ -294,7 +294,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
     // (the credit lines are in Details at the foot; the facts one line under the blurb)
     const ab = await p.evaluate(() => { const d = document.querySelector('#idetails'); if (d) d.open = true; const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#idetails .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout .facts-line .fact').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
-    check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
+    // (the item page's header also has the class item-hero)
+    check(/^hero( item-hero)?,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
     check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
     check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
     await p.click('#iblurbmore');
