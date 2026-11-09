@@ -647,7 +647,10 @@ impl<'a> Vault<'a> {
             Some(w) => {
                 let ix = self.index().await?;
                 let trusted = self.trusted(&ix);
-                self.note_signing(&trusted)?;
+                // The note is for later reads; a record that can't be written doesn't stop this one
+                if let Err(e) = self.note_signing(&trusted) {
+                    tracing::warn!(service, "vault: the signing devices weren't noted: {e}");
+                }
                 let signed = trusted
                     .iter()
                     .find(|t| t.client_key == w.client_key)
@@ -666,7 +669,15 @@ impl<'a> Vault<'a> {
             // One this node has seen sign counts as signing when its proof is missing now
             let ix = self.index().await?;
             let trusted = self.trusted(&ix);
-            let seen = self.note_signing(&trusted)?;
+            // Without the record, only the devices signing right now count
+            let seen = self.note_signing(&trusted).unwrap_or_else(|e| {
+                tracing::warn!(service, "vault: the signing devices weren't noted: {e}");
+                trusted
+                    .iter()
+                    .filter(|t| t.sign_key.is_some())
+                    .map(|t| t.client_key.to_hex())
+                    .collect()
+            });
             if !trusted.is_empty()
                 && trusted
                     .iter()

@@ -1093,10 +1093,16 @@ pub(crate) async fn sync_held(
             since_seen: marker.is_some() && seen.as_ref().is_some_and(|x| x.marker != marker),
         };
         let mut what = decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref(), &wipe);
+        // The node's copy came from an unsigned one (the migration window) and is still that:
+        // the node vouches only for what it held itself, so it never signs this one
+        let took_unsigned = seen
+            .as_ref()
+            .is_some_and(|x| x.from_unsigned && mine.as_ref().is_some_and(|m| x.hash == hash(m)));
         // A copy nobody the person trusts signed (a device whose grant ended, a stranger), or one
         // older than a copy this node has seen, is written over by this node's own: sync goes on
-        // instead of stalling on it
-        if what == Do::NotUsable && (untrusted_there || stale_there) && mine.is_some() {
+        // instead of stalling on it. Not by a copy the node took unsigned: that write would sign
+        // it, and every other node would take it
+        if what == Do::NotUsable && (untrusted_there || stale_there) && mine.is_some() && !took_unsigned {
             what = Do::Push;
         }
         // Lost here because the node's app changed, not signed out: the vault keeps it
@@ -1245,9 +1251,6 @@ pub(crate) async fn sync_held(
                     // A copy from before v2 that equals this node's own: signed by this node now
                     // (it vouches only for what it holds itself, never for what it took from an
                     // unsigned copy), under the blob's lock
-                    let took_unsigned = seen
-                        .as_ref()
-                        .is_some_and(|x| x.from_unsigned && x.hash == hash(m));
                     if o.signed_by.is_none() && !took_unsigned {
                         match vault
                             .resign_if(b.service, &|cur| vault_hash(cur) == vault_hash(&o.sign_in))

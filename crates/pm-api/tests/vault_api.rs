@@ -685,9 +685,85 @@ async fn an_untrusted_copy_is_written_over_and_an_unsigned_one_taken_is_not_sign
         "node 3 doesn't vouch for what it took unsigned: {r}"
     );
     assert!(v1.envelope("jamendo").await.unwrap().unwrap().writer.is_none());
+
+    // ...nor does it write it over a copy nobody trusted signed: a stranger's copy of Jamendo
+    // stays, since node 3's own copy came from the unsigned one (a node that held its own
+    // pushes over such a copy; node 3 may not)
+    let not_pushed = |r: &serde_json::Value| {
+        r["pushed"] == json!([])
+            && r["signed"] == json!([])
+            && r["not_usable"].as_array().unwrap().contains(&json!("jamendo"))
+    };
+    let mut by_stranger = seal(
+        &owner,
+        &jpath,
+        j.epoch + 1,
+        &DataKey::generate(),
+        &serde_json::to_vec(&j.sign_in).unwrap(),
+        &[k1.public(), k2.public(), k3.public()],
+    )
+    .unwrap();
+    sign_envelope(
+        &owner,
+        &jpath,
+        &mut by_stranger,
+        stranger.public(),
+        &SigningKey::derive(&stranger),
+    )
+    .unwrap();
+    s1.session()
+        .storage()
+        .put(jpath.as_str(), serde_json::to_vec(&by_stranger).unwrap())
+        .await
+        .unwrap();
+    let (_, r) = call(&a3, "POST", "/v1/vault/sync").await;
+    assert!(
+        not_pushed(&r),
+        "a copy taken unsigned isn't written over a stranger's: {r}"
+    );
+    assert_eq!(
+        v1.envelope("jamendo")
+            .await
+            .unwrap()
+            .unwrap()
+            .writer
+            .map(|w| w.client_key),
+        Some(stranger.public()),
+        "the stranger's copy is still there"
+    );
+    // Node 1 (whose copy is its own) writes over it once its proof is back in the list; node 3
+    // finds the same content signed, keeps its record as taken unsigned, and signs nothing
     s1.session()
         .storage()
         .put(INDEX_PATH, serde_json::to_vec(&ix_full).unwrap())
         .await
         .unwrap();
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pushed"], json!(["jamendo"]), "{r}");
+    let signed_by_1 = v1.envelope("jamendo").await.unwrap().unwrap();
+    assert_eq!(
+        signed_by_1.writer.as_ref().map(|w| w.client_key),
+        Some(k1.public())
+    );
+    let (_, r) = call(&a3, "POST", "/v1/vault/sync").await;
+    assert_eq!(
+        (r["signed"].clone(), r["pushed"].clone()),
+        (json!([]), json!([])),
+        "{r}"
+    );
+    // An older copy put back is stale for node 3 now (it has seen the signed one): still not
+    // written over by node 3, and node 1 does it
+    s1.session()
+        .storage()
+        .put(jpath.as_str(), serde_json::to_vec(&unsigned).unwrap())
+        .await
+        .unwrap();
+    let (_, r) = call(&a3, "POST", "/v1/vault/sync").await;
+    assert!(
+        not_pushed(&r),
+        "a copy taken unsigned isn't written over a stale one: {r}"
+    );
+    assert!(v1.envelope("jamendo").await.unwrap().unwrap().writer.is_none());
+    let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
+    assert_eq!(r["pushed"], json!(["jamendo"]), "{r}");
 }
