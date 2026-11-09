@@ -717,10 +717,12 @@ impl Output for Owned {
             .map_err(|why| SinkError::Unavailable(self.id(), why))?;
         let sink = self.inner.open(fmt).await?;
         Ok(Box::new(OwnedSink {
-            inner: sink,
+            inner: Some(sink),
+            format: fmt,
             id: self.id(),
             lost,
-            _claim: claim,
+            claim: Some(claim),
+            written: 0,
         }))
     }
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
@@ -728,11 +730,18 @@ impl Output for Owned {
     }
 }
 
+/// The device's sink while this player has it. Paused, it closes the device's stream and lets the
+/// output go (the node's zone may take it; Android no longer counts music as playing, so the player
+/// service can end when nothing plays out of sight); the zone opens it again where it was at the
+/// next play.
 struct OwnedSink {
-    inner: Box<dyn AudioSink>,
+    inner: Option<Box<dyn AudioSink>>,
+    format: AudioFormat,
     id: OutputId,
     lost: Arc<AtomicBool>,
-    _claim: Claim,
+    claim: Option<Claim>,
+    /// Frames written to the device's sink, kept once it is closed.
+    written: u64,
 }
 
 impl OwnedSink {
@@ -742,47 +751,68 @@ impl OwnedSink {
         }
         Ok(())
     }
+
+    fn open(&mut self) -> Result<&mut Box<dyn AudioSink>, SinkError> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| SinkError::Device("the output was closed for the pause".into()))
+    }
 }
 
 impl AudioSink for OwnedSink {
     fn format(&self) -> AudioFormat {
-        self.inner.format()
+        self.format
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         self.check()?;
-        self.inner.write(block)
+        self.open()?.write(block)
     }
     fn buffer_level(&self) -> BufferLevel {
-        self.inner.buffer_level()
+        self.inner.as_ref().map_or(
+            BufferLevel {
+                queued_frames: 0,
+                capacity_frames: 0,
+            },
+            |s| s.buffer_level(),
+        )
     }
     fn flush(&mut self) -> Result<(), SinkError> {
-        self.inner.flush()
+        self.inner.as_mut().map_or(Ok(()), |s| s.flush())
     }
     fn drain(&mut self) -> Result<(), SinkError> {
-        self.inner.drain()
+        self.inner.as_mut().map_or(Ok(()), |s| s.drain())
     }
+    /// Silent at once, and the device let go: the zone opens the output again at the next play
+    /// (`resume` says so), from where it paused.
     fn pause(&mut self) -> Result<bool, SinkError> {
-        self.inner.pause()
+        if let Some(mut s) = self.inner.take() {
+            let _ = s.flush();
+            self.written = s.frames_written();
+        }
+        self.claim = None;
+        Ok(true)
     }
     fn resume(&mut self) -> Result<(), SinkError> {
         self.check()?;
-        self.inner.resume()
+        self.open()?.resume()
     }
     fn ready_to_resume(&mut self) -> Result<(), SinkError> {
         self.check()?;
-        self.inner.ready_to_resume()
+        self.open()?.ready_to_resume()
     }
     fn frames_written(&self) -> u64 {
-        self.inner.frames_written()
+        self.inner.as_ref().map_or(self.written, |s| s.frames_written())
     }
     fn reopen_at_track(&self) -> bool {
-        self.inner.reopen_at_track()
+        self.inner.as_ref().is_some_and(|s| s.reopen_at_track())
     }
     fn gone_reported(&mut self) {
-        self.inner.gone_reported()
+        if let Some(s) = self.inner.as_mut() {
+            s.gone_reported()
+        }
     }
     fn reopen_now(&self) -> bool {
-        self.inner.reopen_now()
+        self.inner.as_ref().is_some_and(|s| s.reopen_now())
     }
 }
 
@@ -937,6 +967,12 @@ mod tests {
         );
         p.pause();
         let at = wait(&p, "paused", |s| s.transport == Transport::Paused).position_ms;
+        // Paused, the device is let go (Android counts no music; the node's zone may take it)
+        assert_eq!(
+            p.inner.owner.holder(&p.inner.output.id()),
+            None,
+            "the output let go while paused"
+        );
         p.seek(500);
         wait(&p, "seeked while paused", |s| {
             s.position_ms == 500 && s.transport == Transport::Paused
@@ -948,6 +984,40 @@ mod tests {
         let st = wait(&p, "stopped", |s| s.transport == Transport::Stopped);
         assert_eq!(st.ended, 0, "a stop is no end");
         assert_eq!(st.url, None);
+    }
+
+    /// Paused, the device's stream closes (nothing open for Android to count as music); play
+    /// opens it again and goes on where it paused.
+    #[test]
+    fn a_pause_closes_the_device_and_play_goes_on_where_it_was() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 6, 1);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let out = Arc::new(NullOutput::realtime());
+        let p = AppPlayer::new(out.clone(), OutputOwner::new());
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "playing", |s| {
+            s.transport == Transport::Playing && s.position_ms > 1_200
+        });
+        p.pause();
+        let at = wait(&p, "paused", |s| s.transport == Transport::Paused).position_ms;
+        assert_eq!(out.opens_total(), 1);
+        assert_eq!(
+            p.inner.owner.holder(&p.inner.output.id()),
+            None,
+            "let go while paused"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        p.play().unwrap();
+        let st = wait(&p, "playing again", |s| {
+            s.transport == Transport::Playing && s.position_ms > at
+        });
+        assert!(
+            st.position_ms < at + 1_500,
+            "where it paused: {at} -> {}",
+            st.position_ms
+        );
+        assert_eq!(out.opens_total(), 2, "the output opened again");
+        p.stop();
     }
 
     /// One output, one stream: the node's session takes it from this player (paused here with
