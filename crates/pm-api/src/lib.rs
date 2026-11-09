@@ -24598,8 +24598,34 @@ exec sleep 300
         zone.wait_acked().await;
         assert_eq!(asked(&speaker).last(), Some(&Volume::Percent(33)));
         assert_eq!(asked(&amp).last(), Some(&Volume::Percent(33)));
-        // The zone goes: so does the group's limit
+        // A second zone on the same speakers shares the entry: deleting the first leaves the
+        // second capped; the entry goes with the last zone
+        let (st, z2) = call(
+            &app,
+            "POST",
+            "/v1/zones",
+            Some(serde_json::json!({"name": "Pair too", "outputs": [aid.0, sid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z2}");
+        let zone2 = zone_of(&s, z2["id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            zone2.output().id(),
+            group,
+            "the same speakers, the same group output"
+        );
         let (st, _) = call(&app, "DELETE", &format!("/v1/zones/{}", zone.id()), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert_eq!(
+            s.sources.volume_limit(&group),
+            Some(-40.0),
+            "the other zone still caps"
+        );
+        zone2.set_volume(Volume::Percent(100)).await.unwrap();
+        zone2.wait_acked().await;
+        assert_eq!(asked(&speaker).last(), Some(&Volume::Percent(33)));
+        // The last zone goes: so does the group's limit
+        let (st, _) = call(&app, "DELETE", &format!("/v1/zones/{}", zone2.id()), None).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert_eq!(s.sources.volume_limit(&group), None);
     }

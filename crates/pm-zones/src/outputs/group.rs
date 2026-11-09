@@ -305,10 +305,22 @@ impl Output for GroupOutput {
         if self.caps.hw_volume.is_none() {
             return Err(SinkError::NoVolume(self.id()));
         }
+        // Every member is set, whatever one of them answers: the others still get the level
+        // (and the zone's cap after an unmute); the first failure is reported after
+        let mut failed = None;
         for m in &self.members {
-            m.set_volume(v).await?;
+            if let Err(e) = m.set_volume(v).await {
+                failed.get_or_insert(e);
+            }
         }
-        Ok(())
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn unmute_restores_level(&self) -> bool {
+        self.members.iter().all(|m| m.unmute_restores_level())
     }
 
     async fn standby(&self, on: bool) -> Result<(), SinkError> {

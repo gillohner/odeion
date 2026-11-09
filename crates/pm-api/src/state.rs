@@ -742,7 +742,11 @@ impl NodeState {
 
     pub fn remove_zone(&self, id: &ZoneId) -> Option<Arc<Zone>> {
         let z = self.zones.remove(id)?;
-        self.sources.forget_group(&z.output().id());
+        // Two zones on the same speakers share the group entry: it goes with the last of them
+        let out = z.output().id();
+        if self.zones.for_output(&out).is_none() {
+            self.sources.forget_group(&out);
+        }
         let _ = self.events.send(ApiEvent::ZoneRemoved { zone: id.clone() });
         Some(z)
     }

@@ -2111,7 +2111,8 @@ async fn unmuting_is_held_to_the_limit() {
         quiet.inner.volume().await.unwrap().unwrap().level,
         VolumeLevel::Percent(20)
     );
-    // No level known yet: the limit itself
+    // A device that keeps its own level through a mute, with no level known: left alone (never
+    // raised to the limit)
     let fresh = Zones::new(Arc::new(Factory {
         tracks: BTreeMap::new(),
         gate: Arc::new(Gate::default()),
@@ -2125,12 +2126,146 @@ async fn unmuting_is_held_to_the_limit() {
             step: 1.0,
         }),
     });
+    unknown.inner.set_volume(Volume::Db(-45.0)).await.unwrap();
     let z = fresh.create("Amp", unknown.clone());
     z.set_volume(Volume::Mute(false)).await.unwrap();
     z.wait_acked().await;
     assert_eq!(
         unknown.inner.volume().await.unwrap().unwrap().level,
-        VolumeLevel::Db(-20.0)
+        VolumeLevel::Db(-45.0)
     );
-    assert_eq!(z.state().volume.map(|v| v.level), Some(VolumeLevel::Db(-20.0)));
+    assert_eq!(z.state().volume, None);
+}
+
+/// An output like an AirPlay receiver or a Squeezebox player: no mute of its own, unmuting is
+/// the level set before (full when none was), it can't report its level, and it says so.
+struct ChoosesOnUnmute {
+    inner: NullOutput,
+    last: Mutex<Option<f32>>,
+    /// Every request, in order.
+    asked: Mutex<Vec<Volume>>,
+    /// Refuse every unmute (a member of a group that is away).
+    refuse_unmute: bool,
+}
+
+impl ChoosesOnUnmute {
+    fn new() -> Self {
+        Self {
+            inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            last: Mutex::new(None),
+            asked: Mutex::new(Vec::new()),
+            refuse_unmute: false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Output for ChoosesOnUnmute {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    fn unmute_restores_level(&self) -> bool {
+        false
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.asked.lock().unwrap().push(v);
+        match v {
+            Volume::Db(d) => {
+                *self.last.lock().unwrap() = Some(d);
+                self.inner.set_volume(v).await
+            }
+            Volume::Mute(false) if self.refuse_unmute => Err(SinkError::Device("away".into())),
+            Volume::Mute(false) => {
+                let back = self.last.lock().unwrap().unwrap_or(0.0);
+                self.inner.set_volume(Volume::Db(back)).await?;
+                self.inner.set_volume(v).await
+            }
+            other => self.inner.set_volume(other).await,
+        }
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
+    }
+}
+
+/// An output that chooses the level on unmuting, with no level known yet, gets the limit before
+/// the unmute: it never comes back at full, not even for a moment. With a level known, unmuting
+/// is that level held to the limit.
+#[tokio::test]
+async fn an_output_that_chooses_its_level_on_unmuting_gets_the_limit_first() {
+    use pm_model::VolumeLevel;
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    let out = Arc::new(ChoosesOnUnmute::new());
+    let zone = zones.create("Receiver", out.clone());
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    assert_eq!(
+        out.asked.lock().unwrap().clone(),
+        [Volume::Db(-20.0), Volume::Mute(false)],
+        "the limit first, then the unmute"
+    );
+    let device = out.inner.volume().await.unwrap().unwrap();
+    assert_eq!((device.level, device.muted), (VolumeLevel::Db(-20.0), false));
+    assert_eq!(zone.state().volume.map(|v| v.level), Some(VolumeLevel::Db(-20.0)));
+    // A level known: unmuting goes back to it (the device's own way), held to the limit
+    zone.set_volume(Volume::Db(-35.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    assert_eq!(
+        out.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Db(-35.0)
+    );
+}
+
+/// A group whose later member refuses the unmute: the earlier member came back all the same,
+/// so the cap is applied to the group anyway, and the refusal is reported.
+#[tokio::test]
+async fn a_groups_unmute_is_capped_when_a_member_refuses_it() {
+    use pm_model::VolumeLevel;
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    // The first comes back at full on an unmute (nothing set on it before), the second refuses
+    let first = Arc::new(ChoosesOnUnmute::new());
+    let mut away = ChoosesOnUnmute::new();
+    away.refuse_unmute = true;
+    let away = Arc::new(away);
+    let members: Vec<Arc<dyn Output>> = vec![first.clone(), away.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    // A level set on the group reaches both; the first forgets it (a receiver that was off)
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    *first.last.lock().unwrap() = None;
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    let r = zone.set_volume(Volume::Mute(false)).await;
+    assert!(r.is_err(), "the refusal is reported");
+    zone.wait_acked().await;
+    let device = first.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (device.level, device.muted),
+        (VolumeLevel::Db(-30.0), false),
+        "the first member, back at full, is held to the level last published"
+    );
 }

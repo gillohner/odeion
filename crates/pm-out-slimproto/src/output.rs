@@ -240,6 +240,11 @@ impl Output for SlimOutput {
         &self.caps
     }
 
+    /// Mute is a gain of zero here: unmuting is the gain set before, or full when none was.
+    fn unmute_restores_level(&self) -> bool {
+        false
+    }
+
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         if fmt.kind != SampleKind::Pcm || !self.caps.accepts(&fmt) {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));

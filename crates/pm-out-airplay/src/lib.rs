@@ -257,6 +257,11 @@ impl Output for AirPlayOutput {
         &self.caps
     }
 
+    /// AirPlay has no mute: unmuting is the level set before, or full when none was.
+    fn unmute_restores_level(&self) -> bool {
+        false
+    }
+
     fn now_playing(&self, item: Option<&QueueItem>) {
         let meta = item.map(|it| match &self.describe {
             Some(d) => d(it),

@@ -457,10 +457,14 @@ impl Zone {
     /// back to the limit at once. On an output that can't report its level, a step up becomes
     /// an absolute request instead (the level last published plus one step, at most the
     /// limit), and is refused while no level is known. Unmuting is held to the limit too: a
-    /// device that reports its level is set back when it came up above the limit, and one that
-    /// can't is given the level last published, held to the limit (the limit itself while none
-    /// is known). This is the one place every controller's request passes (the pages,
-    /// announcements, UPnP controllers, Subsonic clients).
+    /// device that reports its level is set back when it came up above the limit; one that
+    /// can't and chooses the level itself ([`Output::unmute_restores_level`] false: AirPlay,
+    /// Squeezebox) is given the level last published, held to the limit, and the limit itself
+    /// before the unmute while none is known; one that keeps its own level through a mute is
+    /// only brought down when the level last published is above the limit, never raised. A
+    /// group whose member refuses the unmute is capped all the same, and the refusal reported.
+    /// This is the one place every controller's request passes (the pages, announcements, UPnP
+    /// controllers, Subsonic clients).
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let _io = self.volume_io.lock().await;
         let limit = self.volume_limit();
@@ -490,34 +494,71 @@ impl Zone {
             }
         }
         let seen = self.published().announced;
-        let (mut next, reported) = self.set_and_read(v).await?;
+        let percent_for = |db: f32| self.output.percent_for_db(db);
+        let unmuting = v == Volume::Mute(false);
+        let level_is_chosen = !self.output.unmute_restores_level();
+        // The limit as a level of the output's kind
+        let at_limit = |max: f32| match self.output.caps().hw_volume {
+            Some(pm_model::VolumeKind::Db { .. }) => Volume::Db(max),
+            _ => Volume::Percent(percent_for(max)),
+        };
+        // An output that chooses the level on unmuting (AirPlay, Squeezebox) with nothing to go
+        // back to would come back at full for a moment: the limit goes first, so it comes back
+        // at the limit
+        let mut preset: Option<Option<pm_model::ZoneVolume>> = None;
+        if let (true, true, Some(max)) = (unmuting, level_is_chosen, limit) {
+            if self.published().level.is_none() && !matches!(self.output.volume().await, Ok(Some(_))) {
+                preset = Some(self.set_and_read(at_limit(max)).await?.0);
+            }
+        }
+        // A group whose later member refuses the unmute still has its earlier members unmuted:
+        // the cap below is applied all the same, and the refusal reported after
+        let set = self.output.set_volume(v).await;
+        let partial = match set {
+            Ok(()) => None,
+            Err(e) if unmuting && limit.is_some() => Some(e),
+            Err(e) => return Err(e),
+        };
+        let (mut next, reported) = self.read_after(v).await;
+        // The level set before the unmute is what the device plays at now
+        if let (None, Some(Some(l))) = (next, &preset) {
+            next = Some(pm_model::ZoneVolume {
+                level: l.level,
+                muted: false,
+            });
+        }
         if let Some(max) = limit {
-            let percent_for = |db: f32| self.output.percent_for_db(db);
             let back = match v {
                 // A step the device took past the limit
                 Volume::Up => next.and_then(|n| back_to_limit(n.level, max, percent_for)),
-                // Unmuting: the device goes back to a level of its own (AirPlay receivers and
-                // Squeezebox players take full when none was set). One that reports it is set
-                // back when it is above the limit; one that can't is given the level last
-                // published, held to the limit, or the limit itself while none is known
+                // Unmuting: a device that reports its level is set back when it came up above
+                // the limit, whichever way it unmutes
                 Volume::Mute(false) if reported => {
                     next.and_then(|n| back_to_limit(n.level, max, percent_for))
                 }
-                Volume::Mute(false) => Some(match self.published().level.map(|l| l.level) {
-                    Some(pm_model::VolumeLevel::Db(d)) => Volume::Db(d.min(max)),
-                    Some(pm_model::VolumeLevel::Percent(p)) => Volume::Percent(p.min(percent_for(max))),
-                    None => match self.output.caps().hw_volume {
-                        Some(pm_model::VolumeKind::Db { .. }) => Volume::Db(max),
-                        _ => Volume::Percent(percent_for(max)),
-                    },
-                }),
+                _ if preset.is_some() => None,
+                // One that can't report and chooses the level itself is given the level last
+                // published, held to the limit (the limit itself while none is known)
+                Volume::Mute(false) if level_is_chosen => {
+                    Some(match self.published().level.map(|l| l.level) {
+                        Some(pm_model::VolumeLevel::Db(d)) => Volume::Db(d.min(max)),
+                        Some(pm_model::VolumeLevel::Percent(p)) => Volume::Percent(p.min(percent_for(max))),
+                        None => at_limit(max),
+                    })
+                }
+                // One that keeps its own level through a mute is never raised: only a level
+                // last published above the limit (lowered since) is brought down to it
+                Volume::Mute(false) => self
+                    .published()
+                    .level
+                    .and_then(|l| back_to_limit(l.level, max, percent_for)),
                 _ => None,
             };
             if let Some(back) = back {
                 let (again, read) = self.set_and_read(back).await?;
                 next = again;
                 // The unmute went through before this level: the state says so
-                if matches!(v, Volume::Mute(false)) && !read {
+                if unmuting && !read {
                     if let Some(n) = next.as_mut() {
                         n.muted = false;
                     }
@@ -526,13 +567,13 @@ impl Zone {
         }
         let mut p = self.published();
         if p.announced != seen {
-            return Ok(());
+            return partial.map_or(Ok(()), Err);
         }
         if next.is_some() {
             p.level = next;
         }
         self.send(Command::Volume(p.level));
-        Ok(())
+        partial.map_or(Ok(()), Err)
     }
 
     /// The zone's volume limit now: the node's for this zone's output, if any.
@@ -545,12 +586,17 @@ impl Zone {
         limit.and_then(|f| f(&self.output.id()))
     }
 
-    /// Set `v` on the output and read the level back: the device's own reading (and `true`),
-    /// else the level implied by `v` over the last one published (`None`: nothing to publish).
+    /// Set `v` on the output and read the level back ([`Self::read_after`]).
     async fn set_and_read(&self, v: Volume) -> Result<(Option<pm_model::ZoneVolume>, bool), SinkError> {
         self.output.set_volume(v).await?;
+        Ok(self.read_after(v).await)
+    }
+
+    /// The level after `v` was set: the device's own reading (and `true`), else the level
+    /// implied by `v` over the last one published (`None`: nothing to publish).
+    async fn read_after(&self, v: Volume) -> (Option<pm_model::ZoneVolume>, bool) {
         let read = self.output.volume().await;
-        Ok(match read {
+        match read {
             Ok(Some(read)) => (Some(read), true),
             Err(_) => (None, false),
             Ok(None) => {
@@ -566,7 +612,7 @@ impl Zone {
                 };
                 (level.map(|level| pm_model::ZoneVolume { level, muted }), false)
             }
-        })
+        }
     }
 
     /// Read the output's level and publish it in the state (the poll). A read that fails, or an
