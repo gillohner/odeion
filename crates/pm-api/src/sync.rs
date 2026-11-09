@@ -388,7 +388,7 @@ impl PubkySync {
         let _one_at_a_time = self.pass.lock().await;
         {
             let lib = self.lib(library)?;
-            crate::tags::before_sync(&*lib);
+            crate::tags::before_sync(&lib);
         }
         match self.sync_once(library).await {
             Ok(mut report) => {
