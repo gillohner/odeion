@@ -1494,15 +1494,15 @@
     let nativeCommand = 0; let external = null;
     window.addEventListener('pmdesktop:native-command', (e) => {
       const d = e.detail || {}; if (!(d.id > nativeCommand)) return;
-      nativeCommand = d.id; if (d.action !== 'play' || !opening) ++seq; external = null;
-      if (d.action === 'play') { held = false; want = true; external = { id: d.id, seq }; }
+      nativeCommand = d.id; if (!opening || !['play', 'seek'].includes(d.action)) ++seq; external = null;
+      if (d.action === 'play') { if (st && st.url === src) at = st.position_ms / 1000; held = false; want = true; external = { id: d.id, seq }; }
       else if (d.action === 'pause') { held = true; want = false; opening = false; fire('pause'); }
       else if (d.action === 'resume') held = false;
     });
     window.addEventListener('pmdesktop:native-failed', (e) => {
       const d = e.detail || {}, err = d.error || {};
       if (!external || d.id !== external.id || seq !== external.seq || d.url !== src || held || err.overtaken) return;
-      external = null; opening = false; want = false; live = false;
+      external = null; opening = false; want = false; live = false; at = Math.max(0, Number(d.at) || 0);
       fire('pause'); fire(err.refused ? 'nativerefused' : 'nativefailed', { why: String(err.message || 'it did not start'), at: d.at || 0 });
     });
     const mine = () => live && !!st && st.url === src;

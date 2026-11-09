@@ -140,12 +140,15 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check((await calls(p, 'native_load')).length === beforeRetry + 1 && retry[1].atMs === 12000, `${at}: failed direct session Play reaches the existing one-retry path at its saved position`);
       const afterRetry = (await calls(p, 'native_load')).length;
       await p.evaluate((url) => {
-        for (const [id, action] of [[2, 'play'], [3, 'pause']]) window.dispatchEvent(new CustomEvent('pmdesktop:native-command', { detail: { id, action } }));
-        window.__app.transport = 'paused'; window.__send();
+        window.dispatchEvent(new CustomEvent('pmdesktop:native-command', { detail: { id: 2, action: 'play' } }));
+        Object.assign(window.__app, { url: null, transport: 'stopped' }); window.__send();
+        window.dispatchEvent(new CustomEvent('pmdesktop:native-command', { detail: { id: 3, action: 'pause' } }));
         window.dispatchEvent(new CustomEvent('pmdesktop:native-failed', { detail: { id: 2, url, at: 12, error: { refused: true, overtaken: false, message: 'late refusal' } } }));
       }, fileUrl(2));
       await sleep(2200);
       check((await calls(p, 'native_load')).length === afterRetry && await p.evaluate(() => window.__audioPlays.length === 0) && (await now(p)).paused, `${at}: a later system pause cancels stale retry and refused-stream fallback`);
+      await p.click('#toggle'); await sleep(250);
+      check((await calls(p, 'native_load')).at(-1)[1].atMs >= 12000, `${at}: Play after a cancelled reopen failure keeps its saved position`);
       check(!r.state.errors.length, `${at}: combined media/native bridge has no page errors (${r.state.errors.join(' | ')})`);
       await p.screenshot({ path: path.join(SHOTS, `native-media-${w}.png`) });
       await r.context.close();
