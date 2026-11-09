@@ -47,6 +47,8 @@ const FAKE_APP = () => {
       const { kind, id, on, title } = args;
       st.items = st.items.filter((x) => !(x.kind === kind && x.id === id));
       if (on) st.items.push({ kind, id, title: title || kind, sub: '', here: 0, bytes: 0, songs: kind === 'track' ? 1 : 2, online: 0 });
+      // Song 2 stays kept by its album (as the app answers)
+      if (!on && kind === 'track') return { ...copy(), still_kept: id === '2' };
       if (kind === 'album') st.album_ids = on ? [...new Set([...st.album_ids, Number(id)])] : st.album_ids.filter((x) => x !== Number(id));
       return copy();
     }
@@ -100,6 +102,11 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     await pick(page, 'Remove download'); await sleep(400);
     const rmToast = await page.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
     check(/“Song 1” removed from this phone/.test(rmToast) && !/stays/.test(rmToast), `${at}: removing a song kept alone says it goes (${rmToast})`);
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('downloads_keep', { kind: 'track', id: '2', on: true, title: 'Song 2' })); await page.evaluate(() => window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) }))); await sleep(300);
+    await page.click('.track[data-tid="2"] [data-act="more"]'); await sleep(400);
+    await pick(page, 'Remove download'); await sleep(400);
+    const stayToast = await page.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
+    check(/“Song 2” stays on this phone/.test(stayToast), `${at}: removing a song its album keeps says it stays (${stayToast})`);
     await goto(page, '/albums');
     const tiles = await page.evaluate(() => [...document.querySelectorAll('.tile[data-album]')].map((b) => [b.dataset.album, !!b.querySelector('.dl-mark')]));
     check(JSON.stringify(tiles) === '[["7",true],["8",false]]', `${at}: so does the album kept (${JSON.stringify(tiles)})`);

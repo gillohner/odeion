@@ -1702,7 +1702,7 @@
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
       : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
     const lists = $('#dllists', main);
-    if (listsOnly && lists) { lists.innerHTML = body; const c = $('.page-head .count, .page-head .muted', main); if (c && d.songs) c.textContent = String(d.songs); }
+    if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${d.songs}</span>` : ''}</h2><div class="actions"></div></div>`; }
     else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; if (x) dlKeep(x.kind, x.id, false, x.title); });
     const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
