@@ -1245,6 +1245,15 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
             c["items"].as_array_mut().unwrap().push(it);
         }
     });
+    // And a new one of hers, as big: not kept either
+    let yid = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 7_000_000);
+    let big = fake.files.lock().unwrap()[ANN][&phone].clone();
+    fake.files
+        .lock()
+        .unwrap()
+        .get_mut(ANN)
+        .unwrap()
+        .insert(format!("{DRAFTS}{yid}/{yid}.json"), big);
     let (st, v) = call(
         &app,
         &ann,
@@ -1257,6 +1266,19 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
         st,
         StatusCode::PAYLOAD_TOO_LARGE,
         "refused, not written over her phone's: {v}"
+    );
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("MiB of collections it keeps"),
+        "{v}"
+    );
+    let (_, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(
+        list.as_array().map(Vec::len),
+        Some(2),
+        "the new one isn't kept: {list}"
     );
     assert_eq!(
         newest(&fake, ANN, &id).0,
@@ -1272,9 +1294,10 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
         .filter(|c| c.ends_with(&format!("read {phone}")))
         .count();
     assert_eq!(reads, 1, "not downloaded again on every read");
-    // Room again (the other collection shortened): it is read, kept, and changes go above it
+    // Room again (the other collection shortened): both are read and kept, and changes go above
     set_ballast(1_000);
-    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let (_, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(list.as_array().map(Vec::len), Some(3), "the new one too: {list}");
     let (st, v) = call(
         &app,
         &ann,
@@ -1315,6 +1338,10 @@ async fn a_newer_version_the_node_cant_read_is_never_written_over() {
     )
     .await;
     assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert!(
+        v["error"].as_str().unwrap_or_default().contains("can't read"),
+        "{v}"
+    );
     assert_eq!(
         newest(&fake, ANN, &id).0,
         phone,
@@ -1380,4 +1407,87 @@ async fn a_new_one_her_homeserver_never_takes_goes_while_all_her_posts_cant_be_l
     assert_eq!(v, serde_json::json!([]), "{v}");
     let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
     assert_eq!(me["pending"], 0, "{me}");
+}
+
+#[tokio::test]
+async fn a_version_known_unreadable_holds_back_changes_made_while_away_and_waiting_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Mix", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    let phone = another_app_writes(&fake, &id, false, |c| c["name"] = "Longer".into());
+    fake.unreadable.lock().unwrap().insert(phone.clone());
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    // Her homeserver away: the node still knows that version, so a change isn't kept to go later
+    fake.down.store(true, Ordering::SeqCst);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "While away"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    fake.down.store(false, Ordering::SeqCst);
+    // A change already waiting (made before the node knew) doesn't go over it either
+    let key = format!("person.{ANN}.collections");
+    let mut shelf: serde_json::Value =
+        serde_json::from_str(&s.library.lock().unwrap().get_setting(&key).unwrap().unwrap()).unwrap();
+    let item = shelf["items"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|k| k["id"] == id.as_str())
+        .unwrap();
+    item["pending"] = true.into();
+    item["playlist"]["name"] = "Waiting".into();
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(&key, &shelf.to_string())
+        .unwrap();
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(
+        newest(&fake, ANN, &id).0,
+        phone,
+        "her other device's stays the newest"
+    );
+    let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+    assert_eq!(me["pending"], 1, "it keeps waiting: {me}");
+    // The same when what waits goes one collection at a time
+    fake.whole_list_fails.store(true, Ordering::SeqCst);
+    call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(newest(&fake, ANN, &id).0, phone);
+    // A delete still goes
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).is_empty());
+}
+
+#[tokio::test]
+async fn a_waiting_change_never_taken_shows_what_her_homeserver_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Mix", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    fake.down.store(true, Ordering::SeqCst);
+    call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Never taken"})),
+    )
+    .await;
+    // Back, all her posts can't be listed, and it won't take that change: her homeserver's shows
+    fake.down.store(false, Ordering::SeqCst);
+    fake.whole_list_fails.store(true, Ordering::SeqCst);
+    fake.rejects.lock().unwrap().insert(ANN.to_string());
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(names(&v), vec!["Mix"], "{v}");
 }

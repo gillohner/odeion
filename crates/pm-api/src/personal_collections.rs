@@ -101,7 +101,32 @@ fn fits_now(sh: &Shelf, path: &str, was: usize) -> bool {
 #[derive(Debug, Default)]
 struct Caught {
     stale: bool,
-    held_back: std::collections::HashSet<String>,
+    held_back: std::collections::HashMap<String, Held>,
+}
+
+/// Why a collection is held back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// Its newer version would take the node past [`MAX_SHELF_BYTES`].
+    Size,
+    /// Its newer version is one the node can't read or hold (over its read cap, refused, or not
+    /// a collection it can keep).
+    Unreadable,
+}
+
+/// Whether the node already knows a version of `k` newer than its head that it set aside
+/// (`other`) or left unread for the copy's size (`too_big`), even when it can read nothing now.
+fn known_unread(other: &[String], too_big: &[TooBig], k: &Kept) -> Option<Held> {
+    let newer = |path: &str| {
+        v1::parse_version(path).is_some_and(|(id, edit)| id == k.id && edit.as_bytes() > k.head.as_bytes())
+    };
+    if other.iter().any(|p| newer(p)) {
+        Some(Held::Unreadable)
+    } else if too_big.iter().any(|t| newer(&t.path)) {
+        Some(Held::Size)
+    } else {
+        None
+    }
 }
 
 impl Caught {
@@ -267,6 +292,9 @@ async fn refresh(
     // "private again" removes those as well)
     let mut written = std::collections::HashSet::new();
     for k in sh.items.iter_mut().filter(|k| k.pending) {
+        // A version the node knows it couldn't read or keep is newer: what waits here would go
+        // over it unread, so it keeps waiting (its versions are still followed; a delete goes)
+        let held = !k.deleted && known_unread(&sh.other, &sh.too_big, k).is_some();
         for h in [private.get(&k.id), public.get(&k.id)].into_iter().flatten() {
             for v in &h.versions {
                 if !k.versions.contains(v) {
@@ -275,9 +303,12 @@ async fn refresh(
             }
             // Above every version there (another device's, even one dated ahead of this
             // node's clock), so the change waiting here is the newest
-            if h.edit_id.as_bytes() > k.head.as_bytes() {
+            if !held && h.edit_id.as_bytes() > k.head.as_bytes() {
                 k.head = h.edit_id.clone();
             }
+        }
+        if held {
+            continue;
         }
         match push(b, key, k).await {
             Ok(()) => {
@@ -328,7 +359,7 @@ async fn refresh(
                 k.versions = versions;
                 k.public = public.contains_key(id);
                 if head.edit_id.as_bytes() > k.head.as_bytes() {
-                    caught.held_back.insert(id.clone());
+                    caught.held_back.insert(id.clone(), Held::Unreadable);
                 }
             }
             Some(k) => {
@@ -345,7 +376,7 @@ async fn refresh(
                             .find(|t| t.path == head.path)
                             .map_or(usize::MAX, |t| t.bytes);
                         if size_now.saturating_sub(was).saturating_add(held) > MAX_SHELF_BYTES {
-                            caught.held_back.insert(id.clone());
+                            caught.held_back.insert(id.clone(), Held::Size);
                         } else {
                             wanted.push((id, head));
                         }
@@ -354,7 +385,16 @@ async fn refresh(
                     }
                 }
             }
-            None if other.contains(&head.path) || too_big.contains(&head.path) => {}
+            None if other.contains(&head.path) => {}
+            // Left unread for the copy's size: read once it fits (others deleted or shortened)
+            None if too_big.contains(&head.path)
+                && (room == 0
+                    || size_now.saturating_add(
+                        sh.too_big
+                            .iter()
+                            .find(|t| t.path == head.path)
+                            .map_or(usize::MAX, |t| t.bytes),
+                    ) > MAX_SHELF_BYTES) => {}
             None if room == 0 => {
                 tracing::warn!(%key, %id, "a listener has more than {MAX_COLLECTIONS} collections; this one isn't kept on the node");
             }
@@ -415,7 +455,7 @@ async fn refresh(
                 path: head.path.clone(),
                 bytes: bytes_of(&k),
             });
-            caught.held_back.insert(id.clone());
+            caught.held_back.insert(id.clone(), Held::Size);
             continue;
         }
         size = grown;
@@ -439,7 +479,7 @@ fn set_aside(sh: &mut Shelf, id: &str, head: &v1::Head, caught: &mut Caught) {
         .iter()
         .any(|k| k.id == id && !k.pending && head.edit_id.as_bytes() > k.head.as_bytes())
     {
-        caught.held_back.insert(id.to_string());
+        caught.held_back.insert(id.to_string(), Held::Unreadable);
     }
 }
 
@@ -474,11 +514,18 @@ async fn catch_up_one(
     let mut versions = private.as_ref().map(|h| h.versions.clone()).unwrap_or_default();
     versions.extend(public.as_ref().map(|h| h.versions.clone()).unwrap_or_default());
     let k = &mut sh.items[i];
-    // What waits here goes over every version there, above the newest
+    // What waits here goes over every version there, above the newest: unless the node knows one
+    // there it couldn't read or keep (then it keeps waiting; a delete still goes)
     if k.pending {
         for v in versions {
             if !k.versions.contains(&v) {
                 k.versions.push(v);
+            }
+        }
+        if !k.deleted {
+            if let Some(why) = known_unread(&sh.other, &sh.too_big, k) {
+                caught.held_back.insert(id.to_string(), why);
+                return Ok(caught);
             }
         }
         for h in [&private, &public].into_iter().flatten() {
@@ -501,10 +548,12 @@ async fn catch_up_one(
     // Newer, and one the node can't hold, or left unread for the copy's size (and still too big
     // for it): held back, never written over
     let was = bytes_of(&sh.items[i]);
-    if sh.other.contains(&head.path)
-        || (sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was))
-    {
-        caught.held_back.insert(id.to_string());
+    if sh.other.contains(&head.path) {
+        caught.held_back.insert(id.to_string(), Held::Unreadable);
+        return Ok(caught);
+    }
+    if sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was) {
+        caught.held_back.insert(id.to_string(), Held::Size);
         return Ok(caught);
     }
     match b.read(key, &head.path).await {
@@ -522,7 +571,7 @@ async fn catch_up_one(
                         path: head.path.clone(),
                         bytes: bytes_of(&newer),
                     });
-                    caught.held_back.insert(id.to_string());
+                    caught.held_back.insert(id.to_string(), Held::Size);
                 } else {
                     sh.items[i] = newer;
                 }
@@ -553,8 +602,13 @@ async fn drain_one_by_one(
         .take(READS_PER_REQUEST)
         .collect();
     for id in ids {
-        if catch_up_one(s, b, key, sh, &id).await?.stale || personal::is_lost(s, key) {
+        let caught = catch_up_one(s, b, key, sh, &id).await?;
+        if caught.stale || personal::is_lost(s, key) {
             break;
+        }
+        // It would go over a version the node couldn't read or keep: it keeps waiting
+        if caught.held_back.contains_key(&id) {
+            continue;
         }
         let Some(i) = sh.items.iter().position(|k| k.id == id) else {
             continue;
@@ -571,10 +625,11 @@ async fn drain_one_by_one(
                     // Never on their homeserver (a new one): it goes, rather than showing as kept
                     sh.items.remove(i);
                 } else {
-                    // What their homeserver has comes back at the next read of it
+                    // What their homeserver has comes back: it is read again now
                     k.pending = false;
                     k.head.clear();
                     sh.items[i] = k;
+                    catch_up_one(s, b, key, sh, &id).await?;
                 }
             }
             Err(e) => {
@@ -721,16 +776,23 @@ async fn change(
         let lib = s.library.lock().expect("library poisoned");
         edit(&lib, at.map(|i| sh.items[i].clone()))?
     };
-    // Changed in another app to more than the node keeps for them: changing it here would write
-    // over that version unread, so it is refused (a delete reaches every version, and goes)
-    if !k.deleted && caught.held_back.contains(&k.id) {
-        return Err(ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "This collection has a newer version from another app that this node can't read or keep (it keeps {} MiB of collections for you): change it there, or delete or shorten others here and try again",
+    // A newer version from another app that the node couldn't read or keep (found now, or known
+    // from before, also when nothing can be read now): changing it here would write over that
+    // version unread, so it is refused (a delete reaches every version, and goes)
+    let held = caught
+        .held_back
+        .get(&k.id)
+        .copied()
+        .or_else(|| at.and_then(|i| known_unread(&sh.other, &sh.too_big, &sh.items[i])));
+    if let (false, Some(why)) = (k.deleted, held) {
+        let message = match why {
+            Held::Size => format!(
+                "This collection has a newer version from another app that would take this node past the {} MiB of collections it keeps for you: delete or shorten others here and try again, or change it there",
                 MAX_SHELF_BYTES >> 20
             ),
-        ));
+            Held::Unreadable => "This collection has a newer version from another app that this node can't read (over 1 MiB, or not one it can hold): change it there. Deleting it here still works".to_string(),
+        };
+        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, message));
     }
     // Within what the node can read back, and what it keeps for one listener
     if !k.deleted && post_size(&k.playlist) > MAX_COLLECTION_BYTES {
