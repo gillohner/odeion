@@ -590,3 +590,62 @@ async fn a_failure_while_cleaning_saved_queues_is_done_again_at_the_next_start()
     assert!(accounts::clean_saved_queues(&s).unwrap().api_token_found);
     assert!(!setting(key).unwrap().contains("s3cret"));
 }
+
+/// A sign-in found in a saved queue is noted before it ends: when the queue's write fails after
+/// a listener's token ended, the next start no longer knows that token as the node's own, yet
+/// still strips it from a link under another of the node's names (only known sign-ins are
+/// stripped there), because the note keeps it known until every queue is written.
+#[tokio::test]
+async fn a_token_ended_before_a_failed_queue_write_is_still_stripped_at_the_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), Some("s3cret")).await;
+    let app = router(s.clone());
+    let listener = let_in(&s, LISTENER);
+    let key = "queue.somewhere";
+    let saved = serde_json::json!({"items": [{"id": 1, "uri": "track:1",
+        "image": format!("http://localhost:7788/v1/library/albums/1/cover?token={listener}")}],
+        "repeat": "off", "radio": false, "shuffle": false, "order": []})
+    .to_string();
+    s.library.lock().unwrap().set_setting(key, &saved).unwrap();
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_queue BEFORE UPDATE ON settings WHEN NEW.key = 'queue.somewhere'
+         BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+    )
+    .unwrap();
+    assert!(accounts::clean_saved_queues(&s).is_err());
+    let setting = |k: &str| s.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(
+        setting(key).as_deref(),
+        Some(saved.as_str()),
+        "the queue still shows it"
+    );
+    let (st, _) = as_token(&app, &listener, "GET", "/v1/info", None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED, "the listener's token ended");
+    assert!(
+        setting("accounts.queue_cleanup_pending")
+            .is_some_and(|p| p.contains(&blake3::hash(listener.as_bytes()).to_hex().to_string())),
+        "the token found is noted"
+    );
+    db.execute_batch("DROP TRIGGER no_queue;").unwrap();
+    // The next start: the token is nobody's any more, and the link still loses it
+    let cleaned = accounts::clean_saved_queues(&s).unwrap();
+    assert_eq!(cleaned.items, 1, "{cleaned:?}");
+    let json = setting(key).unwrap();
+    assert!(!json.contains(&listener), "{json}");
+    assert!(
+        json.contains("\"http://localhost:7788/v1/library/albums/1/cover\""),
+        "{json}"
+    );
+    assert_eq!(
+        setting("accounts.queue_cleanup_pending"),
+        None,
+        "the note is gone once every queue is written"
+    );
+    // Nothing left: a further start notes nothing
+    assert_eq!(
+        accounts::clean_saved_queues(&s).unwrap(),
+        accounts::CleanedQueues::default()
+    );
+    assert_eq!(setting("accounts.queue_cleanup_pending"), None);
+}

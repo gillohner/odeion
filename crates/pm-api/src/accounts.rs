@@ -41,6 +41,10 @@ pub(crate) const OWNER_SESSIONS_TOKEN: &str = "accounts.owner_sessions_token";
 /// The start of an owner's browser session token.
 pub const OWNER_PREFIX: &str = "pmo_";
 const ZONES: &str = "accounts.listener_zones";
+/// The hashes of the sign-ins found in saved queues at a start whose cleaning didn't finish:
+/// still counted as this node's own when the queues are looked at again, after the sign-ins
+/// themselves have ended (`clean_saved_queues`).
+const QUEUE_CLEANUP_PENDING: &str = "accounts.queue_cleanup_pending";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1329,16 +1333,25 @@ pub struct CleanedQueues {
 ///
 /// What ends, and the API token's warning, is saved before any queue is cleaned: a failure on
 /// the way leaves the sign-ins in the queues, so the next start finds them and does it again
-/// (each step can be done twice).
+/// (each step can be done twice). The sign-ins found are noted first of all: once they have
+/// ended they are no longer this node's own, and a link under another of the node's names
+/// loses only those, so the note keeps them known until every queue has been written.
 pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     let mut out = CleanedQueues::default();
     let origins = s.node_origins();
     let mut found: Vec<String> = Vec::new();
     let mut cleaned: Vec<(String, String)> = Vec::new();
     let lib = s.library.lock().expect("library poisoned");
-    // A link under another of the node's names loses the node's own sign-ins too
+    // A link under another of the node's names loses the node's own sign-ins too, and those
+    // a start before this one found and ended but didn't finish cleaning
     let known_set = KnownSet::load(&lib, s.token());
-    let known = |t: &str| known_set.has(t);
+    let pending: std::collections::BTreeSet<String> = lib
+        .get_setting(QUEUE_CLEANUP_PENDING)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    let known = |t: &str| known_set.has(t) || pending.contains(&hash(t));
     for (key, json) in lib.settings_with_prefix("queue.")? {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&json) else {
             continue;
@@ -1366,6 +1379,15 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
             out.items += n;
             cleaned.push((key, v.to_string()));
         }
+    }
+    // Before anything ends: what was found, so a start after a failure still knows it
+    if !found.is_empty() {
+        let mut noted = pending.clone();
+        noted.extend(found.iter().map(|t| hash(t)));
+        lib.set_setting(
+            QUEUE_CLEANUP_PENDING,
+            &serde_json::to_string(&noted).expect("serializes"),
+        )?;
     }
     let api = s.token();
     let owners: Vec<String> = [OWNER_SESSIONS, DEVICE_SESSIONS]
@@ -1423,10 +1445,14 @@ pub fn clean_saved_queues(s: &NodeState) -> Result<CleanedQueues, ApiError> {
     for key in &listener_keys {
         s.usage.revoke_listener(key);
     }
-    // Only now the queues lose the sign-ins: what they showed has ended
+    // Only now the queues lose the sign-ins: what they showed has ended; the note goes once
+    // every queue is written
     let lib = s.library.lock().expect("library poisoned");
     for (key, json) in &cleaned {
         lib.set_setting(key, json)?;
+    }
+    if !pending.is_empty() || !found.is_empty() {
+        lib.delete_setting(QUEUE_CLEANUP_PENDING)?;
     }
     Ok(out)
 }

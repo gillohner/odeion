@@ -6,6 +6,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-07
 
+- **Cleaning saved queues at start finishes what an earlier start began.** A sign-in found in a saved queue is noted before it is ended, so when a queue's write failed after that, the next start still strips it from a link under another of the node's names (where only the node's own sign-ins are stripped); the note goes once every queue is written.
+
 - **Listings and cleanups that stop part way say so, and keep what they couldn't finish** (follow-ups from the reviews of the queue-link and bounded-listing changes).
   - Someone's shared playlists: when their homeserver doesn't answer for every post, the page says the list may miss some, and when nothing could be read it says so instead of "No shared playlists".
   - A homeserver listing that ends on a short page counts as whole only when its cursor moved on.
