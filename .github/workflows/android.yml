@@ -15,7 +15,8 @@ name: android
 #   player, each sent to the background.
 # On a pull request each check runs only when what it covers changed (the `changes` job), on one
 # Android version (API 35). On main, every night and for a release tag (release.yml) each runs on
-# all its versions: 30 (the oldest the app supports), 35 and Android 17 (37.0). Android 17 runs on
+# all its versions: 30 (the oldest the app supports), 35 and Android 17 (37.0; phone-as-zone on 30
+# and 35, the update check on 35 and 37.0). Android 17 runs on
 # the google_atd image: on the runners the google_apis 37.0 and 37.1 images crash-loop
 # surfaceflinger (SIGABRT in RegionSampling) every ~20 s, which restarts system_server, so installs
 # and launches fail (run 41896087891). The release workflow also runs phone-as-zone with the signed
@@ -124,7 +125,12 @@ jobs:
           three='{"include":[{"api":"30","target":"google_apis"},{"api":"35","target":"google_apis"},{"api":"37.0","target":"google_atd"}]}'
           # The update check has run on 35 and 37.0 since it was added
           two='{"include":[{"api":"35","target":"google_apis"},{"api":"37.0","target":"google_atd"}]}'
-          if [ "$full" = true ]; then zm=$three; rm=$three; um=$two; bm=$three; else zm=$one; rm=$one; um=$one; bm=$one; fi
+          # Phone-as-zone on 30 and 35, the versions it ran on before (34 on pull requests; release.yml
+          # runs it on 30, 33, 34 and 35). Not on Android 17's google_atd image: run 42547730723 there
+          # typed address and token but the connect form never submitted (the page stayed on "None
+          # found"), and screencap returns the emulator's gfxstream assertion instead of a picture.
+          zone_full='{"include":[{"api":"30","target":"google_apis"},{"api":"35","target":"google_apis"}]}'
+          if [ "$full" = true ]; then zm=$zone_full; rm=$three; um=$two; bm=$three; else zm=$one; rm=$one; um=$one; bm=$one; fi
           {
             echo "zone=$zone"; echo "ring=$ring"; echo "update=$update"; echo "background=$background"; echo "node=$node"
             echo "zone_matrix=$zm"; echo "ring_matrix=$rm"; echo "update_matrix=$um"; echo "background_matrix=$bm"
