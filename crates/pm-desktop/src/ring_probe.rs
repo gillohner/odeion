@@ -511,7 +511,10 @@ async fn public_homeserver() {
                     )
                     .await;
                     // The record that routing decided on (see `after_return`)
-                    (json!({ "freshened": fresh, "request": info }), cached_packet(c.pkarr(), PUBLIC_HOMESERVER).await)
+                    (
+                        json!({ "freshened": fresh, "request": info }),
+                        cached_packet(c.pkarr(), PUBLIC_HOMESERVER).await,
+                    )
                 }
                 Err(e) => (json!({ "error": chain(&e) }), Value::Null),
             }
@@ -519,7 +522,10 @@ async fn public_homeserver() {
             (Value::Null, Value::Null)
         };
         let (freshened_v, info) = match info {
-            Value::Object(mut m) if m.contains_key("request") => (m.remove("freshened").unwrap_or(Value::Null), m.remove("request").unwrap_or(Value::Null)),
+            Value::Object(mut m) if m.contains_key("request") => (
+                m.remove("freshened").unwrap_or(Value::Null),
+                m.remove("request").unwrap_or(Value::Null),
+            ),
             other => (Value::Null, other),
         };
         emit(
