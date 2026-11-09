@@ -2290,9 +2290,7 @@
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     nativeAhead();
     audio.play().catch(async (e) => {
-      // The app can't play it itself (a playlist stream, another codec): the page plays it
-      if (e.name === 'NativeRefused') { it.nativeNo = true; if (state.browserIndex === i) browserPlay(i); return; }
-      if (e.name === 'NativeFailed') { startFail(e.message, true); nativeRetry(i, e.message, audio.currentTime); return; }
+      // (the app's own player says its failures through its events: nativefailed, nativerefused)
       if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
       startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
@@ -2355,7 +2353,7 @@
     if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i, at); }, 2000); return; }
     toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
   };
-  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; const why = (typeof d === 'string' ? d : d.why) || 'it did not start'; if (!state.natOn || state.browserIndex < 0) return; startFail(why, true); nativeRetry(state.browserIndex, why, d.at || 0); renderBar(); });
+  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; const why = (typeof d === 'string' ? d : d.why) || 'it did not start'; if (!state.natOn || state.browserIndex < 0) return; if (state.starting && state.starting.zone === BROWSER) startFail(why, true); nativeRetry(state.browserIndex, why, d.at || 0); renderBar(); });
   // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
   nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
   audio.addEventListener('play', () => renderBar());
