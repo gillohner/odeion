@@ -145,6 +145,12 @@ pub async fn register(mut s: Settings, player: Option<Arc<Player>>) -> Settings 
 /// The node's ids for this player's outputs, as the last registration answered.
 static OUTPUT_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// The node's ids for this player's outputs (the phone's own zone plays on one of them).
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn output_ids() -> Vec<String> {
+    OUTPUT_IDS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// For the node's page: `window.pmDesktop.outputs` (the node's ids for this app's player) and
 /// `output` (the one, on a phone), then a `pmdesktop:output` event, so the page shows what this
 /// app plays through (a USB DAC) and fetches the outputs again. Empty before a registration.

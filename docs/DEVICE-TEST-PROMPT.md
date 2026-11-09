@@ -309,8 +309,9 @@ Android played it. Meanwhile other apps' sounds go to the phone's speaker.
 ```
 1. Same phone and files as above. Settings › This phone › Preferred mode: Exclusive USB. Android asks
    whether Odeion may access the FiiO KA17: allow it. Report whether the dialog appeared, and its
-   words. (Auto never asks; with Auto, Exclusive USB is used only below Android 14, and only once
-   access was allowed here.)
+   words. (Auto asks by itself once per DAC, the first time it is plugged in with the app on
+   screen, and then plays Exclusive USB first: see "Media controls, volume keys and full DAC
+   control" below.)
 2. Note Android's media volume, then play the 44.1/16, 96/24 and 192/24 files in turn. For each,
    report:
    - the KA17's display (expected: 44.1, 96, 192 on any Android version);
@@ -346,8 +347,69 @@ Android played it. Meanwhile other apps' sounds go to the phone's speaker.
    song is no louder. With media on Bluetooth at 100% and the DAC plugged in, Auto never plays a
    DAC without a volume of its own at full level (report the panel's reason).
 7. If an Android 13 (or older) phone is at hand: steps 1 to 5 there. Auto plays Exclusive USB on
-   it once access was allowed.
+   it once access was allowed (as on any Android version now).
 8. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB".
+```
+
+## Media controls, volume keys and full DAC control (Android)
+
+Checked without a phone: what the system's media controls show for each kind of zone, the volume
+steps (one key press is one step, never less than the device's own), Android's media volume as a
+percent and back, Auto's order (Exclusive USB, then bit-perfect, then shared) and its one permission
+ask, the page's two calls to the app (crates/pm-desktop/src/media.rs, crates/pm-out-local/src/
+media_volume.rs and exclusive.rs; tools/ui-android-media.js); and on the emulator (Android 11, 15,
+17: tools/android-endpoint.py) the session in `dumpsys media_session`, KEYCODE_MEDIA_NEXT, the volume
+keys on the phone's zone and on a network zone, and screenshots of the notification and lock screen.
+Not checked: a real phone's lock screen and Bluetooth buttons, the keys with the app in the
+background, and the KA17. **Volumes at 0-5 % only; never play on the Linn or the NUC's zones for
+this; start the KA17 test from its lowest volume.**
+
+What it does:
+- **The system's media player:** the notification, the lock screen and the quick-settings panel show
+  the zone the app's page has chosen (title, artist, cover, position) with previous, play/pause and
+  next; headset and Bluetooth buttons drive it. Network zones too (the Linn), and This phone.
+- **One volume:** on a network zone the phone's volume keys and Android's volume panel set the zone's
+  own volume (the same as the slider). On the phone's own zone and on This phone the slider is
+  Android's media volume, which the keys move too; the app adds no volume of its own. On screen this
+  works on every Android version; in the background Android sends the keys to a network zone from
+  Android 16 on (Android 12L to 15 only on phones that allow it, Android 12 not at all).
+- **A USB DAC, best path by itself:** with the DAC plugged in and the app on screen, Android asks once
+  whether Odeion may use it; allowed, Auto plays Exclusive USB (the KA17's own volume is the zone's,
+  the keys move it, nothing is scaled in the app); refused, bit-perfect on Android 14+ (at full media
+  volume only), else shared. "Play on this phone" uses the phone's own zone while the DAC is there
+  (This phone, the page's own player, always goes through Android's mixer). Settings › This phone
+  still picks a mode by hand.
+- **Calls and other apps:** a call pauses the phone's zone and it plays on afterwards; another app
+  playing pauses it; unplugging headphones pauses it; after the DAC is unplugged, Android's volume on
+  the speaker is at most a quarter.
+
+```
+1. Install the edge APK, connect at home (same Wi-Fi as the node), Android media volume low.
+2. Pick the phone's own zone in the app and play a song. Pull down the notification shade: the
+   media notification shows the title, artist and cover, with previous / pause / next. Press them;
+   report what happens. Lock the phone: the lock screen shows the same controls (report).
+3. Bluetooth headphones or a headset with buttons: play/pause and next/previous (report each).
+4. Volume keys, app on screen, phone's zone: the slider follows each press, and the node's web page
+   on a computer shows the same level within a second or two. Move the slider: Android's own volume
+   bar moves with it.
+5. Pick This phone and play: same as 4 (the slider is Android's media volume; there is no second
+   volume).
+6. A network zone you may change (not the Linn: a test speaker, or the node's null output with
+   developer outputs on): app on screen, the keys change that zone's volume and Android's panel shows
+   the zone's name and level. Then the app in the background (home screen), keys again: report your
+   Android version and whether they still changed the zone (expected from Android 16 on; Android 17
+   on your phone).
+7. KA17 at its lowest volume, plugged in with the app on screen: Android asks once whether Odeion may
+   access it (allow). Play on the phone's zone: the Sound panel and Now playing › Details say
+   "Exclusive USB · FiiO KA17 · …"; the KA17's display shows the file's rate. Volume keys: the KA17's
+   own volume (its display) moves, one step per press; it never jumps up. Report the steps.
+8. Unplug the KA17 mid-song: the zone pauses, nothing from the speaker; Android's media volume is
+   now at most a quarter. Plug it in again: no second permission question.
+9. Settings › This phone › Preferred mode: Bit-perfect (Android 14+), then Shared: each still works by
+   hand. Back to Auto.
+10. A phone call (or an alarm) while the phone's zone plays: it pauses and plays on after the call.
+11. On problems: `adb logcat -s pubky-music`, lines with "media controls", "audio focus" and
+    "Exclusive USB".
 ```
 
 ## Squeezebox players and squeezelite (Slimproto)

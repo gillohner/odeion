@@ -62,6 +62,7 @@ Every zone state has `sync`:
 - **Ungroup:** `DELETE /v1/zones/{id}` on the group zone; its members' own zones remain.
 - **Volume:**
   - `POST /v1/zones/{id}/volume` (`{"percent"}`, `{"db"}`, `{"mute"}`, `"up"`/`"down"` where the device supports them).
+  - `GET /v1/zones/{id}/volume`: the level read from the device now (and published), without setting it.
   - A group zone sets every member, so per-member volume is on the members' own zones.
 - **Transfer:** `POST /v1/zones/{id}/transfer {to}` moves the queue and position to another zone.
 - **Find new devices:** `POST /v1/outputs/rescan` (UPnP, Cast, AirPlay, Snapcast, endpoints).
