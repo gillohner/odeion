@@ -1484,7 +1484,7 @@
     // st: the app's last status (when it came); src: what the page set; at: where to start it
     // (restore, a seek before it plays); live: the app has src; adopt: the app already went on
     // to the song handed ahead; want: play pressed, the app not there yet; ahead: last handed
-    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false; let seq = 0; let fresh = false;
+    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false; let seq = 0; let fresh = false; let opening = false;
     const mine = () => live && !!st && st.url === src;
     const playing = () => mine() && st.transport === 'playing';
     window.addEventListener('pmdesktop:native', (e) => {
@@ -1501,13 +1501,17 @@
       }
       if (st.url !== src) return;
       if (st.refused) { live = false; want = false; fire('nativerefused', st.refused); return; }
+      // The song opens again (the same one tapped while it played): the old one's updates wait
+      if (opening) return;
+      // A break mid-song: the page's mid-song retry, whatever the page heard before it
+      if (st.broke && !(was && was.url === src && was.broke) && !st.taken) { fire('pause'); fire('error'); return; }
       // (a song opened again while it played: its start is a start, for the bar and the spinner)
       const before = !fresh && was && was.url === src ? was.transport : 'stopped';
       if (st.transport === 'playing') fresh = false;
       if (st.transport === 'playing' && before !== 'playing') { want = false; done = false; fire('play'); fire('playing'); }
       // A break mid-song: the page's mid-song retry; a song that didn't start: its one retry; a
       // device gone (a DAC unplugged): paused, said in the bar
-      else if (st.transport !== 'playing' && before === 'playing') { fire('pause'); if (st.error && !st.taken) { if (st.broke) fire('error'); else if (st.transport === 'stopped' && st.position_ms === 0) fire('nativefailed', st.error); } }
+      else if (st.transport !== 'playing' && before === 'playing') { fire('pause'); if (st.error && !st.taken && !st.broke && st.transport === 'stopped' && st.position_ms === 0) fire('nativefailed', st.error); }
       // The song handed ahead didn't open (the node busy): the page's one retry
       else if (st.error && !st.taken && st.transport === 'stopped' && (!was || !was.error) && st.position_ms === 0) fire('nativefailed', st.error);
       if (was && was.duration_ms !== st.duration_ms) fire('durationchange');
@@ -1517,6 +1521,8 @@
       addEventListener: (t, f, o) => ev.addEventListener(t, f, o),
       get paused() { return !(want || playing()); },
       get ended() { return done; },
+      // A pause pressed since the last play (a retry doesn't start it again)
+      get held() { return held; },
       get currentTime() {
         if (!mine()) return at;
         const run = st.transport === 'playing' ? Math.min(1000, Date.now() - stAt) : 0;
@@ -1554,7 +1560,7 @@
           try { await call('native_play'); } catch (e) {
             if (tok !== seq) return;
             want = false; if (e && e.overtaken) return;
-            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', String((e && e.message) || e));
+            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: st ? st.position_ms / 1000 : 0 });
           }
           return;
         }
@@ -1566,18 +1572,24 @@
         await new Promise((r) => setTimeout(r, 0));
         if (src !== u || tok !== seq) return;
         fire('waiting');
+        opening = true;
         try { await call('native_load', { url: u, atMs: Math.round(at * 1000), ahead: ahead || null }); } catch (e) {
+          if (tok === seq) opening = false;
           if (src !== u || tok !== seq || (e && e.overtaken)) return;
           want = false; live = false;
           // Only what the app can't play itself goes to <audio>; anything else may pass (the
           // page tries once more)
           const err = new Error(String((e && e.message) || e)); err.name = e && e.refused ? 'NativeRefused' : 'NativeFailed'; throw err;
         }
+        if (tok !== seq) return;
+        opening = false;
+        // Its start, as the app says it now (the updates waited while it opened)
+        if (src === u && st && st.url === u && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
         // Paused while it opened
-        if (held && src === u && tok === seq) call('native_pause').catch(() => {});
+        if (held && src === u) call('native_pause').catch(() => {});
       },
       pause() { want = false; held = true; if (live) call('native_pause').catch(() => {}); },
-      stop() { want = false; adopt = false; done = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
+      stop() { want = false; adopt = false; done = false; opening = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
       // What follows what plays now (the page's next song), for a gapless join
       ahead(u) { const a = u ? abs(u) : null; if (a === ahead) return; ahead = a; if (live) call('native_ahead', { url: a }).catch(() => {}); },
       status: () => (mine() ? st : null),
@@ -2382,14 +2394,15 @@
   audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
   // A song that didn't start in the app (the node busy, the link down): once more after 2 s, as
   // for <audio>, then said
-  const nativeRetry = (i, why) => {
+  const nativeRetry = (i, why, at = 0) => {
     const it = state.browserQueue[i]; if (!it) return;
+    if (state.natOn && nat.held) return; // paused meanwhile: the next play opens it
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.nativeRetry = state.nativeRetry && state.nativeRetry.it === it ? state.nativeRetry : { it, n: 0 };
-    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
+    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i); if (at > 0) audio.currentTime = at; }, 2000); return; }
     toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
   };
-  nat.addEventListener('nativefailed', (e) => { if (state.natOn && state.browserIndex >= 0) nativeRetry(state.browserIndex, (e && e.detail) || 'it did not start'); });
+  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; if (state.natOn && state.browserIndex >= 0) nativeRetry(state.browserIndex, (typeof d === 'string' ? d : d.why) || 'it did not start', d.at || 0); });
   // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
   nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
   audio.addEventListener('play', () => renderBar());
