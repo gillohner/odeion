@@ -386,7 +386,10 @@ impl PubkySync {
     /// unsynced objects stay queued.
     pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
         let _one_at_a_time = self.pass.lock().await;
-        crate::tags::before_sync(&self.lib(library)?);
+        {
+            let lib = self.lib(library)?;
+            crate::tags::before_sync(&*lib);
+        }
         match self.sync_once(library).await {
             Ok(mut report) => {
                 if report
