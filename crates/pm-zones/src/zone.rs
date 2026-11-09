@@ -382,7 +382,7 @@ impl Zone {
         let seed = seed();
         self.with_queue(|q| {
             if q.shuffle() {
-                q.set_current(None);
+                // Clear already removed the old cursor. Preserve a Play completed since then.
                 q.reshuffle(seed);
             }
         });

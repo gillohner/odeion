@@ -2335,6 +2335,41 @@ async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
     assert_eq!(same_place(&st), want);
 }
 
+/// A second controller can finish Play after replacement enqueue but before its shuffle.
+#[tokio::test]
+async fn replacement_shuffle_preserves_a_play_completed_after_enqueue() {
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let tracks: Vec<(&str, u32, u64)> = names.iter().map(|n| (*n, RATE, 100_000)).collect();
+    let r = rig(&tracks);
+    r.zone.set_shuffle(true);
+    r.zone.stop();
+    r.zone.clear();
+    r.zone
+        .enqueue(names.iter().map(|n| QueueItem::new(*n)).collect(), Insert::End);
+    r.zone.wait_acked().await;
+    r.zone.play_index(3);
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let playing = r.zone.wait_acked().await.now_playing.unwrap().item.id;
+    // Resume the replacement only after the other controller's Play has completed.
+    r.zone.shuffle_replacement();
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    let np = st.now_playing.as_ref().unwrap();
+    assert_eq!(np.item.id, playing);
+    assert_eq!(st.queue_index, Some(np.index));
+    assert_eq!(st.queue[np.index].id, playing);
+    let next = st.queue[np.index + 1].id;
+    r.zone.next();
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    let np = st.now_playing.as_ref().unwrap();
+    assert_eq!(np.item.id, next);
+    assert_eq!(st.queue_index, Some(np.index));
+}
+
 /// A replacement delayed at the former mode-read/mutation boundary must respect shuffle-off.
 #[tokio::test]
 async fn a_replacement_never_reenables_shuffle_turned_off_by_another_controller() {
