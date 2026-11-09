@@ -165,11 +165,10 @@ async fn a_record_naming_only_localhost_is_reported() {
     assert_eq!((f.from, f.loopback), (From::Network, true), "{f:?}");
 }
 
-/// The whole sign-in step on the public network: a public homeserver the network has no record
-/// of (here: a relay that knows nothing) refuses the sign-in before it starts, within the step's
-/// bound; on a local testnet nothing is refused.
+/// An unknown Ring approver is not tied to PUBLIC. An explicitly selected missing public
+/// homeserver still refuses within the step's bound; testnet retains its local policy.
 #[tokio::test]
-async fn a_sign_in_with_no_homeserver_record_is_refused_before_it_starts() {
+async fn unknown_ring_approver_does_not_select_the_public_homeserver() {
     let (url, _) = relay(vec![]).await;
     let (c, _) = client(&url, &[]);
     let hs = pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
@@ -178,9 +177,11 @@ async fn a_sign_in_with_no_homeserver_record_is_refused_before_it_starts() {
     );
     let started = std::time::Instant::now();
     let r = hs.fresh_for_sign_in(None, None, false).await;
-    assert!(r.is_err(), "{r:?}");
-    assert!(r.unwrap_err().contains("couldn't be found"));
+    assert!(r.is_ok(), "unrelated missing PUBLIC must not block Ring: {r:?}");
     assert!(started.elapsed() <= pm_pubky::records::SIGN_IN_LOOKUPS + std::time::Duration::from_secs(1));
+    let public = pubky::PublicKey::try_from_z32(pm_pubky::records::PUBLIC_HOMESERVER).unwrap();
+    let r = hs.fresh_for_sign_in(None, Some(&public), false).await;
+    assert!(r.unwrap_err().contains("couldn't be found"));
     let testnet = pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
         pubky::Pubky::with_client(c),
         pm_pubky::Network::Testnet,

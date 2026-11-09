@@ -352,8 +352,8 @@ impl NodeHomeserver {
     /// All of it within [`crate::records::SIGN_IN_LOOKUPS`], the identity's record within
     /// [`crate::records::IDENTITY_STAGE`] and its homeserver's in the rest, each keeping time for
     /// the copy held here. On the public network, the record of the homeserver the sign-in routes
-    /// to (`target`, else the identity's homeserver, else, nothing known of the person, the public
-    /// one) refuses it when it names only this machine or nothing is known of it
+    /// to (`target`, else the identity's known homeserver) refuses it when it names only this
+    /// machine or nothing is known of it. An unknown Ring approver selects no homeserver yet
     /// ([`crate::records::refusal`]), before its link exists; other homeservers' records never do.
     /// On a local testnet the local homeserver's record is loopback by nature.
     pub async fn fresh_for_sign_in(
@@ -393,9 +393,8 @@ impl NodeHomeserver {
         let selected = match (target, &own) {
             (Some(t), _) => Some(t.z32()),
             (None, Some((named, _))) => Some(named.clone()),
-            // A known identity whose record names no homeserver: none known to check
-            (None, None) if identity.is_some() => None,
-            (None, None) => Some(public.z32()),
+            // Ring chooses the approving identity. Warming PUBLIC does not select it.
+            (None, None) => None,
         };
         if let Some((_, Some(f))) = own {
             out.push(f);
