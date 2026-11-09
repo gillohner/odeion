@@ -165,8 +165,16 @@ impl UrlSources {
         let reader = RangeReader::open(&self.client, url)?;
         let ext = ext_for(reader.content_type(), url).map_err(|why| format!("{CANT_PLAY_HERE}{why}"))?;
         let bytes = reader.len();
-        let inner = pm_audio::play::Source::from_media_source(Box::new(reader), ext, "the stream")
-            .map_err(|e| format!("{CANT_PLAY_HERE}{e}"))?;
+        let inner =
+            pm_audio::play::Source::from_media_source(Box::new(reader), ext, "the stream").map_err(|e| {
+                match e {
+                    // The link broke while the start was read: no refusal, it may pass
+                    pm_audio::AudioError::Io(io) if io.kind() != std::io::ErrorKind::UnexpectedEof => {
+                        format!("the stream broke off: {io}")
+                    }
+                    e => format!("{CANT_PLAY_HERE}{e}"),
+                }
+            })?;
         let mut info = inner.stream_info();
         if inner.is_lossy() {
             info.bitrate_kbps = match (bytes, inner.duration_ms()) {

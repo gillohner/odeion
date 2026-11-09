@@ -225,6 +225,7 @@ fn checked(url: &str, page: &tauri::Webview) -> Result<(), String> {
 fn failed(message: impl Into<String>) -> LoadError {
     LoadError {
         refused: false,
+        overtaken: false,
         message: message.into(),
     }
 }

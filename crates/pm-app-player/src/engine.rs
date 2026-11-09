@@ -69,8 +69,10 @@ pub type Notify = Arc<dyn Fn(&Status) + Send + Sync>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LoadError {
     /// Something the app can't play itself (the page plays it in `<audio>`); otherwise it may
-    /// pass (the page tries again as it would with `<audio>`).
+    /// pass (the page tries again, once, as with `<audio>`).
     pub refused: bool,
+    /// Another load or a stop came after it: nothing to say to the listener.
+    pub overtaken: bool,
     pub message: String,
 }
 
@@ -78,7 +80,16 @@ impl LoadError {
     fn overtaken() -> Self {
         Self {
             refused: false,
+            overtaken: true,
             message: "another song or a stop came first".into(),
+        }
+    }
+
+    fn failed(message: impl Into<String>) -> Self {
+        Self {
+            refused: false,
+            overtaken: false,
+            message: message.into(),
         }
     }
 }
@@ -109,12 +120,44 @@ struct Page {
     generation: u64,
     /// A load is opening its URL (the zone still holds the previous song).
     loading: bool,
+    /// Pause pressed while a load opened: the song starts paused.
+    hold: bool,
+    /// The current song's stream broke (a decode error, at this position): the zone's next
+    /// TrackEnded is no end.
+    breaking: Option<u64>,
+    /// It broke here: paused at this position (a play opens it again there; the page's retry).
+    broke_at: Option<u64>,
+}
+
+/// What the page should hear of a zone event, and whether the zone must stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Heard {
+    tell: bool,
+    stop: bool,
+}
+
+impl From<bool> for Heard {
+    fn from(tell: bool) -> Self {
+        Heard { tell, stop: false }
+    }
 }
 
 impl Page {
-    /// The zone said `ev`; true when the page should hear of it now.
-    fn on(&mut self, ev: &ZoneEvent) -> bool {
+    /// The zone said `ev` (the current song at `position_ms`).
+    fn on(&mut self, ev: &ZoneEvent, position_ms: u64) -> Heard {
         match ev {
+            // The stream broke (the zone ends the song on a decode error): not its end. Paused
+            // where it broke, the zone stopped (not on to the song handed ahead); the page's
+            // mid-song retry opens it there again
+            ZoneEvent::TrackEnded { item, .. }
+                if Some(item.id) == self.current && self.breaking.is_some() =>
+            {
+                self.broke_at = self.breaking.take();
+                Heard {
+                    tell: true,
+                    stop: true,
+                }
+            }
             ZoneEvent::TrackEnded { item, .. } if Some(item.id) == self.current => {
                 self.ended += 1;
                 // Handed ahead: the zone goes on with it, and the page hears both at once
@@ -122,14 +165,18 @@ impl Page {
                     self.url = Some(url);
                     self.current = Some(id);
                     self.advanced += 1;
-                    self.want_ahead = None;
+                    // (a load under way keeps what the page said comes after its song)
+                    if !self.loading {
+                        self.want_ahead = None;
+                    }
                 }
-                true
+                true.into()
             }
             ZoneEvent::TrackStarted { item, .. } if Some(item.id) == self.current => {
                 self.error = None;
                 self.refused = None;
-                true
+                self.breaking = None;
+                true.into()
             }
             // The song handed ahead didn't open: something the app can't play is the page's to
             // play; anything else is an error (the page's retry runs)
@@ -139,29 +186,33 @@ impl Page {
                 } else {
                     self.error = Some(reason.clone());
                 }
-                true
+                true.into()
             }
             ZoneEvent::Skipped { item, .. } if self.ahead.as_ref().is_some_and(|(_, id)| *id == item.id) => {
                 // The next one can't play here: the page opens it when its turn comes
                 self.ahead = None;
-                false
+                false.into()
             }
             ZoneEvent::Error { message } => {
                 if self.taken_at.is_none() {
                     self.error = Some(message.clone());
+                    // (the zone says "decode: …" and then ends the song)
+                    if message.starts_with("decode:") {
+                        self.breaking = Some(position_ms);
+                    }
                 }
-                true
+                true.into()
             }
-            ZoneEvent::Stopped => true,
-            ZoneEvent::Paused { .. } | ZoneEvent::Resumed | ZoneEvent::Seeked { .. } => true,
-            _ => false,
+            ZoneEvent::Stopped => true.into(),
+            ZoneEvent::Paused { .. } | ZoneEvent::Resumed | ZoneEvent::Seeked { .. } => true.into(),
+            _ => false.into(),
         }
     }
 
     fn status(&self, z: Option<&ZoneState>, output: &dyn Output) -> Status {
         let np = z.and_then(|z| z.now_playing.as_ref());
         let mine = np.filter(|np| Some(np.item.id) == self.current);
-        let (transport, position_ms) = match (self.taken_at, z, mine) {
+        let (transport, position_ms) = match (self.taken_at.or(self.broke_at), z, mine) {
             (Some(at), _, _) => (Transport::Paused, at),
             (None, Some(z), Some(np)) => (z.transport, np.position_ms),
             _ => (Transport::Stopped, 0),
@@ -282,10 +333,14 @@ impl AppPlayer {
             let mut p = self.page();
             p.generation += 1;
             p.loading = true;
+            p.hold = false;
             p.want_ahead = ahead.map(str::to_string);
             p.generation
         };
-        let opened = self.inner.sources.open_url(url);
+        // (a decoder that panics on a strange file is a failure like another)
+        let opened =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.inner.sources.open_url(url)))
+                .unwrap_or_else(|_| Err("the app's decoder stopped on this stream".to_string()));
         let mut p = self.page();
         if p.generation != mine {
             return Err(LoadError::overtaken());
@@ -293,12 +348,31 @@ impl AppPlayer {
         p.loading = false;
         let source = match opened {
             Ok(s) => s,
-            Err(message) => {
+            Err(message) if crate::source::is_refusal(&message) => {
                 tracing::info!("the app's player leaves this one to the page: {message}");
                 return Err(LoadError {
-                    refused: crate::source::is_refusal(&message),
+                    refused: true,
+                    overtaken: false,
                     message,
                 });
+            }
+            Err(message) => {
+                // The page shows this song now: what played before stops (the page tries again)
+                tracing::info!("the app's player: the song didn't open: {message}");
+                p.url = None;
+                p.current = None;
+                p.ahead = None;
+                p.want_ahead = None;
+                p.taken_at = None;
+                p.broke_at = None;
+                p.breaking = None;
+                if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                    z.stop();
+                    z.clear();
+                }
+                drop(p);
+                self.changed(true);
+                return Err(LoadError::failed(message));
             }
         };
         // The queue changes under the page's lock, so no other load or stop comes in between
@@ -307,6 +381,8 @@ impl AppPlayer {
         p.error = None;
         p.refused = None;
         p.taken_at = None;
+        p.broke_at = None;
+        p.breaking = None;
         zone.clear();
         let ahead = p.want_ahead.clone();
         let mut items = vec![QueueItem::new(url)];
@@ -318,6 +394,9 @@ impl AppPlayer {
         zone.play_index(0);
         if at_ms > 1_000 {
             zone.seek_ms(at_ms);
+        }
+        if std::mem::take(&mut p.hold) {
+            zone.pause();
         }
         drop(p);
         self.changed(true);
@@ -352,20 +431,18 @@ impl AppPlayer {
     pub fn play(&self) -> Result<(), LoadError> {
         let (url, at, ahead, taken) = {
             let p = self.page();
+            let at = p.taken_at.or(p.broke_at);
             (
                 p.url.clone(),
-                p.taken_at,
+                at,
                 p.want_ahead
                     .clone()
                     .or_else(|| p.ahead.as_ref().map(|a| a.0.clone())),
-                p.taken_at.is_some(),
+                at.is_some(),
             )
         };
         let Some(url) = url else {
-            return Err(LoadError {
-                refused: false,
-                message: "nothing to play".into(),
-            });
+            return Err(LoadError::failed("nothing to play"));
         };
         let st = self.zone_state();
         let stopped = st.as_ref().is_none_or(|s| s.transport == Transport::Stopped);
@@ -377,20 +454,33 @@ impl AppPlayer {
     }
 
     pub fn pause(&self) {
+        {
+            let mut p = self.page();
+            if p.loading {
+                p.hold = true;
+            }
+        }
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             z.pause();
         }
     }
 
     pub fn seek(&self, ms: u64) {
-        {
-            let mut p = self.page();
-            if let Some(at) = p.taken_at.as_mut() {
-                *at = ms;
-                drop(p);
-                self.changed(true);
-                return;
+        // Paused where the node took it or the stream broke: the play opens it here
+        let parked = {
+            let mut g = self.page();
+            let p = &mut *g;
+            match p.taken_at.as_mut().or(p.broke_at.as_mut()) {
+                Some(at) => {
+                    *at = ms;
+                    true
+                }
+                None => false,
             }
+        };
+        if parked {
+            self.changed(true);
+            return;
         }
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             z.seek_ms(ms);
@@ -404,8 +494,11 @@ impl AppPlayer {
             let mut p = self.page();
             p.generation += 1;
             p.loading = false;
+            p.hold = false;
             p.want_ahead = None;
             p.ahead = None;
+            p.broke_at = None;
+            p.breaking = None;
             p.taken_at = None;
             p.url = None;
             p.current = None;
@@ -493,8 +586,15 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             Ok(ev) => {
                                 let Some(inner) = player.upgrade() else { return };
                                 let p = AppPlayer { inner };
-                                let urgent = p.page().on(&ev);
-                                Some((p, urgent))
+                                let at = state.borrow().now_playing.as_ref().map_or(0, |np| np.position_ms);
+                                let heard = p.page().on(&ev, at);
+                                if heard.stop {
+                                    let z = p.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                                    if let Some(z) = z {
+                                        z.stop();
+                                    }
+                                }
+                                Some((p, heard.tell))
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => None,
                             Err(_) => return,
@@ -905,6 +1005,39 @@ mod tests {
         assert_eq!((st.advanced, st.url.as_deref()), (1, Some(ua.as_str())));
     }
 
+    impl Page {
+        fn on_test(&mut self, ev: &ZoneEvent) -> bool {
+            self.on(ev, 0).tell
+        }
+    }
+
+    /// A stream that breaks for good mid-song (the link gone): no end, the zone doesn't go on to
+    /// the song handed ahead, and the page sees it paused where it broke, with the error (its
+    /// mid-song retry opens it there again).
+    #[test]
+    fn a_stream_that_breaks_mid_song_is_no_end() {
+        let (a, _) = wav_bytes(44_100, 16, 44_100 * 5, 1);
+        let (b, _) = wav_bytes(44_100, 16, 44_100, 2);
+        let broken = Mode {
+            break_at: Some(a.len() * 7 / 10),
+            break_always: true,
+            ..Mode::default()
+        };
+        let (ua, _) = serve(a, "audio/wav", broken);
+        let (ub, _) = serve(b, "audio/wav", Mode::default());
+        let p = AppPlayer::new(Arc::new(NullOutput::realtime()), OutputOwner::new());
+        p.load(&ua, 0, Some(&ub)).unwrap();
+        let st = wait(&p, "broke", |s| {
+            s.error.is_some() && s.transport == Transport::Paused
+        });
+        assert_eq!((st.ended, st.advanced), (0, 0), "{st:?}");
+        assert_eq!(st.url.as_deref(), Some(ua.as_str()), "not on to the next song");
+        assert!(st.position_ms > 0, "where it broke: {st:?}");
+        std::thread::sleep(Duration::from_millis(300));
+        let z = p.zone_state().unwrap();
+        assert_eq!(z.transport, Transport::Stopped, "the zone stopped: {z:?}");
+    }
+
     #[test]
     fn the_page_hears_ends_only_for_its_own_songs() {
         let item = |id| QueueItem {
@@ -917,20 +1050,20 @@ mod tests {
             ahead: Some(("b".into(), 2)),
             ..Page::default()
         };
-        assert!(pg.on(&ZoneEvent::TrackEnded {
+        assert!(pg.on_test(&ZoneEvent::TrackEnded {
             item: item(1),
             verify_ok: None
         }));
         assert_eq!((pg.ended, pg.url.as_deref(), pg.current), (1, Some("b"), Some(2)));
         assert!(pg.ahead.is_none());
         // An old item's end changes nothing
-        assert!(!pg.on(&ZoneEvent::TrackEnded {
+        assert!(!pg.on_test(&ZoneEvent::TrackEnded {
             item: item(1),
             verify_ok: None
         }));
         assert_eq!(pg.ended, 1);
         // The adopted one refused by the opener: the page plays it itself
-        assert!(pg.on(&ZoneEvent::Skipped {
+        assert!(pg.on_test(&ZoneEvent::Skipped {
             item: item(2),
             reason: format!("{}unsupported codec", crate::source::CANT_PLAY_HERE)
         }));
