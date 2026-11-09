@@ -957,13 +957,99 @@ pub(crate) async fn within<T>(
         .map_err(|_| VaultStoreError::TimedOut("syncing the sign-ins".into()))?
 }
 
-/// Keep a pass's report for Settings (`GET /v1/vault`'s `last_sync`).
-pub(crate) fn record_last_sync(s: &NodeState, r: &CacheReport) {
+const PENDING_CLEAR: &str = "vault.pending_local_clear";
+
+#[derive(Serialize, Deserialize)]
+struct ClearOriginal {
+    service: String,
+    hash: String,
+    lineage: String,
+}
+
+fn local_error(e: impl ToString) -> VaultStoreError {
+    std::io::Error::other(e.to_string()).into()
+}
+
+/// Capture the user's clear intent before any remote await. Only hashes and lineage travel
+/// in this durable machine-owned record, never credentials. The caller holds the pass lock.
+/// If the remote outcome is lost, the user's local clear intent remains conservative: it is
+/// reconciled before any later migration, rather than exporting the captured sign-ins.
+pub(crate) fn prepare_local_clear(s: &NodeState, still: &dyn Fn() -> bool) -> Result<(), VaultStoreError> {
     let lib = s.library.lock().expect("library poisoned");
-    let _ = lib.set_setting(
+    if !still() {
+        return Err(VaultStoreError::Replaced);
+    }
+    reconcile_clear(&lib)?;
+    let mut originals = Vec::new();
+    for b in BRIDGES {
+        if let Some(value) = carried(&lib, b).map_err(local_error)? {
+            originals.push(ClearOriginal {
+                service: b.service.to_string(),
+                hash: hash(&value),
+                lineage: local_lineage(&lib, b.service).map_err(local_error)?,
+            });
+        }
+    }
+    lib.set_setting(
+        PENDING_CLEAR,
+        &serde_json::to_string(&originals).map_err(local_error)?,
+    )
+    .map_err(local_error)
+}
+
+/// Finish explicit local sign-out even if the session that requested it retired. This is
+/// narrowly bound to the captured sign-ins; it never runs the retired identity's general sync.
+fn reconcile_clear(lib: &Library) -> Result<Vec<String>, VaultStoreError> {
+    let Some(raw) = lib.get_setting(PENDING_CLEAR).map_err(local_error)? else {
+        return Ok(Vec::new());
+    };
+    let originals: Vec<ClearOriginal> = serde_json::from_str(&raw).map_err(local_error)?;
+    let mut cleared = Vec::new();
+    for original in originals {
+        let Some(b) = BRIDGES.iter().find(|b| b.service == original.service) else {
+            continue;
+        };
+        let Some(value) = carried(lib, b).map_err(local_error)? else {
+            continue;
+        };
+        let lineage = lib.get_setting(&lineage_key(b.service)).map_err(local_error)?;
+        // A refresh stays on the captured lineage. A new interactive sign-in survives even
+        // when its credential bytes are identical. Content binds legacy records without IDs.
+        let matches = if original.lineage.is_empty() {
+            lineage.is_none() && hash(&value) == original.hash
+        } else {
+            lineage.as_deref() == Some(original.lineage.as_str())
+        };
+        if matches {
+            move_aside(lib, b).map_err(local_error)?;
+            lib.delete_setting(&synced_key(b.service)).map_err(local_error)?;
+            cleared.push(b.service.to_string());
+        }
+    }
+    // A failure above retains intent for restart/replacement recovery.
+    lib.delete_setting(PENDING_CLEAR).map_err(local_error)?;
+    Ok(cleared)
+}
+
+pub(crate) fn finish_local_clear(s: &NodeState) -> Result<Vec<String>, VaultStoreError> {
+    reconcile_clear(&s.library.lock().expect("library poisoned"))
+}
+
+/// Keep a pass's report for Settings (`GET /v1/vault`'s `last_sync`).
+pub(crate) fn record_last_sync(
+    s: &NodeState,
+    r: &CacheReport,
+    still: &dyn Fn() -> bool,
+) -> Result<(), VaultStoreError> {
+    let lib = s.library.lock().expect("library poisoned");
+    if !still() {
+        return Err(VaultStoreError::Replaced);
+    }
+    lib.set_setting(
         LAST_SYNC_KEY,
         &json!({ "at": pm_library::db::now_unix(), "report": r }).to_string(),
-    );
+    )
+    .map_err(local_error)
 }
 
 /// [`sync`] with [`NodeState::vault_pass`] already held. `take` settles one service's conflict
@@ -986,6 +1072,8 @@ pub(crate) async fn sync_held(
         }
     };
     current()?;
+    let vault = vault.guarded(still);
+    finish_local_clear(s)?;
     let mut report = CacheReport::default();
     let owner = vault.owner().to_string();
     let client = vault.client_key().to_hex();
@@ -1044,6 +1132,7 @@ pub(crate) async fn sync_held(
         };
         let (mine, seen, lineage) = {
             let lib = s.library.lock().expect("library poisoned");
+            current()?;
             // The lock first, then the check: `local_lineage` below can write the node's id for
             // the sign-in, and the vault read above was an await
             current()?;
@@ -1299,6 +1388,7 @@ pub(crate) async fn sync_held(
                     // The signing above awaited the homeserver: still this session's?
                     current()?;
                     let lib = s.library.lock().expect("library poisoned");
+                    current()?;
                     // A source that changed its sign-in since this pass read it wins: next pass
                     if carried(&lib, b).ok().flatten().map(|x| hash(&x)) != Some(hash(m)) {
                         continue;
@@ -1342,15 +1432,9 @@ pub(crate) async fn sync_held(
                     Ok(Some(revision)) => {
                         // Written; the node's record of it only while this is still its session
                         current()?;
-                        record(
-                            &s.library.lock().expect("library poisoned"),
-                            revision,
-                            m,
-                            lineage.clone(),
-                            false,
-                            my_app.clone(),
-                            false,
-                        );
+                        let lib = s.library.lock().expect("library poisoned");
+                        current()?;
+                        record(&lib, revision, m, lineage.clone(), false, my_app.clone(), false);
                         if seen.is_none() && theirs.is_none() {
                             report.migrated.push(service);
                         } else {
@@ -1379,6 +1463,7 @@ pub(crate) async fn sync_held(
                 let o = theirs.as_ref().expect("pull has a vault copy");
                 let travels = node_settings(&o.sign_in).unwrap_or_default();
                 let lib = s.library.lock().expect("library poisoned");
+                current()?;
                 // A source that changed its sign-in since this pass read it wins: next pass
                 if carried(&lib, b).ok().flatten().map(|m| hash(&m)) != mine.as_ref().map(hash) {
                     continue;
@@ -1425,6 +1510,7 @@ pub(crate) async fn sync_held(
             }
             Do::MoveAside => {
                 let lib = s.library.lock().expect("library poisoned");
+                current()?;
                 if carried(&lib, b).ok().flatten().map(|m| hash(&m)) != mine.as_ref().map(hash) {
                     continue;
                 }
@@ -1440,6 +1526,7 @@ pub(crate) async fn sync_held(
                 Ok(true) => {
                     current()?;
                     let lib = s.library.lock().expect("library poisoned");
+                    current()?;
                     let _ = lib.delete_setting(&synced_key(b.service));
                     let _ = lib.delete_setting(&lineage_key(b.service));
                     report.removed.push(service);
@@ -1452,6 +1539,7 @@ pub(crate) async fn sync_held(
             },
             Do::Forget => {
                 let lib = s.library.lock().expect("library poisoned");
+                current()?;
                 let _ = lib.delete_setting(&synced_key(b.service));
                 if mine.is_none() && theirs.is_some() {
                     report.forgotten.push(service);
@@ -1460,6 +1548,7 @@ pub(crate) async fn sync_held(
             Do::Conflict => {
                 if let (Some(m), Some(o)) = (&mine, &theirs) {
                     let lib = s.library.lock().expect("library poisoned");
+                    current()?;
                     if seen
                         .as_ref()
                         .is_none_or(|x| !x.conflict || x.hash != hash(m) || x.marker != marker)
@@ -1535,6 +1624,7 @@ pub async fn pass(
     still: &(dyn Fn() -> bool + Sync),
 ) -> Result<CacheReport, VaultStoreError> {
     let _pass = take_pass(s).await?;
+    let vault = vault.guarded(still);
     let r = within(async {
         // Each a write to the vault: not for a session another sign-in replaced
         if !still() {
@@ -1545,13 +1635,13 @@ pub async fn pass(
             return Err(VaultStoreError::Replaced);
         }
         vault.share_with_trusted().await?;
-        sync_held(s, vault, take, false, still).await
+        sync_held(s, &vault, take, false, still).await
     })
     .await?;
     if !still() {
         return Err(VaultStoreError::Replaced);
     }
-    record_last_sync(s, &r);
+    record_last_sync(s, &r, still)?;
     Ok(r)
 }
 
@@ -1565,6 +1655,41 @@ mod tests {
 
     fn lib() -> Library {
         Library::open_in_memory().unwrap()
+    }
+
+    #[test]
+    fn durable_clear_keeps_new_lineage_but_removes_refreshes_of_the_original() {
+        for newer in [false, true] {
+            let lib = lib();
+            let b = bridge("listenbrainz");
+            lib.set_setting("listenbrainz.account", r#"{"token":"old","user":"fixture"}"#)
+                .unwrap();
+            let original = carried(&lib, b).unwrap().unwrap();
+            let lineage = local_lineage(&lib, b.service).unwrap();
+            lib.set_setting(
+                PENDING_CLEAR,
+                &serde_json::to_string(&vec![ClearOriginal {
+                    service: b.service.into(),
+                    hash: hash(&original),
+                    lineage,
+                }])
+                .unwrap(),
+            )
+            .unwrap();
+            if newer {
+                new_sign_in(&lib, b.service);
+            } else {
+                lib.set_setting(
+                    "listenbrainz.account",
+                    r#"{"token":"refreshed","user":"fixture"}"#,
+                )
+                .unwrap();
+            }
+            let cleared = reconcile_clear(&lib).unwrap();
+            assert_eq!(carried(&lib, b).unwrap().is_some(), newer);
+            assert_eq!(cleared.is_empty(), newer);
+            assert_eq!(lib.get_setting(PENDING_CLEAR).unwrap(), None);
+        }
     }
 
     fn side(hash: &str, account: &str) -> Side {

@@ -262,27 +262,27 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
     // No sync may run between the wipe and the node's own copies going aside (one running is
     // waited for briefly, then this answers 409: try again)
     let _pass = crate::vault_cache::take_pass(&s).await.map_err(vault_error)?;
+    crate::vault_cache::prepare_local_clear(&s, &|| !sync.is_retired()).map_err(vault_error)?;
     let report = vault
         .sign_out_everywhere(|service, _| async move {
             tracing::info!(service, "vault: sign-in removed");
         })
         .await
         .map_err(vault_error)?;
-    // The node's own copies go aside now, not at the next sync. The vault is already wiped
-    // here, so a sync that fails is reported, not an error
-    let (signed_out_here, cache_error) =
-        match crate::vault_cache::within(crate::vault_cache::sync_held(&s, &vault, None, true, &|| {
-            !sync.is_retired()
-        }))
-        .await
-        {
-            Ok(c) => {
-                // Settings shows this pass, not the one from before the wipe
-                crate::vault_cache::record_last_sync(&s, &c);
-                (c.signed_out, None)
-            }
-            Err(e) => (Vec::new(), Some(e.to_string())),
-        };
+    crate::test_hooks::pause(|| format!("vault.after_wipe:{}", sync.z32())).await;
+    // The accepted clear owns this narrow cleanup across replacement. New sign-ins have a
+    // different lineage and survive; an old general sync must never run after retirement.
+    let (signed_out_here, cache_error) = match crate::vault_cache::finish_local_clear(&s) {
+        Ok(cleared) => {
+            let report = crate::vault_cache::CacheReport {
+                signed_out: cleared.clone(),
+                ..Default::default()
+            };
+            let _ = crate::vault_cache::record_last_sync(&s, &report, &|| !sync.is_retired());
+            (cleared, None)
+        }
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
     Ok(Json(Everywhere {
         report,
         revoked_at_service: Vec::new(),

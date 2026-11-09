@@ -1320,3 +1320,77 @@ async fn a_replacement_while_the_backup_waits_for_the_library_adopts_nothing() {
         "the node's listen was deleted by A's history delete"
     );
 }
+
+/// A successful remote clear still cleans the captured local sign-ins if another identity
+/// replaces its session before cleanup. A genuinely new sign-in with identical bytes survives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_clear_does_not_migrate_old_sign_ins_to_a_replacement_identity() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let mut b = ids.pop().unwrap();
+    let mut a = ids.pop().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync_a = Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        a.pop().unwrap(),
+    ));
+    n.set_sync(Some(sync_a.clone()));
+    let tidal = r#"{"access_token":"fixture-at","refresh_token":"fixture-rt","user_id":"7"}"#;
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("tidal.user", tidal).unwrap();
+        lib.set_setting("listenbrainz.account", r#"{"token":"fixture-lb","user":"owner"}"#)
+            .unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "tidal");
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+    }
+    let (status, before) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert!(
+        before["migrated"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("listenbrainz")),
+        "{before}"
+    );
+    let (reached, release) = pm_api::test_hooks::arm(&format!("vault.after_wipe:{}", sync_a.z32()));
+    let clear = {
+        let n = n.clone();
+        tokio::spawn(async move { call(&router(n), "POST", "/v1/vault/sign-out-everywhere").await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        b.pop().unwrap(),
+    ))));
+    {
+        let lib = n.library.lock().unwrap();
+        // Same contents, but a new interactive sign-in, after the clear was accepted.
+        lib.set_setting("tidal.user", tidal).unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "tidal");
+    }
+    let _ = release.send(());
+    let (status, result) = clear.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["signed_out_here"], json!(["listenbrainz"]));
+    {
+        let lib = n.library.lock().unwrap();
+        assert_eq!(lib.get_setting("listenbrainz.account").unwrap(), None);
+        assert_eq!(lib.get_setting("tidal.user").unwrap().as_deref(), Some(tidal));
+        assert_eq!(lib.get_setting("vault.pending_local_clear").unwrap(), None);
+    }
+    let (status, result) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let (sync_b, key) = node_vault_parts(&n);
+    assert!(Vault::new(sync_b.session(), &key)
+        .envelope("listenbrainz")
+        .await
+        .unwrap()
+        .is_none());
+}

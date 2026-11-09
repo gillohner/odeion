@@ -386,7 +386,7 @@ impl PubkySync {
     /// unsynced objects stay queued.
     pub async fn sync(&self, library: &Arc<Mutex<Library>>) -> Result<SyncReport, SyncError> {
         let _one_at_a_time = self.pass.lock().await;
-        crate::tags::before_sync(&library.lock().expect("library poisoned"));
+        crate::tags::before_sync(&self.lib(library)?);
         match self.sync_once(library).await {
             Ok(mut report) => {
                 if report
@@ -1485,7 +1485,7 @@ impl PubkySync {
         let backup: SettingsBackup =
             serde_json::from_value(v).map_err(|e| SyncError::Store(format!("settings backup: {e}")))?;
         let fresh = {
-            let lib = s.library.lock().expect("library poisoned");
+            let lib = self.lib(&s.library)?;
             lib.list_folders().map(|f| f.is_empty()).unwrap_or(true) && s.contact().trim().is_empty()
         };
         if only_if_fresh && !fresh {
@@ -1500,13 +1500,13 @@ impl PubkySync {
         self.current()?;
         if s.contact().trim().is_empty()
             && !backup.contact.trim().is_empty()
-            && s.set_contact(&backup.contact).is_ok()
+            && s.set_contact_if(&backup.contact, &|| !self.is_retired()).is_ok()
         {
             out.contact = true;
         }
         let mut new_folders = Vec::new();
         {
-            let lib = s.library.lock().expect("library poisoned");
+            let lib = self.lib(&s.library)?;
             let have: std::collections::HashSet<String> = lib
                 .list_folders()
                 .unwrap_or_default()

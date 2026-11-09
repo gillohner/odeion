@@ -860,6 +860,10 @@ impl NodeState {
     /// Set the contact at runtime: validated, saved in the library settings,
     /// and discovery (Pinakes, Nexus) is built from it.
     pub fn set_contact(&self, contact: &str) -> Result<(), String> {
+        self.set_contact_if(contact, &|| true)
+    }
+
+    pub(crate) fn set_contact_if(&self, contact: &str, still: &dyn Fn() -> bool) -> Result<(), String> {
         let contact = contact.trim().to_string();
         pm_pubky::config::validate_contact(&contact)?;
         let mut cfg = self.pubky.clone();
@@ -872,10 +876,11 @@ impl NodeState {
             (Err(e), _) => return Err(format!("pinakes client: {e}")),
             (_, Err(e)) => return Err(format!("nexus client: {e}")),
         };
-        self.library
-            .lock()
-            .expect("library poisoned")
-            .set_setting(CONTACT_KEY, &contact)
+        let lib = self.library.lock().expect("library poisoned");
+        if !still() {
+            return Err("another sign-in replaced this session".into());
+        }
+        lib.set_setting(CONTACT_KEY, &contact)
             .map_err(|e| e.to_string())?;
         *self.contact.write().expect("contact lock") = contact;
         *self.discovery.write().expect("discovery lock") = discovery;
