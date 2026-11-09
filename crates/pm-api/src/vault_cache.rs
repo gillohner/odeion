@@ -801,11 +801,12 @@ pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultS
                     Do::Push
                 }
             }
-            // Unchanged here and gone from the vault: signed out elsewhere
-            Some(s) if m.hash == s.hash => Do::MoveAside,
             // A new sign-in here goes out (one older than the last sign-out everywhere went aside
             // above); a refresh of the old one doesn't bring back what was signed out
             Some(s) if !same_sign_in(m, s) => Do::Push,
+            // Unchanged here and gone from the vault: signed out elsewhere. A distinct
+            // lineage above is a new sign-in even when its credential bytes are identical.
+            Some(s) if m.hash == s.hash => Do::MoveAside,
             Some(_) => Do::MoveAside,
         },
         (None, Some(t)) => match seen {

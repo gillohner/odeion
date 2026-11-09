@@ -321,6 +321,9 @@ struct Marks {
     /// The highest `signed_out_everywhere_at` seen in the device list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signed_out_everywhere_at: Option<u64>,
+    /// New wipe observations are bound to the vault owner, even when a machine changes users.
+    #[serde(default)]
+    wipes_by_owner: std::collections::BTreeMap<String, u64>,
 }
 
 /// The hash of an envelope as this node read it (its serialised form), for the marks.
@@ -352,7 +355,12 @@ fn write_marks(path: &Path, m: &Marks) -> std::io::Result<()> {
     }
     let tmp = tmp_beside(path);
     write_private(&tmp, &serde_json::to_vec(m).expect("marks serialise"))?;
-    std::fs::rename(&tmp, path)
+    std::fs::rename(&tmp, path)?;
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Change the marks at `path` with `f`, under the file lock; written only when they changed.
@@ -586,9 +594,15 @@ impl<'a> Vault<'a> {
             return Ok(served);
         };
         update_marks(p, |m| {
-            let kept = possible(m.signed_out_everywhere_at);
-            if served > kept || kept != m.signed_out_everywhere_at {
-                m.signed_out_everywhere_at = kept.max(served);
+            // Keep the legacy unscoped floor for existing installations; never add a new
+            // owner's observation to it. New clears cannot sign another owner out locally.
+            let kept = possible(m.wipes_by_owner.get(&self.owner).copied())
+                .max(possible(m.signed_out_everywhere_at));
+            m.signed_out_everywhere_at = possible(m.signed_out_everywhere_at);
+            if let Some(at) = kept.max(served) {
+                m.wipes_by_owner.insert(self.owner.clone(), at);
+            } else {
+                m.wipes_by_owner.remove(&self.owner);
             }
             kept.max(served)
         })
@@ -2194,6 +2208,11 @@ impl Vault<'_> {
             ix.extra
                 .insert(SIGNED_OUT_EVERYWHERE.into(), serde_json::json!(now()));
             let body = index_body(&mut ix)?;
+            // Persist the exact proposed marker before the remote write. A refused local
+            // write leaves the API's pending intent intact and cannot accept a remote wipe;
+            // cancellation or a lost remote response cannot lose the accepted marker. A
+            // remote failure conservatively retains this explicit local sign-out intent.
+            self.marker(&ix)?;
             self.put_locked(&held, spec::INDEX_PATH, body).await
         }
         .await;

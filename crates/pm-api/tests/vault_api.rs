@@ -1394,3 +1394,169 @@ async fn an_accepted_clear_does_not_migrate_old_sign_ins_to_a_replacement_identi
         .unwrap()
         .is_none());
 }
+
+/// Replaying the equal-newest signed envelope and old index after an accepted clear must
+/// not reactivate the sign-in, including when a new NodeState reloads the durable records.
+#[tokio::test]
+async fn accepted_clear_remembers_its_owner_marker_before_any_later_sync() {
+    use pm_appdata::vault::{blob_path, INDEX_PATH};
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let other = ids.pop().unwrap().pop().unwrap();
+    let session = ids.pop().unwrap().pop().unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync = Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        session,
+    ));
+    n.set_sync(Some(sync.clone()));
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("listenbrainz.account", r#"{"token":"fixture","user":"owner"}"#)
+            .unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+    }
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["migrated"], json!(["listenbrainz"]));
+    let (_, key) = node_vault_parts(&n);
+    let vault = Vault::new(sync.session(), &key);
+    let saved_index = vault.index().await.unwrap();
+    let saved_blob = vault.envelope("listenbrainz").await.unwrap().unwrap();
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sign-out-everywhere").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["signed_out_here"], json!(["listenbrainz"]));
+    assert!(r["cache_error"].is_null(), "{r}");
+    let marks = n.data_dir().join("vault/marks.json");
+    assert!(Vault::new(sync.session(), &key)
+        .keep_marks(&marks)
+        .marker(&saved_index)
+        .unwrap()
+        .is_some());
+    // The same machine file must not apply A's newly written marker to B.
+    assert_eq!(
+        Vault::new(&other, &key)
+            .keep_marks(&marks)
+            .marker(&saved_index)
+            .unwrap(),
+        None
+    );
+    sync.session()
+        .storage()
+        .put(INDEX_PATH, serde_json::to_vec(&saved_index).unwrap())
+        .await
+        .unwrap();
+    let path = blob_path("listenbrainz").unwrap();
+    sync.session()
+        .storage()
+        .put(path.as_str(), serde_json::to_vec(&saved_blob).unwrap())
+        .await
+        .unwrap();
+    let reloaded = node(d.path());
+    reloaded.set_sync(Some(sync));
+    let (status, r) = call(&router(reloaded.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["not_usable"], json!(["listenbrainz"]), "{r}");
+    assert_eq!(
+        reloaded
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.account")
+            .unwrap(),
+        None
+    );
+}
+
+/// A new identical-content sign-in after the wipe belongs to a new lineage even on the
+/// same owner; the next complete sync must preserve it and publish it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_clear_preserves_new_same_owner_lineage_through_next_sync() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    let sync = Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        ids.pop().unwrap().pop().unwrap(),
+    ));
+    n.set_sync(Some(sync.clone()));
+    let account = r#"{"token":"fixture","user":"owner"}"#;
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("listenbrainz.account", account).unwrap();
+        pm_api::vault_cache::new_sign_in(&lib, "listenbrainz");
+    }
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    let (reached, release) = pm_api::test_hooks::arm(&format!("vault.after_wipe:{}", sync.z32()));
+    let clear = {
+        let n = n.clone();
+        tokio::spawn(async move { call(&router(n), "POST", "/v1/vault/sign-out-everywhere").await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(60), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    let (_, key) = node_vault_parts(&n);
+    let vault = Vault::new(sync.session(), &key);
+    let wipe = Vault::signed_out_everywhere_at(&vault.index().await.unwrap()).unwrap();
+    {
+        let lib = n.library.lock().unwrap();
+        lib.set_setting("listenbrainz.account", account).unwrap();
+        lib.set_setting("vault.lineage.listenbrainz", &format!("{}-new-fixture", wipe + 1))
+            .unwrap();
+    }
+    let _ = release.send(());
+    let (status, r) = clear.await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["signed_out_here"], json!([]), "{r}");
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    assert_eq!(r["pushed"], json!(["listenbrainz"]), "{r}");
+    assert_eq!(
+        n.library
+            .lock()
+            .unwrap()
+            .get_setting("listenbrainz.account")
+            .unwrap()
+            .as_deref(),
+        Some(account)
+    );
+    assert!(vault.envelope("listenbrainz").await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn failed_wipe_marker_persistence_keeps_local_clear_intent() {
+    let Some(mut ids) = identities_with_sessions(1, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let d = tempfile::tempdir().unwrap();
+    let n = node(d.path());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        ids.pop().unwrap().pop().unwrap(),
+    ))));
+    n.library
+        .lock()
+        .unwrap()
+        .set_setting("listenbrainz.account", r#"{"token":"fixture","user":"owner"}"#)
+        .unwrap();
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sync").await;
+    assert_eq!(status, StatusCode::OK, "{r}");
+    // Only this fixture's marks path is made unwritable as a file.
+    let marks = n.data_dir().join("vault/marks.json");
+    std::fs::rename(&marks, marks.with_extension("saved")).unwrap();
+    std::fs::create_dir(&marks).unwrap();
+    let (status, r) = call(&router(n.clone()), "POST", "/v1/vault/sign-out-everywhere").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    let lib = n.library.lock().unwrap();
+    assert!(lib.get_setting("vault.pending_local_clear").unwrap().is_some());
+    assert!(lib.get_setting("listenbrainz.account").unwrap().is_some());
+}
