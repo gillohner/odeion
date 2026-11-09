@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 const ACCOUNT_KEY: &str = "listenbrainz.account";
 const PENDING_KEY: &str = "listenbrainz.pending";
+const GENERATION_KEY: &str = "listenbrainz.send_generation";
 const IMPORTED_KEY: &str = "listenbrainz.imported_until";
 const PENDING_MAX: usize = 1000;
 pub const API_BASE: &str = "https://api.listenbrainz.org";
@@ -201,11 +202,8 @@ fn count_once(s: &Arc<NodeState>, key: &(String, String, u64)) {
     if sent.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    let Some(acct) = account(s).filter(|a| a.submit) else {
-        return;
-    };
-    let s = s.clone();
-    tokio::spawn(async move { send_listens(&s, &acct.token, vec![listen]).await });
+    // Capture ownership before spawning: the task may first run after disconnect/reconnect.
+    tokio::spawn(send_play(s.clone(), vec![listen]));
 }
 
 /// A zone started `item`: "playing now", then a listen once it has played half its length or
@@ -267,18 +265,55 @@ pub(crate) fn track_ended(s: &Arc<NodeState>, zone: &pm_zones::ZoneId, item: &pm
 /// Send listens with any that are waiting ([`crate::send_queue`]): `new` joins the waiting list
 /// on disk first, then one sender at a time sends the list and removes what ListenBrainz took.
 /// What it couldn't take, and anything added meanwhile, waits for the next send.
+// The generation distinguishes disconnect/reconnect even when the token is reused.
+fn send_owner(s: &NodeState) -> Option<(Account, Option<String>)> {
+    let lib = s.library.lock().expect("library poisoned");
+    let account: Account = serde_json::from_str(&lib.get_setting(ACCOUNT_KEY).ok()??).ok()?;
+    if !account.submit {
+        return None;
+    }
+    Some((account, lib.get_setting(GENERATION_KEY).ok()?))
+}
+
+pub(crate) fn send_play(s: Arc<NodeState>, new: Vec<Value>) -> impl std::future::Future<Output = ()> + Send {
+    let owner = send_owner(&s);
+    async move {
+        if let Some((account, generation)) = owner {
+            send_owned(&s, &account.token, generation, new).await;
+        }
+    }
+}
+
 pub(crate) async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
-    // Not stored (the library refused the write): sent from memory with the rest all the same
-    let unstored = match crate::send_queue::enqueue(
-        &s.library.lock().expect("library poisoned"),
-        PENDING_KEY,
-        new,
-        PENDING_MAX,
-    ) {
-        Ok(()) => Vec::new(),
-        Err((e, new)) => {
-            tracing::warn!("listenbrainz: the new ones couldn't be stored ({e}); sending them now");
-            new
+    let Some((account, generation)) = send_owner(s).filter(|(a, _)| a.token == token) else {
+        return;
+    };
+    send_owned(s, &account.token, generation, new).await;
+}
+
+fn owns_queue(lib: &pm_library::Library, token: &str, generation: &Option<String>) -> bool {
+    lib.get_setting(GENERATION_KEY).ok().as_ref() == Some(generation)
+        && lib
+            .get_setting(ACCOUNT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<Account>(&j).ok())
+            .is_some_and(|a| a.token == token && a.submit)
+}
+
+async fn send_owned(s: &NodeState, token: &str, generation: Option<String>, new: Vec<Value>) {
+    // Check ownership and enqueue under one guard, before any sender-lock wait.
+    let unstored = {
+        let lib = s.library.lock().expect("library poisoned");
+        if !owns_queue(&lib, token, &generation) {
+            return;
+        }
+        match crate::send_queue::enqueue(&lib, PENDING_KEY, new, PENDING_MAX) {
+            Ok(()) => Vec::new(),
+            Err((e, new)) => {
+                tracing::warn!("listenbrainz: the new ones couldn't be stored ({e}); sending them now");
+                new
+            }
         }
     };
     let _one = crate::send_queue::sender(&s.node_id, "listenbrainz").await;
@@ -286,12 +321,7 @@ pub(crate) async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
     // the owner connected another account sends nothing (the list is that account's now)
     let all = {
         let lib = s.library.lock().expect("library poisoned");
-        let current = lib
-            .get_setting(ACCOUNT_KEY)
-            .ok()
-            .flatten()
-            .and_then(|j| serde_json::from_str::<Account>(&j).ok());
-        if current.is_none_or(|a| a.token != token || !a.submit) {
+        if !owns_queue(&lib, token, &generation) {
             return;
         }
         crate::send_queue::batch(&lib, PENDING_KEY, unstored)
@@ -368,6 +398,9 @@ pub(crate) async fn connect(
                 acct.user = cur.user;
             }
         }
+        if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            lib.set_setting(GENERATION_KEY, &uuid::Uuid::new_v4().to_string())?;
+        }
         lib.set_setting(ACCOUNT_KEY, &serde_json::to_string(&acct).expect("serializes"))?;
         if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
             crate::vault_cache::new_sign_in(&lib, "listenbrainz");
@@ -383,6 +416,7 @@ pub(crate) async fn connect(
 pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<ListenBrainzView> {
     {
         let lib = s.library.lock().expect("library poisoned");
+        lib.set_setting(GENERATION_KEY, &uuid::Uuid::new_v4().to_string())?;
         lib.delete_setting(ACCOUNT_KEY)?;
         lib.delete_setting(PENDING_KEY)?;
     }

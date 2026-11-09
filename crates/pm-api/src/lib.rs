@@ -24852,37 +24852,42 @@ exec sleep 300
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         *s.listenbrainz_base.write().unwrap() =
             format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
-        let mock = Router::new().route(
-            "/1/submit-listens",
-            post({
-                let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
-                move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
+        let mock = Router::new()
+            .route(
+                "/1/submit-listens",
+                post({
                     let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
-                    async move {
-                        entered.add_permits(1);
-                        let Ok(permit) = gate.acquire().await else {
-                            return StatusCode::SERVICE_UNAVAILABLE;
-                        };
-                        permit.forget();
-                        let payload = b["payload"].as_array().unwrap().clone();
-                        if payload.iter().any(|l| l["listened_at"] == 0) {
-                            return StatusCode::SERVICE_UNAVAILABLE;
+                    move |h: axum::http::HeaderMap, Json(b): Json<serde_json::Value>| {
+                        let (gate, got, entered) = (gate.clone(), got.clone(), entered.clone());
+                        async move {
+                            entered.add_permits(1);
+                            let Ok(permit) = gate.acquire().await else {
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            };
+                            permit.forget();
+                            let payload = b["payload"].as_array().unwrap().clone();
+                            if payload.iter().any(|l| l["listened_at"] == 0) {
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            }
+                            // Which account it went to, with each listen
+                            let token = h
+                                .get("authorization")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            got.lock().unwrap().extend(payload.into_iter().map(|mut l| {
+                                l["_to"] = serde_json::json!(token);
+                                l
+                            }));
+                            StatusCode::OK
                         }
-                        // Which account it went to, with each listen
-                        let token = h
-                            .get("authorization")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or("")
-                            .to_string();
-                        got.lock().unwrap().extend(payload.into_iter().map(|mut l| {
-                            l["_to"] = serde_json::json!(token);
-                            l
-                        }));
-                        StatusCode::OK
                     }
-                }
-            }),
-        );
+                }),
+            )
+            .route(
+                "/1/validate-token",
+                get(|| async { Json(serde_json::json!({"valid": true, "user_name": "fixture"})) }),
+            );
         tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
         (gate, got, entered)
     }
@@ -25086,6 +25091,45 @@ exec sleep 300
         assert_eq!(to("TOKA"), [1], "A's account got only what A's first sender took");
         assert_eq!(to("TOKB"), [2, 3], "the rest went to the account connected now");
         assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// Capture the production play future without polling it, then really disconnect and
+    /// reconnect. Neither a different token nor reuse of the same token revives that play.
+    #[tokio::test]
+    async fn an_unpolled_old_play_cannot_enqueue_after_reconnect() {
+        for next_token in ["NEXT", "LBT"] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = state(dir.path(), None).await;
+            let (gate, got, _) = gated_listenbrainz(&s).await;
+            gate.add_permits(10);
+            let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
+            listenbrainz::disconnect(axum::extract::State(s.clone()))
+                .await
+                .unwrap();
+            listenbrainz::connect(
+                axum::extract::State(s.clone()),
+                Json(ListenBrainzForm {
+                    token: Some(next_token.into()),
+                    submit: Some(true),
+                }),
+            )
+            .await
+            .unwrap();
+            old.await;
+            assert!(
+                waiting_listens(&s).is_empty(),
+                "old play never entered replacement queue"
+            );
+            listenbrainz::send_listens(&s, next_token, vec![a_listen(2)]).await;
+            let sent: Vec<u64> = got
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|l| l["listened_at"].as_u64().unwrap())
+                .collect();
+            assert_eq!(sent, [2], "only the replacement account's own play was sent");
+            assert!(waiting_listens(&s).is_empty());
+        }
     }
 
     /// A new listen the library refuses to store (a failing write) is still sent with the rest,
