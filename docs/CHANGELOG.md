@@ -6,7 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-11-09
 
-- **The phone is a zone away from home too.** Through remote access (the iroh tunnel), the Android app (and the desktop app) now serves its player to the node over the same connection, so the phone's own zone exists on mobile data as at home: with its signal path, the Sound panel, bit-perfect and Exclusive USB to a USB DAC, and the media controls. The node reaches the player through the tunnel, names it by the app's own key (the same zone each time), and lets more audio be on its way (1.5 s) for a mobile link's round trip.
+- **The phone is a zone away from home too.** Through remote access (the iroh tunnel), the Android app (and the desktop app) now serves its player to the node over the same connection, so the phone's own zone exists on mobile data as at home: with its signal path, the Sound panel, bit-perfect and Exclusive USB to a USB DAC, and the media controls. The node reaches the player through the tunnel, names it by the app's own key (the same zone each time it is away; at home it is its home zone as before), and lets more audio be on its way (1.5 s) for a mobile link's round trip.
 
 ### 2026-11-08
 

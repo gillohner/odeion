@@ -389,7 +389,8 @@ What it does:
    hand. Back to Auto.
 10. A phone call (or an alarm) while the phone's zone plays: it pauses and plays on after the call.
 10b. Away from home (Wi-Fi off, mobile data): the app reaches the node through remote access. Within a
-    few seconds the phone's own zone is listed (the same one as at home). Play on it at low volume,
+    few seconds the phone's own zone is listed (a zone of its own away from home, the same one
+    each time it is away: report whether that is confusing next to the home one). Play on it at low volume,
     with the KA17: the Sound panel says Exclusive USB (or bit-perfect) as at home, and the KA17's
     display shows the file's rate. Report dropouts over five minutes, and whether the media
     notification follows.

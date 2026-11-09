@@ -67,13 +67,25 @@ async fn the_node_reaches_the_apps_player_through_the_tunnel() {
     let (a, b) = tokio::join!(round_trip(relay, b"one"), round_trip(relay, b"two"));
     assert_eq!((a.as_slice(), b.as_slice()), (&b"ONE"[..], &b"TWO"[..]));
 
+    // An app that isn't connected gets no relay
+    assert!(node.player_relay(SecretKey::generate().public()).await.is_err());
+
     // The app starts again with the key it kept: the same relay reaches its new connection
     app.close().await;
     let again = ClientTunnel::start_with_key(node.addr(), &Relays::Off, Some(key))
         .await
         .unwrap();
+    let mut connections = again.connections();
     again.connect().await.unwrap();
+    assert!(
+        *connections.borrow_and_update() >= 1,
+        "a connection is counted (the app registers again)"
+    );
     again.serve_player(player().await).await;
+    assert!(
+        !connections.has_changed().unwrap(),
+        "serving the player is not a new connection"
+    );
     assert_eq!(again.id(), id, "the kept key: the node knows the app again");
     assert_eq!(node.player_relay(again.id()).await.unwrap(), relay);
     let mut ok = false;
@@ -95,9 +107,17 @@ async fn the_node_reaches_the_apps_player_through_the_tunnel() {
     }
     assert!(ok, "the relay reaches the app after it connected again");
 
-    // Another app (another key) is not reached through this relay
+    // Another app (another key) has its own relay, and nothing it serves answers through this one
     let other = ClientTunnel::start(node.addr(), &Relays::Off).await.unwrap();
     other.connect().await.unwrap();
     assert_ne!(other.id(), again.id());
+    let theirs = node.player_relay(other.id()).await.unwrap();
+    assert_ne!(theirs, relay);
+    // Its relay goes when its player isn't used any more
+    node.drop_player_relay(other.id()).await;
+    assert!(
+        tokio::net::TcpStream::connect(theirs).await.is_err(),
+        "the dropped relay listens no more"
+    );
     node.close().await;
 }

@@ -264,15 +264,26 @@ async fn register_any(app: AppHandle, s: Settings) {
 /// its signal path, bit-perfect and the Sound panel); the player service then runs as for a zone.
 #[cfg(any(desktop, target_os = "android"))]
 async fn register_tunnel_player(app: AppHandle, s: Settings) {
+    if register_through_tunnel(app.clone(), s).await {
+        watch_tunnel(app).await;
+    }
+}
+
+/// [`register_tunnel_player`] without starting the watch (the watch's own call): whether it
+/// registered.
+#[cfg(any(desktop, target_os = "android"))]
+async fn register_through_tunnel(app: AppHandle, s: Settings) -> bool {
     let state = app.state::<AppState>();
     let player = state.player.clone();
     let (s, ok) = {
         let tunnel = state.tunnel.lock().await;
-        let Some(tunnel) = tunnel.as_ref() else { return };
+        let Some(tunnel) = tunnel.as_ref() else {
+            return false;
+        };
         player::register_through_tunnel(s, player, tunnel).await
     };
     if state.current().map(|c| c.node_url) != Some(s.node_url.clone()) {
-        return;
+        return false;
     }
     state.store(Some(s));
     let script = player::output_script();
@@ -284,8 +295,47 @@ async fn register_tunnel_player(app: AppHandle, s: Settings) {
     if ok {
         android::start_player_service(&app, "This phone is a zone of your node".into(), true);
     }
-    #[cfg(not(target_os = "android"))]
-    let _ = ok;
+    ok
+}
+
+/// The task that registers the player again on each new tunnel connection (one at a time).
+#[cfg(any(desktop, target_os = "android"))]
+static TUNNEL_WATCH: Mutex<Option<tauri::async_runtime::JoinHandle<()>>> = Mutex::new(None);
+
+/// A new connection of the tunnel (a network switch, or the node restarted and forgot the
+/// player): the player registers again, so the phone's zone comes back by itself.
+#[cfg(any(desktop, target_os = "android"))]
+async fn watch_tunnel(app: AppHandle) {
+    let Some(mut rx) = app
+        .state::<AppState>()
+        .tunnel
+        .lock()
+        .await
+        .as_ref()
+        .map(|t| t.connections())
+    else {
+        return;
+    };
+    rx.borrow_and_update();
+    let task = tauri::async_runtime::spawn(async move {
+        while rx.changed().await.is_ok() {
+            let Some(s) = app.state::<AppState>().current() else {
+                break;
+            };
+            if s.via.is_empty() {
+                break;
+            }
+            tracing::info!("the tunnel connected again: the player registers again");
+            register_through_tunnel(app.clone(), s).await;
+        }
+    });
+    if let Some(old) = TUNNEL_WATCH
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .replace(task)
+    {
+        old.abort();
+    }
 }
 
 /// Register the player with the node in `s`, keep its address, and tell the node's page which

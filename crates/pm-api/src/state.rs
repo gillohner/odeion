@@ -105,7 +105,9 @@ pub struct NodeState {
     /// The tunnel's key once it runs, for `/v1/info`.
     pub remote_id: std::sync::RwLock<Option<String>>,
     /// The apps' players reached through the tunnel (`tunnel:<the app's key>`): where the node
-    /// reaches each on its own loopback while this run lasts ([`crate::remote`]).
+    /// reaches each on its own loopback while this run lasts ([`crate::remote`]; the tunnel, once
+    /// started, runs until the node stops, so its relays stay valid; an entry goes with its
+    /// endpoint or a failed registration).
     pub tunnel_players: std::sync::Mutex<std::collections::HashMap<String, std::net::SocketAddr>>,
     /// Keys the pull-stream URLs handed to renderers (`stream_key`), so a TV gets a URL for its
     /// own stream and never the API token. Kept in the library: URLs survive restarts.
@@ -1782,8 +1784,9 @@ impl NodeState {
         saved.len() != before || had_key || !gone.is_empty()
     }
 
-    /// Re-add the saved endpoint addresses, with their stored keys, at start and on rescan (an
-    /// app reached through the tunnel only while it is connected: it registers again then).
+    /// Re-add the saved endpoint addresses, with their stored keys, at start and on rescan. An app
+    /// reached through the tunnel can't be reached before it connects again: it registers again
+    /// itself on each new tunnel connection (the app's `watch_tunnel`).
     /// Blocking.
     pub fn restore_endpoint_addresses(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = Vec::new();

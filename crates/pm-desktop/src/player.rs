@@ -148,8 +148,9 @@ pub async fn register_through_tunnel(
 ) -> (Settings, bool) {
     let Some(player) = player else { return (s, false) };
     let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
-    // The tunnel's streams come from loopback: they get room of their own before Hello
-    player.endpoint.expect_peer(lo);
+    // The tunnel's streams come from an address of their own: they get the node's room before
+    // Hello (the phone's other apps, connecting from 127.0.0.1, don't)
+    player.endpoint.expect_peer(pm_remote::TUNNEL_SOURCE);
     let Some(port) = player.listen(lo) else {
         return (s, false);
     };

@@ -66,15 +66,34 @@ impl NodeState {
     /// Where the node reaches the player of the app with iroh key `peer` (it registered as
     /// `tunnel:<peer>` over the tunnel): a loopback relay into that app's connection, kept for
     /// [`NodeState::add_endpoint_address`].
-    pub async fn tunnel_player(&self, peer: &str) -> Result<std::net::SocketAddr, String> {
+    /// Answers the endpoint's name in its one spelling (`tunnel:<key>`, as the key prints).
+    pub async fn tunnel_player(&self, peer: &str) -> Result<String, String> {
         let id: pm_remote::EndpointId = peer.trim().parse().map_err(|_| "not an app key".to_string())?;
         let r = self.remote.lock().await;
         let t = r.tunnel.as_ref().ok_or("remote access is off on this node")?;
         let relay = t.player_relay(id).await.map_err(|e| e.to_string())?;
+        let name = format!("{}{id}", crate::state::TUNNEL_PREFIX);
         self.tunnel_players
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(format!("{}{peer}", crate::state::TUNNEL_PREFIX), relay);
-        Ok(relay)
+            .insert(name.clone(), relay);
+        Ok(name)
+    }
+
+    /// The app's player through the tunnel is not used any more: its relay goes.
+    pub async fn drop_tunnel_player(&self, name: &str) {
+        self.tunnel_players
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        let Some(Ok(id)) = name
+            .strip_prefix(crate::state::TUNNEL_PREFIX)
+            .map(|p| p.parse::<pm_remote::EndpointId>())
+        else {
+            return;
+        };
+        if let Some(t) = self.remote.lock().await.tunnel.as_ref() {
+            t.drop_player_relay(id).await;
+        }
     }
 }

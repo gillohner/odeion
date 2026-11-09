@@ -161,11 +161,37 @@ impl NodeTunnel {
         if let Some((addr, _)) = relays.get(&peer) {
             return Ok(*addr);
         }
+        // Only for a controller connected now (the one registering, over this connection; its
+        // connection may be a moment from being recorded)
+        let connected = || {
+            self.peers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&peer)
+                .is_some_and(|c| c.close_reason().is_none())
+        };
+        let mut waited = 0;
+        while !connected() {
+            if waited >= 60 {
+                anyhow::bail!("that app is not connected through the tunnel");
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            waited += 1;
+        }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let addr = listener.local_addr()?;
         let peers = self.peers.clone();
         let task = tokio::spawn(async move {
-            while let Ok((tcp, _)) = listener.accept().await {
+            loop {
+                let tcp = match listener.accept().await {
+                    Ok((tcp, _)) => tcp,
+                    // Out of descriptors for a moment, say: the relay goes on
+                    Err(e) => {
+                        tracing::debug!("the app's player relay: {e}");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
+                };
                 let peers = peers.clone();
                 tokio::spawn(async move {
                     // The app's connection, also one that is just being accepted (it connected a
@@ -196,6 +222,14 @@ impl NodeTunnel {
         });
         relays.insert(peer, (addr, task));
         Ok(addr)
+    }
+
+    /// The controller's player is not used any more (its registration failed, or it was removed):
+    /// its relay goes.
+    pub async fn drop_player_relay(&self, peer: EndpointId) {
+        if let Some((_, t)) = self.relays.lock().await.remove(&peer) {
+            t.abort();
+        }
     }
 
     /// The key controllers dial.
@@ -273,6 +307,9 @@ pub struct ClientTunnel {
 #[derive(Clone, Default)]
 struct Player {
     target: Arc<std::sync::Mutex<Option<SocketAddr>>>,
+    /// Counts the tunnel's connections (a new one: the node may have restarted and forgotten
+    /// the player; the app registers it again, [`ClientTunnel::connections`]).
+    connections: Arc<tokio::sync::watch::Sender<u64>>,
     /// The connections whose streams it already takes.
     served: Arc<std::sync::Mutex<HashSet<usize>>>,
 }
@@ -298,7 +335,7 @@ impl Player {
                     continue;
                 };
                 tokio::spawn(async move {
-                    match TcpStream::connect(target).await {
+                    match connect_from_tunnel(target).await {
                         Ok(tcp) => pipe(tcp, send, recv).await,
                         Err(e) => tracing::warn!(%target, "the node's stream cannot reach the player: {e}"),
                     }
@@ -310,6 +347,20 @@ impl Player {
                 .remove(&conn.stable_id());
         });
     }
+}
+
+/// The address the node's streams reach the player from ([`ClientTunnel::serve_player`]): a
+/// loopback address of their own, so the player can tell them from the phone's other apps (which
+/// connect from 127.0.0.1) and give only them the node's room before `Hello`.
+pub const TUNNEL_SOURCE: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
+
+/// Connect to the player from [`TUNNEL_SOURCE`] (where that address can't be used, from 127.0.0.1).
+async fn connect_from_tunnel(target: SocketAddr) -> std::io::Result<TcpStream> {
+    let s = tokio::net::TcpSocket::new_v4()?;
+    if s.bind(SocketAddr::new(TUNNEL_SOURCE, 0)).is_err() {
+        return TcpStream::connect(target).await;
+    }
+    s.connect(target).await
 }
 
 impl ClientTunnel {
@@ -375,6 +426,12 @@ impl ClientTunnel {
         Ok(route(&conn))
     }
 
+    /// Counts this tunnel's connections to the node: it changes on each new one (after a network
+    /// switch, or the node restarted: it then has forgotten the player, which registers again).
+    pub fn connections(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.player.connections.subscribe()
+    }
+
     /// Serve the player listening at `target` (this machine's loopback) to the node: every stream
     /// the node opens on this tunnel's connection, now and after a reconnect, goes there.
     pub async fn serve_player(&self, target: SocketAddr) {
@@ -392,6 +449,18 @@ impl ClientTunnel {
     pub async fn close(self) {
         self.task.abort();
         self.endpoint.close().await;
+    }
+}
+
+/// A tunnel dropped without [`ClientTunnel::close`] stops too: its listener, and its endpoint (a
+/// kept key must never be live twice).
+impl Drop for ClientTunnel {
+    fn drop(&mut self) {
+        self.task.abort();
+        let ep = self.endpoint.clone();
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            rt.spawn(async move { ep.close().await });
+        }
     }
 }
 
@@ -421,6 +490,8 @@ async fn connection(
         .await
         .context("timed out")??;
     player.serve(&c);
+    // A new connection (not the first one's serve_player): counted only here
+    player.connections.send_modify(|n| *n += 1);
     *slot = Some(c.clone());
     Ok(c)
 }

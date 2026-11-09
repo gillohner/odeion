@@ -1795,26 +1795,36 @@ async fn add_endpoint(
             "the player's key is not 32 to 256 visible ASCII characters".to_string()
         })
     })?;
-    // The app's player away from home: reached through the tunnel, by the app's key
-    if let Some(peer) = body.address.strip_prefix(state::TUNNEL_PREFIX) {
-        s.tunnel_player(peer).await.map_err(|e| {
-            ApiError::bad_request(format!(
-                "cannot reach the app's player through remote access: {e}"
-            ))
-        })?;
-    }
+    // The app's player away from home: reached through the tunnel, by the app's key (one spelling)
+    let mut body = body;
+    let tunnel = match body.address.trim().strip_prefix(state::TUNNEL_PREFIX) {
+        Some(peer) => {
+            let name = s.tunnel_player(peer).await.map_err(|e| {
+                ApiError::bad_request(format!(
+                    "cannot reach the app's player through remote access: {e}"
+                ))
+            })?;
+            body.address = name.clone();
+            Some(name)
+        }
+        None => None,
+    };
     let st = s.clone();
     let address = body.address.clone();
-    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
+    let added = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
         .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| {
-            let from = local_address().unwrap_or_else(|| "this node".into());
-            ApiError::bad_request(format!(
-                "cannot reach the endpoint at {}: {e} (asked from {} at {from})",
-                body.address, s.name
-            ))
-        })?;
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Not registered: its relay goes again
+    if let (Err(_), Some(name)) = (&added, &tunnel) {
+        s.drop_tunnel_player(name).await;
+    }
+    let outs = added.map_err(|e| {
+        let from = local_address().unwrap_or_else(|| "this node".into());
+        ApiError::bad_request(format!(
+            "cannot reach the endpoint at {}: {e} (asked from {} at {from})",
+            body.address, s.name
+        ))
+    })?;
     tracing::info!(address = %body.address, outputs = outs.len(), "endpoint added by address");
     Ok(Json(outs))
 }
@@ -1826,6 +1836,9 @@ async fn remove_endpoint(
 ) -> ApiResult<Vec<String>> {
     if !s.remove_endpoint_address(&address) {
         return Err(ApiError::not_found(format!("{address} is not a saved endpoint")));
+    }
+    if address.trim().starts_with(state::TUNNEL_PREFIX) {
+        s.drop_tunnel_player(address.trim()).await;
     }
     Ok(Json(s.endpoint_addresses()))
 }
