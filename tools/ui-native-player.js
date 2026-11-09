@@ -56,7 +56,10 @@ const FAKE_APP = ({ nativePlayer, len, slow }) => {
     if (cmd === 'native_load') {
       if (/refuse/.test(args.url)) throw { refused: true, message: "the app can't play this itself: unsupported codec" };
       if (/busy/.test(args.url)) throw { refused: false, message: 'HTTP 503' };
+      const gen = s.gen = (s.gen || 0) + 1;
       if (slow) await new Promise((r) => setTimeout(r, slow));
+      // A later load overtook this one (as the app's generation does)
+      if (gen !== s.gen) throw { refused: false, overtaken: true, message: 'another song or a stop came first' };
       s.ahead = args.ahead || null; start(args.url, args.atMs || 0); return null;
     }
     if (cmd === 'native_ahead') { s.ahead = args.url || null; return null; }
@@ -167,6 +170,18 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       const ap = await p.evaluate(() => window.__audioPlays);
       const nn = await p.evaluate(() => JSON.parse(localStorage.getItem('pm.browserQueue') || '[]').some((x) => x.nativeNo));
       check(ap.length === 0 && !nn, `${at}: a busy node is no refusal: still the app's, nothing marked (${JSON.stringify(ap)})`);
+      await sleep(2200);
+      const tries = (await calls(p, 'native_load')).filter((c) => /busy/.test(c[1].url)).length;
+      const said = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
+      check(tries === 2 && /can't play here: HTTP 503/.test(said), `${at}: it is tried once more, then said (${tries} loads; ${said})`);
+      // Play pressed twice while a song opens: the page still hears the app, and pause stops it
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(60);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(30);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(1200);
+      const n2 = await now(p);
+      check(!n2.paused && n2.time > 0, `${at}: play pressed twice while it opens: the bar follows the app (${JSON.stringify(n2)})`);
+      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(400);
+      check((await p.evaluate(() => window.__app.transport)) === 'paused', `${at}: and pause reaches the app`);
       // Pause pressed while the song opens
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(80);
       await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(900);
