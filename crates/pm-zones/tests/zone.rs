@@ -2014,3 +2014,123 @@ async fn an_up_step_is_held_to_the_limit_on_an_output_that_cant_report_its_level
     pc_zone.wait_acked().await;
     assert_eq!(device(&pc).await.level, VolumeLevel::Percent(53));
 }
+
+/// An output that takes unmuting as "back to full" (AirPlay receivers and Squeezebox players do
+/// when nothing was set) and reports its level.
+struct LoudUnmute {
+    inner: NullOutput,
+}
+
+#[async_trait::async_trait]
+impl Output for LoudUnmute {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        if v == Volume::Mute(false) {
+            self.inner.set_volume(Volume::Db(0.0)).await?;
+        }
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        self.inner.volume().await
+    }
+}
+
+/// Unmuting is held to the zone's limit like any other request. A device that comes back above
+/// the limit and reports it is set back to the limit; one that can't report its level is given
+/// the level last published, held to the limit, or the limit itself while none is known.
+#[tokio::test]
+async fn unmuting_is_held_to_the_limit() {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(Some(-20.0)));
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    let l = limit.clone();
+    zones.set_volume_limit(Some(Arc::new(move |_: &OutputId| *l.lock().unwrap())));
+    // Reports its level, comes back at full
+    let loud = Arc::new(LoudUnmute {
+        inner: NullOutput::with_volume(VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let zone = zones.create("Amp", loud.clone());
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    let device = loud.inner.volume().await.unwrap().unwrap();
+    assert_eq!((device.level, device.muted), (VolumeLevel::Db(-20.0), false));
+    assert_eq!(
+        zone.state().volume,
+        Some(pm_model::ZoneVolume {
+            level: VolumeLevel::Db(-20.0),
+            muted: false
+        })
+    );
+    // Can't report: the level last published, held to a limit lowered since
+    let quiet = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Percent),
+    });
+    let speaker = zones.create("Speaker", quiet.clone());
+    *limit.lock().unwrap() = None;
+    speaker.set_volume(Volume::Percent(80)).await.unwrap();
+    *limit.lock().unwrap() = Some(-30.0);
+    speaker.set_volume(Volume::Mute(true)).await.unwrap();
+    speaker.set_volume(Volume::Mute(false)).await.unwrap();
+    speaker.wait_acked().await;
+    let device = quiet.inner.volume().await.unwrap().unwrap();
+    assert_eq!((device.level, device.muted), (VolumeLevel::Percent(50), false));
+    assert_eq!(
+        speaker.state().volume,
+        Some(pm_model::ZoneVolume {
+            level: VolumeLevel::Percent(50),
+            muted: false
+        })
+    );
+    // Under the limit the level stays where it was
+    speaker.set_volume(Volume::Percent(20)).await.unwrap();
+    speaker.set_volume(Volume::Mute(true)).await.unwrap();
+    speaker.set_volume(Volume::Mute(false)).await.unwrap();
+    speaker.wait_acked().await;
+    assert_eq!(
+        quiet.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Percent(20)
+    );
+    // No level known yet: the limit itself
+    let fresh = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    fresh.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    let unknown = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let z = fresh.create("Amp", unknown.clone());
+    z.set_volume(Volume::Mute(false)).await.unwrap();
+    z.wait_acked().await;
+    assert_eq!(
+        unknown.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Db(-20.0)
+    );
+    assert_eq!(z.state().volume.map(|v| v.level), Some(VolumeLevel::Db(-20.0)));
+}

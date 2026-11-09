@@ -456,9 +456,11 @@ impl Zone {
     /// reaches the output ([`cap_volume`]), and a step up that the device took past it is set
     /// back to the limit at once. On an output that can't report its level, a step up becomes
     /// an absolute request instead (the level last published plus one step, at most the
-    /// limit), and is refused while no level is known. This is the one place every
-    /// controller's request passes (the pages, announcements, UPnP controllers, Subsonic
-    /// clients).
+    /// limit), and is refused while no level is known. Unmuting is held to the limit too: a
+    /// device that reports its level is set back when it came up above the limit, and one that
+    /// can't is given the level last published, held to the limit (the limit itself while none
+    /// is known). This is the one place every controller's request passes (the pages,
+    /// announcements, UPnP controllers, Subsonic clients).
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let _io = self.volume_io.lock().await;
         let limit = self.volume_limit();
@@ -488,11 +490,38 @@ impl Zone {
             }
         }
         let seen = self.published().announced;
-        let mut next = self.set_and_read(v).await?;
-        if let (Volume::Up, Some(max)) = (v, limit) {
-            let back = next.and_then(|n| back_to_limit(n.level, max, |db| self.output.percent_for_db(db)));
+        let (mut next, reported) = self.set_and_read(v).await?;
+        if let Some(max) = limit {
+            let percent_for = |db: f32| self.output.percent_for_db(db);
+            let back = match v {
+                // A step the device took past the limit
+                Volume::Up => next.and_then(|n| back_to_limit(n.level, max, percent_for)),
+                // Unmuting: the device goes back to a level of its own (AirPlay receivers and
+                // Squeezebox players take full when none was set). One that reports it is set
+                // back when it is above the limit; one that can't is given the level last
+                // published, held to the limit, or the limit itself while none is known
+                Volume::Mute(false) if reported => {
+                    next.and_then(|n| back_to_limit(n.level, max, percent_for))
+                }
+                Volume::Mute(false) => Some(match self.published().level.map(|l| l.level) {
+                    Some(pm_model::VolumeLevel::Db(d)) => Volume::Db(d.min(max)),
+                    Some(pm_model::VolumeLevel::Percent(p)) => Volume::Percent(p.min(percent_for(max))),
+                    None => match self.output.caps().hw_volume {
+                        Some(pm_model::VolumeKind::Db { .. }) => Volume::Db(max),
+                        _ => Volume::Percent(percent_for(max)),
+                    },
+                }),
+                _ => None,
+            };
             if let Some(back) = back {
-                next = self.set_and_read(back).await?;
+                let (again, read) = self.set_and_read(back).await?;
+                next = again;
+                // The unmute went through before this level: the state says so
+                if matches!(v, Volume::Mute(false)) && !read {
+                    if let Some(n) = next.as_mut() {
+                        n.muted = false;
+                    }
+                }
             }
         }
         let mut p = self.published();
@@ -516,14 +545,14 @@ impl Zone {
         limit.and_then(|f| f(&self.output.id()))
     }
 
-    /// Set `v` on the output and read the level back: the device's own reading, else the level
-    /// implied by `v` over the last one published (`None`: nothing to publish).
-    async fn set_and_read(&self, v: Volume) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+    /// Set `v` on the output and read the level back: the device's own reading (and `true`),
+    /// else the level implied by `v` over the last one published (`None`: nothing to publish).
+    async fn set_and_read(&self, v: Volume) -> Result<(Option<pm_model::ZoneVolume>, bool), SinkError> {
         self.output.set_volume(v).await?;
         let read = self.output.volume().await;
         Ok(match read {
-            Ok(Some(read)) => Some(read),
-            Err(_) => None,
+            Ok(Some(read)) => (Some(read), true),
+            Err(_) => (None, false),
             Ok(None) => {
                 let was = self.published().level;
                 let level = match v {
@@ -535,7 +564,7 @@ impl Zone {
                     Volume::Mute(m) => m,
                     _ => was.is_some_and(|w| w.muted),
                 };
-                level.map(|level| pm_model::ZoneVolume { level, muted })
+                (level.map(|level| pm_model::ZoneVolume { level, muted }), false)
             }
         })
     }

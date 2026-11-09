@@ -154,6 +154,9 @@ pub struct AirPlayOutput {
     meta: Mutex<Option<TrackMeta>>,
     /// The session while a sink is open, for volume.
     session: Arc<Mutex<Option<Session>>>,
+    /// The level last set (dB), which unmuting goes back to: AirPlay has no mute of its own
+    /// (-144 dB stands for it), so the receiver would otherwise come back at full.
+    level_db: Mutex<Option<f32>>,
 }
 
 impl AirPlayOutput {
@@ -179,6 +182,7 @@ impl AirPlayOutput {
             describe: None,
             meta: Mutex::new(None),
             session: Arc::new(Mutex::new(None)),
+            level_db: Mutex::new(None),
         }
     }
 
@@ -206,6 +210,19 @@ fn start_session(addr: SocketAddr, auth: bool, text: &Text) -> Result<Session, A
 /// The highest percent at or below `db` on AirPlay's -30…0 dB scale (0 is mute).
 fn airplay_percent(db: f32) -> u8 {
     ((db.clamp(-30.0, 0.0) + 30.0) / 30.0 * 100.0).floor() as u8
+}
+
+/// The dB sent for `v`: percent and dB on AirPlay's scale, -144 for a mute, and for an unmute the
+/// level set before the mute (`last`), or full when none was ever set (the zone holds that to
+/// its limit when it has one).
+fn db_for(v: Volume, last: Option<f32>) -> Result<f32, SinkError> {
+    Ok(match v {
+        Volume::Percent(p) => percent_to_db(p),
+        Volume::Db(db) => db.clamp(-30.0, 0.0),
+        Volume::Mute(true) => -144.0,
+        Volume::Mute(false) => last.unwrap_or(0.0),
+        Volume::Up | Volume::Down => return Err(SinkError::Device("AirPlay volume needs a level".into())),
+    })
 }
 
 /// AirPlay volume: -30 dB (quietest) to 0 dB; -144 is mute.
@@ -288,14 +305,13 @@ impl Output for AirPlayOutput {
     }
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        let db = match v {
-            Volume::Percent(p) => percent_to_db(p),
-            Volume::Db(db) => db.clamp(-30.0, 0.0),
-            Volume::Mute(true) => -144.0,
-            Volume::Mute(false) => 0.0,
-            Volume::Up | Volume::Down => {
-                return Err(SinkError::Device("AirPlay volume needs a level".into()))
+        let db = {
+            let mut last = self.level_db.lock().expect("level");
+            let db = db_for(v, *last)?;
+            if !matches!(v, Volume::Mute(_)) {
+                *last = Some(db);
             }
+            db
         };
         match self.session.lock().expect("session").as_mut() {
             Some(s) => s.set_volume_db(db).map_err(err),
@@ -424,6 +440,19 @@ impl Drop for AirPlaySink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Unmuting goes back to the level set before the mute, not to the receiver's full.
+    #[test]
+    fn unmuting_goes_back_to_the_level_set_before() {
+        assert_eq!(db_for(Volume::Mute(false), Some(-30.0)).unwrap(), -30.0);
+        assert_eq!(db_for(Volume::Mute(true), Some(-30.0)).unwrap(), -144.0);
+        assert_eq!(db_for(Volume::Db(-12.0), Some(-30.0)).unwrap(), -12.0);
+        assert_eq!(
+            db_for(Volume::Mute(false), None).unwrap(),
+            0.0,
+            "nothing set yet: the receiver's full, which the zone holds to its limit"
+        );
+    }
 
     #[test]
     fn a_volume_limit_caps_percent_on_airplays_scale() {

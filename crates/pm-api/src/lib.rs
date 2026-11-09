@@ -1915,7 +1915,7 @@ pub(crate) async fn zone_output(
             heos.clear();
         }
     }
-    Ok(if members.len() == 1 {
+    let out: Arc<dyn pm_zones::Output> = if members.len() == 1 {
         members.remove(0)
     } else if sonos.len() == ids.len() {
         let mut sonos = sonos;
@@ -1934,7 +1934,13 @@ pub(crate) async fn zone_output(
             pm_zones::outputs::GroupOutput::new(name, members)
                 .map_err(|e| ApiError::bad_request(e.to_string()))?,
         )
-    })
+    };
+    if ids.len() > 1 {
+        // Every group of speakers: each keeps its own volume limit in it (the strictest holds)
+        let members: Vec<OutputId> = ids.iter().map(|i| OutputId(i.clone())).collect();
+        s.sources.note_group(&out.id(), &members);
+    }
+    Ok(out)
 }
 
 async fn zone(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiResult<ZoneState> {
@@ -24530,5 +24536,71 @@ exec sleep 300
         assert_eq!(looks.load(SeqCst), 1);
         assert!(cached().contains("s3cret"));
         server.abort();
+    }
+
+    /// A zone of several speakers the owner makes takes the strictest volume limit among them, as
+    /// a listen-along group does: a speaker limited to -30 dB is never sent more in the group, a
+    /// limit lowered while the group exists holds at the next request, and the group's limit goes
+    /// with its zone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zone_of_several_speakers_takes_the_strictest_limit_among_them() {
+        use pm_model::{Volume, VolumeKind};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        let amp = Arc::new(NotedVolume {
+            inner: NullOutput::with_volume(VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            asked: Default::default(),
+        });
+        let speaker = Arc::new(NotedVolume {
+            inner: NullOutput::with_volume(VolumeKind::Percent),
+            asked: Default::default(),
+        });
+        let (amp_out, speaker_out): (Arc<dyn Output>, Arc<dyn Output>) = (amp.clone(), speaker.clone());
+        s.outputs.register(amp_out.clone());
+        s.outputs.register(speaker_out.clone());
+        let (aid, sid) = (amp_out.id(), speaker_out.id());
+        let limit = |db: f32| {
+            Some(pm_audio::PipelineConfig {
+                max_volume_db: Some(db),
+                ..pm_audio::PipelineConfig::default()
+            })
+        };
+        s.sources.set_dsp(&sid, limit(-30.0)).unwrap();
+        let (st, z) = call(
+            &app,
+            "POST",
+            "/v1/zones",
+            Some(serde_json::json!({"name": "Pair", "outputs": [aid.0, sid.0]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{z}");
+        let zone = zone_of(&s, z["id"].as_str().unwrap()).unwrap();
+        let group = zone.output().id();
+        assert_eq!(s.sources.volume_limit(&group), Some(-30.0));
+        let asked = |o: &NotedVolume| o.asked.lock().unwrap().clone();
+        // Full volume on the pair reaches each speaker held to -30 dB
+        zone.set_volume(Volume::Percent(100)).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(
+            asked(&speaker),
+            [Volume::Percent(50)],
+            "the speaker's own limit holds"
+        );
+        assert_eq!(asked(&amp), [Volume::Percent(50)]);
+        // Lowered while the pair exists: the next request is held to the new limit
+        s.sources.set_dsp(&sid, limit(-40.0)).unwrap();
+        zone.set_volume(Volume::Percent(100)).await.unwrap();
+        zone.wait_acked().await;
+        assert_eq!(asked(&speaker).last(), Some(&Volume::Percent(33)));
+        assert_eq!(asked(&amp).last(), Some(&Volume::Percent(33)));
+        // The zone goes: so does the group's limit
+        let (st, _) = call(&app, "DELETE", &format!("/v1/zones/{}", zone.id()), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert_eq!(s.sources.volume_limit(&group), None);
     }
 }

@@ -54,6 +54,9 @@ pub(crate) struct Link {
     /// The last volume set (16.16), sent again on every connection: squeezelite starts at gain 0
     /// and plays silence until it gets an `audg`.
     gain: Mutex<Option<u32>>,
+    /// The last level set that wasn't a mute: what unmuting goes back to (the zone held it to
+    /// its limit); full gain only when none was ever set.
+    unmuted: Mutex<Option<u32>>,
 }
 
 impl Link {
@@ -278,19 +281,22 @@ impl Output for SlimOutput {
     }
 
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
-        let gain = match v {
+        let g = match v {
             // Below -60 dB too: a volume limit under it still holds
-            Volume::Db(db) => 10f64.powf(db.min(0.0) as f64 / 20.0),
-            Volume::Percent(p) => (p.min(100) as f64 / 100.0).powi(2),
-            Volume::Mute(true) => 0.0,
-            Volume::Mute(false) => 1.0,
+            Volume::Db(db) => (10f64.powf(db.min(0.0) as f64 / 20.0) * FIXED_ONE as f64).round() as u32,
+            Volume::Percent(p) => ((p.min(100) as f64 / 100.0).powi(2) * FIXED_ONE as f64).round() as u32,
+            Volume::Mute(true) => 0,
+            // Back to the level set before the mute, not to full gain
+            Volume::Mute(false) => self.link.unmuted.lock().expect("gain").unwrap_or(FIXED_ONE),
             Volume::Up | Volume::Down => {
                 return Err(SinkError::Device(
                     "slimproto volume needs an absolute level".into(),
                 ));
             }
         };
-        let g = (gain * FIXED_ONE as f64).round() as u32;
+        if !matches!(v, Volume::Mute(_)) {
+            *self.link.unmuted.lock().expect("gain") = Some(g);
+        }
         *self.link.gain.lock().expect("gain") = Some(g);
         self.send(b"audg", &audg(g))
     }
@@ -641,6 +647,19 @@ mod tests {
         assert_eq!(&op, b"audg");
         let g = u32::from_be_bytes([data[10], data[11], data[12], data[13]]);
         assert!((g as f64 / FIXED_ONE as f64 - 0.501).abs() < 0.01, "{g}");
+        // Muted, then unmuted: back to -6 dB, not to full gain
+        out.set_volume(Volume::Mute(true)).await.unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
+        assert_eq!(&op, b"audg");
+        assert_eq!(&data[10..14], &0u32.to_be_bytes());
+        out.set_volume(Volume::Mute(false)).await.unwrap();
+        let (op, data) = next_frame(&mut player).unwrap();
+        assert_eq!(&op, b"audg");
+        assert_eq!(
+            &data[10..14],
+            &g.to_be_bytes(),
+            "unmuting goes back to the level set before"
+        );
 
         // STAT updates the status, once the player has confirmed the new stream (STMf):
         // a report already on its way describes the old one.

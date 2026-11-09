@@ -541,7 +541,7 @@ impl NodeState {
         let weak = Arc::downgrade(&node);
         node.zones
             .set_volume_limit(Some(Arc::new(move |o: &pm_zones::OutputId| {
-                weak.upgrade().and_then(|s| s.sources.dsp_for(o).max_volume_db)
+                weak.upgrade().and_then(|s| s.sources.volume_limit(o))
             })));
         node
     }
@@ -742,6 +742,7 @@ impl NodeState {
 
     pub fn remove_zone(&self, id: &ZoneId) -> Option<Arc<Zone>> {
         let z = self.zones.remove(id)?;
+        self.sources.forget_group(&z.output().id());
         let _ = self.events.send(ApiEvent::ZoneRemoved { zone: id.clone() });
         Some(z)
     }
