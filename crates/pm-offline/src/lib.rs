@@ -17,6 +17,6 @@ pub mod server;
 pub mod store;
 pub mod sync;
 
-pub use downloads::{summary, Summary};
+pub use downloads::{kept_otherwise, summary, Summary};
 pub use store::{node_dir, Event, Format, Index, Keep, KeepItem, KeptTrack, Label, Store};
 pub use sync::{flush, sync, Node, Progress, ProgressSink, StopCheck, SyncError, SyncOptions, SyncReport};

@@ -207,6 +207,8 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       // A break mid-song: opened again where it broke (the page's mid-song retry)
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'playing', position_ms: 800 }); window.__send(); }); await sleep(150);
+      // (the zone's stop reaches the page first, then the break: still the mid-song retry)
+      await p.evaluate(() => { Object.assign(window.__app, { transport: 'stopped', position_ms: 0 }); window.__send(); }); await sleep(100);
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 800, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(2200);
       const again = (await calls(p, 'native_load')).pop();
       check(again && again[1].atMs >= 700, `${at}: a break mid-song is opened again where it broke (${JSON.stringify(again && again[1].atMs)})`);

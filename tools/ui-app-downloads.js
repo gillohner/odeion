@@ -95,6 +95,11 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     await page.evaluate(() => { Object.assign(window.__dl, { track_ids: [1], album_ids: [7], songs: 1, bytes: 30e6 }); window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(400);
     const marks = await page.evaluate(() => [...document.querySelectorAll('.track[data-tid]')].map((r) => [r.dataset.tid, !!r.querySelector('.dl-mark')]));
     check(JSON.stringify(marks) === '[["1",true],["2",false]]', `${at}: the song on this phone carries the mark, the other not (${JSON.stringify(marks)})`);
+    // Remove download of a song kept only by itself (on the phone): said removed, not "stays"
+    await page.click('.track[data-tid="1"] [data-act="more"]'); await sleep(400);
+    await pick(page, 'Remove download'); await sleep(400);
+    const rmToast = await page.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
+    check(/“Song 1” removed from this phone/.test(rmToast) && !/stays/.test(rmToast), `${at}: removing a song kept alone says it goes (${rmToast})`);
     await goto(page, '/albums');
     const tiles = await page.evaluate(() => [...document.querySelectorAll('.tile[data-album]')].map((b) => [b.dataset.album, !!b.querySelector('.dl-mark')]));
     check(JSON.stringify(tiles) === '[["7",true],["8",false]]', `${at}: so does the album kept (${JSON.stringify(tiles)})`);
@@ -143,6 +148,10 @@ const goto = async (page, p) => { await page.evaluate((x) => { history.pushState
     await page.evaluate(() => { const sel = document.querySelector('#dllimit'); sel.__kept = true; Object.assign(window.__dl.progress, { done: 1, failed: 1, current: 'Song 3' }); window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(300);
     const inPlace = await page.evaluate(() => [!!document.querySelector('#dllimit').__kept, document.querySelector('.dl-note').innerText]);
     check(inPlace[0] && /Downloading 3 of 3: Song 3/.test(inPlace[1]), `${at}: a progress event updates the status line in place (${JSON.stringify(inPlace)})`);
+    // A song done (the lists change): the lists again, the limit picker stays the same element
+    await page.evaluate(() => { window.__dl.items[0].here = 3; window.__dl.items[0].bytes = 91e6; window.dispatchEvent(new CustomEvent('pmdesktop:downloads', { detail: JSON.parse(JSON.stringify(window.__dl)) })); }); await sleep(300);
+    const kept2 = await page.evaluate(() => [!!document.querySelector('#dllimit').__kept, document.querySelector('#dllists').innerText]);
+    check(kept2[0] && /3 of 3 songs here/.test(kept2[1]), `${at}: a song done redraws the lists, not the limit picker (${JSON.stringify(kept2[0])})`);
     const fetched = (await calls(page, 'downloads_state')).length;
     check(/Journey/.test(text) && /2 of 3 songs here/.test(text) && /61\.0 MB/.test(text) && /1 stay online/.test(text) && /waiting/.test(text), `${at}: each kept thing with its songs here and size`);
     await page.screenshot({ path: path.join(SHOTS, `storage-${w}.png`), fullPage: true });

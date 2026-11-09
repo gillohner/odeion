@@ -70,6 +70,10 @@ pub struct DownloadsState {
     pub free: Option<u64>,
     pub keep_free: u64,
     pub progress: pm_offline::Progress,
+    /// After Remove download of a song: it stays on the device, kept by its album, a playlist or
+    /// the favourites.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub still_kept: Option<bool>,
 }
 
 impl Offline {
@@ -134,6 +138,7 @@ impl Offline {
             other_bytes: self.other_bytes(node_id),
             free: pm_offline::sync::free_bytes(&self.base),
             keep_free: KEEP_FREE,
+            still_kept: None,
             // Another node's sync is not this one's
             progress: {
                 let p = self.progress.lock().unwrap_or_else(|e| e.into_inner());
@@ -165,6 +170,13 @@ impl Offline {
     /// The copy of a library song this device keeps from the node with this id, if any.
     pub fn track_file(&self, node_id: &str, track_id: i64) -> Option<PathBuf> {
         self.store(node_id)?.track_file(track_id).filter(|p| p.is_file())
+    }
+
+    /// Whether a song stays on the device when it alone is let go (see
+    /// [`pm_offline::kept_otherwise`]).
+    pub fn kept_otherwise(&self, node_id: &str, track_id: i64) -> bool {
+        self.store(node_id)
+            .is_some_and(|s| pm_offline::kept_otherwise(&s.index(), track_id))
     }
 
     /// Keep nothing: the next sync removes the device's copies (only those).
@@ -395,7 +407,11 @@ pub async fn downloads_keep(
     let o2 = o.clone();
     let st = blocking(move || {
         o2.keep(&node_id, &item, on, label)?;
-        Ok(o2.state(&node_id))
+        let mut st = o2.state(&node_id);
+        if let (false, pm_offline::KeepItem::Track(id)) = (on, &item) {
+            st.still_kept = Some(o2.kept_otherwise(&node_id, *id));
+        }
+        Ok(st)
     })
     .await?;
     sync_now(&app, &o);
@@ -435,8 +451,14 @@ pub async fn downloads_limit(
     Ok(st)
 }
 
-/// The page hears the downloads changed (`pmdesktop:downloads`, with the storage screen's state).
+/// The page hears the downloads changed (`pmdesktop:downloads`, with the storage screen's state),
+/// built on a blocking thread (it reads the stores and the disk).
 pub fn push_state(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || push_state_now(&app));
+}
+
+fn push_state_now(app: &tauri::AppHandle) {
     use tauri::Manager;
     let state = app.state::<crate::AppState>();
     let Ok((o, node_id)) = offline_of(&state) else {

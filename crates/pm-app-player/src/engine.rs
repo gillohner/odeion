@@ -175,6 +175,7 @@ impl Page {
                     self.url = Some(url);
                     self.current = Some(id);
                     self.advanced += 1;
+                    self.heard_at = 0;
                     // (a load under way keeps what the page said comes after its song)
                     if !self.loading {
                         self.want_ahead = None;
@@ -221,7 +222,14 @@ impl Page {
                 true.into()
             }
             ZoneEvent::Stopped => true.into(),
-            ZoneEvent::Paused { .. } | ZoneEvent::Resumed | ZoneEvent::Seeked { .. } => true.into(),
+            // Playing again: an old reason (a DAC that was unplugged) no longer applies
+            ZoneEvent::Resumed => {
+                if self.taken_at.is_none() && self.broke_at.is_none() {
+                    self.error = None;
+                }
+                true.into()
+            }
+            ZoneEvent::Paused { .. } | ZoneEvent::Seeked { .. } => true.into(),
             _ => false.into(),
         }
     }
@@ -609,7 +617,10 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             std::future::pending::<()>().await
                         }
                     };
+                    // Events first: the zone sends them before it publishes the state that follows
+                    // them (a break's error before the state that names the next song)
                     let urgent = tokio::select! {
+                        biased;
                         ev = events.recv() => match ev {
                             Ok(ev) => {
                                 let Some(inner) = player.upgrade() else { return };

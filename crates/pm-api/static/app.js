@@ -1484,7 +1484,7 @@
     // st: the app's last status (when it came); src: what the page set; at: where to start it
     // (restore, a seek before it plays); live: the app has src; adopt: the app already went on
     // to the song handed ahead; want: play pressed, the app not there yet; ahead: last handed
-    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false; let seq = 0; let fresh = false;
+    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null; let held = false; let seq = 0; let fresh = false; let opening = false;
     const mine = () => live && !!st && st.url === src;
     const playing = () => mine() && st.transport === 'playing';
     window.addEventListener('pmdesktop:native', (e) => {
@@ -1501,13 +1501,17 @@
       }
       if (st.url !== src) return;
       if (st.refused) { live = false; want = false; fire('nativerefused', st.refused); return; }
+      // The song opens again (the same one tapped while it played): the old one's updates wait
+      if (opening) return;
+      // A break mid-song: the page's mid-song retry, whatever the page heard before it
+      if (st.broke && !(was && was.url === src && was.broke) && !st.taken) { fire('pause'); fire('error'); return; }
       // (a song opened again while it played: its start is a start, for the bar and the spinner)
       const before = !fresh && was && was.url === src ? was.transport : 'stopped';
       if (st.transport === 'playing') fresh = false;
       if (st.transport === 'playing' && before !== 'playing') { want = false; done = false; fire('play'); fire('playing'); }
       // A break mid-song: the page's mid-song retry; a song that didn't start: its one retry; a
       // device gone (a DAC unplugged): paused, said in the bar
-      else if (st.transport !== 'playing' && before === 'playing') { fire('pause'); if (st.error && !st.taken) { if (st.broke) fire('error'); else if (st.transport === 'stopped' && st.position_ms === 0) fire('nativefailed', st.error); } }
+      else if (st.transport !== 'playing' && before === 'playing') { fire('pause'); if (st.error && !st.taken && !st.broke && st.transport === 'stopped' && st.position_ms === 0) fire('nativefailed', st.error); }
       // The song handed ahead didn't open (the node busy): the page's one retry
       else if (st.error && !st.taken && st.transport === 'stopped' && (!was || !was.error) && st.position_ms === 0) fire('nativefailed', st.error);
       if (was && was.duration_ms !== st.duration_ms) fire('durationchange');
@@ -1517,6 +1521,8 @@
       addEventListener: (t, f, o) => ev.addEventListener(t, f, o),
       get paused() { return !(want || playing()); },
       get ended() { return done; },
+      // A pause pressed since the last play (a retry doesn't start it again)
+      get held() { return held; },
       get currentTime() {
         if (!mine()) return at;
         const run = st.transport === 'playing' ? Math.min(1000, Date.now() - stAt) : 0;
@@ -1554,7 +1560,7 @@
           try { await call('native_play'); } catch (e) {
             if (tok !== seq) return;
             want = false; if (e && e.overtaken) return;
-            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', String((e && e.message) || e));
+            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: st ? st.position_ms / 1000 : 0 });
           }
           return;
         }
@@ -1566,18 +1572,24 @@
         await new Promise((r) => setTimeout(r, 0));
         if (src !== u || tok !== seq) return;
         fire('waiting');
+        opening = true;
         try { await call('native_load', { url: u, atMs: Math.round(at * 1000), ahead: ahead || null }); } catch (e) {
+          if (tok === seq) opening = false;
           if (src !== u || tok !== seq || (e && e.overtaken)) return;
           want = false; live = false;
           // Only what the app can't play itself goes to <audio>; anything else may pass (the
           // page tries once more)
           const err = new Error(String((e && e.message) || e)); err.name = e && e.refused ? 'NativeRefused' : 'NativeFailed'; throw err;
         }
+        if (tok !== seq) return;
+        opening = false;
+        // Its start, as the app says it now (the updates waited while it opened)
+        if (src === u && st && st.url === u && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
         // Paused while it opened
-        if (held && src === u && tok === seq) call('native_pause').catch(() => {});
+        if (held && src === u) call('native_pause').catch(() => {});
       },
       pause() { want = false; held = true; if (live) call('native_pause').catch(() => {}); },
-      stop() { want = false; adopt = false; done = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
+      stop() { want = false; adopt = false; done = false; opening = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
       // What follows what plays now (the page's next song), for a gapless join
       ahead(u) { const a = u ? abs(u) : null; if (a === ahead) return; ahead = a; if (live) call('native_ahead', { url: a }).catch(() => {}); },
       status: () => (mine() ? st : null),
@@ -1635,10 +1647,11 @@
   // Download (or Remove download) for a song, a library album or a playlist, in its ⋯ menu
   const dlKeep = async (kind, id, on, title, sub, online, songs) => {
     try {
-      dlSet(await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null, songs: songs || null })); markDownloads();
+      const d = await dlCall('downloads_keep', { kind, id: String(id), on, title: title || null, sub: sub || null, songs: songs || null });
+      dlSet(d); markDownloads();
       if (state.view === 'downloads' && state.dl) storageUpdate(state.dl);
-      // A song also kept with its album or a playlist stays
-      if (!on && kind === 'track' && dlHas(id)) { toast(`“${title}” stays on this phone with an album or playlist kept there`); return; }
+      // A song also kept with its album, a playlist or the favourites stays
+      if (!on && d && d.still_kept) { toast(`“${title}” stays on this phone: its album, a playlist or your favourites keep it there`); return; }
       toast(on ? `Downloading “${title}” to this phone${online ? `; ${online === 1 ? '1 song not in your library stays' : `${online} songs not in your library stay`} online` : ''}` : `“${title}” removed from this phone`);
     } catch (e) { toast(String((e && e.message) || e), 'error'); }
   };
@@ -1654,6 +1667,9 @@
   // The storage screen (Downloads in the app, online): what this phone keeps, its size against
   // the limit, the downloads under way, Remove per item and Remove all (the phone's copies only)
   const DL_LIMITS = [2e9, 5e9, 10e9, 20e9, 50e9, null];
+  // Each draw has a number: an older one finishing late (its fetch answered after an event) draws
+  // nothing
+  let storageDraws = 0;
   // What the screen's lists show (redrawn only when this changes)
   const storageKey = (d) => JSON.stringify([d.items, d.bytes, d.other_bytes, d.limit, d.songs]);
   const storageFacts = (d) => {
@@ -1666,12 +1682,15 @@
   // An event while the screen shows: the status line in place; the lists only when they changed
   const storageUpdate = (d) => {
     const main = $('#main'); const line = main && $('.dl-note', main);
-    if (!line || main.dataset.dlKey !== storageKey(d)) { if (main) drawStorage(main, d); return; }
+    if (!line) { if (main) drawStorage(main, d); return; }
     line.innerHTML = storageFacts(d);
+    // The lists again when they changed (a song done); the limit row and its picker stay
+    if (main.dataset.dlKey !== storageKey(d)) drawStorage(main, d, true);
   };
-  const drawStorage = async (main, given) => {
+  const drawStorage = async (main, given, listsOnly) => {
+    const mine = ++storageDraws;
     const d = given || await dlLoad();
-    if (state.view !== 'downloads') return;
+    if (state.view !== 'downloads' || mine !== storageDraws) return;
     if (!d) { main.innerHTML = pageHead('Downloads', null) + '<div class="notice">The app’s downloads can’t be read just now. Try again in a moment.</div>'; return; }
     main.dataset.dlKey = storageKey(d);
     const sub = (i) => [i.sub, i.kind === 'track' ? '' : i.songs ? `${i.here} of ${countOf(i.songs, 'songs')} here` : `${countOf(i.here, 'songs')} here`, i.online ? `${i.online} stay online` : '', i.bytes ? fileSize(i.bytes) : i.here ? '' : 'waiting'].filter(Boolean).map(esc).join(' · ');
@@ -1682,9 +1701,12 @@
       ? section('album', 'Albums') + section('playlist', 'Playlists') + section('track', 'Songs')
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
       : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
-    main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p>` + body + `<div class="set-group">${limit}</div>`;
+    const lists = $('#dllists', main);
+    if (listsOnly && lists) { lists.innerHTML = body; const c = $('.page-head .count, .page-head .muted', main); if (c && d.songs) c.textContent = String(d.songs); }
+    else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; if (x) dlKeep(x.kind, x.id, false, x.title); });
     const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
+    if (listsOnly && lists) return;
     $('#dllimit', main).onchange = async (e) => { const v = e.target.value; try { dlSet(await dlCall('downloads_limit', { bytes: v === '' ? null : Number(v) })); if (state.view === 'downloads') storageUpdate(state.dl); } catch (er) { toast(String((er && er.message) || er), 'error'); } };
   };
   // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays
@@ -2382,14 +2404,15 @@
   audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
   // A song that didn't start in the app (the node busy, the link down): once more after 2 s, as
   // for <audio>, then said
-  const nativeRetry = (i, why) => {
+  const nativeRetry = (i, why, at = 0) => {
     const it = state.browserQueue[i]; if (!it) return;
+    if (state.natOn && nat.held) return; // paused meanwhile: the next play opens it
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.nativeRetry = state.nativeRetry && state.nativeRetry.it === it ? state.nativeRetry : { it, n: 0 };
-    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
+    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i); if (at > 0) audio.currentTime = at; }, 2000); return; }
     toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
   };
-  nat.addEventListener('nativefailed', (e) => { if (state.natOn && state.browserIndex >= 0) nativeRetry(state.browserIndex, (e && e.detail) || 'it did not start'); });
+  nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; if (state.natOn && state.browserIndex >= 0) nativeRetry(state.browserIndex, (typeof d === 'string' ? d : d.why) || 'it did not start', d.at || 0); });
   // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
   nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
   audio.addEventListener('play', () => renderBar());
