@@ -460,6 +460,9 @@ pub fn push_state(app: &tauri::AppHandle) {
 
 fn push_state_now(app: &tauri::AppHandle) {
     use tauri::Manager;
+    // One at a time, read and sent in the same order: a later state never arrives first
+    static ORDER: Mutex<()> = Mutex::new(());
+    let _one = ORDER.lock().unwrap_or_else(|e| e.into_inner());
     let state = app.state::<crate::AppState>();
     let Ok((o, node_id)) = offline_of(&state) else {
         return;

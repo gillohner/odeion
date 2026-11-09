@@ -1490,6 +1490,9 @@
     window.addEventListener('pmdesktop:native', (e) => {
       const was = st; st = e.detail || null; stAt = Date.now(); if (!st) return;
       if (!live) return;
+      // The song opens again (the same one tapped while it played): the old copy's updates and
+      // its end wait
+      if (opening && st.url === src) return;
       // (an end of the song before this one, still playing while this one opens, is not this one's)
       const ended = was && st.ended > was.ended && was.url === src;
       if (ended) {
@@ -1501,10 +1504,9 @@
       }
       if (st.url !== src) return;
       if (st.refused) { live = false; want = false; fire('nativerefused', st.refused); return; }
-      // The song opens again (the same one tapped while it played): the old one's updates wait
-      if (opening) return;
-      // A break mid-song: the page's mid-song retry, whatever the page heard before it
-      if (st.broke && !(was && was.url === src && was.broke) && !st.taken) { fire('pause'); fire('error'); return; }
+      // A break mid-song: the page's mid-song retry, whatever the page heard before it (at its
+      // very start: the song's one retry)
+      if (st.broke && !(was && was.url === src && was.broke) && !st.taken) { fire('pause'); if (st.position_ms > 0) fire('error'); else fire('nativefailed', { why: st.error || 'the stream broke off', at: 0 }); return; }
       // (a song opened again while it played: its start is a start, for the bar and the spinner)
       const before = !fresh && was && was.url === src ? was.transport : 'stopped';
       if (st.transport === 'playing') fresh = false;
@@ -1556,12 +1558,16 @@
           if (st.transport === 'playing') return;
           // Carry on (it reopens the song when the node took the output, it broke, or it ended):
           // a failure goes to the page's own handlers, as a failed start does
-          want = true; const tok = ++seq;
+          want = true; const tok = ++seq; const pos = this.currentTime;
           try { await call('native_play'); } catch (e) {
             if (tok !== seq) return;
-            want = false; if (e && e.overtaken) return;
-            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: st ? st.position_ms / 1000 : 0 });
+            opening = false; want = false; if (e && e.overtaken) return;
+            live = false; fire(e && e.refused ? 'nativerefused' : 'nativefailed', { why: String((e && e.message) || e), at: pos });
+            return;
           }
+          if (tok !== seq) return;
+          // (a load this play overtook won't end `opening`: this answer does)
+          if (opening) { opening = false; if (src && st && st.url === src && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); } }
           return;
         }
         // Its first events may come before the answer. Only the latest play() changes anything
@@ -1702,7 +1708,7 @@
         + `<div class="actions"><button class="btn ghost" id="dlrmall">${icon('trash')} Remove all downloads</button></div>`
       : `<div class="empty">${icon('download')}<h3>Nothing on this phone yet</h3><p>Download an album, a playlist or a song from its ⋯ menu: it plays here without your node, and saves mobile data.</p></div>`;
     const lists = $('#dllists', main);
-    if (listsOnly && lists) { lists.innerHTML = body; const c = $('.page-head .count, .page-head .muted', main); if (c && d.songs) c.textContent = String(d.songs); }
+    if (listsOnly && lists) { lists.innerHTML = body; const h = $('.page-head', main); if (h) h.outerHTML = `<div class="page-head"><h2>Downloads${d.songs ? `<span class="count">${d.songs}</span>` : ''}</h2><div class="actions"></div></div>`; }
     else main.innerHTML = pageHead('Downloads', d.songs || null) + `<p class="muted small dl-note" role="status">${storageFacts(d)}</p><div id="dllists">${body}</div><div class="set-group">${limit}</div>`;
     $$('[data-dlrm]', main).forEach((b) => b.onclick = () => { const x = d.items[Number(b.dataset.dlrm)]; if (x) dlKeep(x.kind, x.id, false, x.title); });
     const all = $('#dlrmall', main); if (all) all.onclick = async () => { const ok = await choiceDialog({ title: 'Remove all downloads?', text: 'The copies on this phone go. Your library and your playlists stay as they are.', choices: [{ label: 'Remove all', value: true, primary: true }] }); if (!ok) return; try { dlSet(await dlCall('downloads_remove_all')); markDownloads(); toast('Downloads removed from this phone'); if (state.view === 'downloads') drawStorage(main, state.dl); } catch (e) { toast(String((e && e.message) || e), 'error'); } };
@@ -2325,7 +2331,7 @@
   { const sp = new URLSearchParams(location.search); if (sp.get('drive') === 'ok') { toast('Drive signed in: add a folder'); history.replaceState(null, '', location.pathname); } else if (sp.get('drive') === 'error') { toast('Drive: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
   { const sp = new URLSearchParams(location.search); if (sp.get('spotify') === 'ok') { toast('Spotify signed in'); history.replaceState(null, '', location.pathname); } else if (sp.get('spotify') === 'error') { toast('Spotify: ' + (sp.get('message') || 'sign-in failed'), 'error'); history.replaceState(null, '', location.pathname); } }
   const hitItem = (h, album) => ({ uri: h.uri || `${h.source || 'tidal'}:track:${h.id.replace(/^track:/, '')}`, title: h.title, artist: h.creator || '', album: album || '', duration_ms: h.duration_ms || null, image: h.image || null });
-  const browserPlay = (i) => {
+  const browserPlay = (i, startAt = 0) => {
     const it = state.browserQueue[i];
     // The end of the queue: the last song stays on the bar, stopped, ready to play again
     if (!it && i >= state.browserQueue.length && state.browserQueue.length) { audio.pause(); try { audio.currentTime = 0; } catch { /* not loaded */ } renderBar(); return; }
@@ -2343,6 +2349,8 @@
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
     if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
     browserSrc(it);
+    // (a retry opens the song where it was)
+    if (startAt > 0) audio.currentTime = startAt;
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
     nativeAhead();
@@ -2409,7 +2417,7 @@
     if (state.natOn && nat.held) return; // paused meanwhile: the next play opens it
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.nativeRetry = state.nativeRetry && state.nativeRetry.it === it ? state.nativeRetry : { it, n: 0 };
-    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i); if (at > 0) audio.currentTime = at; }, 2000); return; }
+    if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i, at); }, 2000); return; }
     toast(`“${it.title || 'This song'}” can't play here: ${why}.`, 'error');
   };
   nat.addEventListener('nativefailed', (e) => { const d = (e && e.detail) || {}; if (state.natOn && state.browserIndex >= 0) nativeRetry(state.browserIndex, (typeof d === 'string' ? d : d.why) || 'it did not start', d.at || 0); });
