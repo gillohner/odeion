@@ -27,6 +27,8 @@ struct Gate {
     cv: Condvar,
     /// Engine threads currently blocked in `take`.
     waiting: AtomicU64,
+    /// Calls of `take` so far (for `hang`: opens of `hang:` items).
+    taken: AtomicU64,
 }
 
 impl Gate {
@@ -38,6 +40,7 @@ impl Gate {
     fn take(&self) {
         let mut p = self.permits.lock().unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
+        self.taken.fetch_add(1, Ordering::SeqCst);
         self.waiting.fetch_add(1, Ordering::SeqCst);
         while *p == 0 {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -730,8 +733,9 @@ async fn other_commands_during_a_pass_are_served_after_it() {
                 .unwrap()
                 .clone();
                 assert!(st.now_playing.is_some(), "{cmd}: {st:?}");
-                // ...and Play resumes it
-                r.gate.allow(1000);
+                // ...and Play resumes it. The gate stays shut until the resume shows: with
+                // blocks flowing, the 300 ms track plays out before a watcher looks, and the
+                // state watch folds Playing into the Stopped that follows
                 r.zone.play();
                 tokio::time::timeout(
                     Duration::from_secs(2),
@@ -740,6 +744,7 @@ async fn other_commands_during_a_pass_are_served_after_it() {
                 .await
                 .unwrap_or_else(|_| panic!("{cmd}: Play resumes"))
                 .unwrap();
+                r.gate.allow(1000);
             }
             _ => assert_eq!(st.transport, Transport::Playing, "{cmd}: {st:?}"),
         }
@@ -747,6 +752,122 @@ async fn other_commands_during_a_pass_are_served_after_it() {
         r.zone.stop();
         r.zone.wait_stopped().await;
     }
+}
+
+/// The queue changing again and again while the next item's open doesn't return (a listener
+/// adding songs while a silent stream is next) keeps one open ahead in flight, not one per
+/// change: an open given up is waited out before another starts, and one that is still the
+/// next item is kept.
+#[tokio::test]
+async fn queue_changes_keep_one_open_ahead_in_flight() {
+    let r = rig(&[("a", RATE, 2_000)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("hang:first")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    let mut played = 100;
+    for i in 0..6 {
+        // A new next item (the open ahead is given up), then one at the end (it is kept)
+        r.zone
+            .enqueue(vec![QueueItem::new(format!("hang:next{i}"))], Insert::Next);
+        r.zone
+            .enqueue(vec![QueueItem::new(format!("hang:end{i}"))], Insert::End);
+        r.gate.allow(2);
+        played += 200;
+        wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
+        assert_eq!(
+            r.hang.waiting.load(Ordering::SeqCst),
+            1,
+            "round {i}: one open ahead in flight"
+        );
+    }
+    // The given-up open ends: then the next item is opened ahead, still one at a time
+    r.hang.allow(1);
+    r.gate.allow(2);
+    played += 200;
+    wait_for(|| r.rec.samples.lock().unwrap().len() >= played).await;
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.hang.allow(100);
+    r.gate.allow(1_000);
+    r.zone.stop();
+    r.zone.wait_stopped().await;
+}
+
+/// An item opened ahead is kept while the queue changes elsewhere (a song added at the end):
+/// it is opened once, and it is what the track's end goes to (here it fails, so it is skipped
+/// and the added song plays).
+#[tokio::test]
+async fn an_open_ahead_still_next_is_kept_when_the_queue_changes() {
+    let mut r = rig(&[("a", RATE, 300), ("b", RATE, 300)]);
+    r.zone
+        .enqueue(vec![QueueItem::new("a"), QueueItem::new("hang:x")], Insert::End);
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.gate.blocked().await;
+    r.zone.enqueue(vec![QueueItem::new("b")], Insert::End);
+    r.gate.allow(1);
+    wait_for(|| r.rec.samples.lock().unwrap().len() >= 200).await;
+    // The open ahead ends (it fails); the track then ends into it and on to "b"
+    r.hang.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 0).await;
+    r.gate.allow(1_000);
+    let mut w = r.zone.watch();
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        w.wait_for(|s| s.queue_index == Some(2) && s.now_playing.is_some()),
+    )
+    .await
+    .expect("the added song plays")
+    .unwrap();
+    assert_eq!(
+        r.hang.taken.load(Ordering::SeqCst),
+        1,
+        "the item opened ahead was kept, not opened again"
+    );
+    let evs = kinds(&drain_events(&mut r.events));
+    assert_eq!(
+        evs.iter().filter(|e| e.starts_with("skip:hang:x")).count(),
+        1,
+        "{evs:?}"
+    );
+    r.zone.stop();
+    r.zone.wait_stopped().await;
+}
+
+/// A track's end while an open given up is still running (a listener chose another next item
+/// while a silent stream was next) opens the next item on a thread of its own, never on the
+/// zone's: Stop is taken while that item is still opening.
+#[tokio::test]
+async fn a_tracks_end_beside_a_given_up_open_still_takes_stop() {
+    let r = rig(&[("a", RATE, 300)]);
+    r.zone.enqueue(
+        vec![QueueItem::new("a"), QueueItem::new("hang:first")],
+        Insert::End,
+    );
+    r.zone.play();
+    r.gate.allow(1);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 1).await;
+    r.gate.blocked().await;
+    // Another next item: the open ahead of "hang:first" is given up, its thread still running
+    r.zone.enqueue(vec![QueueItem::new("hang:second")], Insert::Next);
+    // The track ends: "hang:second" opens beside the given-up one
+    r.gate.allow(10);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 2).await;
+    r.zone.stop();
+    tokio::time::timeout(Duration::from_secs(2), r.zone.wait_stopped())
+        .await
+        .expect("Stop is taken while the next item is still opening");
+    assert_eq!(
+        r.hang.waiting.load(Ordering::SeqCst),
+        2,
+        "both opens are still in progress"
+    );
+    r.hang.allow(2);
+    wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 0).await;
 }
 
 /// The next item is opened ahead on its own thread: a next item whose open doesn't return
@@ -1743,5 +1864,410 @@ async fn a_level_the_device_announces_during_a_set_stands() {
         zone.state().volume,
         Some(pct(35)),
         "a change read after the announcement shows"
+    );
+}
+
+/// Every volume request for a zone is held to the node's limit for its output, whoever asks:
+/// absolute dB and percent before they reach the output, an up step after the read-back; mute
+/// is untouched, and without a limit requests pass as they are.
+#[tokio::test]
+async fn a_zones_volume_limit_holds_for_every_request() {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    let db_out: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Db {
+        min: -60.0,
+        max: 0.0,
+        step: 1.0,
+    }));
+    let pc_out: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Percent));
+    // A limit set reaches the zones there are and those made later
+    let db_zone = zones.create("Amp", db_out);
+    zones.set_volume_limit(Some(Arc::new(|o: &OutputId| match o.0.as_str() {
+        "null:db" => Some(-20.0),
+        "null:percent" => Some(-30.0),
+        _ => None,
+    })));
+    let pc_zone = zones.create("Linn", pc_out);
+    let level = |z: &pm_zones::Zone| z.state().volume.map(|v| (v.level, v.muted));
+    let set = |z: &Arc<pm_zones::Zone>, v: Volume| {
+        let z = z.clone();
+        async move {
+            z.set_volume(v).await.unwrap();
+            z.wait_acked().await;
+        }
+    };
+    // Absolute requests above the limit become the limit; under it they pass
+    set(&db_zone, Volume::Db(-3.0)).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-20.0), false)));
+    set(&db_zone, Volume::Db(-30.0)).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-30.0), false)));
+    // -30 dB is 50 % on a linear output
+    set(&pc_zone, Volume::Percent(100)).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(50), false)));
+    set(&pc_zone, Volume::Percent(20)).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(20), false)));
+    // A step up the device takes past the limit comes back to it
+    set(&db_zone, Volume::Db(-20.5)).await;
+    set(&db_zone, Volume::Up).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-20.0), false)));
+    set(&pc_zone, Volume::Percent(49)).await;
+    set(&pc_zone, Volume::Up).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(50), false)));
+    // Down and mute pass as they are
+    set(&db_zone, Volume::Down).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-21.0), false)));
+    set(&db_zone, Volume::Mute(true)).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-21.0), true)));
+    // No limit: as asked
+    zones.set_volume_limit(None);
+    set(&pc_zone, Volume::Percent(100)).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(100), false)));
+}
+
+/// An output that takes levels but can't say where it is (ALSA, Cast, AirPlay, groups): its
+/// inner level is what a device would show.
+struct Mute {
+    inner: NullOutput,
+}
+
+#[async_trait::async_trait]
+impl Output for Mute {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
+    }
+}
+
+/// On an output that can't report its level, a step up with a limit set is made from the level
+/// the zone last published and held to the limit (the device can't be checked after the step);
+/// with no level known it is refused; without a limit it is the device's own step.
+#[tokio::test]
+async fn an_up_step_is_held_to_the_limit_on_an_output_that_cant_report_its_level() {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|o: &OutputId| match o.0.as_str() {
+        "null:db" => Some(-20.0),
+        "null:percent" => Some(-30.0),
+        _ => None,
+    })));
+    let db = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let pc = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Percent),
+    });
+    let db_zone = zones.create("Amp", db.clone());
+    let pc_zone = zones.create("Speaker", pc.clone());
+    // What the device shows (its own level), which the zone can't ask for
+    let device = |o: &Arc<Mute>| {
+        let o = o.clone();
+        async move { o.inner.volume().await.unwrap().unwrap() }
+    };
+    // No level known yet: a step can't be held to the limit, so it is refused
+    assert!(db_zone.set_volume(Volume::Up).await.is_err());
+    // From -20.5 dB a step of 1 dB would land at -19.5: the device gets -20
+    db_zone.set_volume(Volume::Db(-20.5)).await.unwrap();
+    db_zone.set_volume(Volume::Up).await.unwrap();
+    db_zone.wait_acked().await;
+    assert_eq!(device(&db).await.level, VolumeLevel::Db(-20.0));
+    assert_eq!(
+        db_zone.state().volume.map(|v| v.level),
+        Some(VolumeLevel::Db(-20.0))
+    );
+    // Under the limit the step is a step
+    db_zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    db_zone.set_volume(Volume::Up).await.unwrap();
+    db_zone.wait_acked().await;
+    assert_eq!(device(&db).await.level, VolumeLevel::Db(-29.0));
+    // Percent: 49 + 3 would pass 50 (-30 dB on a linear output)
+    pc_zone.set_volume(Volume::Percent(49)).await.unwrap();
+    pc_zone.set_volume(Volume::Up).await.unwrap();
+    pc_zone.wait_acked().await;
+    assert_eq!(device(&pc).await.level, VolumeLevel::Percent(50));
+    // Without a limit the device steps by itself
+    zones.set_volume_limit(None);
+    pc_zone.set_volume(Volume::Up).await.unwrap();
+    pc_zone.wait_acked().await;
+    assert_eq!(device(&pc).await.level, VolumeLevel::Percent(53));
+}
+
+/// An output that takes unmuting as "back to full" (AirPlay receivers and Squeezebox players do
+/// when nothing was set) and reports its level.
+struct LoudUnmute {
+    inner: NullOutput,
+}
+
+#[async_trait::async_trait]
+impl Output for LoudUnmute {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        if v == Volume::Mute(false) {
+            self.inner.set_volume(Volume::Db(0.0)).await?;
+        }
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        self.inner.volume().await
+    }
+}
+
+/// Unmuting is held to the zone's limit like any other request. A device that comes back above
+/// the limit and reports it is set back to the limit; one that can't report its level is given
+/// the level last published, held to the limit, or the limit itself while none is known.
+#[tokio::test]
+async fn unmuting_is_held_to_the_limit() {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(Some(-20.0)));
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    let l = limit.clone();
+    zones.set_volume_limit(Some(Arc::new(move |_: &OutputId| *l.lock().unwrap())));
+    // Reports its level, comes back at full
+    let loud = Arc::new(LoudUnmute {
+        inner: NullOutput::with_volume(VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let zone = zones.create("Amp", loud.clone());
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    let device = loud.inner.volume().await.unwrap().unwrap();
+    assert_eq!((device.level, device.muted), (VolumeLevel::Db(-20.0), false));
+    assert_eq!(
+        zone.state().volume,
+        Some(pm_model::ZoneVolume {
+            level: VolumeLevel::Db(-20.0),
+            muted: false
+        })
+    );
+    // Can't report: the level last published, held to a limit lowered since
+    let quiet = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Percent),
+    });
+    let speaker = zones.create("Speaker", quiet.clone());
+    *limit.lock().unwrap() = None;
+    speaker.set_volume(Volume::Percent(80)).await.unwrap();
+    *limit.lock().unwrap() = Some(-30.0);
+    speaker.set_volume(Volume::Mute(true)).await.unwrap();
+    speaker.set_volume(Volume::Mute(false)).await.unwrap();
+    speaker.wait_acked().await;
+    let device = quiet.inner.volume().await.unwrap().unwrap();
+    assert_eq!((device.level, device.muted), (VolumeLevel::Percent(50), false));
+    assert_eq!(
+        speaker.state().volume,
+        Some(pm_model::ZoneVolume {
+            level: VolumeLevel::Percent(50),
+            muted: false
+        })
+    );
+    // Under the limit the level stays where it was
+    speaker.set_volume(Volume::Percent(20)).await.unwrap();
+    speaker.set_volume(Volume::Mute(true)).await.unwrap();
+    speaker.set_volume(Volume::Mute(false)).await.unwrap();
+    speaker.wait_acked().await;
+    assert_eq!(
+        quiet.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Percent(20)
+    );
+    // A device that keeps its own level through a mute, with no level known: left alone (never
+    // raised to the limit)
+    let fresh = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    fresh.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    let unknown = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    unknown.inner.set_volume(Volume::Db(-45.0)).await.unwrap();
+    let z = fresh.create("Amp", unknown.clone());
+    z.set_volume(Volume::Mute(false)).await.unwrap();
+    z.wait_acked().await;
+    assert_eq!(
+        unknown.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Db(-45.0)
+    );
+    assert_eq!(z.state().volume, None);
+}
+
+/// An output like an AirPlay receiver or a Squeezebox player: no mute of its own, unmuting is
+/// the level set before (full when none was), it can't report its level, and it says so.
+struct ChoosesOnUnmute {
+    inner: NullOutput,
+    last: Mutex<Option<f32>>,
+    /// Every request, in order.
+    asked: Mutex<Vec<Volume>>,
+    /// Refuse every unmute (a member of a group that is away).
+    refuse_unmute: bool,
+}
+
+impl ChoosesOnUnmute {
+    fn new() -> Self {
+        Self {
+            inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            last: Mutex::new(None),
+            asked: Mutex::new(Vec::new()),
+            refuse_unmute: false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Output for ChoosesOnUnmute {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    fn unmute_restores_level(&self) -> bool {
+        false
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.asked.lock().unwrap().push(v);
+        match v {
+            Volume::Db(d) => {
+                *self.last.lock().unwrap() = Some(d);
+                self.inner.set_volume(v).await
+            }
+            Volume::Mute(false) if self.refuse_unmute => Err(SinkError::Device("away".into())),
+            Volume::Mute(false) => {
+                let back = self.last.lock().unwrap().unwrap_or(0.0);
+                self.inner.set_volume(Volume::Db(back)).await?;
+                self.inner.set_volume(v).await
+            }
+            other => self.inner.set_volume(other).await,
+        }
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
+    }
+}
+
+/// An output that chooses the level on unmuting, with no level known yet, gets the limit before
+/// the unmute: it never comes back at full, not even for a moment. With a level known, unmuting
+/// is that level held to the limit.
+#[tokio::test]
+async fn an_output_that_chooses_its_level_on_unmuting_gets_the_limit_first() {
+    use pm_model::VolumeLevel;
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    let out = Arc::new(ChoosesOnUnmute::new());
+    let zone = zones.create("Receiver", out.clone());
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    assert_eq!(
+        out.asked.lock().unwrap().clone(),
+        [Volume::Db(-20.0), Volume::Mute(false)],
+        "the limit first, then the unmute"
+    );
+    let device = out.inner.volume().await.unwrap().unwrap();
+    assert_eq!((device.level, device.muted), (VolumeLevel::Db(-20.0), false));
+    assert_eq!(zone.state().volume.map(|v| v.level), Some(VolumeLevel::Db(-20.0)));
+    // A level known: unmuting goes back to it (the device's own way), held to the limit
+    zone.set_volume(Volume::Db(-35.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    assert_eq!(
+        out.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Db(-35.0)
+    );
+}
+
+/// A group whose later member refuses the unmute: the earlier member came back all the same,
+/// so the cap is applied to the group anyway, and the refusal is reported.
+#[tokio::test]
+async fn a_groups_unmute_is_capped_when_a_member_refuses_it() {
+    use pm_model::VolumeLevel;
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    // The first comes back at full on an unmute (nothing set on it before), the second refuses
+    let first = Arc::new(ChoosesOnUnmute::new());
+    let mut away = ChoosesOnUnmute::new();
+    away.refuse_unmute = true;
+    let away = Arc::new(away);
+    let members: Vec<Arc<dyn Output>> = vec![first.clone(), away.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    // A level set on the group reaches both; the first forgets it (a receiver that was off)
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    *first.last.lock().unwrap() = None;
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    let r = zone.set_volume(Volume::Mute(false)).await;
+    assert!(r.is_err(), "the refusal is reported");
+    zone.wait_acked().await;
+    let device = first.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (device.level, device.muted),
+        (VolumeLevel::Db(-30.0), false),
+        "the first member, back at full, is held to the level last published"
     );
 }
