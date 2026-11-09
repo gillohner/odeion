@@ -4,7 +4,8 @@
 //!
 //! - **The grant.** A listener approves the node in Ring a second time, for
 //!   [`PERSONAL_CAPABILITIES`] only (their bookmarks and collections folders: no vault, no files).
-//!   A grant approved for less (bookmarks only, from before collections came) is asked for again.
+//!   A grant kept for less or more (bookmarks only, from before collections came) is removed: they
+//!   connect again.
 //!   The node keeps that session only when the approver is the listener asking, in
 //!   `<data>/grants/<z32>.session` (created 0600, never in a backup), and it goes when they
 //!   disconnect or People › Remove removes them. It is never used for anyone else.
@@ -209,19 +210,33 @@ impl Grants {
             .await
             .map_err(|_| PersonalError::Unreachable("the homeserver took too long".into()))?
             .map_err(|e| self.noted(key, classify_grant(&e)))?;
-        // A grant approved for fewer folders than the node needs now (bookmarks only, from before
-        // collections came) is approved again in Ring: until then it isn't used, so the listener
-        // is asked to (their grant shows as lost)
-        if !covers_every_folder(&pm_pubky::homeserver::session_capabilities(&session)) {
-            return Err(PersonalError::Refused(
-                "approved for fewer folders than the node needs now: approve it again".into(),
-            ));
-        }
+        self.may_hold(
+            key,
+            &session.public_key().to_string(),
+            &pm_pubky::homeserver::session_capabilities(&session),
+        )?;
         sessions()
             .lock()
             .expect("sessions")
             .insert(key.to_string(), session.clone());
         Ok((session, true))
+    }
+
+    /// Whether a grant read back from its file may stay: theirs, and for exactly what the node
+    /// asks for now ([`may_keep`]). One that doesn't fit (kept by an earlier build that asked for
+    /// more) is removed, so the node holds no key wider than it uses; they connect again.
+    fn may_hold(&self, key: &str, approver: &str, granted: &[String]) -> Result<(), PersonalError> {
+        let Err(why) = may_keep(key, approver, granted) else {
+            return Ok(());
+        };
+        sessions().lock().expect("sessions").remove(key);
+        if let Some(f) = grant_file(&self.dir, key) {
+            let _ = std::fs::remove_file(f);
+        }
+        tracing::warn!(%key, "a kept listener grant doesn't fit what the node asks for; removed: {why}");
+        Err(PersonalError::Refused(format!(
+            "{why}: connect your homeserver again"
+        )))
     }
 
     /// One call to their homeserver with their session, time-limited. With `gone_ok`, a 404 is
@@ -267,11 +282,6 @@ impl Grants {
         }
         e
     }
-}
-
-/// Whether a grant's capabilities cover every folder the node asks for now.
-fn covers_every_folder(granted: &[String]) -> bool {
-    pm_pubky::homeserver::missing_capabilities(granted, PERSONAL_CAPABILITIES).is_empty()
 }
 
 /// How a path of theirs is reached: `/pub/` publicly, anything else with their session.
@@ -1336,28 +1346,63 @@ mod tests {
         assert_eq!(keeping.await.unwrap()["state"], "expired");
     }
 
-    #[test]
-    fn a_bookmark_the_node_cant_build_is_dropped_not_waited_on() {
-        // Longer than any reference a bookmark may hold: no homeserver could ever take it
+    #[tokio::test]
+    async fn a_bookmark_the_node_cant_build_is_dropped_not_waited_on() {
+        // The node's own adapter (no client needed: it builds first). Longer than any reference
+        // a bookmark may hold (1,024 code points): no homeserver could ever take it
+        let dir = tempfile::tempdir().unwrap();
+        let g = Grants {
+            dir: dir.path().to_path_buf(),
+            hs: None,
+        };
         let long = format!("https://example.com/{}", "a".repeat(20_000));
         assert!(matches!(
-            pm_pubky::v1::bookmark_of(&long, 0).map_err(unbuildable),
+            g.put_bookmark("ann", &long, 0).await,
             Err(PersonalError::Rejected(_))
         ));
         assert!(matches!(
-            pm_pubky::v1::bookmark_path(&long).map_err(unbuildable),
+            g.delete_bookmark("ann", &long).await,
             Err(PersonalError::Rejected(_))
         ));
     }
 
     #[test]
     fn a_grant_from_before_collections_is_asked_for_again() {
-        let all: Vec<String> = PERSONAL_CAPABILITIES.split(',').map(String::from).collect();
-        assert!(covers_every_folder(&all));
-        assert!(
-            !covers_every_folder(&["/priv/social/v1/bookmarks/:rw".to_string()]),
-            "bookmarks only (#261's grant): approve again"
-        );
+        // Bookmarks only (#261's grant): it doesn't fit the three folders, so it goes and they
+        // connect again, now for their collections too
+        let dir = tempfile::tempdir().unwrap();
+        let g = Grants {
+            dir: dir.path().to_path_buf(),
+            hs: None,
+        };
+        let k = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let file = grant_file(dir.path(), k).unwrap();
+        crate::imports::write_private(&file, b"fixture-secret").unwrap();
+        assert!(matches!(
+            g.may_hold(k, k, &["/priv/social/v1/bookmarks/:rw".to_string()]),
+            Err(PersonalError::Refused(_))
+        ));
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_kept_grant_wider_than_what_the_node_asks_for_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = Grants {
+            dir: dir.path().to_path_buf(),
+            hs: None,
+        };
+        let k = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let file = grant_file(dir.path(), k).unwrap();
+        crate::imports::write_private(&file, b"fixture-secret").unwrap();
+        let exact: Vec<String> = PERSONAL_CAPABILITIES.split(',').map(String::from).collect();
+        assert!(g.may_hold(k, k, &exact).is_ok());
+        assert!(file.exists(), "one that fits stays");
+        // Kept by an earlier build that asked for more (their sources vault, say)
+        let wider = [exact, vec!["/priv/pubky.music/vault/:rw".to_string()]].concat();
+        assert!(matches!(g.may_hold(k, k, &wider), Err(PersonalError::Refused(_))));
+        assert!(!file.exists(), "removed: the node holds no wider key");
+        assert!(!g.connected(k), "they connect again");
     }
 
     #[test]
