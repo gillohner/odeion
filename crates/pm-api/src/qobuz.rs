@@ -2,10 +2,10 @@
 //! open API, so the source is unofficial-only: it uses the private API Qobuz's own players use,
 //! opt-in behind a warning, and can stop working at any time.
 //!
-//! - **App:** a Qobuz app ID and secret the owner enters in Sources › Qobuz (or `[qobuz] app_id` /
-//!   `app_secret`, `PM_QOBUZ_APP_ID` / `_SECRET`). The node has no built-in app and never fetches
-//!   one; without it the source stays off.
-//! - **Sign-in:** the owner's Qobuz email and password, sent once to `user/login`; the node keeps
+//! - **App:** the current web player's app ID and signing secret, discovered automatically and
+//!   cached for the whole node. `[qobuz] app_id` / `app_secret` and `PM_QOBUZ_APP_ID` / `_SECRET`
+//!   are silent admin overrides and suppress discovery.
+//! - **Sign-in:** each person's Qobuz email and password, sent once to `user/login`; the node keeps
 //!   only the session token Qobuz answers with (a sign-in: a backup carries it only under the
 //!   passphrase). Accounts without a streaming plan are refused there.
 //! - **Streams:** `track/getFileUrl` (signed with the app secret) answers a plain FLAC URL, up to
@@ -25,6 +25,30 @@ use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+mod auto;
+
+/// Points discovery at a mock web player and forgets what the last discovery found.
+#[cfg(test)]
+pub(crate) fn set_player(url: &str) {
+    auto::set_player(url);
+    forget_discovery();
+}
+
+#[cfg(test)]
+pub(crate) fn forget_discovery() {
+    *DISCOVERY.lock().expect("Qobuz discovery") = Discovery::NONE;
+}
+
+/// Moves the discovery clock on by `by`, so the last discovery looks that much older.
+#[cfg(test)]
+pub(crate) fn age_discovery(by: Duration) {
+    *CLOCK_SKEW.lock().expect("Qobuz clock") += by;
+}
+
+#[cfg(test)]
+static CLOCK_SKEW: std::sync::Mutex<Duration> = std::sync::Mutex::new(Duration::ZERO);
 
 pub const SOURCE_ID: &str = "qobuz";
 pub const TRACK_URI_PREFIX: &str = "qobuz:track:";
@@ -43,12 +67,13 @@ pub fn page_url(kind: &str, id: &str) -> String {
     format!("https://open.qobuz.com/{kind}/{id}")
 }
 
+#[cfg(test)]
 fn base_override() -> &'static std::sync::RwLock<Option<String>> {
     static B: std::sync::OnceLock<std::sync::RwLock<Option<String>>> = std::sync::OnceLock::new();
     B.get_or_init(|| std::sync::RwLock::new(None))
 }
 
-/// Point the node at another Qobuz API (tests: a mock).
+#[cfg(test)]
 pub fn set_api_base(url: &str) {
     *base_override().write().expect("qobuz base") = Some(url.trim_end_matches('/').to_string());
 }
@@ -57,14 +82,11 @@ pub fn set_api_base(url: &str) {
 pub(crate) static API_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn api_base() -> String {
+    #[cfg(test)]
     if let Some(b) = base_override().read().expect("qobuz base").clone() {
         return b;
     }
-    std::env::var("PM_QOBUZ_API_BASE")
-        .ok()
-        .map(|v| v.trim().trim_end_matches('/').to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| API_BASE.into())
+    API_BASE.into()
 }
 
 fn now() -> i64 {
@@ -92,7 +114,7 @@ fn album_id(id: &str) -> Result<&str, ApiError> {
 
 // ---- state ---------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Session {
     pub token: String,
     #[serde(default)]
@@ -107,9 +129,23 @@ pub struct Session {
     /// The plan streams hi-res (else 16-bit/44.1 kHz at most).
     #[serde(default)]
     pub hires: bool,
-    /// The app this sign-in was imported from (`streamrip`, `pasted`, …); none for one made here.
+    /// Kept only so sessions stored by older versions still load; sign-ins made now leave it empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session")
+            .field("token", &if self.token.is_empty() { "" } else { "<set>" })
+            .field("user_id", &self.user_id)
+            .field("name", &self.name)
+            .field("plan", &self.plan)
+            .field("country", &self.country)
+            .field("hires", &self.hires)
+            .field("from", &self.from)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -137,9 +173,10 @@ pub struct ModeState {
 pub struct App {
     pub id: String,
     pub secret: String,
-    /// `settings` or `config`.
     #[serde(default)]
     pub from: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle_url: Option<String>,
 }
 
 impl std::fmt::Debug for App {
@@ -148,6 +185,7 @@ impl std::fmt::Debug for App {
             .field("id", &self.id)
             .field("secret", &if self.secret.is_empty() { "" } else { "<set>" })
             .field("from", &self.from)
+            .field("bundle_url", &self.bundle_url)
             .finish()
     }
 }
@@ -192,16 +230,69 @@ fn config_app() -> &'static std::sync::OnceLock<App> {
     &C
 }
 
-/// The app from node.toml (`[qobuz] app_id` / `app_secret`), set once at start-up; Settings
-/// override it.
-pub fn set_config_app(id: &str, secret: &str) {
-    if !id.trim().is_empty() {
-        let _ = config_app().set(App {
-            id: id.trim().into(),
-            secret: secret.trim().into(),
-            from: "config".into(),
-        });
+#[cfg(test)]
+static TEST_CONFIG_APP: std::sync::RwLock<Option<App>> = std::sync::RwLock::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_config_app(app: Option<App>) {
+    *TEST_CONFIG_APP.write().expect("Qobuz test config") = app;
+}
+
+/// An admin override counts only with both values; one alone is ignored with a warning.
+fn override_app(id: &str, secret: &str) -> Option<App> {
+    let (id, secret) = (id.trim(), secret.trim());
+    if id.is_empty() || secret.is_empty() {
+        if !id.is_empty() || !secret.is_empty() {
+            tracing::warn!("Qobuz: the app ID override needs both app_id and app_secret; ignored");
+        }
+        return None;
     }
+    Some(App {
+        id: id.into(),
+        secret: secret.into(),
+        from: "config".into(),
+        bundle_url: None,
+    })
+}
+
+/// The silent admin override from node.toml (`[qobuz] app_id` / `app_secret`).
+pub fn set_config_app(id: &str, secret: &str) {
+    if let Some(app) = override_app(id, secret) {
+        let _ = config_app().set(app);
+    }
+}
+
+/// `PM_QOBUZ_APP_ID` / `PM_QOBUZ_APP_SECRET`, read once.
+fn env_app() -> Option<App> {
+    static E: std::sync::OnceLock<Option<App>> = std::sync::OnceLock::new();
+    E.get_or_init(|| {
+        override_app(
+            &std::env::var("PM_QOBUZ_APP_ID").unwrap_or_default(),
+            &std::env::var("PM_QOBUZ_APP_SECRET").unwrap_or_default(),
+        )
+    })
+    .clone()
+}
+
+fn configured_app() -> Option<App> {
+    #[cfg(test)]
+    if let Some(a) = TEST_CONFIG_APP.read().expect("Qobuz test config").clone() {
+        return Some(a);
+    }
+    config_app().get().cloned().or_else(env_app)
+}
+
+fn cached_app(lib: &pm_library::Library) -> Option<App> {
+    lib.get_setting(APP_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .filter(|a: &App| !a.id.is_empty() && !a.secret.is_empty())
+}
+
+fn cache_app(lib: &pm_library::Library, app: &App) -> Result<(), ApiError> {
+    lib.set_setting(APP_KEY, &serde_json::to_string(app).expect("app serializes"))?;
+    Ok(())
 }
 
 /// The app id the node's Qobuz sign-in is made with (`vault_cache`).
@@ -209,26 +300,9 @@ pub(crate) fn app_id(s: &NodeState) -> Option<String> {
     app_of(&s.library.lock().expect("library poisoned")).map(|a| a.id)
 }
 
-/// The app the owner set: in Settings, else node.toml, else `PM_QOBUZ_APP_ID` / `_SECRET`.
+/// The admin override wins; otherwise the last web-player app is reused.
 pub fn app_of(lib: &pm_library::Library) -> Option<App> {
-    let kept: Option<App> = lib
-        .get_setting(APP_KEY)
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok());
-    if let Some(a) = kept.filter(|a| !a.id.is_empty()) {
-        return Some(a);
-    }
-    if let Some(a) = config_app().get() {
-        return Some(a.clone());
-    }
-    let id = std::env::var("PM_QOBUZ_APP_ID").unwrap_or_default();
-    let secret = std::env::var("PM_QOBUZ_APP_SECRET").unwrap_or_default();
-    (!id.trim().is_empty()).then(|| App {
-        id: id.trim().into(),
-        secret: secret.trim().into(),
-        from: "config".into(),
-    })
+    configured_app().or_else(|| cached_app(lib))
 }
 
 /// On, signed in and with an app: Qobuz searches and plays for this person.
@@ -245,7 +319,7 @@ fn ready(s: &NodeState, who: &Who) -> Result<(App, Session), ApiError> {
     let app = app_of(&lib).ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "Enter a Qobuz app ID and secret first (Sources › Qobuz)",
+            "Sign in to Qobuz again to refresh automatic setup",
         )
     })?;
     if !st.enabled {
@@ -279,6 +353,7 @@ async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result
     let resp = s
         .http_client()
         .get(format!("{}/{path}", api_base()))
+        .header(reqwest::header::USER_AGENT, auto::USER_AGENT)
         .header("X-App-Id", &app.id)
         .header("X-User-Auth-Token", &sess.token)
         .query(query)
@@ -464,14 +539,12 @@ impl StreamingService for Qobuz {
     fn info(&self, s: &NodeState) -> SourceInfo {
         let lib = s.library.lock().expect("library poisoned");
         let st = load(&lib, &crate::accounts::asking());
-        let status = if app_of(&lib).is_none() {
-            "not configured: enter a Qobuz app ID and secret under Sources › Qobuz".to_string()
-        } else if let Some(h) = st.health.as_ref().filter(|h| !h.ok && !st.enabled) {
+        let status = if let Some(h) = st.health.as_ref().filter(|h| !h.ok && !st.enabled) {
             format!("error: {}", h.detail)
-        } else if !st.enabled {
-            "off: switch Qobuz (unofficial) on under Sources › Qobuz".to_string()
         } else if st.session.is_none() {
             "needs sign-in".to_string()
+        } else if !st.enabled {
+            "off: switch Qobuz (unofficial) on under Sources › Qobuz".to_string()
         } else {
             "signed in".to_string()
         };
@@ -642,18 +715,12 @@ pub struct QobuzStatus {
     pub quality: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<Health>,
-    /// Where the app comes from: `settings` or `config`; absent = none yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_from: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_id: Option<String>,
     pub warning: String,
 }
 
 pub(crate) fn view(s: &NodeState, who: &Who) -> QobuzStatus {
     let lib = s.library.lock().expect("library poisoned");
     let st = load(&lib, who);
-    let app = app_of(&lib);
     QobuzStatus {
         enabled: st.enabled,
         signed_in: st.session.is_some(),
@@ -669,8 +736,6 @@ pub(crate) fn view(s: &NodeState, who: &Who) -> QobuzStatus {
             st.quality.clone()
         },
         health: st.health.clone(),
-        app_from: app.as_ref().map(|a| a.from.clone()),
-        app_id: app.map(|a| a.id),
         warning: WARNING.into(),
     }
 }
@@ -687,38 +752,18 @@ pub(crate) async fn get_status(
 pub struct QobuzUpdate {
     pub enabled: Option<bool>,
     pub quality: Option<String>,
-    /// Replace the app (both; an empty id forgets it and goes back to node.toml's).
-    pub app_id: Option<String>,
-    pub app_secret: Option<String>,
 }
 
-/// `PUT /v1/sources/qobuz/unofficial {enabled?, quality?, app_id?, app_secret?}`.
+/// `PUT /v1/sources/qobuz/unofficial {enabled?, quality?}`.
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
     axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Json(u): Json<QobuzUpdate>,
 ) -> ApiResult<QobuzStatus> {
     let who = Who::of(&caller);
-    // The app is the node's, set by its owner; the switch and quality are each person's
-    if u.app_id.is_some() && !who.is_owner() {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "only the node's owner sets the Qobuz app",
-        ));
-    }
     if let Some(q) = &u.quality {
         if q != "max" && q != "cd" && q != "mp3" {
             return Err(ApiError::bad_request("quality is max, cd or mp3"));
-        }
-    }
-    if let Some(id) = &u.app_id {
-        let id = id.trim();
-        let lib = s.library.lock().expect("library poisoned");
-        if id.is_empty() {
-            lib.delete_setting(APP_KEY)?;
-        } else {
-            let a = valid_app(id, u.app_secret.as_deref().unwrap_or_default())?;
-            lib.set_setting(APP_KEY, &serde_json::to_string(&a).expect("app serializes"))?;
         }
     }
     update(&s, &who, |st| {
@@ -737,114 +782,181 @@ pub(crate) async fn put(
     Ok(Json(view(&s, &who)))
 }
 
-/// An app as the owner typed it, in the shape Qobuz issues them (so a paste of the wrong thing is
-/// said at once).
-fn valid_app(id: &str, secret: &str) -> Result<App, ApiError> {
-    let (id, secret) = (id.trim(), secret.trim());
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) || id.len() > 20 {
-        return Err(ApiError::bad_request("A Qobuz app ID is digits only"));
-    }
-    if secret.is_empty() || secret.len() > 128 || !secret.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err(ApiError::bad_request(
-            "The Qobuz app secret is letters and digits",
-        ));
-    }
-    Ok(App {
-        id: id.into(),
-        secret: secret.into(),
-        from: "settings".into(),
-    })
-}
-
-#[derive(Deserialize)]
-pub struct AppCheck {
-    pub app_id: String,
-    pub app_secret: String,
-}
-
-/// What a check found: `ok`, and the words for the page either way.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
     pub ok: bool,
     pub detail: String,
 }
 
-/// A track Qobuz has everywhere, for the app check (streamrip and qobuz-dl use it too).
+/// A track Qobuz has everywhere, for selecting the web player's signing secret.
 const CHECK_TRACK: &str = "5966783";
 
-/// `POST /v1/sources/qobuz/unofficial/app/check {app_id, app_secret}`: asks Qobuz whether it takes
-/// this app, without saving anything and without an account: one signed `track/getFileUrl`. An
-/// unknown app ID and a wrong secret are each refused with their own words before the sign-in is
-/// looked at (401), so the answer tells them apart. Always 200 with `{ok, detail}`.
-pub(crate) async fn check_app(
-    State(s): State<Arc<NodeState>>,
-    Json(c): Json<AppCheck>,
-) -> ApiResult<CheckResult> {
-    let app = match valid_app(&c.app_id, &c.app_secret) {
-        Ok(a) => a,
-        Err(e) => {
-            return Ok(Json(CheckResult {
-                ok: false,
-                detail: e.message,
-            }))
-        }
-    };
-    let resp = s
-        .http_client()
-        .get(format!("{}/track/getFileUrl", api_base()))
-        .header("X-App-Id", &app.id)
-        .query(&file_url_query(&app, CHECK_TRACK, 6, now()))
-        .send()
-        .await;
-    let resp = match resp {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(Json(CheckResult {
-                ok: false,
-                detail: format!("Couldn't reach Qobuz: {}", e.without_url()),
-            }))
-        }
-    };
-    let status = resp.status().as_u16();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
-    Ok(Json(judge_app_check(status, &v)))
+/// Single flight for discovery and for the secret selection with its cache write.
+static APP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// How a look at the web player ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    /// It found candidates.
+    Found,
+    /// It reached the web player, which is not what discovery expects.
+    Changed,
+    /// It could not reach the web player.
+    Unreachable,
+    /// It has not ended: it is running, or it was cut off.
+    CutOff,
 }
 
-/// What Qobuz's answer to the app check means.
-fn judge_app_check(status: u16, v: &Value) -> CheckResult {
-    let msg = message(v);
-    let low = msg.to_lowercase();
-    let (ok, detail) = match status {
-        400 if low.contains("signature") => (
-            false,
-            "Qobuz knows this app ID, but the secret doesn't go with it. Check the secret.".to_string(),
-        ),
-        400 if low.contains("app") => (
-            false,
-            "Qobuz doesn't know this app ID. Check it, or ask Qobuz for API access.".to_string(),
-        ),
-        // Without an account Qobuz stops here. That proves the app ID; whether it looked at the
-        // signature before the missing account isn't certain, so the secret is said to be checked
-        // at the first play (a wrong one then switches the mode off with its own words)
-        401 => (
-            true,
-            "OK: Qobuz accepts this app ID; the secret is checked at the first play. Your Qobuz account is next."
-                .to_string(),
-        ),
-        200..=299 | 403 => (true, "OK: Qobuz accepts this app ID and secret.".to_string()),
-        _ => (
-            false,
-            format!(
-                "Qobuz answered {status}{}",
-                if msg.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {msg}")
-                }
-            ),
-        ),
+impl Outcome {
+    /// How long after its start the next look waits.
+    fn wait(self) -> Duration {
+        match self {
+            Self::Found | Self::Changed => DISCOVERY_EVERY,
+            Self::Unreachable | Self::CutOff => RETRY_AFTER,
+        }
+    }
+
+    /// What a caller is told inside the wait, when no candidates are offered.
+    fn fail(self) -> auto::Fail {
+        match self {
+            Self::Found | Self::Changed => auto::Fail::Changed,
+            Self::Unreachable => auto::Fail::Unreachable,
+            Self::CutOff => auto::Fail::Interrupted,
+        }
+    }
+}
+
+/// A look at the web player: when it started ([`clock`]) and how it ended.
+#[derive(Clone, Copy)]
+struct Look {
+    at: Duration,
+    outcome: Outcome,
+}
+
+/// The candidates of the last look that found some.
+struct Found {
+    /// When that look started ([`clock`]).
+    at: Duration,
+    apps: Vec<App>,
+    /// Qobuz refused them (their app ID, or every secret).
+    refused: bool,
+}
+
+/// What the web player gave, in memory only; the rules are on [`known_candidates`].
+struct Discovery {
+    last: Option<Look>,
+    found: Option<Found>,
+}
+
+impl Discovery {
+    const NONE: Self = Self {
+        last: None,
+        found: None,
     };
-    CheckResult { ok, detail }
+}
+
+static DISCOVERY: std::sync::Mutex<Discovery> = std::sync::Mutex::new(Discovery::NONE);
+/// After a look that found candidates or saw a changed web player, the next waits this long.
+const DISCOVERY_EVERY: Duration = Duration::from_secs(5 * 60);
+/// After a look that could not reach Qobuz, or was cut off, the next waits only this long.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// Found candidates are offered this long after their look started, never longer.
+const CANDIDATES_FOR: Duration = Duration::from_secs(10 * 60);
+/// A sign-in, and a stream's app refresh, end within this.
+const DEADLINE: Duration = Duration::from_secs(60);
+
+/// Time since the first discovery-clock read, for the discovery limits (tests move it on).
+fn clock() -> Duration {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let elapsed = START.get_or_init(Instant::now).elapsed();
+    #[cfg(test)]
+    let elapsed = elapsed + *CLOCK_SKEW.lock().expect("Qobuz clock");
+    elapsed
+}
+
+/// The web player's candidates: remembered ones, or a new look ([`known_candidates`] has the
+/// rules). Call with `APP_LOCK` held, which makes a look single-flight.
+async fn candidates(client: &reqwest::Client, fresh: bool) -> Result<Vec<App>, auto::Fail> {
+    if let Some(known) = known_candidates(fresh) {
+        return known;
+    }
+    let at = clock();
+    let look = |outcome| Some(Look { at, outcome });
+    // Until the look ends it counts as cut off: a dropped caller leaves exactly that behind
+    DISCOVERY.lock().expect("Qobuz discovery").last = look(Outcome::CutOff);
+    let found = auto::discover(client).await;
+    let mut d = DISCOVERY.lock().expect("Qobuz discovery");
+    d.last = look(match &found {
+        Ok(_) => Outcome::Found,
+        Err(auto::Fail::Changed) => Outcome::Changed,
+        Err(_) => Outcome::Unreachable,
+    });
+    if let Ok(apps) = &found {
+        d.found = Some(Found {
+            at,
+            apps: apps.clone(),
+            refused: false,
+        });
+    }
+    found
+}
+
+/// What [`candidates`] answers without a look; `None` when a new look is due.
+///
+/// - State: the last look (its start and how it ended: found, changed, unreachable, or cut off,
+///   which is also how a running look counts), and the last candidates found (when, and whether
+///   Qobuz refused them). A look stores how it ended only when it ends.
+/// - A new look is due when there was none, or [`DISCOVERY_EVERY`] after the start of one that
+///   found candidates or saw a changed web player, or [`RETRY_AFTER`] after one that could not
+///   reach Qobuz or was cut off.
+/// - Candidates are usable when Qobuz did not refuse them and are younger than [`CANDIDATES_FOR`].
+///   A caller that is not `fresh` gets usable candidates whenever there are some, a due look or not.
+/// - `fresh` means the known values were refused. Such a caller gets a new look when one is due,
+///   and inside the wait only the candidates of the last look, and only when it found them and
+///   they are usable.
+/// - Otherwise, inside the wait, the last look's own error: could not reach Qobuz, interrupted
+///   (cut off), or changed (it saw a changed player, or Qobuz refused what it found). Only that
+///   last one, from a look that reached the web player, can switch a person's source off.
+fn known_candidates(fresh: bool) -> Option<Result<Vec<App>, auto::Fail>> {
+    let d = DISCOVERY.lock().expect("Qobuz discovery");
+    let now = clock();
+    let usable = d
+        .found
+        .as_ref()
+        .filter(|f| !f.refused && now.saturating_sub(f.at) < CANDIDATES_FOR)
+        .map(|f| f.apps.clone());
+    if !fresh {
+        if let Some(apps) = usable {
+            return Some(Ok(apps));
+        }
+    }
+    let last = d.last?;
+    if now.saturating_sub(last.at) >= last.outcome.wait() {
+        return None;
+    }
+    Some(match (last.outcome, usable) {
+        (Outcome::Found, Some(apps)) => Ok(apps),
+        (outcome, _) => Err(outcome.fail()),
+    })
+}
+
+/// Qobuz refused `apps` (their app ID, or every secret): they are not offered again, and until
+/// the next look is due [`candidates`] says so at once instead of probing them again.
+fn refuse(apps: &[App]) {
+    let mut d = DISCOVERY.lock().expect("Qobuz discovery");
+    if let Some(found) = d.found.as_mut().filter(|f| f.apps == apps) {
+        found.refused = true;
+    }
+}
+
+/// [`auto::select_secret`]; candidates whose every secret Qobuz refuses with a 400 about the
+/// signature or the app ID are [`refuse`]d. Any other 400 fails only this caller.
+async fn select(client: &reqwest::Client, found: &[App], token: &str) -> Result<App, auto::Fail> {
+    let chosen = auto::select_secret(client, found, token).await;
+    if chosen == Err(auto::Fail::Changed) {
+        refuse(found);
+    }
+    chosen
 }
 
 #[derive(Deserialize)]
@@ -853,9 +965,8 @@ pub struct Login {
     pub password: String,
 }
 
-/// `POST /v1/sources/qobuz/unofficial/login {email, password}`: signs in once; the node keeps
-/// only the session token. The password is sent to Qobuz as its MD5 (Qobuz's login takes that)
-/// and never stored or logged.
+/// `POST /v1/sources/qobuz/unofficial/login {email, password}`: discovers the app when needed,
+/// signs in once, and keeps only the session token. Neither password nor its MD5 is stored.
 pub(crate) async fn login(
     State(s): State<Arc<NodeState>>,
     axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
@@ -865,107 +976,163 @@ pub(crate) async fn login(
     if who == Who::Nobody {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
     }
-    let app = app_of(&s.library.lock().expect("library poisoned")).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::PRECONDITION_FAILED,
-            "Enter a Qobuz app ID and secret first",
-        )
-    })?;
     if l.email.trim().is_empty() || l.password.is_empty() {
         return Err(ApiError::bad_request("Enter your Qobuz email and password"));
     }
     let hash = hex(&Md5::digest(l.password.as_bytes()));
-    let sess = sign_in_hashed(&s, &app, l.email.trim(), &hash).await?;
-    update_signed_in(&s, &who, "qobuz", |st| {
-        st.session = Some(sess);
-        st.health = None;
-    });
-    crate::search::forget_answers(&s);
-    tracing::info!("Qobuz sign-in stored");
-    Ok(Json(view(&s, &who)))
+    let sess = tokio::time::timeout(DEADLINE, sign_in(&s, l.email.trim(), &hash))
+        .await
+        .map_err(|_| ApiError::from(auto::Fail::Unreachable))??;
+    finish_login(&s, &who, sess)
 }
 
-/// `user/login` with the password's MD5 (what Qobuz takes; also what other apps keep): the
-/// session Qobuz answers with. Accounts without a streaming plan are refused.
-pub(crate) async fn sign_in_hashed(
-    s: &NodeState,
+/// This person's session, with app values that work for it cached for the node. `APP_LOCK`
+/// covers discovery and the secret selection with its cache write, not the person's `user/login`.
+///
+/// A 400 with the cached values that is not about them is this person's own, or Qobuz retired
+/// those values and says so in other words. Either way nothing is refused: the web player's
+/// candidates (remembered ones, or a look the limits allow) get one try when the first of them
+/// differs from the cached values, and the 400 stands when they do not or when there are none.
+async fn sign_in(s: &NodeState, email: &str, hash: &str) -> Result<Session, ApiError> {
+    let client = auto::client()?;
+    if let Some(app) = configured_app() {
+        let sess = authenticate(&client, &app, email, hash)
+            .await
+            .map_err(LoginFailure::into_configured)?;
+        return Ok(sess);
+    }
+    let cached = cached_app(&s.library.lock().expect("library poisoned"));
+    let mut declined = None;
+    if let Some(app) = &cached {
+        match authenticate(&client, app, email, hash).await {
+            Ok(sess) => match auto::secret_works(&client, app, &sess.token).await {
+                Ok(true) => return Ok(sess),
+                Ok(false) => {}
+                Err(auto::Fail::NoStream) => declined = Some((auto::Fail::NoStream, app)),
+                Err(f) => return Err(f.into()),
+            },
+            Err(LoginFailure::BadApp) => {}
+            Err(LoginFailure::Declined) => declined = Some((auto::Fail::Declined, app)),
+            Err(LoginFailure::Failed(e)) => return Err(e),
+        }
+    }
+    // `fresh` only when Qobuz refused the cached values themselves
+    let fresh = cached.is_some() && declined.is_none();
+    let found = {
+        let _guard = APP_LOCK.lock().await;
+        candidates(&client, fresh).await
+    };
+    let found = match declined {
+        None => found?,
+        Some((why, old)) => match found {
+            // `user/login` reads only the app ID; the stream check also the secret
+            Ok(found)
+                if found.first().is_some_and(|new| {
+                    new.id != old.id || (why == auto::Fail::NoStream && new.secret != old.secret)
+                }) =>
+            {
+                found
+            }
+            _ => return Err(why.into()),
+        },
+    };
+    let first = found.first().ok_or_else(auto::discovery_failed)?;
+    let sess = match authenticate(&client, first, email, hash).await {
+        Ok(sess) => sess,
+        Err(LoginFailure::BadApp) => {
+            refuse(&found);
+            return Err(auto::discovery_failed());
+        }
+        Err(LoginFailure::Declined) => return Err(auto::Fail::Declined.into()),
+        Err(LoginFailure::Failed(e)) => return Err(e),
+    };
+    let _guard = APP_LOCK.lock().await;
+    let app = select(&client, &found, &sess.token).await?;
+    let lib = s.library.lock().expect("library poisoned");
+    if cached_app(&lib).as_ref() != Some(&app) {
+        cache_app(&lib, &app)?;
+    }
+    Ok(sess)
+}
+
+enum LoginFailure {
+    /// A 400 about the app ID.
+    BadApp,
+    /// Any other 400: this sign-in's own, as far as anyone can tell.
+    Declined,
+    Failed(ApiError),
+}
+
+impl LoginFailure {
+    fn into_configured(self) -> ApiError {
+        match self {
+            Self::BadApp => upstream("Qobuz refused the configured app ID or secret"),
+            Self::Declined => auto::Fail::Declined.into(),
+            Self::Failed(e) => e,
+        }
+    }
+}
+
+async fn authenticate(
+    client: &reqwest::Client,
     app: &App,
     email: &str,
     hash: &str,
-) -> Result<Session, ApiError> {
-    // Built before any await: the serializer is not Send
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("email", email)
-        .append_pair("password", hash)
-        .append_pair("app_id", &app.id)
-        .finish();
-    let resp = s
-        .http_client()
-        .post(format!("{}/user/login", api_base()))
+) -> Result<Session, LoginFailure> {
+    let response = client
+        .get(format!("{}/user/login", api_base()))
         .header("X-App-Id", &app.id)
-        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-        .body(body)
+        .query(&[("email", email), ("password", hash), ("app_id", &app.id)])
         .send()
         .await
-        .map_err(|e| upstream(e.without_url()))?;
-    let status = resp.status();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
-    if status.as_u16() == 400 && message(&v).to_lowercase().contains("app") {
-        return Err(upstream(format!("Qobuz refused the app ID: {}", message(&v))));
+        .map_err(|_| LoginFailure::Failed(auto::Fail::Unreachable.into()))?;
+    let status = response.status();
+    if status == StatusCode::BAD_REQUEST {
+        // Only a message about the app ID is the app's; any other 400 is this sign-in's alone
+        return Err(if about_app_id(&auto::json_of(response).await) {
+            LoginFailure::BadApp
+        } else {
+            LoginFailure::Declined
+        });
     }
-    if status.as_u16() == 401 {
-        return Err(ApiError::new(
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(LoginFailure::Failed(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            format!(
-                "Qobuz doesn't know that email and password. Check them and try again ({})",
-                message(&v)
-            ),
-        ));
-    }
-    if !status.is_success() {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            format!("Qobuz refused the sign-in ({status}): {}", message(&v)),
-        ));
-    }
-    let token = v["user_auth_token"]
-        .as_str()
-        .filter(|t| !t.is_empty())
-        .ok_or_else(|| upstream("the sign-in answered without a session"))?;
-    session_from_user(token, &v["user"])
-}
-
-/// Validate a supplied token before replacing the working sign-in. This request uses only the
-/// candidate app and token; an unsuccessful import must not mark the current session down.
-async fn sign_in_token(
-    s: &NodeState,
-    app: &App,
-    token: &str,
-    user_id: Option<&str>,
-) -> Result<Session, ApiError> {
-    let mut req = s
-        .http_client()
-        .get(format!("{}/user/get", api_base()))
-        .header("X-App-Id", &app.id)
-        .header("X-User-Auth-Token", token);
-    if let Some(id) = user_id {
-        req = req.query(&[("user_id", id)]);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|_| upstream("Could not check the sign-in with Qobuz. Try again when it is reachable"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(ApiError::bad_request(format!(
-            "Qobuz did not accept the sign-in ({status}). Try another way"
+            "Wrong Qobuz email or password",
         )));
     }
-    let user: Value = resp
-        .json()
-        .await
-        .map_err(|_| upstream("Qobuz did not return an account. Try again"))?;
-    session_from_user(token, &user)
+    if !status.is_success() {
+        return Err(LoginFailure::Failed(upstream(
+            "Qobuz could not sign you in right now. Try again later",
+        )));
+    }
+    let bytes = auto::bounded(response, 64 * 1024).await.map_err(|f| {
+        LoginFailure::Failed(match f {
+            auto::Fail::Changed => upstream("Qobuz returned an unreadable sign-in response"),
+            auto::Fail::Unreachable
+            | auto::Fail::Interrupted
+            | auto::Fail::Declined
+            | auto::Fail::NoStream => f.into(),
+        })
+    })?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| LoginFailure::Failed(upstream("Qobuz returned an unreadable sign-in response")))?;
+    let token = value["user_auth_token"]
+        .as_str()
+        .filter(|t| !t.is_empty() && t.len() <= 4096)
+        .ok_or_else(|| LoginFailure::Failed(upstream("Qobuz returned no session")))?;
+    session_from_user(token, &value["user"]).map_err(LoginFailure::Failed)
+}
+
+fn finish_login(s: &NodeState, who: &Who, sess: Session) -> ApiResult<QobuzStatus> {
+    update_signed_in(s, who, "qobuz", |st| {
+        st.session = Some(sess);
+        st.enabled = true;
+        st.health = None;
+    });
+    crate::search::forget_answers(s);
+    tracing::info!("Qobuz sign-in stored");
+    Ok(Json(view(s, who)))
 }
 
 fn session_from_user(token: &str, user: &Value) -> Result<Session, ApiError> {
@@ -973,7 +1140,7 @@ fn session_from_user(token: &str, user: &Value) -> Result<Session, ApiError> {
     if params.is_null() || params.as_object().is_some_and(|o| o.is_empty()) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            "This Qobuz account has no streaming plan: full tracks need a paid Qobuz plan",
+            "This Qobuz account is free; full tracks need a paid Qobuz plan",
         ));
     }
     Ok(Session {
@@ -996,8 +1163,6 @@ fn session_from_user(token: &str, user: &Value) -> Result<Session, ApiError> {
 // ---- one Sign in, the ways side by side (STEWARD-CREDENTIALS-REUSE.md step 3) ----
 
 pub(crate) const WAY_OWN: &str = "own";
-pub(crate) const WAY_IMPORT: &str = "import";
-pub(crate) const WAY_PASTE: &str = "paste";
 
 /// Qobuz's ways, for `crate::signin`.
 pub(crate) struct QobuzSignIn;
@@ -1005,14 +1170,9 @@ pub(crate) struct QobuzSignIn;
 impl QobuzSignIn {
     fn in_use(st: &ModeState) -> Option<crate::signin::InUse> {
         let sess = st.session.as_ref()?;
-        let (way, label) = match sess.from.as_deref() {
-            Some("pasted") => (WAY_PASTE, "Pasted config".to_string()),
-            Some(app) => (WAY_IMPORT, format!("{}'s sign-in", crate::imports::app_name(app))),
-            None => (WAY_OWN, "Your own Qobuz app".to_string()),
-        };
         Some(crate::signin::InUse {
-            way: way.into(),
-            label,
+            way: WAY_OWN.into(),
+            label: "Your Qobuz account".into(),
             user: sess.name.clone().or_else(|| sess.user_id.clone()),
             expires_at: None,
             gives: Some(if sess.hires { "hi-res" } else { "CD quality" }.into()),
@@ -1029,75 +1189,20 @@ impl crate::signin::SignInSource for QobuzSignIn {
         headers: Option<&axum::http::HeaderMap>,
     ) -> crate::signin::SignIn {
         use crate::signin::{SignIn, Way, NOT_SIGNED_IN};
-        let (st, app, chosen) = {
+        let (st, chosen) = {
             let lib = s.library.lock().expect("library poisoned");
-            (
-                load(&lib, who),
-                app_of(&lib),
-                crate::signin::chosen(&lib, who, SOURCE_ID),
-            )
+            (load(&lib, who), crate::signin::chosen(&lib, who, SOURCE_ID))
         };
-        // Other apps' files are on the owner's machine: looked at for the owner only
-        let scanned = if headers.is_some() && who.is_owner() {
-            crate::imports::scan_qobuz()
-        } else {
-            Vec::new()
-        };
-        let note = if scanned.is_empty() {
-            "Nothing in the known places on this machine (streamrip, qobuz-dl). From another machine, pick the config file or paste it below.".to_string()
-        } else {
-            format!(
-                "Found: {}. The other app's file is only read; its app values and the sign-in are kept here like the node's own.",
-                scanned
-                    .iter()
-                    .map(|(f, _)| match (&f.user, &f.reason) {
-                        (_, Some(_)) => format!("{} (not usable)", f.app),
-                        (Some(u), None) => format!("{} ({u})", f.app),
-                        (None, None) => f.app.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" · ")
-            )
-        };
-        let app_note = "Uses streamrip's or qobuz-dl's app values for this node, replacing its current Qobuz app. Other users signed in with the old app may need to sign in again.";
-        let ways = vec![
-            Way {
-                id: WAY_OWN.into(),
-                label: "Your own Qobuz app and account".into(),
-                note: format!(
-                    "A Qobuz app id and secret you are allowed to use{}, then your Qobuz email and password; the node keeps the app and the session, never the password.",
-                    if app.is_some() { " (set)" } else { "" }
-                ),
-                action: "setup".into(),
-                recommended: true,
-                advanced: false,
-                // The app is the node's: a listener signs in once the owner has set one
-                available: app.is_some() || who.is_owner(),
-                reason: (app.is_none() && !who.is_owner())
-                    .then(|| "The node's owner hasn't set up a Qobuz app yet.".to_string()),
-            },
-            Way {
-                id: WAY_IMPORT.into(),
-                label: "A sign-in from another app on this machine".into(),
-                note: format!("{note} {app_note}"),
-                action: "import".into(),
-                recommended: false,
-                advanced: false,
-                available: who.is_owner(),
-                reason: (!who.is_owner())
-                    .then(|| "The sign-ins on the node's machine are the owner's; paste your own instead.".to_string()),
-            },
-            Way {
-                id: WAY_PASTE.into(),
-                label: "Paste streamrip's or qobuz-dl's config".into(),
-                note: format!("The contents of streamrip's config.toml or qobuz-dl's config.ini: the app values and the sign-in (a token, or the email with the password's MD5). Nothing is shown again once saved. {app_note}"),
-                action: "paste".into(),
-                recommended: false,
-                advanced: false,
-                available: true,
-                reason: None,
-            },
-        ];
+        let ways = vec![Way {
+            id: WAY_OWN.into(),
+            label: "Your Qobuz account".into(),
+            note: "Your Qobuz email and password; automatic app setup, and only the session is kept.".into(),
+            action: "setup".into(),
+            recommended: true,
+            advanced: false,
+            available: true,
+            reason: None,
+        }];
         let in_use = Self::in_use(&st);
         let line = match &in_use {
             None => NOT_SIGNED_IN.to_string(),
@@ -1109,12 +1214,8 @@ impl crate::signin::SignInSource for QobuzSignIn {
             chosen,
             in_use,
             line,
-            imports: scanned.into_iter().map(|(f, _)| f).collect(),
-            places: if headers.is_some() {
-                crate::imports::qobuz_places_text()
-            } else {
-                Vec::new()
-            },
+            imports: Vec::new(),
+            places: Vec::new(),
             details: if headers.is_some() {
                 serde_json::json!({ "unofficial": view(s, who) })
             } else {
@@ -1131,73 +1232,11 @@ impl crate::signin::SignInSource for QobuzSignIn {
 
     async fn import(
         &self,
-        s: &Arc<NodeState>,
-        who: &Who,
-        body: crate::signin::ImportBody,
+        _s: &Arc<NodeState>,
+        _who: &Who,
+        _body: crate::signin::ImportBody,
     ) -> Result<&'static str, ApiError> {
-        let (imp, from, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
-            (Some(text), _) if !text.is_empty() => (
-                crate::imports::parse_qobuz(text)
-                    .map_err(|e| ApiError::bad_request(format!("Not usable: {e}")))?,
-                "pasted".to_string(),
-                WAY_PASTE,
-            ),
-            (_, Some(id)) => {
-                let (f, imp) = crate::imports::scan_qobuz()
-                    .into_iter()
-                    .find(|(f, _)| f.id == id)
-                    .ok_or_else(|| ApiError::not_found(format!("nothing found for {id} on this machine")))?;
-                let Some(imp) = imp else {
-                    return Err(ApiError::bad_request(format!(
-                        "{}'s config is not usable: {}",
-                        f.app,
-                        f.reason.unwrap_or_default()
-                    )));
-                };
-                (imp, f.id, WAY_IMPORT)
-            }
-            _ => {
-                return Err(ApiError::bad_request(
-                    "Say which sign-in (id) or paste one (text)",
-                ))
-            }
-        };
-        let app = App {
-            id: imp.app_id.clone(),
-            secret: imp.secrets[0].clone(),
-            from: "import".into(),
-        };
-        // A listener's sign-in only works with the node's app, which only the owner sets
-        if !who.is_owner()
-            && app_of(&s.library.lock().expect("library poisoned")).map(|a| a.id) != Some(app.id.clone())
-        {
-            return Err(ApiError::bad_request(
-                "Not usable here: it was made with another Qobuz app than this node's. Sign in with your email instead",
-            ));
-        }
-        let mut sess = match (&imp.token, &imp.email, &imp.password_md5) {
-            (Some(token), _, _) => sign_in_token(s, &app, token, imp.user_id.as_deref())
-                .await
-                .map_err(|e| ApiError::bad_request(format!("Not usable: {}", e.message)))?,
-            (None, Some(email), Some(hash)) => sign_in_hashed(s, &app, email, hash).await.map_err(|_| {
-                ApiError::bad_request(
-                    "Not usable: Qobuz could not verify the app and account. Check them or try another way",
-                )
-            })?,
-            _ => return Err(ApiError::bad_request("Not usable: no sign-in in it")),
-        };
-        sess.from = Some(from);
-        if who.is_owner() {
-            let lib = s.library.lock().expect("library poisoned");
-            lib.set_setting(APP_KEY, &serde_json::to_string(&app).expect("app serializes"))?;
-        }
-        update_signed_in(s, who, "qobuz", |st| {
-            st.session = Some(sess);
-            st.health = None;
-            st.enabled = true;
-        });
-        crate::search::forget_answers(s);
-        Ok(way)
+        Err(ApiError::not_found("Qobuz signs in with email and password only"))
     }
 }
 
@@ -1218,11 +1257,13 @@ fn hex(b: &[u8]) -> String {
 
 // ---- playback -------------------------------------------------------------------------------------
 
-/// Whether a failure is the mode's (switch it off) or only this track's.
+/// Whether a failure is the mode's (switch it off), only this track's, or a Qobuz that could not
+/// be reached or is busy (neither: try again soon).
 #[derive(Debug)]
 pub enum StreamError {
     Mode(String),
     Track(String),
+    Unavailable(String),
 }
 
 /// The signed `track/getFileUrl` request: Qobuz checks
@@ -1263,11 +1304,23 @@ fn content_type_for(format: u32) -> &'static str {
     }
 }
 
+/// Qobuz's message is about the app ID.
+fn about_app_id(v: &Value) -> bool {
+    let m = message(v).to_lowercase();
+    m.contains("app_id") || m.contains("app id")
+}
+
+/// A 400 about the signature or the app ID: the app values are refused, not the track or the
+/// person.
+fn app_refused(status: u16, v: &Value) -> bool {
+    status == 400 && (about_app_id(v) || message(v).to_lowercase().contains("signature"))
+}
+
 /// What `track/getFileUrl` answered, judged: the stream URL, or why not.
 fn judge_file_url(status: u16, v: &Value) -> Result<String, StreamError> {
     match status {
         200..=299 => {}
-        400 if message(v).to_lowercase().contains("signature") => {
+        400 if app_refused(status, v) => {
             return Err(StreamError::Mode(format!(
                 "Qobuz refused the app secret: {}",
                 message(v)
@@ -1286,6 +1339,12 @@ fn judge_file_url(status: u16, v: &Value) -> Result<String, StreamError> {
             )))
         }
         404 => return Err(StreamError::Track("Qobuz has no stream for this track".into())),
+        408 | 429 | 500..=599 => {
+            return Err(StreamError::Unavailable(format!(
+                "Qobuz answered {status}: {}",
+                message(v)
+            )))
+        }
         _ => {
             return Err(StreamError::Track(format!(
                 "Qobuz answered {status}: {}",
@@ -1305,6 +1364,61 @@ fn judge_file_url(status: u16, v: &Value) -> Result<String, StreamError> {
         .ok_or_else(|| StreamError::Mode("Qobuz answered without a stream URL".into()))
 }
 
+/// A refresh's failure: only a web player that no longer works is the mode's; a network problem,
+/// a timeout or a busy Qobuz is only for now, and a probe 400 that is not about the app values
+/// fails only this track.
+fn refresh_failed(f: auto::Fail) -> StreamError {
+    match f {
+        auto::Fail::Changed => StreamError::Mode(f.message().into()),
+        auto::Fail::Unreachable | auto::Fail::Interrupted => StreamError::Unavailable(f.message().into()),
+        auto::Fail::Declined | auto::Fail::NoStream => {
+            StreamError::Track("Qobuz refused this request".into())
+        }
+    }
+}
+
+/// New app values after Qobuz refused `old`'s: another refresh's if one came first, else the web
+/// player's candidates (at most one look per [`DISCOVERY_EVERY`]) and the first secret that works.
+/// Ends within [`DEADLINE`], waiting for the lock included.
+async fn refresh_app(
+    library: &std::sync::Mutex<pm_library::Library>,
+    old: &App,
+    token: &str,
+) -> Result<App, StreamError> {
+    let refresh = async {
+        let _guard = APP_LOCK.lock().await;
+        if let Some(current) = {
+            let lib = library.lock().map_err(|_| StreamError::Track("library".into()))?;
+            app_of(&lib).filter(|app| app != old)
+        } {
+            return Ok(current);
+        }
+        let client = auto::client().map_err(refresh_failed)?;
+        let found = candidates(&client, true).await.map_err(refresh_failed)?;
+        let app = select(&client, &found, token).await.map_err(refresh_failed)?;
+        let lib = library.lock().map_err(|_| StreamError::Track("library".into()))?;
+        cache_app(&lib, &app).map_err(|e| StreamError::Track(e.message))?;
+        Ok(app)
+    };
+    tokio::time::timeout(DEADLINE, refresh)
+        .await
+        .unwrap_or_else(|_| Err(refresh_failed(auto::Fail::Unreachable)))
+}
+
+/// `track/getFileUrl` for the audio thread: its status and JSON.
+fn ask_file_url_blocking(app: &App, token: &str, id: &str, format: u32) -> Result<(u16, Value), StreamError> {
+    let resp = crate::sources::http_client()
+        .get(format!("{}/track/getFileUrl", api_base()))
+        .header(reqwest::header::USER_AGENT, auto::USER_AGENT)
+        .header("X-App-Id", &app.id)
+        .header("X-User-Auth-Token", token)
+        .query(&file_url_query(app, id, format, now()))
+        .send()
+        .map_err(|e| StreamError::Unavailable(format!("Qobuz: {}", e.without_url())))?;
+    let status = resp.status().as_u16();
+    Ok((status, resp.json().unwrap_or(Value::Null)))
+}
+
 /// The stream URL of a track (the audio thread).
 pub fn file_url_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
@@ -1321,31 +1435,51 @@ pub fn file_url_blocking(
         .clone()
         .filter(|_| st.enabled)
         .ok_or_else(|| StreamError::Track(not_connected(who)))?;
-    let resp = crate::sources::http_client()
-        .get(format!("{}/track/getFileUrl", api_base()))
-        .header("X-App-Id", &app.id)
-        .header("X-User-Auth-Token", &sess.token)
-        .query(&file_url_query(&app, id, format_id(&st), now()))
-        .send()
-        .map_err(|e| StreamError::Track(format!("Qobuz: {}", e.without_url())))?;
-    let status = resp.status().as_u16();
-    let v: Value = resp.json().unwrap_or(Value::Null);
+    let format = format_id(&st);
+    let (status, v) = ask_file_url_blocking(&app, &sess.token, id, format)?;
+    if !app_refused(status, &v) || configured_app().is_some() {
+        return judge_file_url(status, &v);
+    }
+    let app = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| StreamError::Track("Qobuz refresh runtime".into()))?
+        .block_on(refresh_app(library, &app, &sess.token))?;
+    let (status, v) = ask_file_url_blocking(&app, &sess.token, id, format)?;
     judge_file_url(status, &v)
 }
 
-async fn file_url(s: &NodeState, who: &Who, id: &str, format: u32) -> Result<String, StreamError> {
-    let (app, sess) = ready(s, who).map_err(|e| StreamError::Track(e.message))?;
+/// `track/getFileUrl`: its status and JSON.
+async fn ask_file_url(
+    s: &NodeState,
+    app: &App,
+    token: &str,
+    id: &str,
+    format: u32,
+) -> Result<(u16, Value), StreamError> {
     let resp = s
         .http_client()
         .get(format!("{}/track/getFileUrl", api_base()))
+        .header(reqwest::header::USER_AGENT, auto::USER_AGENT)
         .header("X-App-Id", &app.id)
-        .header("X-User-Auth-Token", &sess.token)
-        .query(&file_url_query(&app, id, format, now()))
+        .header("X-User-Auth-Token", token)
+        .query(&file_url_query(app, id, format, now()))
         .send()
         .await
-        .map_err(|e| StreamError::Track(format!("Qobuz: {}", e.without_url())))?;
+        .map_err(|e| StreamError::Unavailable(format!("Qobuz: {}", e.without_url())))?;
     let status = resp.status().as_u16();
-    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok((status, resp.json().await.unwrap_or(Value::Null)))
+}
+
+/// The stream URL of a track; app values Qobuz refuses are refreshed once (unless an admin set them).
+async fn file_url(s: &NodeState, who: &Who, id: &str, format: u32) -> Result<String, StreamError> {
+    let (app, sess) = ready(s, who).map_err(|e| StreamError::Track(e.message))?;
+    let (status, v) = ask_file_url(s, &app, &sess.token, id, format).await?;
+    if !app_refused(status, &v) || configured_app().is_some() {
+        return judge_file_url(status, &v);
+    }
+    let app = refresh_app(&s.library, &app, &sess.token).await?;
+    let (status, v) = ask_file_url(s, &app, &sess.token, id, format).await?;
     judge_file_url(status, &v)
 }
 
@@ -1370,7 +1504,7 @@ pub fn record(library: &std::sync::Mutex<pm_library::Library>, who: &Who, r: &Re
                 at: now(),
             });
         }
-        Err(StreamError::Track(_)) => return,
+        Err(StreamError::Track(_) | StreamError::Unavailable(_)) => return,
     }
     save(&lib, who, &st);
 }
@@ -1391,7 +1525,7 @@ pub(crate) fn open_track_blocking(
     let r = file_url_blocking(library, id, who);
     record(library, who, &r);
     let url = r.map_err(|e| match e {
-        StreamError::Mode(m) | StreamError::Track(m) => fail(m),
+        StreamError::Mode(m) | StreamError::Track(m) | StreamError::Unavailable(m) => fail(m),
     })?;
     crate::sources::open_http_stream(&url).map_err(|_| fail("the Qobuz stream did not open".into()))
 }
@@ -1413,6 +1547,7 @@ pub(crate) async fn stream(
     let url = r.map_err(|e| match e {
         StreamError::Mode(m) => ApiError::new(StatusCode::BAD_GATEWAY, m),
         StreamError::Track(m) => ApiError::not_found(m),
+        StreamError::Unavailable(m) => ApiError::new(StatusCode::SERVICE_UNAVAILABLE, m),
     })?;
     let resp = s
         .http_client()
@@ -1451,6 +1586,7 @@ mod tests {
             id: "100000000".into(),
             secret: "abc123".into(),
             from: "settings".into(),
+            bundle_url: None,
         };
         let q = file_url_query(&app, "5966783", 27, 1_700_000_000);
         let sig = &q.iter().find(|(k, _)| *k == "request_sig").unwrap().1;
@@ -1462,22 +1598,14 @@ mod tests {
     }
 
     #[test]
-    fn the_app_check_tells_an_unknown_id_a_wrong_secret_and_an_accepted_app_apart() {
-        let r = judge_app_check(
-            400,
-            &serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"}),
-        );
-        assert!(!r.ok && r.detail.contains("secret"), "{r:?}");
-        let r = judge_app_check(
-            400,
-            &serde_json::json!({"message": "Invalid Request Parameters app_id"}),
-        );
-        assert!(!r.ok && r.detail.contains("app ID"), "{r:?}");
-        let r = judge_app_check(401, &serde_json::json!({"message": "Invalid user auth token"}));
-        assert!(r.ok && r.detail.starts_with("OK"), "{r:?}");
-        let r = judge_app_check(503, &Value::Null);
-        assert!(!r.ok && r.detail.contains("503"), "{r:?}");
-        assert!(valid_app("12ab", "s").is_err() && valid_app("100", "s3-cret").is_err());
+    fn session_debug_redacts_the_user_token() {
+        let session = Session {
+            token: "private-user-token".into(),
+            name: Some("Listener".into()),
+            ..Default::default()
+        };
+        let shown = format!("{session:?}");
+        assert!(shown.contains("<set>") && !shown.contains("private-user-token"));
     }
 
     #[test]

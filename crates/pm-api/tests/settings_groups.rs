@@ -239,7 +239,6 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
         "spotify",
         "tidal",
         "tidal-full",
-        "qobuz",
         "soundcloud",
         "youtube",
         "lastfm",
@@ -250,6 +249,7 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
     ] {
         assert!(ids.contains(&want), "{want} missing from {ids:?}");
     }
+    assert!(!ids.contains(&"qobuz"), "Qobuz setup is automatic");
     let find = |a: &Value, id: &str| {
         a.as_array()
             .unwrap()

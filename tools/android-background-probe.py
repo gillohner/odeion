@@ -2,7 +2,7 @@
 """Does the Android app keep playing in the background? (TASK-android-background-playback-1105;
 owner: playback stops a few seconds after leaving the app and resumes when it is opened again.)
 
-On an emulator (CI: android-background.yml), with a node on the host as tools/android-endpoint.py
+On an emulator (CI: android.yml, background playback), with a node on the host as tools/android-endpoint.py
 sets it up (that script's helpers are reused), both ways the app can make sound:
 
   A. the phone's own zone (the app's native player, AAudio through cpal, kept alive by

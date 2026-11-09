@@ -240,7 +240,9 @@ where
 /// directory that isn't there (it lists as empty). The listing stops, incomplete, at the entry
 /// cap (entries past it are dropped, from the page that crosses it too), the page cap, the
 /// deadline, or a cursor that doesn't move on (one seen before); with `bounds.whole` that is
-/// [`HomeserverError::Cut`] instead.
+/// [`HomeserverError::Cut`] instead. A page shorter than [`LIST_LIMIT`] is the end only when its
+/// cursor moved on: a short page that ends on a cursor seen before is a homeserver going round,
+/// not a whole listing.
 pub(crate) async fn list_within<T, F, Fut>(
     bounds: ListBounds,
     dir: &str,
@@ -272,13 +274,14 @@ where
         };
         let n = got.len();
         let next = got.last().map(|(_, c)| c.clone());
+        let moved_on = next.as_ref().is_none_or(|c| !seen.contains(c));
         entries.extend(got.into_iter().map(|(e, _)| e));
         if entries.len() > bounds.max_entries {
             entries.truncate(bounds.max_entries);
             break;
         }
         if n < LIST_LIMIT as usize {
-            complete = true;
+            complete = moved_on;
             break;
         }
         if entries.len() == bounds.max_entries {
@@ -1487,6 +1490,68 @@ mod listing_tests {
             2,
             "the page after the repeated cursor is never asked for"
         );
+    }
+
+    #[tokio::test]
+    async fn a_short_page_ends_the_listing_only_when_its_cursor_moved_on() {
+        // A full page, then a short one past it: the end, with no page asked for after it
+        let pages = |repeat: bool| {
+            let asked = std::sync::Arc::new(AtomicUsize::new(0));
+            let a = asked.clone();
+            let page = move |cursor: Option<String>| {
+                let a = a.clone();
+                async move {
+                    a.fetch_add(1, Ordering::SeqCst);
+                    let (from, n) = if cursor.is_none() {
+                        (0, LIST_LIMIT as usize)
+                    } else {
+                        (100, 10)
+                    };
+                    Ok(Some(
+                        (from..from + n)
+                            .map(|i| {
+                                // Repeating: the short page ends on the first page's cursor again
+                                let c = if repeat && i == from + n - 1 { 99 } else { i };
+                                (format!("/pub/x/{i:07}"), format!("pubky://u/pub/x/{c}"))
+                            })
+                            .collect::<Page<String>>(),
+                    ))
+                }
+            };
+            (asked, page)
+        };
+        let (asked, page) = pages(false);
+        let l = list_within(bounds(10_000, 100, 5_000), "/pub/x/", page)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (110, true));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        // A short page alone is the end too
+        let l = list_within(bounds(10_000, 100, 5_000), "/pub/x/", |_| async {
+            Ok(Some(vec![(
+                "/pub/x/a".to_string(),
+                "pubky://u/pub/x/a".to_string(),
+            )]))
+        })
+        .await
+        .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (1, true));
+        // The short page ends on a cursor seen before: not the end, and a whole listing is cut
+        let (asked, page) = pages(true);
+        let l = list_within(bounds(10_000, 100, 5_000), "/pub/x/", page)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (110, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+        let (_, page) = pages(true);
+        let whole = ListBounds {
+            whole: true,
+            ..bounds(10_000, 100, 5_000)
+        };
+        assert!(matches!(
+            list_within(whole, "/pub/x/", page).await,
+            Err(HomeserverError::Cut { .. })
+        ));
     }
 
     #[tokio::test]

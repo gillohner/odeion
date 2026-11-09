@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The phone as a zone, on an Android emulator (CI: release.yml, android-emulator).
+"""The phone as a zone, on an Android emulator (CI: android.yml, phone-as-zone; release.yml, android-emulator).
 
 The release APK is installed and connected by address to a node on the host
 (10.0.2.2 from the emulator) over plain http, and must show the node's page.
@@ -147,21 +147,56 @@ def center(node):
     return (x1 + x2) // 2, (y1 + y2) // 2
 
 
-def tap(pred, what):
-    def find():
-        for n in ui_nodes():
-            if pred(n):
-                return n
-        return None
+def find(pred):
+    return next((n for n in ui_nodes() if pred(n)), None)
 
-    node = until(what, find, timeout=90, every=2)
+
+def tap(pred, what):
+    """Tap a node once the screen holds still: the same node at the same place in two dumps a second
+    apart. The connect page lays itself out again while the app looks for nodes on the network
+    ("Search again", "None found"), and a tap made during that lands on whatever moved under it
+    (CI: the address field never opened, run 42368568855)."""
+    def steady():
+        a = find(pred)
+        if not a:
+            return None
+        time.sleep(1)
+        b = find(pred)
+        return b if b and center(a) == center(b) else None
+
+    node = until(what, steady, timeout=90, every=1)
     x, y = center(node)
     if (x, y) == (0, 0):  # off screen: scroll it into view and look again
         adb("shell", "input", "swipe", "500", "1500", "500", "500", "300")
-        node = until(what, find, timeout=30, every=2)
+        node = until(what, steady, timeout=30, every=1)
         x, y = center(node)
     adb("shell", "input", "tap", str(x), str(y))
     log(f"tapped {what} at {x},{y}")
+
+
+def type_into(pred, what, text, readable=True):
+    """Type into a text field once it has the focus, and (when the field shows what it holds) check
+    that all of it landed. Keys sent before a WebView field takes the focus, or while the page
+    redraws the form, are lost: the address field once held "10" of "10.0.2.2:7788" (run
+    42536847482). This is the harness typing, not the check: the field is cleared and typed into
+    again, three times at most."""
+    for attempt in range(3):
+        tap(pred, what)
+        try:
+            until(f"{what} to take the focus", lambda: (find(pred) or "").find('focused="true"') >= 0, timeout=10, every=1)
+        except RuntimeError as e:
+            log(f"{e}; typing all the same")
+        adb("shell", "input", "keyevent", "KEYCODE_MOVE_END", *["KEYCODE_DEL"] * 40)
+        adb("shell", "input", "text", text)
+        if not readable:
+            return
+        try:
+            until(f"{what} to hold what was typed", lambda: f'text="{text}"' in (find(pred) or ""), timeout=10, every=1)
+            return
+        except RuntimeError:
+            held = re.search(r' text="([^"]*)"', find(pred) or "")
+            log(f"{what} holds {held.group(1) if held else None!r}, not {text!r} (attempt {attempt + 1}): typing again")
+    raise RuntimeError(f"{what} never held {text!r} after three tries")
 
 
 def shot(name):
@@ -498,11 +533,10 @@ def run(node):
         adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
         tap(lambda n: "connect by address" in n, "“Or connect by address”")
         # The address field is the page's first text field (its id and hint differ between WebViews)
-        tap(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field")
-        adb("shell", "input", "text", "10.0.2.2:7788")
-        # The node's token in the form's token field
-        tap(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field")
-        adb("shell", "input", "text", TOKEN)
+        type_into(lambda n: 'resource-id="url"' in n or "EditText" in n, "the address field", "10.0.2.2:7788")
+        # The node's token in the form's token field (a password field shows no text to check)
+        type_into(lambda n: 'resource-id="tok"' in n or ("EditText" in n and 'password="true"' in n), "the token field",
+                  TOKEN, readable=False)
         adb("shell", "input", "keyevent", "66")
         shot("1-connecting")
         def node_page():
