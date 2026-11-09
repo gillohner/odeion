@@ -98,6 +98,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo build -p pm-node && cargo build -p pm-library --example big_library
       - run: tar -czf node-debug.tgz -C target/debug pm-node odeiond examples/big_library && ls -la node-debug.tgz
+      - name: freeze shared search inputs for the three control audits
+        run: python3 -I tools/ui-controls-inputs.py target/debug/pm-node /tmp/control-inputs ui-controls-inputs.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-controls-inputs
+          path: ui-controls-inputs.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: node-debug
@@ -715,11 +722,15 @@ jobs:
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' http://127.0.0.1:7788/v1/info && break; sleep 1; done
           # The node scans its config folders at start
           for i in $(seq 1 60); do curl -sf -H 'Authorization: Bearer ci-token' 'http://127.0.0.1:7788/v1/library/tracks?limit=1' | grep -q '"id"' && break; sleep 1; done
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ui-controls-inputs
       - name: every visible control does something (real browser)
         timeout-minutes: 25
         env:
           UI_SHARD: ${{ matrix.shard }}/3
           UI_CONTROLS_REPORT: /tmp/ui-controls-${{ matrix.shard }}.json
+          UI_CONTROLS_INPUTS: ${{ github.workspace }}/ui-controls-inputs.json
         run: |
           mkdir -p /tmp/pw && cd /tmp/pw && npm init -y >/dev/null && npm install --no-audit --no-fund playwright@1.49.1 >/dev/null
           npx playwright install --with-deps chromium >/dev/null
@@ -742,7 +753,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: ui-controls-*
+          pattern: ui-controls-[123]
           merge-multiple: true
       - name: every control seen was in its owner's list
         shell: python3 {0}

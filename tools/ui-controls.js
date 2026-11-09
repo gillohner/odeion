@@ -36,6 +36,18 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   views.push('/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
+  if (process.env.UI_CONTROLS_INPUTS) {
+    const frozen = JSON.parse(require('node:fs').readFileSync(process.env.UI_CONTROLS_INPUTS, 'utf8'));
+    if (frozen.query !== 'queen' || !frozen.sources.length || !frozen.answers.length) throw new Error('invalid control-audit search inputs');
+    await ctx.route(/\/v1\/search\?/, (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get('q') !== frozen.query) return route.continue();
+      const scope = url.searchParams.get('in') || 'everywhere';
+      const sources = scope === 'everywhere' ? frozen.sources : scope.split(',');
+      const answers = frozen.answers.filter((a) => sources.includes(a.source));
+      return route.fulfill({ status: 200, contentType: 'application/x-ndjson', headers: { 'x-pm-sources': sources.join(',') }, body: answers.map((a) => JSON.stringify(a)).join('\n') + '\n' });
+    });
+  } else if (SHARDS > 1) throw new Error('sharded control audits require shared UI_CONTROLS_INPUTS');
   await ctx.addInitScript((t) => {
     localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
     HTMLMediaElement.prototype.play = async function () {};
