@@ -240,8 +240,17 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
     Ok(())
 }
 
+/// Held while a tunnel is replaced: closing the old one, starting the new one and keeping it.
+static TUNNEL_SWAP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Close the tunnel, if any, and wait until its endpoint is closed (its key is free again).
 async fn close_tunnel(state: &AppState) {
+    let _swap = TUNNEL_SWAP.lock().await;
+    close_tunnel_locked(state).await;
+}
+
+/// [`close_tunnel`] while [`TUNNEL_SWAP`] is held.
+async fn close_tunnel_locked(state: &AppState) {
     let old = state.tunnel.lock().await.take();
     if let Some(old) = old {
         old.close().await;
@@ -533,7 +542,9 @@ async fn through_tunnel(
     }
     let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
     // The kept key is never live twice: the old tunnel is closed first
-    close_tunnel(state).await;
+    // One replacement at a time (close, start, keep): the kept key is never live twice
+    let _swap = TUNNEL_SWAP.lock().await;
+    close_tunnel_locked(state).await;
     let tunnel = pm_remote::ClientTunnel::start_with_key(id, &pm_remote::Relays::Public, tunnel_key(state))
         .await
         .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
@@ -742,7 +753,9 @@ async fn tunnel_for_sign_in(state: &AppState, mut s: Settings, msg: String) -> R
     }
     let id: pm_remote::EndpointId = s.iroh.parse().map_err(|_| msg.clone())?;
     // The kept key is never live twice: the old tunnel is closed first
-    close_tunnel(state).await;
+    // One replacement at a time (close, start, keep): the kept key is never live twice
+    let _swap = TUNNEL_SWAP.lock().await;
+    close_tunnel_locked(state).await;
     let tunnel = pm_remote::ClientTunnel::start_with_key(id, &pm_remote::Relays::Public, tunnel_key(state))
         .await
         .map_err(|e| format!("{msg}, and remote access failed: {e}"))?;
