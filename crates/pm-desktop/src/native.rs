@@ -131,6 +131,7 @@ fn push(app: &AppHandle, st: &Status) {
     if PLAYING.swap(playing, Ordering::SeqCst) != playing {
         #[cfg(target_os = "android")]
         crate::android::app_playing(app, playing);
+        LOGGED_HERE.store(st.from_device, Ordering::SeqCst);
         tracing::info!("{}", log_line(st));
     } else if playing && st.from_device != LOGGED_HERE.swap(st.from_device, Ordering::SeqCst) {
         tracing::info!("{}", log_line(st));

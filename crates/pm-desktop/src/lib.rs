@@ -303,6 +303,9 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
                 let state = app.state::<AppState>();
                 let Some(s) = state.current() else { break };
                 match reach(&app, &state, s).await {
+                    // (a song started while the node was reached: after it)
+                    #[cfg(any(desktop, target_os = "android"))]
+                    Ok(_) if native::playing() => continue,
                     Ok((s, info)) => {
                         if let Err(e) = connected(&app, &state, s, &info) {
                             tracing::warn!("back from offline: {e}");

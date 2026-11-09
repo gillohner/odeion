@@ -170,17 +170,10 @@ impl Offline {
     /// The copy of a library song this device keeps from the node with this id, if any (with
     /// `original_only`, only an original).
     pub fn track_file(&self, node_id: &str, track_id: i64, original_only: bool) -> Option<PathBuf> {
-        let store = self.store(node_id)?;
-        if original_only
-            && store
-                .index()
-                .tracks
-                .get(&track_id)
-                .is_none_or(|t| t.format != "original")
-        {
-            return None;
-        }
-        store.track_file(track_id).filter(|p| p.is_file())
+        let (path, format) = self.store(node_id)?.track_copy(track_id)?;
+        (!original_only || format == "original")
+            .then_some(path)
+            .filter(|p| p.is_file())
     }
 
     /// Whether a song stays on the device when it alone is let go (see
@@ -503,6 +496,40 @@ mod tests {
         assert_eq!(again.prefs().limit, None);
         let opts = again.options("node-1", 0);
         assert_eq!((opts.cap_bytes, opts.keep_free), (None, KEEP_FREE));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// While the node answers only an original stands in for its stream; offline any copy plays.
+    #[test]
+    fn only_an_original_stands_in_while_connected() {
+        let dir = tempfile_dir();
+        let o = Offline::open(dir.clone(), Arc::default()).unwrap();
+        let store = o.store("node-1").unwrap();
+        for (id, format) in [(1, "original"), (2, "aac")] {
+            let file = format!("{id}.{}", if format == "aac" { "m4a" } else { "flac" });
+            std::fs::write(store.dir().join("files").join(&file), b"x").unwrap();
+            store
+                .update(|ix| {
+                    ix.tracks.insert(
+                        id,
+                        pm_offline::KeptTrack {
+                            track: serde_json::json!({"id": id}),
+                            file,
+                            bytes: 1,
+                            format: format.into(),
+                        },
+                    )
+                })
+                .unwrap();
+        }
+        assert!(o.track_file("node-1", 1, true).is_some());
+        assert!(o.track_file("node-1", 1, false).is_some());
+        assert!(
+            o.track_file("node-1", 2, true).is_none(),
+            "a smaller copy doesn't stand in"
+        );
+        assert!(o.track_file("node-1", 2, false).is_some(), "offline it plays");
+        assert!(o.track_file("node-1", 3, false).is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 

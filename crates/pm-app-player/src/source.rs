@@ -106,7 +106,7 @@ pub struct UrlSources {
     /// A copy of the URL's file on this device, when there is one.
     local: Mutex<Option<LocalCopy>>,
     /// The URLs last opened from the copy on this device (the page says "From this phone").
-    from_device: Mutex<std::collections::HashSet<String>>,
+    from_device: Mutex<std::collections::VecDeque<String>>,
 }
 
 /// Where a URL's file is kept on this device, if anywhere.
@@ -153,14 +153,13 @@ impl UrlSources {
 
     fn mark(&self, url: &str, here: bool) {
         let mut m = self.from_device.lock().unwrap_or_else(|e| e.into_inner());
-        // (only the songs of now matter: what plays and what comes next)
-        if m.len() > 8 {
-            m.clear();
-        }
+        m.retain(|u| u != url);
+        // (only the songs of now matter: what plays, what comes next, one before)
         if here {
-            m.insert(url.to_string());
-        } else {
-            m.remove(url);
+            m.push_back(url.to_string());
+            while m.len() > 3 {
+                m.pop_front();
+            }
         }
     }
 
@@ -169,7 +168,8 @@ impl UrlSources {
         self.from_device
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .contains(url)
+            .iter()
+            .any(|u| u == url)
     }
 
     /// Open and probe `url` now; `Err` says why it can't play here (the page then plays it).

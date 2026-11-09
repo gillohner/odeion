@@ -317,6 +317,13 @@ impl Store {
         Some(self.files_dir().join(name))
     }
 
+    /// A kept song's file and its format (`original`, `aac`…), read under one lock.
+    pub fn track_copy(&self, track_id: i64) -> Option<(PathBuf, String)> {
+        let ix = self.lock();
+        let t = ix.tracks.get(&track_id)?;
+        Some((self.files_dir().join(&t.file), t.format.clone()))
+    }
+
     /// An album's cover file.
     pub fn cover_file(&self, album_id: i64) -> Option<PathBuf> {
         let name = self.lock().covers.get(&album_id)?.clone();
