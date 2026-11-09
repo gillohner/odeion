@@ -314,6 +314,29 @@ impl Output for SnapcastOutput {
         .map_err(snap_err)
     }
 
+    /// Per client, each by its own level: the group's level is one client's, and the others may
+    /// have been set apart; none is raised to the limit.
+    async fn unmute_held(
+        &self,
+        _level: Volume,
+        max: f32,
+        _last: pm_zones::LastLevel<'_>,
+        _sole: bool,
+    ) -> pm_zones::Unmuted {
+        let server = self.server.clone();
+        let clients: Vec<String> = self.group.clients.iter().map(|(id, _)| id.clone()).collect();
+        let limit = self.percent_for_db(max);
+        match tokio::task::spawn_blocking(move || unmute_clients(&server, &clients, limit)).await {
+            Ok(Ok((back, refused))) => pm_zones::Unmuted {
+                any: back > 0,
+                error: refused.map(snap_err),
+                held: true,
+            },
+            Ok(Err(e)) => pm_zones::Unmuted::nothing(snap_err(e)),
+            Err(_) => pm_zones::Unmuted::nothing(SinkError::Device("snapcast unmute panicked".into())),
+        }
+    }
+
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let (percent, muted) = match v {
             Volume::Percent(p) => (Some(p.min(100)), None),
@@ -350,6 +373,63 @@ impl Output for SnapcastOutput {
         .map_err(|_| SinkError::Device("snapcast thread panicked".into()))?
         .map_err(snap_err)
     }
+}
+
+/// Each client's `(percent, muted)` in a `Server.GetStatus` answer, by client id.
+fn client_volumes(status: &Value) -> std::collections::HashMap<String, (u8, bool)> {
+    status
+        .pointer("/server/groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|g| g.get("clients").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|cl| {
+            let vol = cl.pointer("/config/volume")?;
+            Some((
+                cl.get("id")?.as_str()?.to_string(),
+                (
+                    vol.get("percent")?.as_u64()?.min(100) as u8,
+                    vol.get("muted").and_then(Value::as_bool).unwrap_or(false),
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// Unmute `clients` under `limit` (percent), each by its own level: one above the limit is set to
+/// it in the same call (a Snapcast level write unmutes), the others are only unmuted. A client the
+/// server doesn't report stays muted and is the refusal.
+fn unmute_clients(
+    server: &str,
+    clients: &[String],
+    limit: u8,
+) -> Result<(usize, Option<SnapError>), SnapError> {
+    let mut c = Control::connect(server)?;
+    let levels = client_volumes(&c.call("Server.GetStatus", Value::Null)?);
+    let (mut back, mut refused) = (0, None);
+    for id in clients {
+        let volume = match levels.get(id) {
+            Some((p, _)) if *p > limit => json!({"percent": limit, "muted": false}),
+            Some(_) => json!({"muted": false}),
+            None => {
+                refused.get_or_insert(SnapError::Rpc {
+                    method: "Server.GetStatus".into(),
+                    message: format!(
+                        "client {id}: its level isn't reported, so it stays muted under the volume limit"
+                    ),
+                });
+                continue;
+            }
+        };
+        match c.call("Client.SetVolume", json!({"id": id, "volume": volume})) {
+            Ok(_) => back += 1,
+            Err(e) => {
+                refused.get_or_insert(e);
+            }
+        }
+    }
+    Ok((back, refused))
 }
 
 /// Add our stream, wait for snapserver to connect, route the group to it.
@@ -531,6 +611,84 @@ mod tests {
         assert_eq!(g[0].label(), "pi · kitchen");
         assert_eq!(g[1].label(), "pi · bath");
         assert_eq!(with_port("10.0.0.2:1800"), "10.0.0.2:1800");
+    }
+
+    /// A fake snapserver: answers `Server.GetStatus` with `status` and records each
+    /// `Client.SetVolume` (client id, volume object).
+    /// Each `Client.SetVolume` the fake server took: (client id, volume object).
+    type Taken = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+
+    fn fake_server(status: Value) -> (String, Taken) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let set = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = set.clone();
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(conn) = conn else { return };
+                let mut w = conn.try_clone().unwrap();
+                for line in BufReader::new(conn).lines() {
+                    let Ok(line) = line else { break };
+                    let req: Value = serde_json::from_str(&line).unwrap();
+                    let result = match req["method"].as_str() {
+                        Some("Server.GetStatus") => status.clone(),
+                        Some("Client.SetVolume") => {
+                            let p = &req["params"];
+                            seen.lock()
+                                .unwrap()
+                                .push((p["id"].as_str().unwrap().to_string(), p["volume"].clone()));
+                            json!({})
+                        }
+                        _ => json!({}),
+                    };
+                    let _ = w.write_all(
+                        format!(
+                            "{}\r\n",
+                            json!({"id": req["id"], "jsonrpc": "2.0", "result": result})
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+        });
+        (addr, set)
+    }
+
+    /// Unmuting under a limit goes per client: the louder client comes down to the limit, the
+    /// quieter one is only unmuted (never raised to the limit); a client the server doesn't
+    /// report stays muted and is the refusal.
+    #[tokio::test]
+    async fn an_unmute_under_a_limit_never_raises_a_quieter_client() {
+        let status = json!({"server": {"groups": [{"id": "g", "clients": [
+            {"id": "loud", "config": {"volume": {"percent": 80, "muted": true}}},
+            {"id": "quiet", "config": {"volume": {"percent": 20, "muted": true}}}
+        ]}]}});
+        let (addr, set) = fake_server(status);
+        let group = Group {
+            id: "g".into(),
+            name: String::new(),
+            stream_id: "default".into(),
+            clients: vec![
+                ("loud".into(), "Loud".into()),
+                ("quiet".into(), "Quiet".into()),
+                ("gone".into(), "Gone".into()),
+            ],
+        };
+        let out = SnapcastOutput::new(&addr, group);
+        let max = -30.0;
+        let limit = out.percent_for_db(max);
+        assert!(limit > 20 && limit < 80, "{limit}");
+        let r = out.unmute_held(Volume::Percent(limit), max, None, true).await;
+        assert!(r.any && r.held, "{r:?}");
+        assert!(r.error.is_some(), "the unreported client is said: {r:?}");
+        let set = set.lock().unwrap().clone();
+        assert_eq!(
+            set,
+            vec![
+                ("loud".to_string(), json!({"percent": limit, "muted": false})),
+                ("quiet".to_string(), json!({"muted": false})),
+            ]
+        );
     }
 
     #[test]

@@ -323,35 +323,19 @@ impl Output for GroupOutput {
         self.members.iter().all(|m| m.unmute_restores_level())
     }
 
-    /// Per member, down only: each member by its own reading; none is given the group's last level
-    /// (a member may have been turned down on its own). Every member is tried; the first refusal
-    /// is reported after.
-    async fn hold_down(&self, max: f32, _last: Option<pm_model::VolumeLevel>) -> Result<(), SinkError> {
-        let mut failed = None;
-        for m in &self.members {
-            if let Err(e) = m.hold_down(max, None).await {
-                failed.get_or_insert(e);
-            }
-        }
-        failed.map_or(Ok(()), Err)
-    }
-
-    /// Per member: one that chooses its level on unmuting gets `level` first, one that restores
-    /// its own is only unmuted (a mixed group never raises the member that kept a lower level).
-    /// Every member is tried; the group came back when any member did.
-    async fn unmute_held(&self, level: Volume) -> crate::sink::Unmuted {
-        let mut out = crate::sink::Unmuted {
-            any: false,
-            error: None,
-        };
-        for m in &self.members {
-            let r = m.unmute_held(level).await;
-            out.any |= r.any;
-            if out.error.is_none() {
-                out.error = r.error;
-            }
-        }
-        out
+    /// Per member, each by its own level ([`crate::sink::unmute_each`]): a member that chooses
+    /// its level gets `level`, one that restores its own is never raised, and one whose level
+    /// can't be read stays muted (it may be above the limit). The group came back when any
+    /// member did.
+    async fn unmute_held(
+        &self,
+        level: Volume,
+        max: f32,
+        last: crate::sink::LastLevel<'_>,
+        _sole: bool,
+    ) -> crate::sink::Unmuted {
+        let members: Vec<&dyn Output> = self.members.iter().map(|m| m.as_ref() as &dyn Output).collect();
+        crate::sink::unmute_each(&members, level, max, last).await
     }
 
     async fn standby(&self, on: bool) -> Result<(), SinkError> {

@@ -509,14 +509,15 @@ impl Zone {
         Ok(())
     }
 
-    /// Unmute held to the zone's limit `max`. A device that chooses its level on unmuting
-    /// (AirPlay, Squeezebox) is given the level last published, held to the limit (the limit
-    /// itself while none is known) before it unmutes, so it never comes back at full; one that
-    /// restores its own level is only unmuted, never raised. A group does this per member
-    /// ([`Output::unmute_held`]). After: a device that reports its level is set back when it
-    /// came up above the limit; otherwise a level last published above the limit (lowered
-    /// since) is brought down to it. The zone shows itself unmuted only when some device came
-    /// back; a refusal is returned after the rest was done.
+    /// Unmute held to the zone's limit `max`, never raising a device ([`Output::unmute_held`],
+    /// per member in a group). A device that chooses its level on unmuting (AirPlay, Squeezebox)
+    /// is given the level last published, held to the limit (the limit itself while none is
+    /// known), before it unmutes, so it never comes back at full. One that restores its own is
+    /// brought down when it is above the limit: by its reading, else by the zone's level asked
+    /// for at that moment (a level the device announced meanwhile is the newer one). The zone
+    /// shows itself unmuted when some device came back. A device that can't report shows the
+    /// held level only when it is known to be there; after a refused correction it keeps the
+    /// level it had, so the next unmute corrects again. A refusal is returned after the rest.
     async fn unmute_within(&self, max: f32, seen: u64) -> Result<(), SinkError> {
         let percent_for = |db: f32| self.output.percent_for_db(db);
         let was = self.published().level;
@@ -529,34 +530,32 @@ impl Zone {
             },
         };
         let chooses = !self.output.unmute_restores_level();
-        let r = self.output.unmute_held(held).await;
+        let last = || self.published().level.map(|l| l.level);
+        let last: &(dyn Fn() -> Option<pm_model::VolumeLevel> + Send + Sync) = &last;
+        let r = self.output.unmute_held(held, max, Some(last), true).await;
         if !r.any {
             // Nothing came back: the zone stays as it was shown
             return Err(r
                 .error
                 .unwrap_or_else(|| SinkError::Device("the unmute went nowhere".into())));
         }
-        let mut error = r.error;
-        // Down to the limit, never up: per member in a group ([`Output::hold_down`])
-        if let Err(e) = self.output.hold_down(max, was.map(|l| l.level)).await {
-            error.get_or_insert(e);
-        }
         let (mut next, reported) = self.read_after(Volume::Mute(false)).await;
-        // A device that can't report: what the zone gave it, held to the limit (a device that
-        // keeps its own level and was never given one stays unknown)
-        if !reported && (chooses || was.is_some()) {
-            next = Some(pm_model::ZoneVolume {
-                level: match held {
+        if !reported {
+            let level = if r.held && (chooses || was.is_some()) {
+                Some(match held {
                     Volume::Db(d) => pm_model::VolumeLevel::Db(d),
                     Volume::Percent(p) => pm_model::VolumeLevel::Percent(p),
                     _ => unreachable!("held is a level"),
-                },
-                muted: false,
-            });
+                })
+            } else {
+                // Not known to be held (a correction was refused): the level it had stays shown
+                self.published().level.map(|l| l.level)
+            };
+            next = level.map(|level| pm_model::ZoneVolume { level, muted: false });
         }
         // Some device came back: the zone shows it, and a member's refusal is said after
         self.publish_volume(next, seen);
-        error.map_or(Ok(()), Err)
+        r.error.map_or(Ok(()), Err)
     }
 
     /// Publish `next` as the zone's level (none: the last one stays), unless the device announced

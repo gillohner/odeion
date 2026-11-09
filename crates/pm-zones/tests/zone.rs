@@ -2148,6 +2148,8 @@ struct ChoosesOnUnmute {
     asked: Mutex<Vec<Volume>>,
     /// Refuse every unmute (a member of a group that is away).
     refuse_unmute: bool,
+    /// A level write alone makes it heard (AirPlay: mute is a level).
+    writes_unmute: bool,
 }
 
 impl ChoosesOnUnmute {
@@ -2161,6 +2163,7 @@ impl ChoosesOnUnmute {
             last: Mutex::new(None),
             asked: Mutex::new(Vec::new()),
             refuse_unmute: false,
+            writes_unmute: false,
         }
     }
 }
@@ -2178,6 +2181,9 @@ impl Output for ChoosesOnUnmute {
     }
     fn unmute_restores_level(&self) -> bool {
         false
+    }
+    fn level_write_unmutes(&self) -> bool {
+        self.writes_unmute
     }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
         self.inner.open(fmt).await
@@ -2396,8 +2402,9 @@ fn zones_with_limit(limit: Arc<Mutex<Option<f32>>>) -> Zones {
 }
 
 /// The limit lowered while a mixed group is muted: on unmute, the member that chooses its level
-/// gets the new limit, and the member that keeps its own level and can't report is not touched:
-/// it was turned down on its own below the limit, and setting it to the limit would raise it.
+/// gets the new limit, and the member that keeps its own level and can't report is never set to
+/// the limit (it was turned down on its own below it: that would raise it). It may as well be
+/// above the limit, so it stays muted, and that is said.
 #[tokio::test]
 async fn a_limit_lowered_while_muted_never_raises_a_member_on_unmute() {
     use pm_model::VolumeLevel;
@@ -2419,13 +2426,16 @@ async fn a_limit_lowered_while_muted_never_raises_a_member_on_unmute() {
     zone.set_volume(Volume::Mute(true)).await.unwrap();
     // The owner lowers the limit while the pair is muted
     *limit.lock().unwrap() = Some(-20.0);
-    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    assert!(
+        zone.set_volume(Volume::Mute(false)).await.is_err(),
+        "the member left muted is said"
+    );
     zone.wait_acked().await;
     let k = keeps.inner.volume().await.unwrap().unwrap();
     assert_eq!(
         (k.level, k.muted),
-        (VolumeLevel::Db(-45.0), false),
-        "never raised"
+        (VolumeLevel::Db(-45.0), true),
+        "never raised; left muted"
     );
     let c = chooses.inner.volume().await.unwrap().unwrap();
     assert_eq!(
@@ -2470,4 +2480,229 @@ async fn a_member_refusing_the_correction_still_leaves_the_zone_shown_unmuted() 
     );
     let c = chooses.inner.volume().await.unwrap().unwrap();
     assert_eq!(c.level, pm_model::VolumeLevel::Db(-20.0));
+}
+
+/// A device for the unmute tests: keeps its own level through a mute; `reports` whether it can say
+/// its level; `refuse_levels` refuses level writes (mute changes go through); `partial_unmute`
+/// unmutes and then says no (a native Sonos, HEOS or BluOS group whose later player refused);
+/// `unmute_to`, a level it takes when it unmutes, and `on_unmute`, run then (to announce it).
+struct Knobs {
+    inner: NullOutput,
+    reports: bool,
+    refuse_levels: std::sync::atomic::AtomicBool,
+    partial_unmute: bool,
+    unmute_to: Mutex<Option<f32>>,
+    on_unmute: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl Knobs {
+    fn new(reports: bool) -> Self {
+        Self {
+            inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            reports,
+            refuse_levels: Default::default(),
+            partial_unmute: false,
+            unmute_to: Mutex::new(None),
+            on_unmute: Mutex::new(None),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Output for Knobs {
+    fn id(&self) -> OutputId {
+        OutputId::new("knobs", "1")
+    }
+    fn name(&self) -> String {
+        "Knobs".into()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        if !matches!(v, Volume::Mute(_)) && self.refuse_levels.load(Ordering::SeqCst) {
+            return Err(SinkError::Device("away".into()));
+        }
+        if v == Volume::Mute(false) {
+            let to = *self.unmute_to.lock().unwrap();
+            if let Some(d) = to {
+                self.inner.set_volume(Volume::Db(d)).await?;
+            }
+            self.inner.set_volume(v).await?;
+            if let Some(f) = self.on_unmute.lock().unwrap().as_ref() {
+                f();
+            }
+            if self.partial_unmute {
+                return Err(SinkError::Device("a later player refused".into()));
+            }
+            return Ok(());
+        }
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        if self.reports {
+            self.inner.volume().await
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn level_of(z: &Zone) -> Option<(pm_model::VolumeLevel, bool)> {
+    z.state().volume.map(|v| (v.level, v.muted))
+}
+
+/// A group member that keeps its own level and can't report it, at the group's level, when the
+/// limit comes down below that level while the group is muted: it may be above the limit, so it
+/// stays muted (it is never heard above it), the rest of the group plays, and that is said.
+#[tokio::test]
+async fn a_member_that_cant_report_stays_muted_when_the_limit_came_down_below_the_group() {
+    use pm_model::VolumeLevel;
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let chooses = Arc::new(ChoosesOnUnmute::new());
+    let keeps = Arc::new(Mute {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let members: Vec<Arc<dyn Output>> = vec![chooses.clone(), keeps.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    *limit.lock().unwrap() = Some(-20.0);
+    assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+    zone.wait_acked().await;
+    let k = keeps.inner.volume().await.unwrap().unwrap();
+    assert!(
+        k.muted || matches!(k.level, VolumeLevel::Db(d) if d <= -20.0),
+        "never heard above the limit: {k:?}"
+    );
+    assert_eq!(
+        chooses.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Db(-20.0)
+    );
+    assert_eq!(zone.state().volume.map(|v| v.muted), Some(false));
+    // Under the limit it is unmuted as before
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    let k = keeps.inner.volume().await.unwrap().unwrap();
+    assert_eq!((k.level, k.muted), (VolumeLevel::Db(-30.0), false));
+}
+
+/// A device that can't report, above a lowered limit, refuses the correction after its unmute:
+/// the zone shows it unmuted at the level it had (not the limit), so the next unmute corrects
+/// it, which goes through once the device takes levels again.
+#[tokio::test]
+async fn a_refused_correction_is_tried_again_on_the_next_unmute() {
+    use pm_model::VolumeLevel;
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let out = Arc::new(Knobs::new(false));
+    let zone = zones.create("Amp", out.clone());
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    *limit.lock().unwrap() = Some(-20.0);
+    out.refuse_levels.store(true, Ordering::SeqCst);
+    assert!(
+        zone.set_volume(Volume::Mute(false)).await.is_err(),
+        "the refusal is said"
+    );
+    zone.wait_acked().await;
+    assert_eq!(
+        level_of(&zone),
+        Some((VolumeLevel::Db(-10.0), false)),
+        "not shown at the limit"
+    );
+    out.refuse_levels.store(false, Ordering::SeqCst);
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    let d = out.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (d.level, d.muted),
+        (VolumeLevel::Db(-20.0), false),
+        "corrected this time"
+    );
+    assert_eq!(level_of(&zone), Some((VolumeLevel::Db(-20.0), false)));
+}
+
+/// A native group's unmute that brought its leader back before a later player refused: the
+/// leader is brought down to the lowered limit all the same, the zone shows it playing, and the
+/// refusal is said.
+#[tokio::test]
+async fn a_partial_unmute_is_still_held_to_the_limit() {
+    use pm_model::VolumeLevel;
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let mut out = Knobs::new(true);
+    out.partial_unmute = true;
+    let out = Arc::new(out);
+    let zone = zones.create("Group", out.clone());
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    *limit.lock().unwrap() = Some(-20.0);
+    assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+    zone.wait_acked().await;
+    let d = out.inner.volume().await.unwrap().unwrap();
+    assert_eq!((d.level, d.muted), (VolumeLevel::Db(-20.0), false));
+    assert_eq!(zone.state().volume.map(|v| v.muted), Some(false), "shown playing");
+}
+
+/// A device whose level write alone makes it heard (AirPlay) and whose unmute after it is
+/// refused: it is playing at the held level, so the zone shows it unmuted, and says the refusal.
+#[tokio::test]
+async fn a_level_write_that_unmuted_shows_the_zone_unmuted() {
+    use pm_model::VolumeLevel;
+    let zones = zones_with_limit(Arc::new(Mutex::new(Some(-20.0))));
+    let mut out = ChoosesOnUnmute::new();
+    out.refuse_unmute = true;
+    out.writes_unmute = true;
+    let out = Arc::new(out);
+    let zone = zones.create("Receiver", out.clone());
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+    zone.wait_acked().await;
+    assert_eq!(level_of(&zone), Some((VolumeLevel::Db(-30.0), false)));
+}
+
+/// While an unmute runs, the device announces a lower level of its own (turned down at the
+/// device); it can't be read back. The correction goes by that newer level, not by the one the
+/// unmute began with: the device is not raised to the limit, and the zone shows the announced
+/// level.
+#[tokio::test]
+async fn a_level_announced_during_the_unmute_is_what_the_correction_goes_by() {
+    use pm_model::{VolumeLevel, ZoneVolume};
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let out = Arc::new(Knobs::new(false));
+    let zone = zones.create("Amp", out.clone());
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    *limit.lock().unwrap() = Some(-20.0);
+    *out.unmute_to.lock().unwrap() = Some(-45.0);
+    let z = zone.clone();
+    *out.on_unmute.lock().unwrap() = Some(Box::new(move || {
+        z.announce_volume(ZoneVolume {
+            level: VolumeLevel::Db(-45.0),
+            muted: false,
+        })
+    }));
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    let d = out.inner.volume().await.unwrap().unwrap();
+    assert_eq!(d.level, VolumeLevel::Db(-45.0), "not raised to the limit");
+    assert_eq!(level_of(&zone), Some((VolumeLevel::Db(-45.0), false)));
 }
