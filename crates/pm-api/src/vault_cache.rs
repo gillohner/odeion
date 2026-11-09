@@ -924,9 +924,15 @@ fn app_for(b: &Bridge, travels: Option<&Map<String, Value>>, node_app: Option<St
 }
 
 /// One pass over every bridge, waiting for any other pass (or "Sign out everywhere") to end.
-pub async fn sync(s: &NodeState, vault: &Vault<'_>) -> Result<CacheReport, VaultStoreError> {
+/// `still`: whether the session the pass runs under is still the node's (checked before every
+/// write; a pass whose sign-in was replaced ends with [`VaultStoreError::Replaced`]).
+pub async fn sync(
+    s: &NodeState,
+    vault: &Vault<'_>,
+    still: &(dyn Fn() -> bool + Sync),
+) -> Result<CacheReport, VaultStoreError> {
     let _pass = take_pass(s).await?;
-    within(sync_held(s, vault, None, false)).await
+    within(sync_held(s, vault, None, false, still)).await
 }
 
 /// The longest one pass may take: the homeserver client has no timeouts of its own, and a pass
@@ -968,7 +974,18 @@ pub(crate) async fn sync_held(
     vault: &Vault<'_>,
     take: Option<(&str, Take)>,
     wiping: bool,
+    still: &(dyn Fn() -> bool + Sync),
 ) -> Result<CacheReport, VaultStoreError> {
+    // Before every write (the library's or the vault's): a sign-in that replaced this one
+    // meanwhile ends the pass, so nothing of the old identity's lands here or there
+    let current = || {
+        if still() {
+            Ok(())
+        } else {
+            Err(VaultStoreError::Replaced)
+        }
+    };
+    current()?;
     let mut report = CacheReport::default();
     let owner = vault.owner().to_string();
     let client = vault.client_key().to_hex();
@@ -983,6 +1000,7 @@ pub(crate) async fn sync_held(
         }
     };
     for b in BRIDGES {
+        current()?;
         let service = b.service.to_string();
         let mut read = vault.read(b.service).await;
         // The person takes the vault's copy by hand: a copy older than one seen (a sign-in made
@@ -1248,6 +1266,7 @@ pub(crate) async fn sync_held(
         // Written only while the vault holds what this pass decided on
         let expected = theirs.as_ref().map(|o| vault_hash(&o.sign_in));
         let unchanged = |cur: Option<&SignIn>| cur.map(vault_hash) == expected;
+        current()?;
         match what {
             Do::Nothing => {}
             Do::InStep => {
@@ -1463,7 +1482,7 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
         // plain text; writing it again now leaves it out
         sync.backup_settings(&s).await;
         loop {
-            if !s.sync_handle().is_some_and(|h| Arc::ptr_eq(&h, &sync)) {
+            if sync.is_retired() {
                 break;
             }
             match crate::vault::client_secret(&s) {
@@ -1474,9 +1493,10 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
                         .device("node")
                         .remember_revocations(&revoked)
                         .keep_marks(&marks);
-                    match pass(&s, &vault, None).await {
+                    match pass(&s, &vault, None, &|| !sync.is_retired()).await {
                         Ok(r) if r != CacheReport::default() => tracing::info!(?r, "vault: sign-ins synced"),
                         Ok(_) => {}
+                        Err(VaultStoreError::Replaced) => break,
                         Err(e) => tracing::warn!("vault: {e}"),
                     }
                 }
@@ -1495,12 +1515,20 @@ pub async fn pass(
     s: &NodeState,
     vault: &Vault<'_>,
     take: Option<(&str, Take)>,
+    still: &(dyn Fn() -> bool + Sync),
 ) -> Result<CacheReport, VaultStoreError> {
     let _pass = take_pass(s).await?;
     let r = within(async {
+        // Each a write to the vault: not for a session another sign-in replaced
+        if !still() {
+            return Err(VaultStoreError::Replaced);
+        }
         vault.touch(&s.name).await?;
+        if !still() {
+            return Err(VaultStoreError::Replaced);
+        }
         vault.share_with_trusted().await?;
-        sync_held(s, vault, take, false).await
+        sync_held(s, vault, take, false, still).await
     })
     .await?;
     record_last_sync(s, &r);

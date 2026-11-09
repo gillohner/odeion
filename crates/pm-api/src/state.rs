@@ -2106,6 +2106,11 @@ impl NodeState {
         let old = self
             .usage
             .revoke_all_across(|| std::mem::replace(&mut *self.sync.lock().expect("sync lock"), sync));
+        // A pass of the old session still running writes nothing more, to the library or to its
+        // homeserver, and its background loops stop (sync.rs, vault_cache.rs)
+        if let Some(old) = &old {
+            old.retire();
+        }
         drop(old);
         // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
         // After the swap: a session minted meanwhile was checked against the identity then

@@ -875,3 +875,88 @@ async fn a_take_of_the_vaults_copy_that_doesnt_go_through_keeps_the_nodes_record
         "the record of the newest copy seen is back: {r}"
     );
 }
+
+/// A sign-in that replaces this node's while a vault pass runs for the old one ends the pass
+/// before its next write: nothing of the old identity's sign-ins lands on the node, and the old
+/// identity's vault (its device list, its sign-ins) is left as it was.
+#[tokio::test]
+async fn a_sign_in_switch_ends_the_old_vault_pass() {
+    use pm_pubky::vault::VaultStoreError;
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let info = admin_call(&a, reqwest::Method::GET, "/info", None).await;
+    let hs = PublicKey::try_from(info["public_key"].as_str().unwrap()).unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
+    let sign_up = |ids: Vec<&'static str>| {
+        let (a, hs, homeserver) = (a.clone(), hs.clone(), homeserver.clone());
+        async move {
+            let token = admin_call(
+                &a,
+                reqwest::Method::POST,
+                "/generate_signup_token",
+                Some(json!({"storage_quota_mb": "unlimited"})),
+            )
+            .await;
+            let signer = pubky().signer(Keypair::random());
+            signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
+            let mut sessions = Vec::new();
+            for id in ids {
+                let flow = homeserver.start_login(id).unwrap();
+                signer.approve_auth(flow.url()).await.unwrap();
+                sessions.push(flow.await_approval().await.unwrap());
+            }
+            sessions
+        }
+    };
+    let mut a_sessions = sign_up(vec!["node.pubky.music", "phone.pubky.music"]).await;
+    let mut b_sessions = sign_up(vec!["node.pubky.music"]).await;
+    let phone_session = a_sessions.pop().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        a_sessions.pop().unwrap(),
+    ))));
+    let app = router(n.clone());
+    let (st, v) = call(&app, "POST", "/v1/vault/register").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // A's phone signed in to TIDAL for every device of A's
+    let phone_key = ClientSecret::generate();
+    let phone = Vault::new(&phone_session, &phone_key);
+    phone.register("Phone").await.unwrap();
+    let tidal: SignIn = serde_json::from_value(json!({"service": "tidal", "way": "app",
+        "tokens": {"access_token": "never-shown", "refresh_token": "never-shown-either"}}))
+    .unwrap();
+    phone.write_shared("tidal", &tidal).await.unwrap();
+    let index_before = serde_json::to_value(phone.index().await.unwrap()).unwrap();
+    let blob_before = phone.envelope("tidal").await.unwrap().unwrap();
+    // The node's pass for A starts as B signs in on the node
+    let sync_a = n.sync.lock().unwrap().clone().expect("signed in as A");
+    let key = pm_pubky::vault::load_or_create_client_secret(&n.data_dir().join("vault").join("client.key"))
+        .unwrap();
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        NodeHomeserver::new(network()).unwrap(),
+        b_sessions.pop().unwrap(),
+    ))));
+    assert!(sync_a.is_retired());
+    let vault = Vault::new(sync_a.session(), &key).device("node");
+    let r = pm_api::vault_cache::pass(&n, &vault, None, &|| !sync_a.is_retired()).await;
+    assert!(matches!(r, Err(VaultStoreError::Replaced)), "{r:?}");
+    let get = |k: &str| n.library.lock().unwrap().get_setting(k).unwrap();
+    assert_eq!(get("tidal.user"), None, "A's sign-in landed on the node");
+    assert_eq!(
+        serde_json::to_value(phone.index().await.unwrap()).unwrap(),
+        index_before,
+        "A's device list was written"
+    );
+    assert_eq!(phone.envelope("tidal").await.unwrap().unwrap(), blob_before);
+    // B's own pass runs: B has no sign-ins, nothing to take; the node is registered with B
+    let (st, v) = call(&app, "POST", "/v1/vault/register").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, r) = call(&app, "POST", "/v1/vault/sync").await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["pulled"], json!([]), "{r}");
+    assert_eq!(get("tidal.user"), None);
+}

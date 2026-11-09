@@ -38,6 +38,9 @@ pub enum VaultStoreError {
     NoGrant,
     #[error("another device is changing {0}; try again in a moment")]
     Busy(String),
+    /// Another sign-in replaced the session this pass ran under: it ended before writing more.
+    #[error("another sign-in replaced this session")]
+    Replaced,
     #[error("the service refused the refresh: {0}")]
     Refresh(String),
     #[error("this node's Pubky sign-in doesn't include your streaming sign-ins yet; sign it in again with Pubky Ring")]
