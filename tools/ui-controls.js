@@ -13,6 +13,7 @@
 // in its own shard's list (a control that appears only after another shard's click would otherwise
 // be clicked by none).
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
+const searchFixture = require('./ui-controls-search');
 const TOKEN = process.argv[2]; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const [SHARD, SHARDS] = (process.env.UI_SHARD || '1/1').split('/').map(Number);
@@ -34,8 +35,11 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   try { const pls = await api('/playlists'); const pl = pls.find((p) => p.items > 0); if (pl) views.push('/playlist/' + pl.id); } catch { /* none */ }
   try { const al = await api('/library/albums'); if (al[0]) views.push('/album/lib-' + al[0].id); } catch { /* none */ }
   views.push('/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69');
+  // Optional focused rerun; CI leaves this unset and audits every view above.
+  if (process.env.UI_CONTROLS_VIEWS) views.splice(0, views.length, ...JSON.parse(process.env.UI_CONTROLS_VIEWS));
   const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' });
+  await searchFixture.install(ctx);
   await ctx.addInitScript((t) => {
     localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser');
     HTMLMediaElement.prototype.play = async function () {};
@@ -50,7 +54,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   let inflight = 0; let lastDone = 0;
   p.on('request', () => { inflight++; });
   for (const ev of ['requestfinished', 'requestfailed']) p.on(ev, () => { inflight = Math.max(0, inflight - 1); lastDone = Date.now(); });
-  const settle = async () => { await p.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {}); await sleep(400); };
+  const settle = async () => { await p.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {}); await searchFixture.settle(p); await sleep(400); };
   // Visible, enabled buttons, one per kind: class, data attributes and wording (digits dropped).
   const kinds = () => p.$$eval('button', (els) => {
     const seen = new Set(); const out = [];

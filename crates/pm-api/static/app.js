@@ -3875,7 +3875,8 @@
   };
   // Retried searches have the same query and scope, but a different run. Old tag replies and
   // slow-source timers must never replace the new results or change their progress.
-  const currentSearch = (run) => state.view === 'search' && state.viewArg && searchRuns.get(`${(state.viewArg.q || '').toLowerCase()}|${state.viewArg.in || 'everywhere'}`) === run;
+  const displayedSearch = () => state.view === 'search' && state.viewArg && searchRuns.get(`${(state.viewArg.q || '').toLowerCase()}|${state.viewArg.in || 'everywhere'}`);
+  const currentSearch = (run) => !!run && displayedSearch() === run;
   const searchChanged = (run) => {
     if (!currentSearch(run)) return;
     const prog = $('#sprog'); const total = Math.max(run.sources.length, 1); const got = Object.keys(run.answers).length;
@@ -3950,12 +3951,16 @@
   search.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); } if (e.key === 'Escape') { search.value = ''; search.blur(); if (state.view === 'search') setView('home'); } });
 
   document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return;
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
     if (e.key === 'Escape') { if (!overlay.hidden) toggleNowPlaying(); closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
     if (typing) return;
     // A clickable row (a div) is a button for the keyboard: Enter or Space opens it
     const row = e.target.closest && e.target.closest('.clickable[tabindex]');
     if (row && e.target === row && (e.key === 'Enter' || e.code === 'Space')) { e.preventDefault(); row.click(); return; }
+    // Focused controls own their keys (including native button Space activation).
+    // Playback shortcuts apply to the page, never to a control or its children.
+    if (e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]')) return;
     if (e.key === '/') { e.preventDefault(); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
     if (e.key === 'ArrowRight' && !e.metaKey && !e.ctrlKey) transport({ action: 'next' });
@@ -4994,7 +4999,7 @@
     const chips = $('#scopechips'); const box = $('#sresults'); if (!chips || !box) return;
     const retryFocus = $('[data-sretry]:focus', box);
     const scope = run.scope;
-    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(run); }).catch(() => { state.sourcesLoading = false; }); }
+    if (!state.sources && !state.sourcesLoading) { state.sourcesLoading = true; api('GET', '/sources').then((l) => { state.sources = l; state.sourcesLoading = false; applySourcesOff(); renderSearchBody(displayedSearch()); }).catch(() => { state.sourcesLoading = false; }); }
     const services = (state.sources || []).filter((x) => x.enabled !== false && (!x.features || x.features.includes('search')) && !/^not configured/.test(x.status) && x.status !== 'needs_config' && x.status !== 'browser');
     const scopes = [['everywhere', 'Everywhere'], ['library', 'Library'], ['pubky', 'Pubky'], ...services.map((x) => [x.id, x.name])];
     const stat = (src) => { const ans = run.answers[src]; if (ans) return ans.status === 'ok' ? `<span class="cnt">${ans.hits.length}</span>` : `<span class="bad" title="${esc(ans.error || '')}">!</span>`; return run.sources.includes(src) && run.pending ? '<span class="spin"></span>' : ''; };

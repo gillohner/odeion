@@ -20,9 +20,19 @@ async function until(page, predicate, label) {
 const hit = { kind: 'song', id: 'lib-1', title: fx.track.title, subtitle: 'Sefa, Dr. Peacock', track_id: 1, uri: 'track:1', keys: ['track:1'] };
 const answer = (hits = [hit]) => JSON.stringify({ source: 'library', status: 'ok', hits, counts: [] });
 const response = (body, sources = 'library') => ({ contentType: 'application/x-ndjson', headers: { 'x-pm-sources': sources }, body });
+const zone = { id: 'z1', name: 'Living room', output: 'upnp:fixture', transport: 'paused', queue: [{ id: 1, uri: 'track:1', title: hit.title }], queue_index: 0, queue_version: 1, repeat: 'off', radio: false, sync: 'single', volume: { percent: 20, muted: false }, now_playing: { item: { id: 1, uri: 'track:1', title: hit.title, artist: 'Sefa', duration_ms: 240000 }, index: 0, position_ms: 1000, duration_ms: 240000 } };
+async function withPlayer(browser, width) {
+  const run = await fx.create(browser, width, { zone: zone.id, fixtures: { '/zones': { body: [zone] }, '/zones/z1/transport': { body: zone } } });
+  await run.context.routeWebSocket(/\/v1\/events/, (ws) => {
+    ws.onMessage((m) => { const j = JSON.parse(m); if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); });
+    ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] }));
+  });
+  return run;
+}
+const transports = (state) => state.hits.filter((h) => h.v === '/zones/z1/transport' && h.m === 'POST').map((h) => JSON.parse(h.body).action);
 
-async function recovery(browser, width, mode, theme = 'light') {
-  const run = await fx.create(browser, width);
+async function recovery(browser, width, mode, theme = 'light', key = 'Enter') {
+  const run = await withPlayer(browser, width);
   const { page, context, state } = run;
   const scope = mode === 'partial' || mode === 'incomplete' ? 'everywhere' : 'library';
   await context.addInitScript((t) => localStorage.setItem('pm.theme', t), theme);
@@ -64,7 +74,8 @@ async function recovery(browser, width, mode, theme = 'light') {
     assert.equal(await page.locator('#sprog').isVisible(), false, 'failure ends the progress indicator');
     // Keyboard activation must issue a fresh search and retain the user's query and scope.
     await retry.focus();
-    await page.keyboard.press('Enter');
+    await page.keyboard.press(key);
+    assert.deepEqual(transports(state), [], `${key} on Retry never controls playback`);
     await until(page, () => !document.querySelector('#sprog').hidden, 'retry progress appears');
     assert.equal(await retry.count(), 0, 'retry disappears while searching, preventing repeated presses');
     assert.doesNotMatch(await page.locator('#sresults').innerText(), /Nothing matched/, 'waiting for retry headers is not an empty result');
@@ -77,7 +88,7 @@ async function recovery(browser, width, mode, theme = 'light') {
     assert.deepEqual(state.errors, [], 'no page errors');
     await fx.cleanCopy(page);
     await page.screenshot({ path: path.join(shots, `recovered-${mode}-${width}-${theme}.png`) });
-    console.log(`PASS ${width} ${theme} ${mode}: error, retained results, keyboard retry, progress, recovery`);
+    console.log(`PASS ${width} ${theme} ${mode} ${key}: error, retained results, keyboard retry, progress, recovery`);
   } finally {
     releaseRetry();
     await context.close();
@@ -159,15 +170,92 @@ async function lateReplies(browser, whileFailed = false) {
   } finally { releaseTags(); await context.close(); }
 }
 
+async function delayedSources(browser, action) {
+  const { page, context, state } = await fx.create(browser, 1280);
+  let releaseSources;
+  const sources = new Promise((resolve) => { releaseSources = resolve; });
+  let calls = 0;
+  await context.route(/\/v1\/sources$/, async (route) => {
+    await sources;
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify([{ id: 'tidal', name: 'TIDAL', status: 'ready', enabled: true, features: ['search'] }]) });
+  });
+  await context.route(/\/v1\/search\?/, (route) => route.fulfill(response(++calls === 1 ? '{broken\n' : answer() + '\n')));
+  try {
+    await fx.go(page, '/search?q=Journey');
+    await page.locator('button[data-sretry]').waitFor();
+    assert.equal(await page.locator('[data-scope-in="tidal"]').count(), 0);
+    if (action === 'retry') await page.locator('button[data-sretry]').click();
+    else if (action === 'query') { await page.fill('#search', 'New query'); await page.press('#search', 'Enter'); }
+    else { await page.locator('#sidebar [data-view="tracks"]').click(); await page.locator('#tracklist').waitFor(); }
+    if (action !== 'leave') await page.locator('#sresults .srow').first().waitFor();
+    releaseSources();
+    if (action === 'leave') {
+      await sleep(200);
+      assert.equal(new URL(page.url()).pathname, '/tracks');
+      assert.equal(await page.locator('#scopechips').count(), 0, 'source discovery never reopens Search');
+    } else {
+      await page.locator('[data-scope-in="tidal"]').waitFor();
+      assert.match(await page.locator('#sresults').innerText(), /Journey Through Time/);
+      assert.equal(await page.locator('button[data-sretry]').count(), 0, 'source discovery does not restore the failed run');
+      assert.equal(await page.locator('#search').inputValue(), action === 'query' ? 'New query' : 'Journey');
+      await page.locator('[data-scope-in="tidal"]').click();
+      await until(page, () => window.pmLastSearch?.scope === 'tidal', 'discovered source is usable');
+    }
+    assert.deepEqual(state.errors, []);
+    console.log(`PASS delayed nonempty sources after ${action}`);
+  } finally { releaseSources(); await context.close(); }
+}
+
+async function keyboardControls(browser) {
+  const { page, context, state } = await withPlayer(browser, 1280);
+  try {
+    await fx.go(page, '/library/import');
+    await page.locator('[data-libtab="import"].on').waitFor();
+    await page.locator('[data-libtab="import"]').focus();
+    await page.keyboard.press('ArrowLeft');
+    await page.locator('[data-libtab="node"].on').waitFor();
+    assert.deepEqual(transports(state), [], 'handled tab arrows do not skip songs');
+    await page.locator('#libadd').focus();
+    await page.keyboard.press('Space');
+    await page.locator('dialog[open]').waitFor();
+    assert.deepEqual(transports(state), [], 'Space opens Add music without playing');
+    await page.keyboard.press('Escape');
+    await page.locator('dialog[open]').waitFor({ state: 'hidden' });
+    // The global shortcuts still work when the page itself has focus.
+    await page.evaluate(() => document.activeElement.blur());
+    await page.keyboard.press('Space');
+    await sleep(150);
+    await page.keyboard.press('ArrowRight');
+    await sleep(150);
+    await page.keyboard.press('ArrowLeft');
+    await sleep(150);
+    assert.deepEqual(transports(state), ['play', 'next', 'previous']);
+    // A component can consume a shortcut even without a native interactive tag.
+    await page.evaluate(() => document.body.addEventListener('keydown', (e) => e.preventDefault(), { once: true }));
+    await page.keyboard.press('Space');
+    await sleep(150);
+    assert.deepEqual(transports(state), ['play', 'next', 'previous'], 'defaultPrevented is respected');
+    assert.deepEqual(state.errors, []);
+    console.log('PASS native button Space, tab arrows, consumed events and page playback shortcuts');
+  } finally { await context.close(); }
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
+    // A focused mode also lets the unchanged UI act as each regression's negative control.
+    if (process.env.SEARCH_RECOVERY_CASE === 'sources') { await delayedSources(browser, 'retry'); return; }
+    if (process.env.SEARCH_RECOVERY_CASE === 'keyboard') { await recovery(browser, 1280, 'http', 'light', 'Space'); return; }
+    if (process.env.SEARCH_RECOVERY_CASE === 'controls') { await keyboardControls(browser); return; }
     for (const [width, theme] of [[1280, 'dark'], [1024, 'light'], [768, 'dark'], [360, 'light'], [412, 'dark']]) {
       await recovery(browser, width, 'http', theme);
+      await recovery(browser, width, 'http', theme, 'Space');
     }
     for (const mode of ['network', 'malformed', 'partial', 'incomplete']) await recovery(browser, 1280, mode);
     await healthyAndCancelled(browser);
     await lateReplies(browser);
     await lateReplies(browser, true);
+    for (const action of ['retry', 'query', 'leave']) await delayedSources(browser, action);
+    await keyboardControls(browser);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
