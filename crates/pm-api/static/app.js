@@ -5253,7 +5253,7 @@
     // Removing Sort during loading leaves focus on body. Any later focus transfer cancels
     // restoration, even if the person then dismisses that control (Search followed by Escape).
     const moved = () => { focused = false; };
-    document.addEventListener('focusin', moved, true);
+    document.addEventListener('focusin', moved, { capture: true, once: true, signal: navCtl.signal });
     try {
       const rendered = render(); const drawing = lastDrawing;
       await rendered;

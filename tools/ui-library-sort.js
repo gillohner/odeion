@@ -23,6 +23,14 @@ async function ready(page, sort) {
   await page.locator('[data-lsort]').waitFor();
   assert.equal(await page.locator('[data-lsort]').inputValue(), sort, 'chosen order is shown');
 }
+async function focusListeners(page) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { result } = await session.send('Runtime.evaluate', { expression: 'document' });
+    const { listeners } = await session.send('DOMDebugger.getEventListeners', { objectId: result.objectId });
+    return listeners.filter((l) => l.type === 'focusin').length;
+  } finally { await session.detach(); }
+}
 async function matches(page, kind, query, ids) {
   const { rows, attr } = lists[kind];
   assert.equal(await page.locator('#filter').inputValue(), query, `${kind}: typed filter survives sorting`);
@@ -76,15 +84,21 @@ async function delayedSort(browser, width, focusChoice, navigateAway = false) {
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(artists) });
   });
   try {
-    await fx.go(page, '/artists');
+    if (navigateAway === 'history') {
+      await fx.go(page, '/albums');
+      await page.locator('#sidebar [data-view="artists"]').click();
+    } else await fx.go(page, '/artists');
     await page.fill('#filter', 'Loop');
+    const beforeListeners = await focusListeners(page);
     await page.locator('[data-lsort]').focus();
     await page.selectOption('[data-lsort]', 'added');
     await pending;
     assert.equal(await page.locator('#main > .skeleton').count(), 1, 'loading is visible while sorting');
     if (navigateAway) {
-      await page.locator('#sidebar [data-view="albums"]').click();
+      if (navigateAway === 'history') await page.goBack();
+      else await page.locator('#sidebar [data-view="albums"]').click();
       await page.locator('#albumgrid .tile').first().waitFor();
+      assert.equal(await focusListeners(page), beforeListeners, 'leaving a pending sort removes its focus listener, even without moving focus');
     }
     if (focusChoice !== 'sort') {
       await page.keyboard.press('/');
@@ -105,8 +119,9 @@ async function delayedSort(browser, width, focusChoice, navigateAway = false) {
       await matches(page, 'artists', 'Loop', [3, 2, 1]);
     }
     const focused = await page.evaluate(() => document.activeElement.matches('[data-lsort]') ? 'sort' : document.activeElement.id || document.activeElement.tagName);
-    await page.screenshot({ path: path.join(shots, `delayed-${width}-${focusChoice}${navigateAway ? '-navigation' : ''}.png`) });
+    await page.screenshot({ path: path.join(shots, `delayed-${width}-${focusChoice}${navigateAway ? '-' + navigateAway : ''}.png`) });
     assert.equal(focused, { sort: 'sort', search: 'search', blur: 'BODY' }[focusChoice], 'sorting respects the latest focus choice, including move then blur');
+    assert.equal(await focusListeners(page), beforeListeners, 'completed sort removes its focus listener');
     // Cancellation belongs to this render only: a later deliberate sort still restores focus.
     if (!navigateAway) {
       await page.locator('[data-lsort]').focus();
@@ -162,7 +177,8 @@ async function sparseLists(browser) {
     for (const width of [1280, 1024, 768]) {
       for (const focusChoice of ['blur', 'search', 'sort']) await delayedSort(browser, width, focusChoice);
     }
-    await delayedSort(browser, 1280, 'search', true);
+    await delayedSort(browser, 1280, 'search', 'pointer');
+    await delayedSort(browser, 1280, 'search', 'history');
     await sparseLists(browser);
   } finally { await browser.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });
