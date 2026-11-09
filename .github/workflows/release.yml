@@ -473,18 +473,30 @@ jobs:
       # install pinned to one still pulls with the new default name. Tags it has are left alone.
       - name: copy older version tags to the new name
         if: needs.meta.outputs.publish == 'true'
+        shell: bash
         run: |
           tags() {
-            local tok
-            tok=$(curl -fsS "https://ghcr.io/token?scope=repository:$1:pull" | jq -r .token)
-            curl -fsS -H "Authorization: Bearer $tok" "https://ghcr.io/v2/$1/tags/list?n=1000" | jq -r '.tags[]?'
+            local reply tok
+            reply=$(curl -fsS "https://ghcr.io/token?scope=repository:$1:pull") || return $?
+            tok=$(jq -er '.token | select(type == "string" and length > 0)' <<<"$reply") || return $?
+            reply=$(curl -fsS -H "Authorization: Bearer $tok" "https://ghcr.io/v2/$1/tags/list?n=1000") || return $?
+            jq -er '
+              if type == "object" and has("tags") and
+                (.tags == null or (.tags | type == "array" and
+                  all(.[]; type == "string" and test("^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"))))
+              then (.tags // [] | join("\n"))
+              else error("invalid registry tag list") end' <<<"$reply"
           }
-          have=$(tags gillohner/odeion)
-          for t in $(tags gillohner/pubky-music-node | grep -E '^(latest|[0-9]+\.[0-9]+(\.[0-9]+)?)$'); do
+          # Both enumerations must succeed before any tag is copied. An empty valid list is
+          # distinct from an HTTP, authentication, JSON or schema failure.
+          have=$(tags gillohner/odeion) || exit $?
+          old=$(tags gillohner/pubky-music-node) || exit $?
+          while IFS= read -r t; do
+            [[ "$t" =~ ^(latest|[0-9]+\.[0-9]+(\.[0-9]+)?)$ ]] || continue
             if grep -qxF "$t" <<<"$have"; then continue; fi
             echo "copying $t"
             docker buildx imagetools create -t "ghcr.io/gillohner/odeion:$t" "ghcr.io/gillohner/pubky-music-node:$t"
-          done
+          done <<<"$old"
 
   # A version tag: every Android check on every version (android.yml; pushes to main run it on their
   # own). The phone-as-zone check above runs on the signed release APK as well.
