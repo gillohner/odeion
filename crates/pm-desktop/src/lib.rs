@@ -75,7 +75,12 @@ impl AppState {
 }
 
 /// [`AppState::store_if_node`] on the settings cell itself (also for tests).
-fn store_if_node(cell: &Mutex<Option<Settings>>, path: &Path, node_url: &str, s: Settings) -> bool {
+fn store_if_node(
+    cell: &Mutex<Option<Settings>>,
+    path: &std::path::Path,
+    node_url: &str,
+    s: Settings,
+) -> bool {
     let Ok(mut cur) = cell.lock() else {
         return false;
     };
@@ -974,11 +979,21 @@ mod tests {
         };
         let cell = Mutex::new(Some(node("http://b:7788", "")));
         // A's registration, late: refused, B stays
-        assert!(!store_if_node(&cell, &path, "http://a:7788", node("http://a:7788", "a-player")));
+        assert!(!store_if_node(
+            &cell,
+            &path,
+            "http://a:7788",
+            node("http://a:7788", "a-player")
+        ));
         assert_eq!(cell.lock().unwrap().as_ref().unwrap().node_url, "http://b:7788");
         assert!(!path.exists(), "nothing written");
         // B's own: stored
-        assert!(store_if_node(&cell, &path, "http://b:7788", node("http://b:7788", "b-player")));
+        assert!(store_if_node(
+            &cell,
+            &path,
+            "http://b:7788",
+            node("http://b:7788", "b-player")
+        ));
         assert_eq!(cell.lock().unwrap().as_ref().unwrap().player_address, "b-player");
         let saved: Settings = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved.player_address, "b-player");
