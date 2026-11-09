@@ -1045,9 +1045,8 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
             })
     };
     let grant = crate::personal::forget(s, key);
-    signed_out?;
-    personal?;
-    grant.map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Everything else goes too before a failure above is answered (removing them again finishes
+    // what is left)
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
     crate::tidal::pending()
@@ -1079,6 +1078,9 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     crate::search::forget_answers_of(s, key);
     crate::search::forget_answers_of(s, &on_node);
     crate::devices::forget_all_of(s, key);
+    signed_out?;
+    personal?;
+    grant.map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(())
 }
 
