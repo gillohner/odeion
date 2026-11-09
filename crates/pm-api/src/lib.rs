@@ -13910,6 +13910,39 @@ exec sleep 300
         let (_, r) = call(&app, "DELETE", "/v1/sources/spotify/signin", None).await;
         assert_eq!(r["line"], "Not signed in");
         assert!(!file.exists(), "the copy goes with Sign out");
+        // Sign out of a way by name, also while another way is the one picked (librespot while
+        // the app is picked, even with librespot itself missing here)
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/sources/spotify/signin/import",
+            Some(serde_json::json!({"text": creds})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, r) = call(
+            &app,
+            "PUT",
+            "/v1/sources/spotify/signin",
+            Some(serde_json::json!({"way": "app"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["chosen"], "app");
+        let (st, r) = call(&app, "DELETE", "/v1/sources/spotify/signin?way=nope", None).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+        assert!(file.exists(), "a refused sign-out changes nothing");
+        let (st, r) = call(
+            &app,
+            "DELETE",
+            "/v1/sources/spotify/signin?way=librespot-file",
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["line"], "Not signed in");
+        assert_eq!(r["details"]["librespot"]["signed_in"], false, "{r}");
+        assert!(!file.exists(), "the named way's copy is gone");
         *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 

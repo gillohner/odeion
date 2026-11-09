@@ -1684,7 +1684,7 @@
   };
   // Play on a Spotify Connect device: the active one, else a menu of the devices online. Spotify streams it; the node only drives it.
   // Spotify can't share one app between nodes, so the owner makes their own: these steps, then only its client ID (PKCE through the return page, no secret)
-  const spotSetup = (sp, hidden) => `<form class="set-group" id="spotapp" ${hidden ? 'hidden' : ''}><p class="muted small">Spotify lets each person use their own free developer app. It takes about two minutes, once:</p><ol class="muted small steps"><li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a>, sign in with your Spotify account and choose <b>Create app</b> (any name and description).</li><li>Under <b>Redirect URIs</b> add this address, tick <b>Web API</b>, and save:<div class="toolbar"><code class="path">${esc(sp.redirect_uri)}</code><button type="button" class="btn ghost sm" id="spotcopy">Copy</button></div></li><li>Under <b>User Management</b>, add every Spotify account that will sign in here (up to 25).</li><li>Copy the <b>Client ID</b> from the app's Settings and paste it below. No secret is needed.</li></ol><div class="toolbar"><label class="sr-only" for="spotid">Spotify client ID</label><input id="spotid" name="id" class="input" autocomplete="off" spellcheck="false" placeholder="Client ID (32 letters and digits)" pattern="[0-9a-fA-F]{32}" required value="${esc(sp.client_id || '')}"><button class="btn primary">Save</button>${hidden ? '<button type="button" class="btn ghost" id="spotappcancel">Cancel</button>' : ''}</div></form>`;
+  const spotSetup = (sp, hidden) => `<form class="stack" id="spotapp" ${hidden ? 'hidden' : ''}><ol class="muted small steps"><li>Open the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify developer dashboard</a>, sign in with your Spotify account and choose <b>Create app</b> (any name and description).</li><li>Under <b>Redirect URIs</b> add this address, tick <b>Web API</b>, and save:<div class="toolbar"><code class="path">${esc(sp.redirect_uri)}</code><button type="button" class="btn ghost sm" id="spotcopy">Copy</button></div></li><li>Under <b>User Management</b>, add every Spotify account that will sign in here (up to 25).</li><li>Copy the <b>Client ID</b> from the app's Settings and paste it below. No secret is needed.</li></ol><div class="toolbar"><label class="sr-only" for="spotid">Spotify client ID</label><input id="spotid" name="id" class="input" autocomplete="off" spellcheck="false" placeholder="Client ID (32 letters and digits)" pattern="[0-9a-fA-F]{32}" required value="${esc(sp.client_id || '')}"><button class="btn primary">Save</button>${hidden ? '<button type="button" class="btn ghost" id="spotappcancel">Cancel</button>' : ''}</div></form>`;
   // The fallback for a sign-in whose last step could not reach this node (another network, an app allowing only
   // loopback redirects): paste the address the sign-in page landed on; the node finishes from its parameters.
   const pasteBack = (svc) => `<details class="small"><summary>Landed on a page that didn't load?</summary><form class="toolbar" id="${svc}paste"><input class="input" name="url" placeholder="Paste that page's address (…?code=…)" autocomplete="off" spellcheck="false" required aria-label="The address you landed on"><button class="btn sm" type="submit">Finish sign-in</button></form></details>`;
@@ -1699,11 +1699,14 @@
     const ca = $('#spotappcancel'); if (ca) ca.onclick = () => { f.hidden = true; };
     const fg = $('#spotappforget'); if (fg) fg.onclick = () => save('', 'Spotify app forgotten');
   };
-  // One Sign in per source, the ways side by side (STEWARD-CREDENTIALS-REUSE.md): the radio list of
-  // ways, one status line with Change way and Sign out, and the import (found sign-ins, a picked
-  // file) and paste areas every source shares. A source's config gives `actions(pick, si, h)` for
-  // its own ways' areas (null = the shared import/paste area), `wire(pick, si, h, act)` for their
-  // handlers, `extra(si, pick)` for rows under the status line, `after(si, h, el)` once rendered.
+  // One Sign in per source (owner, 2026-11-08: “make sure ui is simpler; remove all options that don't
+  // work at the moment”): a first line saying what it gives and needs; only the ways that work here;
+  // one of them is the action, the others a line each under one closed “Other ways to sign in”;
+  // signed in, one row. A source's config gives `lead(si)` (that first line), `keep(w, si)` (drops a
+  // way that is not a sign-in or not a working path), `actions(pick, si, h)` for its own ways' areas
+  // (null = the shared import/paste area), `wire(pick, si, h, act)` for their handlers, `inUse(si)`
+  // and `signOut(h)` where the sign-in shown is not the source's in-use one, `extra(si, pick)` for
+  // rows under it, `after(si, h, el)` once rendered.
   const sgHelp = (h) => (h ? `<p class="set-help">${h}</p>` : '');
   // A long note's first sentence (or the clause before a colon), and the rest: settings show the
   // rest only where it is needed (UX sweep A25)
@@ -1746,21 +1749,34 @@
     if (!el.isConnected) return;
     const mem = state.signin = state.signin || {}; const m = mem[cfg.source] = mem[cfg.source] || {};
     const wayOf = (id) => si.ways.find((w) => w.id === id) || {};
-    const usable = si.ways.filter((w) => w.available);
-    // The way picked here, else the remembered one, else the recommended one
-    let pick = [m.way, si.chosen].find((id) => usable.some((w) => w.id === id)) || (usable.find((w) => w.recommended) || usable[0] || si.ways[0] || {}).id;
-    const choosing = !si.in_use || !!m.change;
+    const inUse = cfg.inUse ? cfg.inUse(si) : si.in_use;
+    // Only the ways that work here (owner, 2026-11-08): no greyed rows; the everyday ones first
+    const usable = si.ways.filter((w) => w.available && (!cfg.keep || cfg.keep(w, si))).sort((a, b) => (a.advanced ? 1 : 0) - (b.advanced ? 1 : 0));
+    const changing = !!inUse && !!m.change && usable.some((w) => w.id !== inUse.way);
+    const choosing = !inUse || changing;
+    const offered = changing ? usable.filter((w) => w.id !== inUse.way) : usable;
+    const main = offered.find((w) => w.recommended) || offered[0];
+    // The way opened here, else one with a sign-in under way (a code waiting), else the recommended one
+    const pick = [m.way, cfg.prefer && cfg.prefer(si)].find((id) => id && offered.some((w) => w.id === id)) || (main || {}).id;
+    const others = offered.filter((w) => w.id !== pick);
     const rows = [];
+    const lead = cfg.lead ? cfg.lead(si) : '';
+    if (lead) rows.push(`<p class="sg-lead" data-sg="lead">${lead}</p>`);
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
-    if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
-    if (choosing) {
-      const wayHtml = (w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${(() => { const [a, b] = splitNote(w.available ? w.note : w.reason || w.note); return `${esc(a)}${b ? `<span class="way-more"> ${esc(b)}</span>` : ''}`; })()}</span></span></label>`;
-      // The everyday ways first; the rest under Advanced (open when one of them is picked)
-      const adv = si.ways.filter((w) => w.advanced);
-      const ways = si.ways.filter((w) => !w.advanced).map(wayHtml).join('') + (adv.length ? `<details class="ways-adv" data-sg="advanced" ${adv.some((w) => w.id === pick) ? 'open' : ''}><summary>Advanced</summary><div class="ways">${adv.map(wayHtml).join('')}</div></details>` : '');
-      rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
+    // Signed in: one row, who and what it gives; Change only when another way works here
+    if (inUse) {
+      const who = inUse.user && !/^\d+$/.test(inUse.user) ? inUse.user : '';
+      const gives = inUse.gives ? String(inUse.gives).charAt(0).toUpperCase() + String(inUse.gives).slice(1) : '';
+      rows.push(`<div class="set-row sg-in" data-sg="signed-in"><div class="set-label"><div class="set-name">${who ? `Signed in as ${esc(who)}` : 'Signed in'}</div>${sgHelp([esc(inUse.label), esc(gives)].filter(Boolean).join(' · '))}</div><div class="set-ctl">${usable.some((w) => w.id !== inUse.way) ? `<button class="btn ghost sm" data-sg="change" aria-expanded="${changing}">${changing ? 'Cancel' : 'Change'}</button>` : ''}<button class="btn ghost sm" data-sg="out">Sign out</button></div></div>`);
     }
-    if (choosing) rows.push('<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span><div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div></div>');
+    if (choosing && !offered.length && !inUse) rows.push(`<p class="muted small" data-sg="none">${esc(cfg.none ? cfg.none(si) : ((si.ways.find((w) => w.reason) || {}).reason || `${cfg.name} can’t be signed in to on this node.`))}</p>`);
+    if (choosing && offered.length) {
+      // One way: just its button or form. Several: the picked one, the rest a line each under one closed list
+      const pw = wayOf(pick);
+      rows.push(`<div class="set-row set-block sg-main">${offered.length > 1 ? `<div class="set-label"><div class="set-name">${esc(pw.label)}</div>${sgHelp(esc(splitNote(pw.note)[0]))}</div>` : ''}<div class="set-body"><div class="way-action" data-sg="action"></div></div></div>`);
+      if (others.length) rows.push(`<details class="sg-other" data-sg="other"><summary>Other ways to sign in</summary><div class="list">${others.map((w) => `<div class="list-row"><div class="grow"><div class="name">${esc(w.label)}</div><div class="sub">${esc(splitNote(w.note)[0])}</div></div><button class="btn ghost sm" data-sg-way="${esc(w.id)}" aria-label="Use ${esc(w.label)}">Use this</button></div>`).join('')}</div></details>`);
+      rows.push(`<div class="notice warn" role="alert" data-sg="error" hidden><span data-sg="error-text"></span>${others.length ? '<div class="actions"><button class="btn sm" data-sg="another">Try another way</button></div>' : ''}</div>`);
+    }
     if (cfg.extra) rows.push(...[].concat(cfg.extra(si, pick) || []));
     el.innerHTML = sgGroup(cfg.title === undefined ? 'Sign in' : cfg.title, rows.join(''));
     const h = {
@@ -1768,8 +1784,8 @@
       pick: () => pick,
       choose: async (way) => { m.way = way; try { await api('PUT', `/sources/${cfg.source}/signin`, { way }); return true; } catch (e) { toast(e.message, 'error'); return false; } },
       refill: (now) => signinChooser(cfg, now),
-      done: () => { m.change = false; state.sources = null; render(); },
-      useImport: async (body, what) => { try { const r = await api('POST', `/sources/${cfg.source}/signin/import`, body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); m.change = false; state.sources = null; render(); } catch (e) { const notice = el.querySelector('[data-sg="error"]'); if (notice) { notice.querySelector('[data-sg="error-text"]').textContent = e.message; notice.hidden = false; } else toast(e.message, 'error'); } },
+      done: () => { m.change = false; m.way = null; state.sources = null; render(); },
+      useImport: async (body, what) => { try { const r = await api('POST', `/sources/${cfg.source}/signin/import`, body); toast(`Saved ${r.in_use ? r.in_use.label : what}`); m.change = false; m.way = null; state.sources = null; render(); } catch (e) { const notice = el.querySelector('[data-sg="error"]'); if (notice) { notice.querySelector('[data-sg="error-text"]').textContent = e.message; notice.hidden = false; } else toast(e.message, 'error'); } },
       useButton: (w, who) => `<div class="toolbar"><button class="btn primary" data-sg="use">Use ${esc(w.label)}</button><span class="muted small">Already signed in with it${who || ''}.</span></div>`,
       // What other apps on this machine hold (read-only), the file itself, where the node looked
       importArea: (o = {}) => {
@@ -1784,13 +1800,9 @@
       pasteArea: (o = {}) => `<form class="stack" data-sg="paste"><textarea class="input" name="text" rows="${o.rows || 3}" aria-label="${esc(o.label || 'What to paste')}" placeholder="${esc(o.placeholder || '')}" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn primary sm" type="submit">Use it</button><span class="muted small">${esc(o.note || 'Kept like the node’s own sign-in; never shown again.')}</span></div></form>`,
     };
     const act = el.querySelector('[data-sg="action"]');
-    const renderAction = () => {
-      if (!act) return;
-      el.querySelectorAll('.way').forEach((l) => l.classList.toggle('on', l.querySelector('input').value === pick));
+    if (act) {
       const w = wayOf(pick);
-      let html = null;
-      if (si.in_use && si.in_use.way === pick) html = '<p class="muted small">This is the way in use.</p>';
-      else if (cfg.actions) html = cfg.actions(pick, si, h);
+      let html = cfg.actions ? cfg.actions(pick, si, h) : null;
       if (html == null) html = w.action === 'import' ? h.importArea() : w.action === 'paste' ? h.pasteArea() : '';
       act.innerHTML = html;
       const useIt = act.querySelector('[data-sg="use"]'); if (useIt) useIt.onclick = async () => { if (await h.choose(pick)) { toast(`Using ${w.label || 'this way'}`); h.done(); } };
@@ -1798,17 +1810,18 @@
       const ff = act.querySelector('[data-sg="file"]'); if (ff) ff.onsubmit = async (e) => { e.preventDefault(); const file = ff.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } h.useImport({ text: await file.text() }, 'the file'); };
       const pf = act.querySelector('[data-sg="paste"]'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); h.useImport({ text: pf.querySelector('textarea').value }, 'the pasted sign-in'); };
       if (cfg.wire) cfg.wire(pick, si, h, act);
-    };
-    el.querySelectorAll(`input[name="way-${cfg.source}"]`).forEach((r) => r.onchange = () => { pick = r.value; m.way = r.value; renderAction(); });
-    renderAction();
-    const another = el.querySelector('[data-sg="another"]'); if (another) another.onclick = () => { el.querySelector('input[type=radio]:not(:disabled)')?.focus(); };
-    const ch = el.querySelector('[data-sg="change"]'); if (ch) ch.onclick = () => { m.change = !m.change; signinChooser(cfg, si); };
-    const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
+    }
+    // Another way swaps in as the action; the focus goes to it
+    el.querySelectorAll('[data-sg-way]').forEach((b) => b.onclick = () => { m.way = b.dataset.sgWay; signinChooser(cfg, si).then(() => { const a = el.querySelector('[data-sg="action"]'); const f = a && a.querySelector('button, input, textarea, select, a[href]'); if (f) f.focus(); }); });
+    const another = el.querySelector('[data-sg="another"]'); if (another) another.onclick = () => { const d = el.querySelector('[data-sg="other"]'); if (d) { d.open = true; const b = d.querySelector('[data-sg-way]'); if (b) b.focus(); } };
+    const ch = el.querySelector('[data-sg="change"]'); if (ch) ch.onclick = () => { m.change = !m.change; m.way = null; signinChooser(cfg, si).then(() => { const a = m.change && el.querySelector('[data-sg="action"]'); const f = (a && a.querySelector('button, input, textarea, select, a[href]')) || el.querySelector('[data-sg="change"]'); if (f) f.focus(); }); };
+    const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { if (cfg.signOut) { if ((await cfg.signOut(h)) === false) return; } else await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; m.way = null; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
     if (cfg.after) cfg.after(si, h, el);
   };
-  // TIDAL (owner, 2026-11-04): Sign in with TIDAL (the browser sign-in, Recommended: full tracks
-  // lossless and hi-res), the code sign-in as the fallback, and under Advanced the official app,
-  // your own device client and a pasted token; quality and health under the full-tracks sign-in.
+  // TIDAL (owner, 2026-11-04 and 11-08): Sign in with TIDAL (the browser sign-in: full tracks,
+  // lossless and hi-res) where this build can, else the code sign-in; the official app and a
+  // pasted token under Other ways. Your own device client only once one is set here: TIDAL hands
+  // none out. Quality and health under the full-tracks sign-in.
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
   // Sign in with TIDAL: TIDAL's sign-in in a new tab (opened at the click, so no popup blocker
   // stops it), then the page here asks for the address TIDAL lands on. In the desktop and Android
@@ -1839,6 +1852,9 @@
   };
   const tidalSigninCfg = (el) => ({
     source: 'tidal', name: 'TIDAL', el,
+    lead: () => 'Full tracks, lossless and hi-res, and your TIDAL collection and playlists. Needs a paid TIDAL plan.',
+    keep: (w, si) => w.id !== 'own-device' || (si.details.unofficial || {}).client_from === 'settings',
+    prefer: (si) => { const u = si.details.unofficial || {}; return u.pending ? si.chosen : u.browser_pending ? 'browser' : null; },
     actions: (pick, si, h) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       const own = !u.from && u.signed_in;
@@ -1852,7 +1868,7 @@
       if (pick === 'own-device') {
         const now = u.client_from === 'settings' ? '<p class="muted small">Your device client is set here and used for the code sign-in. <button class="btn ghost sm" id="tfclientforget">Forget it</button></p>'
           : u.client_from === 'config' ? '<p class="muted small">A device client is set in the node config; one entered here is used instead.</p>' : '';
-        return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `A TIDAL device client you are allowed to use, for the code sign-in; it replaces the built-in one for everyone here. The node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
+        return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `For the code sign-in, for everyone here; the secret is never shown again. ${guideLink('tidal-full-tracks.md')}`,
           `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
       }
       if (pick === 'import') return h.importArea({ fileLabel: 'Token file', accept: '.json,.toml,.txt,application/json' });
@@ -1876,23 +1892,25 @@
       }
       const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast('Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
     },
-    // The full-tracks status at the top: Off / Needs a device client / Needs sign-in / Working
+    // The full-tracks status, only when it says more than the signed-in row: Off, Problem, AAC
+    // only, Waiting, or no way to full tracks in this build
     before: (si) => {
       const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok; const lossy = !!(u.health && u.health.ok && u.health.lossy);
       // A session first (also one imported or pasted, which needs no device client here), then
       // a code waiting, then what is missing
       const st = u.signed_in
         ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the way it came from below to use it).' }
+          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here.' }
           // AAC only is a code sign-in's (TIDAL sends its device client AAC); a browser
           // session's AAC track is that track (the Health row below says so)
           : lossy && u.session_client !== 'pkce' ? { cls: 'warn', label: 'AAC only', text: 'Full tracks, but TIDAL sends them as AAC (lossy).' }
           : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
         : u.browser_pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the address of the TIDAL page you landed on (step 2 below).' }
-        : !u.client_from && !u.browser_available ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (Advanced › Your own device client below).' }
-        : { cls: '', label: 'Needs sign-in', text: `Needs your TIDAL sign-in (${u.browser_available ? 'Sign in with TIDAL' : 'the code sign-in'} below).` };
-      return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your TIDAL account. ${guideLink('tidal-full-tracks.md')}`, u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : '')];
+        : !u.client_from && !u.browser_available && !si.ways.some((w) => (w.id === 'browser' || w.id === 'device') && w.available) ? { cls: '', label: 'Not in this build', text: 'This build can’t sign in for full tracks itself; a token from another app (tidal-dl-ng and others) still works.' }
+        : null;
+      if (!st || st.cls === 'ok') return [];
+      return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} ${guideLink('tidal-full-tracks.md')}`, (u.signed_in && !u.enabled && !broke ? '<button class="btn sm" id="tfon">Turn on</button>' : '') + (u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : ''))];
     },
     extra: (si) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const rows = [];
@@ -1908,8 +1926,8 @@
           if (codeSession) rows.push(sgRow('Lossless', 'Sign in with TIDAL again for lossless.', again));
           if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
         }
-        if (!st.signed_in) rows.push(sgRow('Your collection', `Collection and playlist imports go through ${esc((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
-      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to Sign in with TIDAL.`, '<span class="pill warn">previews</span>'));
+        if (!st.signed_in && st.configured && si.ways.some((w) => w.id === 'app' && w.available)) rows.push(sgRow('Your collection', `Importing your collection and playlists needs ${esc(((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app').replace(/^Your /, 'your '))} too.`, '<button class="btn sm" id="tsiapp2">Sign in with it too</button>'));
+      } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `30-second previews with this sign-in.${si.ways.some((w) => (w.id === 'browser' || w.id === 'device') && w.available) ? ' For full tracks: Change.' : ''}`, '<span class="pill warn">previews</span>'));
       // The page has no general Status row (the full-tracks status leads): a problem with the
       // sign-in in use still shows, as a phone has no source list beside it
       const src = (state.sources || []).find((x) => x.id === 'tidal'); const ss = src && srcState({ ...src, enabled: true });
@@ -1920,6 +1938,9 @@
       const u = si.details.unofficial || {};
       const putU = async (body, ok) => { try { await api('PUT', '/sources/tidal/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } h.refill(); };
       const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
+      // Turn on: the way the full-tracks session came from (picking it switches full tracks on)
+      const sessionWay = u.from === 'pasted' ? 'paste' : u.from ? 'import' : u.session_client === 'pkce' ? 'browser' : 'device';
+      const ton = $('#tfon'); if (ton) ton.onclick = async () => { if (si.ways.some((w) => w.id === sessionWay && w.available)) { if (await h.choose(sessionWay)) { toast('TIDAL full tracks are on'); h.done(); } } else putU({ enabled: true }, 'TIDAL full tracks are on'); };
       const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
       const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
       // From a code sign-in to the browser one: the chooser opens on it and TIDAL's tab opens
@@ -1939,58 +1960,52 @@
   // The device code, big: Open link.tidal.com fills it in (TIDAL's complete verification address);
   // Copy for a device where that doesn't work; the time left under it (wired in `after`)
   const tidalCodeBox = (p) => `<div class="codebox" id="tfpending"><p class="small">Open link.tidal.com, sign in to TIDAL and enter this code. The button opens it with the code filled in. This page continues by itself once TIDAL says yes.</p><div class="toolbar"><code class="tf-code big" id="tfcode">${esc(p.user_code)}</code><button class="btn ghost sm" type="button" data-copylink="${esc(p.user_code)}" aria-label="Copy the code">${icon('copy')} Copy</button></div><div class="toolbar"><a class="btn primary" id="tfopen" href="${esc(webUrl(p.uri))}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a><span class="muted small" id="tfcount" role="status"></span></div></div>`;
-  // ---- Qobuz: one guided page (TASK-qobuz-tidal-setup-ux) ----
-  // The full-tracks status at the top (Off / Needs app / Needs sign-in / Working), then two step
-  // cards: 1. the app ID and secret (with Check), 2. the owner's Qobuz account (email and password,
-  // sent once). streamrip's or qobuz-dl's config does both at once, under step 1. Qobuz has no
-  // OAuth, so there is nothing to open: the guide says what to ask Qobuz for.
+  // ---- Qobuz: one guided page (TASK-qobuz-tidal-setup-ux; owner, 2026-11-08) ----
+  // What works on this build: streamrip's or qobuz-dl's config (the app Qobuz needs, often the
+  // sign-in too), then the Qobuz account if the config had none. Qobuz hands no app to a person who
+  // asks, so there is no app form here (an app in the node config still works). Signed in, one row.
   const qobuzSetup = async (el) => {
     if (!el || !el.isConnected) return;
     let u, si;
     try { [u, si] = await Promise.all([api('GET', '/sources/qobuz/unofficial'), api('GET', '/sources/qobuz/signin')]); } catch (e) { if (el.isConnected) el.innerHTML = `<div class="notice warn" role="alert">${esc(e.message)}</div>`; return; }
     if (!el.isConnected) return;
-    const mem = state.signin = state.signin || {}; const m = mem.qobuz = mem.qobuz || {};
     const broke = !!(u.health && !u.health.ok); const hasApp = !!u.app_from;
+    // The app is the owner's to set up: a listener without one here sees why, nothing to do
+    const own = (si.ways || []).find((w) => w.id === 'own') || {}; const owner = ((si.ways || []).find((w) => w.id === 'import') || {}).available !== false;
+    // A config can be pasted by anyone it works for (a listener's, made with this node's app)
+    const canPaste = owner || ((si.ways || []).find((w) => w.id === 'paste') || {}).available === true;
     const quality = u.quality === 'mp3' ? 'MP3 320 kbps' : u.quality === 'cd' || !u.hires ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz';
-    const st = !hasApp ? { cls: '', label: 'Needs app', text: 'Needs a Qobuz app ID and secret (step 1).' }
-      : !u.signed_in ? { cls: '', label: 'Needs sign-in', text: 'Needs your Qobuz account (step 2).' }
-      : broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-      : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here.' }
-      : { cls: 'ok', label: 'Working', text: `Full tracks ${quality}.` };
-    const status = sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your Qobuz account. ${guideLink('qobuz.md')}`,
-      (u.signed_in ? `<input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks">` : '') + (u.signed_in ? '<button class="btn ghost sm" id="qbout">Sign out</button>' : ''))
-      + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>` : '');
-    // 1. The app
-    const appInfo = hasApp ? `<p class="small">App <code class="path">${esc(u.app_id || '')}</code> · ${u.app_from === 'config' ? 'set in the node config' : u.app_from === 'import' ? 'from an imported config' : 'entered here'}.${u.app_from !== 'config' ? ` <button class="btn ghost sm" type="button" id="qbappchange">${m.changeApp ? 'Keep it' : 'Change'}</button> <button class="btn ghost sm" type="button" id="qbappforget">Forget</button>` : ''}</p>` : '';
-    const appForm = hasApp && !m.changeApp ? '' : `<form class="stack" id="qbapp" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="App ID (digits)" inputmode="numeric" autocomplete="off" spellcheck="false" aria-label="Qobuz app ID" required>${secretInput('secret', 'Qobuz app secret', 'App secret')}</div><div class="toolbar"><button class="btn" type="button" id="qbcheck">Check</button><button class="btn primary" type="submit">Save</button><span class="check-out small" id="qbcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>app_id=… app_secret=…</code> block or JSON into either field: it is split.</p></form>`;
+    const lead = `<p class="sg-lead" data-sg="lead">Full tracks in CD or hi-res quality. Needs a paid Qobuz plan${hasApp || !owner ? '' : ' and the config of streamrip or qobuz-dl, which holds the app Qobuz needs'}. Unofficial: can stop working. ${guideLink('qobuz.md')}</p>`;
+    let body;
     const found = si.imports || []; const places = si.places || [];
-    const importBox = `<details class="small" id="qbimport"><summary>Already use streamrip or qobuz-dl? Use its config</summary><div class="stack">${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><p class="muted small">Pick streamrip’s config.toml or qobuz-dl’s config.ini: it is only read; its app values and sign-in are kept here like the node’s own, replacing the current app.</p><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="[qobuz] … or [DEFAULT] … from streamrip’s config.toml or qobuz-dl’s config.ini" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Nothing is shown again once saved.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div></details>`;
-    const step1 = stepCard(1, 'App ID and secret', hasApp, `Qobuz has no public developer page: ask Qobuz for API access at <a href="mailto:api@qobuz.com">api@qobuz.com</a> (an app ID and secret). The node keeps them like a sign-in and never shows the secret again. ${guideLink('qobuz.md')}`, appInfo + appForm + importBox);
-    // 2. The account
-    const acct = u.signed_in
-      ? `<p class="small">Signed in${u.user ? ' as ' + esc(u.user) : ''}${u.plan ? ' · ' + esc(u.plan) : ''} · ${u.hires ? 'hi-res' : 'CD quality'}. Only Qobuz’s session is kept. <button class="btn ghost sm" type="button" id="qbout2">Sign out</button></p>`
-      : `<form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required ${hasApp ? '' : 'disabled'}>${secretInput('password', 'Qobuz password', 'Password', 'current-password', !hasApp)}<button class="btn primary" type="submit" ${hasApp ? '' : 'disabled'}>Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
-    const step2 = stepCard(2, 'Your Qobuz account', u.signed_in, `${hasApp ? '' : 'After step 1. '}Your email and password go to Qobuz once; the node keeps only the session Qobuz answers with. A paid streaming plan is needed.`, acct);
+    const importBox = `<div class="stack" id="qbimport">${found.length ? `<div class="list">${found.map((f) => `<div class="list-row"><div class="grow"><div class="name">${esc(f.app)}</div><div class="sub">${esc([f.user ? 'user ' + f.user : '', f.usable ? '' : f.reason, f.place].filter(Boolean).join(' · '))}</div></div>${f.usable ? `<button class="btn primary sm" data-qbimp="${esc(f.id)}">Use it</button>` : '<span class="pill">not usable</span>'}</div>`).join('')}</div>` : ''}<form class="stack" id="qbimpfile"><div class="toolbar"><input class="input" type="file" name="file" aria-label="Config file" accept=".toml,.ini,.txt"><button class="btn primary sm" type="submit">Use this file</button></div></form><form class="stack" id="qbimppaste"><textarea class="input" name="text" rows="4" aria-label="streamrip or qobuz-dl config" placeholder="Or paste it: [qobuz] … from streamrip’s config.toml, [DEFAULT] … from qobuz-dl’s config.ini" autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Only read; never shown again.</span></div></form><div class="notice warn" role="alert" id="qbimperr" hidden></div>${places.length ? `<details class="small"><summary>Where the node looked</summary><ul class="muted small steps">${places.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></details>` : ''}</div>`;
+    if (!u.signed_in && !hasApp && !owner && own.available === false) body = `<p class="muted small" data-sg="none">${esc(own.reason || 'The node’s owner hasn’t set up Qobuz yet.')}</p>`;
+    else if (u.signed_in) {
+      const st = broke ? { cls: 'bad', label: 'Problem' } : !u.enabled ? { cls: '', label: 'Off' } : { cls: 'ok', label: 'Working' };
+      body = `<div class="set-row sg-in" data-sg="signed-in"><div class="set-label"><div class="set-name">Signed in${u.user ? ' as ' + esc(u.user) : ''} <span class="pill ${st.cls}">${esc(st.label)}</span></div>${sgHelp(esc([u.plan, broke ? `Switched itself off: ${u.health.detail}` : !u.enabled ? 'Switched off here' : `Full tracks ${quality}`].filter(Boolean).join(' · ')))}</div><div class="set-ctl"><input type="checkbox" class="switch" role="switch" id="qbon" ${u.enabled ? 'checked' : ''} aria-label="Qobuz full tracks"><button class="btn ghost sm" id="qbout">Sign out</button></div></div>`
+        + (broke ? `<div class="notice warn" role="status">${esc(u.health.detail)}. Qobuz links still open on qobuz.com.<div class="actions"><button class="btn sm" id="qbretry">Try again</button></div></div>${canPaste ? `<details class="small set-row set-block"><summary>Use a newer config</summary>${importBox}</details>` : ''}` : '');
+    } else {
+      // 1. The config (the app, and often the sign-in): importBox above
+      const appInfo = `<p class="small">${u.app_from === 'config' ? 'Set up on this node.' : 'From the config you gave.'}${u.app_from !== 'config' && owner ? ' <button class="btn ghost sm" type="button" id="qbappforget">Forget</button>' : ''}</p>${canPaste ? `<details class="small"><summary>Use a newer config</summary>${importBox}</details>` : ''}`;
+      const step1 = stepCard(1, 'streamrip’s or qobuz-dl’s config', hasApp, hasApp ? 'Done.' : 'Its config.toml or config.ini, from this machine or another.', hasApp ? appInfo : importBox);
+      // 2. The account, when the config had no sign-in
+      const acct = `<form class="stack" id="qbin"><div class="toolbar"><input class="input" name="email" type="email" placeholder="Qobuz email" autocomplete="username" aria-label="Qobuz email" required ${hasApp ? '' : 'disabled'}>${secretInput('password', 'Qobuz password', 'Password', 'current-password', !hasApp)}<button class="btn primary" type="submit" ${hasApp ? '' : 'disabled'}>Sign in</button></div><div class="notice warn" role="alert" id="qbinerr" hidden></div></form>`;
+      const step2 = stepCard(2, 'Your Qobuz account', false, hasApp ? 'Your email and password go to Qobuz once; only its session is kept.' : 'After step 1, if the config had no sign-in.', hasApp ? acct : '');
+      body = sgBlock('', '', `<div class="setup-steps">${step1}${step2}</div>`);
+    }
     const playback = u.signed_in ? sgGroup('Playback', sgRow('Quality', 'Max plays up to 24-bit/192 kHz where Qobuz has it and your plan allows.', `<select class="input" id="qbq" aria-label="Qobuz quality"><option value="max" ${u.quality === 'max' ? 'selected' : ''}>Max (up to 24-bit/192 kHz)</option><option value="cd" ${u.quality === 'cd' ? 'selected' : ''}>CD (16-bit/44.1 kHz)</option><option value="mp3" ${u.quality === 'mp3' ? 'selected' : ''}>MP3 (320 kbps)</option></select>`)
       + (u.health && u.health.ok ? sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>') : '')) : '';
-    el.innerHTML = sgGroup('Qobuz', status) + sgGroup('Set up', `<div class="setup-steps">${step1}${step2}</div>`) + playback;
+    el.innerHTML = sgGroup('Sign in', lead + body) + playback;
     // Wiring
     const refill = () => qobuzSetup(el);
     const put = async (body, ok) => { try { await api('PUT', '/sources/qobuz/unofficial', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } state.sources = null; refill(); };
     const on = $('#qbon'); if (on) on.onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Qobuz full tracks are on' : 'Qobuz full tracks are off');
     const retry = $('#qbretry'); if (retry) retry.onclick = () => put({ enabled: true }, 'Trying Qobuz again');
     const signOut = async () => { try { await api('DELETE', '/sources/qobuz/unofficial/login'); toast('Signed out of Qobuz'); } catch (e) { toast(e.message, 'error'); } state.sources = null; render(); };
-    for (const id of ['#qbout', '#qbout2']) { const b = $(id); if (b) b.onclick = signOut; }
-    const ac = $('#qbappchange'); if (ac) ac.onclick = () => { m.changeApp = !m.changeApp; refill(); };
-    const ag = $('#qbappforget'); if (ag) ag.onclick = () => { m.changeApp = false; put({ app_id: '' }, 'Qobuz app forgotten'); };
-    const af = $('#qbapp'); if (af) {
-      wireSecretToggles(af); wireAppPaste(af, 'qobuz');
-      const chk = $('#qbcheck'); chk.onclick = () => { const f = new FormData(af); runCheck(chk, $('#qbcheckout'), '/sources/qobuz/unofficial/app/check', { app_id: String(f.get('id') || ''), app_secret: String(f.get('secret') || '') }); };
-      af.onsubmit = (e) => { e.preventDefault(); const f = new FormData(af); m.changeApp = false; m.focusEmail = true; put({ app_id: String(f.get('id') || '').trim(), app_secret: String(f.get('secret') || '').trim() }, 'Qobuz app saved'); };
-    }
-    const qi = $('#qbin'); if (qi) {
+    const so = $('#qbout'); if (so) so.onclick = signOut;
+    const ag = $('#qbappforget'); if (ag) ag.onclick = () => put({ app_id: '' }, 'Qobuz app forgotten');
+    const qi = $('#qbin'); if (qi && hasApp) {
       wireSecretToggles(qi);
-      if (m.focusEmail) { m.focusEmail = false; const em = qi.querySelector('input[name=email]'); if (em && !em.disabled) em.focus(); }
       qi.onsubmit = async (e) => {
         e.preventDefault(); const f = new FormData(qi); const b = qi.querySelector('button[type=submit]'); const err = $('#qbinerr'); b.disabled = true; err.hidden = true;
         try { await api('POST', '/sources/qobuz/unofficial/login', { email: f.get('email'), password: f.get('password') }); toast('Signed in to Qobuz'); state.sources = null; render(); } catch (er) { err.textContent = er.message; err.hidden = false; b.disabled = false; }
@@ -2003,20 +2018,28 @@
     const pf = $('#qbimppaste'); if (pf) pf.onsubmit = (e) => { e.preventDefault(); imp({ text: pf.querySelector('textarea').value }, 'the pasted config'); };
     const qq = $('#qbq'); if (qq) qq.onchange = () => put({ quality: qq.value }, 'Quality saved');
   };
-  // Spotify: your own app (Connect control, library), librespot picked in a Spotify app, or
-  // librespot with a credentials.json you pick; Soloist and librespot's own settings keep their rows.
+  // Spotify (owner, 2026-11-08): one sign-in, your own free developer app then Connect, in two
+  // numbered steps. librespot and Soloist are ways to play, not to sign in: they sit under Other
+  // ways to play on the Spotify tab, and only when they can run on this machine.
+  const spotifyAppInUse = (si) => {
+    if (si.in_use && si.in_use.way === 'app') return si.in_use;
+    const st = si.details.status || {};
+    return st.signed_in ? { way: 'app', label: 'Your own Spotify app', user: st.display_name || '', gives: st.product === 'premium' ? 'Connect playback on your devices, your library' : '' } : null;
+  };
   const spotifySigninCfg = (el) => ({
     source: 'spotify', name: 'Spotify', el,
-    actions: (pick, si, h) => {
-      const st = si.details.status || {}; const ls = si.details.librespot || {}; const w = h.wayOf(pick);
-      if (pick === 'app') {
-        if (!st.configured) return spotSetup(st, false);
-        if (st.signed_in) return h.useButton(w, st.display_name ? ' as ' + esc(st.display_name) : '');
-        return `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify’s sign-in; the app must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${spotAppRow(st)}${st.app_from === 'settings' ? spotSetup(st, true) : ''}`;
-      }
-      if (pick === 'librespot') return ls.enabled ? `<p class="muted small">librespot is on: pick it in a Spotify app on this network; its device name and output are below.</p>` : `<div class="toolbar"><button class="btn primary" data-sg="use">Switch librespot on</button><span class="muted small">Then pick it in a Spotify app on this network. Its device name and output are set below.</span></div>`;
-      if (pick === 'librespot-file') return h.importArea({ fileLabel: 'credentials.json', accept: '.json,application/json', what: 'credentials.json', intro: 'The credentials.json another librespot saved; it is kept readable by the node only.', withPaste: true, label: 'credentials.json contents', placeholder: '{"username": …, "auth_type": …, "auth_data": …}' });
-      return null;
+    lead: (si) => `Control Spotify on your devices and import your library. Needs Spotify Premium${(si.ways.find((w) => w.id === 'app') || {}).available === false || (si.details.status || {}).configured ? '' : ' and a free Spotify developer app (2 minutes)'}.`,
+    keep: (w) => w.id === 'app',
+    inUse: spotifyAppInUse,
+    none: (si) => (si.ways.find((w) => w.id === 'app') || {}).reason || 'Spotify isn’t set up on this node yet.',
+    // Sign out of the app, also while librespot is the way picked last
+    signOut: async () => { await api('DELETE', '/sources/spotify/signin?way=app'); return true; },
+    actions: (pick, si) => {
+      const st = si.details.status || {};
+      if (pick !== 'app') return null;
+      const app = st.app_from === 'config' ? '<p class="muted small">Set up on this node.</p>' : spotAppRow(st);
+      return `<div class="setup-steps">${stepCard(1, 'Your free developer app', !!st.configured, st.configured ? 'Done.' : 'At Spotify, once:', st.configured ? app + (st.app_from === 'settings' ? spotSetup(st, true) : '') : spotSetup(st, false))}`
+        + stepCard(2, 'Connect Spotify', false, st.configured ? 'Opens Spotify’s sign-in and comes back here.' : 'After step 1.', st.configured ? `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button></div>${pasteBack('spotify')}` : '') + '</div>';
     },
     wire: (pick, si, h) => {
       const sp = $('#spotin'); if (sp) sp.onclick = async () => { if (await h.choose('app')) { try { const r = await api('GET', '/sources/spotify/login'); location.href = r.url; } catch (e) { toast(e.message, 'error'); } } };
@@ -2024,12 +2047,15 @@
       wirePasteBack('spotify', 'Spotify signed in');
     },
   });
-  // YouTube: your Data API key for search, or a cookies file you pick for yt-dlp.
-  const youtubeSigninCfg = (el) => ({
+  // YouTube: your Data API key for search; the cookies file for yt-dlp only once YouTube plays on
+  // your speakers (`speakers`), as it does nothing before.
+  const youtubeSigninCfg = (el, speakers) => ({
     source: 'youtube', name: 'YouTube', el,
+    lead: () => 'Search YouTube here and play it in this browser. Search needs a free YouTube Data API key.',
+    keep: (w) => w.id !== 'cookies' || !!speakers,
     actions: (pick, si, h) => {
       const key = (si.details.key || {}).set;
-      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key’s 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, enable the YouTube Data API v3, then create an API key under Credentials and paste it here. It is checked once, then never shown again.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
+      if (pick === 'key') return key ? `<div class="toolbar"><span class="pill ok account">Search on · your API key</span><button class="btn ghost sm" data-yt="forget">Forget the key</button></div><p class="muted small">Each search spends 100 of the key’s 10,000 free daily units, so YouTube is searched only when you pick it, never in the everyday search.</p>` : `<form class="stack" data-yt="key"><p class="muted small">In the <a href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noopener">Google Cloud console</a>, turn on the YouTube Data API v3, create an API key under Credentials and paste it here.</p><div class="toolbar"><label class="sr-only" for="ytkeyin">YouTube Data API key</label><input id="ytkeyin" class="input" name="key" type="password" autocomplete="off" spellcheck="false" placeholder="YouTube Data API key" required><button class="btn primary" type="submit">Save</button></div></form>`;
       if (pick === 'cookies') return h.importArea({ fileLabel: 'Cookies file', accept: '.txt,text/plain', what: 'the cookies file', intro: 'The Netscape cookies file you export for yt-dlp; the copy is kept readable by the node only, and yt-dlp on your speakers plays as your account.', withPaste: true, label: 'Cookies file contents', placeholder: '# Netscape HTTP Cookie File …', rows: 4 });
       return null;
     },
@@ -2038,16 +2064,20 @@
       const kg = act.querySelector('[data-yt="forget"]'); if (kg) kg.onclick = async () => { try { await api('PUT', '/sources/youtube/key', { key: '' }); toast('YouTube key forgotten'); h.done(); } catch (e) { toast(e.message, 'error'); } };
     },
   });
-  // Last.fm (Settings › Accounts): your own API account, rescrobbled's sign-in, or a pasted one;
-  // scrobbling on/off and the waiting plays stay as rows.
+  // Last.fm (Settings › Accounts): your own API account then Connect, in two steps; a sign-in
+  // found on this machine (rescrobbled) only when there is one, or the three values pasted.
+  // Scrobbling on/off and the waiting plays stay as rows.
   const lastfmSigninCfg = (el) => ({
     source: 'lastfm', name: 'Last.fm', el, title: '',
+    lead: () => 'Sends what you play to your Last.fm profile. Needs a free Last.fm API account (2 minutes).',
+    keep: (w, si) => w.id !== 'import' || (si.imports || []).length > 0,
     actions: (pick, si, h) => {
       const lf = si.details.lastfm || {};
       if (pick === 'own') {
-        if (!lf.configured) return `<form class="stack" data-lf="app"><p class="muted small">Last.fm gives each app its own key: <a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">create one</a> (any name; no callback needed), then paste its API key and shared secret. Both stay on this node; the secret only signs requests here.</p><div class="toolbar"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" aria-label="Last.fm API key" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" aria-label="Last.fm shared secret" required><button class="btn" type="submit">Save</button></div></form>`;
-        const appRow = lf.app_from === 'config' ? '<p class="muted small">This node’s Last.fm app is set in its config.</p>' : `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" data-lf="appforget">Forget</button></p>`;
-        return `<div class="toolbar"><button class="btn primary" data-lf="in">Connect Last.fm</button><span class="muted small">Opens Last.fm’s permission page; it comes back here.</span></div>${appRow}`;
+        const appForm = `<form class="stack" data-lf="app"><p class="muted small"><a href="https://www.last.fm/api/account/create" target="_blank" rel="noopener">Create an API account</a> (any name, no callback), then paste its API key and shared secret.</p><div class="toolbar"><input class="input" name="key" placeholder="API key" autocomplete="off" spellcheck="false" pattern="[0-9a-fA-F]{32}" aria-label="Last.fm API key" required><input class="input" name="secret" type="password" placeholder="Shared secret" autocomplete="off" aria-label="Last.fm shared secret" required><button class="btn" type="submit">Save</button></div></form>`;
+        const appRow = lf.app_from === 'config' ? '<p class="muted small">Set up on this node.</p>' : `<p class="muted small">Your Last.fm app: <code class="path">${esc(lf.api_key || '')}</code> <button class="btn ghost sm" data-lf="appforget">Forget</button></p>`;
+        return `<div class="setup-steps">${stepCard(1, 'Your free Last.fm API account', !!lf.configured, lf.configured ? 'Done.' : 'At Last.fm, once:', lf.configured ? appRow : appForm)}`
+          + stepCard(2, 'Connect Last.fm', false, lf.configured ? 'Opens Last.fm’s permission page and comes back here.' : 'After step 1.', lf.configured ? '<div class="toolbar"><button class="btn primary" data-lf="in">Connect Last.fm</button></div>' : '') + '</div>';
       }
       if (pick === 'import') return h.importArea({ fileLabel: 'Last.fm key, secret and session key', accept: '.toml,.txt', intro: 'From another machine, use a text file with three lines: the API key, shared secret and session key. rescrobbled’s config alone does not contain the session.', withPaste: true, label: 'API key, shared secret and session key', placeholder: 'API key\nshared secret\nsession key' });
       if (pick === 'paste') return h.pasteArea({ label: 'API key, shared secret and session key', placeholder: 'API key\nshared secret\nsession key', rows: 3 });
@@ -6158,6 +6188,8 @@
           const known = (k) => k === 'library' || srcs.some((x) => x.id === k);
           const asked = state.viewArg && known(state.viewArg.source) ? state.viewArg.source : null;
           const active = asked || (phone ? null : (known(state.sourceId) ? state.sourceId : 'library'));
+          // Another source: its sign-in opens on the recommended way again, not one opened before
+          if (active && active !== state.sourceId && state.signin) Object.values(state.signin).forEach((m) => { m.way = null; m.change = false; });
           if (active) state.sourceId = active;
           const cur = active === 'library' ? { id: 'library', name: 'Your library', description: '', status: 'ready', enabled: true } : srcs.find((x) => x.id === active) || null;
           const help = (h) => (h ? `<p class="set-help">${h}</p>` : '');
@@ -6177,19 +6209,19 @@
           let tidal = null; let tidalSi = null; if (active === 'tidal') { try { tidalSi = await api('GET', '/sources/tidal/signin'); tidal = tidalSi.details.status || null; } catch { tidalSi = null; tidal = null; } if (state.view !== 'sources') return; }
           let sub = null; let subPls = []; if (active === 'subsonic') { try { sub = await api('GET', '/sources/subsonic/server'); if (sub.connected) subPls = await api('GET', '/sources/subsonic/playlists').catch(() => []); } catch { sub = null; } if (state.view !== 'sources') return; }
           const subAccount = active !== 'subsonic' ? '' : sub && sub.connected
-            ? `<div class="toolbar"><span class="pill ok account">Connected · ${esc(sub.name || 'your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.user || '')}@${esc(sub.url || '')}</span><button class="btn ghost" id="subforget">Forget this server</button></div>`
+            ? row(`Signed in as ${esc(sub.user || '')}`, `${esc(sub.name || 'Your server')}${sub.version ? ' ' + esc(sub.version) : ''} · ${esc(sub.url || '')} · its music in search, its playlists below`, '<button class="btn ghost sm" id="subforget">Forget this server</button>', 'sg-in')
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz id or ISRC on the server)</span></div>${subPls.length ? `<div class="list">${subPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-subpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No playlists on the server.</p>'}</section>`
-            : `<form class="card subform" id="subform"><h3>Connect your server</h3><p class="muted small">Navidrome, Airsonic, Gonic, Ampache, LMS or another Odeion node. The password stays on this node; requests are signed with a fresh token each time.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
+            : `<form class="card subform" id="subform"><p class="sg-lead" data-sg="lead">Play your own music server here: Navidrome, Airsonic, Gonic, Ampache, LMS or another Odeion node. Needs its address, a user and password.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://music.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label><div class="toolbar"><button class="btn primary" id="subconnect" type="submit">${icon('zone')} Connect</button></div></form>`;
           let jf = null; let jfPls = []; if (active === 'jellyfin') { try { jf = await api('GET', '/sources/jellyfin/server'); if (jf.connected) jfPls = await api('GET', '/sources/jellyfin/playlists').catch(() => []); } catch { jf = null; } if (state.view !== 'sources') return; }
           const jfAccount = active !== 'jellyfin' ? '' : jf && jf.connected
-            ? `<div class="toolbar"><span class="pill ok account">Signed in · ${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · ${esc(jf.user || '')}</span><button class="btn ghost" id="jfout">Sign out</button></div>`
+            ? row(`Signed in as ${esc(jf.user || '')}`, `${esc(jf.server_name || 'Jellyfin')}${jf.version ? ' ' + esc(jf.version) : ''} · its music in search, its playlists below`, '<button class="btn ghost sm" id="jfout">Sign out</button>', 'sg-in')
               + `<section class="section"><div class="section-head"><h3>Its playlists</h3><span class="muted small">import one as a private Pubky playlist (songs need a MusicBrainz recording id in Jellyfin)</span></div>${jfPls.length ? `<div class="list">${jfPls.map((p) => `<div class="list-row"><div class="grow"><div class="name" title="${esc(p.name)}">${esc(p.name)}</div><div class="sub">${p.songs} song${p.songs === 1 ? '' : 's'}</div></div><button class="btn sm" data-jfpl="${esc(p.id)}" aria-label="Import ${esc(p.name)}">${icon('download')} Import</button></div>`).join('')}</div>` : '<p class="muted small">No music playlists.</p>'}</section>`
-            : `<form class="card subform" id="jfform"><h3>Sign in to your Jellyfin</h3><p class="muted small">Also works with Emby. The password is used once to sign in; the node keeps only the access token Jellyfin gives it.</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
+            : `<form class="card subform" id="jfform"><p class="sg-lead" data-sg="lead">Play your Jellyfin or Emby music here and import its playlists. Needs its address, a user and password (used once; only Jellyfin’s token is kept).</p><label class="field"><span>Server address</span><input class="input" name="url" placeholder="https://jellyfin.example.com" autocomplete="url" required></label><label class="field"><span>User</span><input class="input" name="user" autocomplete="username" required></label><label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password"></label><div class="toolbar"><button class="btn primary" id="jfin" type="submit">${icon('zone')} Sign in</button></div></form>`;
           let jam = null; if (active === 'jamendo') { try { jam = await api('GET', '/sources/jamendo/status'); } catch { jam = null; } if (state.view !== 'sources') return; }
-          const jamAccount = active !== 'jamendo' ? '' : !jam || !jam.configured ? `<div class="notice">This build of the node has no built-in Jamendo app. Add one in Settings › This node › Service apps.</div>`
-            : jam.signed_in ? `<div class="toolbar"><span class="pill ok account">Signed in${jam.name ? ' · ' + esc(jam.name) : ''}</span><button class="btn" id="jamimport">${icon('heart')} Add my Jamendo likes to Favourites</button><button class="btn ghost" id="jamout">Sign out</button></div>`
-            : !jam.can_sign_in ? `<p class="muted small">Search and full-length playback need no account. Signing in to bring your Jamendo likes over needs your own Jamendo app with its secret in the node config (<code>[jamendo]</code>).</p>`
-            : `<div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button><span class="muted small">Optional: search and full-length playback need no account. Signing in brings your likes and favourites to this node. The Jamendo app's redirect URL must be on the same domain as <code>${esc(jam.redirect_uri)}</code>.</span></div>`;
+          // Jamendo: a sign-in only where one can be made here (no notice about apps when not)
+          const jamAccount = active !== 'jamendo' || !jam || !jam.configured || (!jam.signed_in && !jam.can_sign_in) ? ''
+            : jam.signed_in ? row(`Signed in${jam.name ? ' as ' + esc(jam.name) : ''}`, 'Your Jamendo likes can come to Favourites here.', `<button class="btn sm" id="jamimport">${icon('heart')} Add my likes to Favourites</button><button class="btn ghost sm" id="jamout">Sign out</button>`, 'sg-in')
+            : `<p class="sg-lead" data-sg="lead">Optional: brings your Jamendo likes to Favourites here. Search and full tracks need no account.</p><div class="toolbar"><button class="btn" id="jamin">${icon('zone')} Sign in to Jamendo</button></div>`;
           let spot = null; if (active === 'spotify') { try { spot = await api('GET', '/sources/spotify/status'); } catch { spot = null; } if (state.view !== 'sources') return; }
           const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
@@ -6198,8 +6230,8 @@
               + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Zones and outputs</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (cur.id === 'tidal' || cur.id === 'qobuz' ? '' : (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
-                + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
-              + (account ? group('Account', block('', '', account)) : '')
+                + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
+              + (account ? group('Sign in', /^<div class="set-row/.test(account) ? account : block('', '', account)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalsignin"></div>' : '')
               + (cur.id === 'qobuz' ? '<div id="signin-qobuz"></div>' : '')
               + (cur.id === 'spotify' ? '<div id="signin-spotify"></div>' : '')
@@ -6207,7 +6239,7 @@
               + (cur.enabled && (!cur.features || cur.features.includes('search')) && cur.status !== 'needs_config' && cur.status !== 'browser' && !/^not configured/.test(cur.status) && (cur.id !== 'qobuz' || cur.status === 'signed in') && (cur.id !== 'soundcloud' || /^(ready|signed in)/.test(cur.status)) && (cur.id !== 'bandcamp' || /^(ready|signed in)/.test(cur.status)) ? group('Use', row(`Search ${esc(cur.name)}`, `Opens the one search, scoped to ${esc(cur.name)}.`, `<button class="btn" id="ssearchall">${icon('search')} Search ${esc(cur.name)}</button>`)) : '')
               + (cur.id === 'youtube' ? '<div id="ytzones"></div>' : '')
               + (cur.id === 'bandcamp' ? '<div id="bcmode"></div>' : '')
-              + (cur.id === 'spotify' ? '<div id="spotsoloist"></div><div id="splibrespot"></div>' : '')
+              + (cur.id === 'spotify' ? '<div id="spotplay" hidden><h3 class="set-h sg-play-h">Other ways to play</h3><div id="splibrespot"></div><div id="spotsoloist"></div></div>' : '')
               + (cur.id === 'soundcloud' ? '<div id="scmode"></div>' : '')
               + '<div id="srcmine"></div>';
           main.innerHTML = (phone && active ? '' : pageHead('Sources')) + `<div class="settings ${active ? 'has-panel' : 'no-panel'}">${nav}<div class="set-body-wrap">${cur ? `<section class="set-panel" id="src-${esc(cur.id)}" aria-labelledby="srctab-${esc(cur.id)}">${panelHead(cur)}${body}</section>` : ''}</div></div>`;
@@ -6217,7 +6249,7 @@
           signinChooser(tidalSigninCfg($('#tidalsignin')), tidalSi);
           qobuzSetup($('#signin-qobuz'));
           signinChooser(spotifySigninCfg($('#signin-spotify')));
-          signinChooser(youtubeSigninCfg($('#signin-youtube')));
+          if ($('#signin-youtube')) api('GET', '/sources/youtube/unofficial').catch(() => ({})).then((u) => signinChooser(youtubeSigninCfg($('#signin-youtube'), !!(u && u.enabled))));
           // YouTube › On your speakers (unofficial): yt-dlp as an external program (STEWARD-DUAL-MODE.md)
           const yz = $('#ytzones');
           const fillYtZones = async () => {
@@ -6225,7 +6257,7 @@
             let u; try { u = await api('GET', '/sources/youtube/unofficial'); } catch (e) { yz.innerHTML = ''; return; }
             if (!yz.isConnected) return;
             const y = u.ytdlp;
-            const rows = [row('On your speakers (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
+            const rows = [row('On your speakers (unofficial)', esc(splitNote(u.warning)[0]), `<input type="checkbox" class="switch" role="switch" id="yzon" ${u.enabled ? 'checked' : ''} aria-label="YouTube on your speakers (unofficial)">`)];
             if (u.enabled || y) {
               rows.push(y
                 ? row('yt-dlp', `${esc(y.version ? 'Version ' + y.version : 'Found')}: ${y.from === 'downloaded' ? 'downloaded by this node' : y.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(y.path)}</code>).`, y.from === 'downloaded' ? '<button class="btn ghost sm" id="yzupdate">Update</button><button class="btn ghost sm" id="yzremove">Remove</button>' : '')
@@ -6282,15 +6314,24 @@
             };
             draw();
           }
+          // Spotify › Other ways to play: shown once one of them can run here (owner, 2026-11-08)
+          // A group under the "Other ways to play" heading: its own title one level down
+          const subGroup = (title, body) => `<div class="set-group"><h4 class="set-h">${title}</h4><div class="set-rows">${body}</div></div>`;
+          const spotPlayShown = () => { const box = $('#spotplay'); if (box) box.hidden = !$$('#splibrespot > *, #spotsoloist > *', box).length; };
           const slo = $('#spotsoloist');
           const fillSoloist = async () => {
             if (!slo || !slo.isConnected) return;
-            let u; try { u = await api('GET', '/sources/spotify/soloist'); } catch (e) { slo.innerHTML = ''; return; }
+            let u; try { u = await api('GET', '/sources/spotify/soloist'); } catch (e) { slo.innerHTML = ''; spotPlayShown(); return; }
             if (!slo.isConnected) return;
             const b = u.soloist;
-            const rows = [row('Spotify Soloist', esc(u.note), `<input type="checkbox" class="switch" role="switch" id="slon" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="Spotify Soloist">`)];
-            if (!u.supported) rows.push('<div class="notice">Spotify Soloist runs on Linux and macOS only, so this node can’t start it.</div>');
-            else {
+            // Soloist plays on this machine's own PipeWire or PulseAudio output: none in a container
+            // or a service without a desktop session, and nothing to get without a build for it
+            if (!u.enabled && !u.running && !(u.supported && u.sound_output && (b || u.can_download))) { slo.innerHTML = ''; spotPlayShown(); return; }
+            const rows = [row('Spotify Soloist', 'Spotify’s own player, on this machine’s speakers (not the node’s zones). Its key needs Spotify Premium.', `<input type="checkbox" class="switch" role="switch" id="slon" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="Spotify Soloist">`)];
+            // Left on where it can't play (no sound output any more): just the switch, to turn it off
+            const noPlay = !u.running && !(u.supported && u.sound_output);
+            if (noPlay) rows.push('<div class="notice" role="status">This machine has no sound output Soloist can play on.</div>');
+            if (!noPlay) {
               if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="slretry">Try again</button></div></div>`);
               if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
               const stateText = !u.running ? (u.enabled ? 'Not running.' : 'Off.') : u.paired === false ? `Running as “${esc(u.device_name)}”. Nobody has picked it yet: open a Spotify app on this network, choose this device from the device picker and press play.` : u.paired ? `Running as “${esc(u.device_name)}”, paired with a Spotify account.` : `Starting as “${esc(u.device_name)}”…`;
@@ -6305,7 +6346,7 @@
                 ? row('Soloist', `${esc(b.version ? b.version : 'Found')}: ${b.from === 'downloaded' ? `downloaded by this node${u.downloaded_at ? ' on ' + new Date(u.downloaded_at * 1000).toLocaleDateString() : ''}` : b.from === 'config' ? 'set in the node config' : 'installed on this machine'} (<code>${esc(b.path)}</code>). Spotify’s builds stop working 90 days after they were made.`, b.from === 'downloaded' ? '<button class="btn ghost sm" id="slupdate">Update</button><button class="btn ghost sm" id="slremove">Remove</button>' : '')
                 : row('Soloist', u.can_download ? 'The node downloads Spotify’s build for this machine from Spotify’s own servers, when you ask. Spotify publishes no checksums; the node checks that the download runs. By using it you accept Spotify’s Terms and Conditions of Use.' : 'Spotify offers no build for this machine here. Install Soloist yourself and point <code>[spotify] soloist</code> in the node config at it, then reload this page.', u.can_download ? '<button class="btn primary sm" id="slget">Download Soloist</button>' : ''));
             }
-            slo.innerHTML = group('Play on this machine', rows.join(''));
+            slo.innerHTML = subGroup('Spotify Soloist', rows.join('')); spotPlayShown();
             const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/soloist', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#slon').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'Spotify Soloist is on' : 'Spotify Soloist is off');
             const sr = $('#slretry'); if (sr) sr.onclick = () => put({ enabled: true }, 'Starting Spotify Soloist again');
@@ -6327,20 +6368,35 @@
           const lso = $('#splibrespot');
           const fillLibrespot = async () => {
             if (!lso || !lso.isConnected) return;
-            let u; try { u = await api('GET', '/sources/spotify/librespot'); } catch (e) { lso.innerHTML = ''; return; }
+            let u, si; try { [u, si] = await Promise.all([api('GET', '/sources/spotify/librespot'), api('GET', '/sources/spotify/signin')]); } catch (e) { lso.innerHTML = ''; spotPlayShown(); return; }
             if (!lso.isConnected) return;
             const b = u.librespot;
-            const rows = [row('librespot (unofficial)', `${esc(u.warning)} Unlike Soloist, it can play into one of the node’s zones.`, `<input type="checkbox" class="switch" role="switch" id="lson" ${u.enabled ? 'checked' : ''} ${u.supported ? '' : 'disabled'} aria-label="librespot (unofficial)">`)];
-            if (u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="lsretry">Try again</button></div></div>`);
-            if (u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
-            if (u.enabled || b) {
-              rows.push(row('librespot', b ? `${esc(b.version || 'Found')}: ${b.from === 'config' ? 'set in the node config' : b.from === 'data' ? 'in the node’s bin folder' : 'installed on this machine'} (<code>${esc(b.path)}</code>).` : 'Not installed. librespot publishes no ready-made builds: install it with <code>cargo install librespot</code>, your distribution’s package or Homebrew, then reload this page (or point <code>[spotify] librespot</code> in the node config at it).', `<a class="btn ghost sm" href="https://github.com/librespot-org/librespot" target="_blank" rel="noopener">About librespot</a>`));
+            const lsd = (si.details && si.details.librespot) || {};
+            const lsIn = si.in_use && /^librespot/.test(si.in_use.way) ? si.in_use : lsd.signed_in ? { way: lsd.credentials_from ? 'librespot-file' : 'librespot', user: lsd.user, label: lsd.credentials_from ? 'librespot, from a credentials file' : 'librespot, picked in a Spotify app' } : null;
+            // librespot publishes no builds: nothing here until it is installed on this machine (an
+            // account still signed in without it: the switch and Sign out, to undo that)
+            if ((!b || !u.supported) && !lsIn) { lso.innerHTML = ''; spotPlayShown(); return; }
+            const gone = !b || !u.supported;
+            const rows = [row('librespot', `Plays into one of the node’s zones: pick it in a Spotify app on this network. ${esc(splitNote(u.warning)[0])}`, `<input type="checkbox" class="switch" role="switch" id="lson" ${u.enabled ? 'checked' : ''} aria-label="librespot">`)];
+            if (lsIn) rows.push(row(`Signed in as ${esc(lsIn.user || 'your Spotify account')}`, esc(lsIn.label), '<button class="btn ghost sm" id="lsout">Sign out</button>'));
+            if (gone) rows.push('<div class="notice" role="status">librespot isn’t installed on this machine.</div>');
+            if (!gone && u.health && !u.health.ok) rows.push(`<div class="notice warn" role="status">${esc(u.health.detail)}<div class="actions"><button class="btn sm" id="lsretry">Try again</button></div></div>`);
+            if (!gone && u.enabled && u.waiting_for) rows.push(`<div class="notice" role="status">Switched on, waiting for ${esc(u.waiting_for)}.</div>`);
+            if (!gone) {
+              rows.push(row('Program', `${esc(b.version || 'Found')}: ${b.from === 'config' ? 'set in the node config' : b.from === 'data' ? 'in the node’s bin folder' : 'installed on this machine'} (<code>${esc(b.path)}</code>).`, ''));
               const zoneOpts = u.zones.map((z) => `<option value="zone:${esc(z.id)}" ${u.output === 'zone' && u.zone_id === z.id ? 'selected' : ''}>Zone: ${esc(z.name)}</option>`).join('');
               rows.push(`<form class="set-row set-block" id="lsdev"><div class="set-label"><div class="set-name">Device and output</div>${help('The name Spotify apps show, and where the sound goes: this machine’s own sound output, or one of the node’s zones (librespot then pipes its audio into the node, and the zone starts, pauses and stops with it).')}</div><div class="set-body"><div class="toolbar"><input class="input" name="name" maxlength="64" placeholder="Device name" autocomplete="off" aria-label="librespot device name" value="${esc(u.device_name)}"><select class="input" name="out" aria-label="librespot output"><option value="local" ${u.output === 'local' ? 'selected' : ''}>This machine’s sound</option>${zoneOpts}</select><button class="btn" type="submit">Save</button></div></div></form>`);
               rows.push(row('Status', !u.running ? (u.enabled ? 'Not running.' : 'Off.') : `Running as “${esc(u.device_name)}”${u.user ? `, picked by ${esc(u.user)}` : '. Pick it in a Spotify app on this network'}.${u.now && u.now.title ? ` ${u.now.status === 'paused' ? 'Paused' : 'Playing'}: ${esc(u.now.title)}${u.now.artists && u.now.artists.length ? ' · ' + esc(u.now.artists.join(', ')) : ''}.` : ''}`, u.running ? '<span class="pill ok">Running</span>' : `<span class="pill">${u.enabled ? 'Waiting' : 'Off'}</span>`));
             }
-            lso.innerHTML = group('librespot', rows.join(''));
+            // Signed in with another librespot (spotifyd, raspotify, go-librespot): its credentials.json
+            if (!lsIn && !gone) rows.push(`<details class="small set-row set-block" id="lsfile"><summary>Signed in with another librespot? Use its credentials.json</summary><div class="stack"><form class="stack" id="lsfilepick"><div class="toolbar"><input class="input" type="file" name="file" aria-label="credentials.json" accept=".json,application/json"><button class="btn sm" type="submit">Use this file</button></div></form><form class="stack" id="lsfilepaste"><textarea class="input" name="text" rows="3" aria-label="credentials.json contents" placeholder='{"username": …, "auth_type": …, "auth_data": …}' autocomplete="off" spellcheck="false" required></textarea><div class="toolbar"><button class="btn sm" type="submit">Use it</button><span class="muted small">Kept readable by the node only.</span></div></form><div class="notice warn" role="alert" id="lsfileerr" hidden></div></div></details>`);
+            lso.innerHTML = subGroup('librespot', rows.join('')); spotPlayShown();
             const put = async (body, ok) => { try { await api('PUT', '/sources/spotify/librespot', body); if (ok) toast(ok); } catch (e) { toast(e.message, 'error'); } render(); };
+            const lsImport = async (text) => { const err = $('#lsfileerr'); err.hidden = true; try { await api('POST', '/sources/spotify/signin/import', { text }); toast('librespot signed in'); render(); } catch (e) { err.textContent = e.message; err.hidden = false; } };
+            const lfp = $('#lsfilepick'); if (lfp) lfp.onsubmit = async (e) => { e.preventDefault(); const file = lfp.querySelector('input[type=file]').files[0]; if (!file) { toast('Pick the file first', 'error'); return; } lsImport(await file.text()); };
+            const lfs = $('#lsfilepaste'); if (lfs) lfs.onsubmit = (e) => { e.preventDefault(); lsImport(lfs.querySelector('textarea').value); };
+            // Sign out of librespot by its way, also while the app is the one in use
+            const lo = $('#lsout'); if (lo) lo.onclick = async () => { try { await api('DELETE', `/sources/spotify/signin?way=${encodeURIComponent(lsIn.way)}`); toast('librespot signed out'); } catch (e) { toast(e.message, 'error'); } render(); };
             $('#lson').onchange = (e) => put({ enabled: e.target.checked }, e.target.checked ? 'librespot is on' : 'librespot is off');
             const lr = $('#lsretry'); if (lr) lr.onclick = () => put({ enabled: true }, 'Starting librespot again');
             const ld = $('#lsdev'); if (ld) ld.onsubmit = (e) => { e.preventDefault(); const f = new FormData(ld); const out = String(f.get('out') || 'local'); put({ device_name: String(f.get('name') || '').trim(), output: out === 'local' ? 'local' : 'zone', zone_id: out.startsWith('zone:') ? out.slice(5) : '' }, 'librespot saved'); };
@@ -6352,14 +6408,14 @@
             let u; try { u = await api('GET', '/sources/soundcloud/unofficial'); } catch (e) { scm.innerHTML = ''; return; }
             if (!scm.isConnected) return;
             const broke = u.health && !u.health.ok;
-            const rows = [row('SoundCloud (unofficial)', esc(u.warning), `<input type="checkbox" class="switch" role="switch" id="scon" ${u.enabled ? 'checked' : ''} aria-label="SoundCloud (unofficial)">`)];
+            const rows = [`<p class="sg-lead" data-sg="lead">Search and play SoundCloud here; your likes and playlists with your sign-in token. Needs a SoundCloud web client ID.</p>`, row('SoundCloud (unofficial)', esc(splitNote(u.warning)[0]), `<input type="checkbox" class="switch" role="switch" id="scon" ${u.enabled ? 'checked' : ''} aria-label="SoundCloud (unofficial)">`)];
             if (broke) rows.push(`<div class="notice warn" role="status">Switched itself off: ${esc(u.health.detail)}. SoundCloud links still open on soundcloud.com.<div class="actions"><button class="btn sm" id="scretry">Try again</button></div></div>`);
-            if (u.client_from) rows.push(row('Client ID', `<code class="path">${esc(u.client_id || '')}</code> · ${u.client_from === 'config' ? 'set in the node config.' : 'set here. SoundCloud can stop accepting a client at any time; then enter another one.'}`, `<button class="btn ghost sm" id="scclientchange">Change</button>${u.client_from === 'settings' ? '<button class="btn ghost sm" id="scclientforget">Forget</button>' : ''}`));
-            rows.push(`<form class="set-row set-block" id="scclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Client ID</div>${help('The node has no built-in SoundCloud client and reads none off soundcloud.com: enter a SoundCloud web client ID you are allowed to use. Until you do, SoundCloud stays off.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client ID" autocomplete="off" spellcheck="false" aria-label="SoundCloud client ID" required><button class="btn" type="submit">Save</button></div></div></form>`);
+            if (u.client_from) rows.push(row('Client ID', `<code class="path">${esc(u.client_id || '')}</code> · ${u.client_from === 'config' ? 'set in the node config.' : 'set here.'}`, `${u.client_from === 'settings' ? '<button class="btn ghost sm" id="scclientchange">Change</button><button class="btn ghost sm" id="scclientforget">Forget</button>' : ''}`));
+            rows.push(`<form class="set-row set-block" id="scclient" ${u.client_from ? 'hidden' : ''}><div class="set-label"><div class="set-name">Client ID</div>${help('A SoundCloud web client ID you are allowed to use; SoundCloud stays off until one is set.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="id" placeholder="Client ID" autocomplete="off" spellcheck="false" aria-label="SoundCloud client ID" required><button class="btn" type="submit">Save</button></div></div></form>`);
             if (u.client_from) {
               rows.push(u.signed_in
-                ? row('Signed in', `Your likes and playlists come from SoundCloud account ${esc(u.user || '')}. The token stays on the node and never comes back.`, '<button class="btn ghost sm" id="sctokenforget">Sign out</button>')
-                : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: paste your own SoundCloud sign-in token (the one your browser uses while you are signed in). The node checks it once with SoundCloud and keeps it like a sign-in; it never shows it again. Without it, search and playback still work.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
+                ? row(`Signed in as ${esc(u.user || 'your SoundCloud account')}`, 'Your likes and playlists, below.', '<button class="btn ghost sm" id="sctokenforget">Sign out</button>', 'sg-in')
+                : `<form class="set-row set-block" id="sctoken"><div class="set-label"><div class="set-name">Your likes and playlists</div>${help('Optional: the sign-in token your browser uses on soundcloud.com. Checked once, never shown again.')}</div><div class="set-body"><div class="toolbar"><input class="input" name="token" type="password" placeholder="Sign-in token (optional)" autocomplete="off" spellcheck="false" aria-label="SoundCloud sign-in token" required><button class="btn" type="submit">Save</button></div></div></form>`);
               rows.push(row('Streams', 'MP3 as SoundCloud serves it, progressive or stitched from HLS. Tracks SoundCloud encrypts (Go+) are skipped; a track SoundCloud only snips plays its 30-second preview.', ''));
               if (u.health && u.health.ok) rows.push(row('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
             }
@@ -7298,9 +7354,15 @@
             ? qEntries.map(([src, q]) => row(esc(SERVICE_NAMES[src] || srcName(src)), applies(q.applies), `<span class="pill">${esc(String(q.value == null ? '—' : q.value))}</span>${q.applies === 'yours' ? ` <button class="btn ghost sm" data-qreset="${esc(src)}">Use the node’s</button>` : ''}`)).join('')
             : block('', 'Each service plays at the quality set on its page in Sources. Your own choice per service, over the node’s, comes here with the services’ quality choices.', '<button class="btn ghost" data-goto-sources>Open Sources</button>'));
           // This node › Service apps: the apps the admin sets once for everyone
-          // Built in, or the admin's own app (Advanced); the service's limits in plain words
+          // Built in, or the admin's own app; the service's limits in plain words
           const appFrom = (a) => a.from === 'settings' ? 'Your own app' : a.from === 'builtin' ? 'Built in' : a.from === 'config' ? 'Your own app, set in node.toml' : a.from ? 'Set' : '';
-          const appAdvanced = (a) => !a.set ? '' : `<details class="small app-adv"><summary>Advanced: use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
+          // Only what can be done here (owner, 2026-11-08): no row for an app with nothing to set and
+          // none in use, and no own-app form where the service hands none out (Qobuz, TIDAL's device
+          // clients); one saved here before keeps its Remove
+          const NO_OWN_APP = new Set(['qobuz', 'tidal-full']);
+          const ownAppForm = (a) => !!a.set && !NO_OWN_APP.has(a.id);
+          const appShown = (a) => a.configured || !!a.page || ownAppForm(a);
+          const appAdvanced = (a) => !ownAppForm(a) ? '' : `<details class="small app-adv"><summary>Use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
           // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
           const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
           const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? (() => { const [x, y] = splitNote(a.limits); return help(esc(x)) + (y ? `<details class="small morenote"><summary>More</summary><p class="set-help">${esc(y)}</p></details>` : ''); })() : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
@@ -7308,7 +7370,7 @@
           const SRC_POLICIES = [['node', 'This node’s', 'Everyone plays TIDAL, Qobuz and Spotify through the sign-ins made here. Listeners can’t sign in to their own.'], ['own', 'Each person’s own', 'Everyone signs in to their own accounts; a listener without one gets “Open in” instead.'], ['choice', 'Each person chooses', 'This node’s by default; each listener may switch to their own.']];
           const curPolicy = ns.sources_policy || 'own';
           const policyTab = group('Sources for everyone', row('Whose sign-ins people play with', (SRC_POLICIES.find(([v]) => v === curPolicy) || SRC_POLICIES[1])[2] + ' Switching keeps every sign-in, yours and theirs.', `<div class="chips" role="radiogroup" aria-label="Whose sign-ins people play with">${SRC_POLICIES.map(([v, l]) => `<button class="chip scope ${curPolicy === v ? 'on' : ''}" role="radio" aria-checked="${curPolicy === v}" data-srcpolicy="${v}">${l}</button>`).join('')}</div>`));
-          const appsTab = policyTab + group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
+          const appsTab = policyTab + group('Set once, for everyone on this node', apps && apps.length ? apps.filter(appShown).map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
             + row('Status', '', bundled.reachable ? `<span class="pill ok">Running${bundled.version ? ` · ${esc(bundled.version)}` : ''}</span>` : `<span class="pill bad">Not reachable</span>${bundled.error ? ` <span class="muted small">${esc(bundled.error)}</span>` : ''}`)

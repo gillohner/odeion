@@ -1613,7 +1613,7 @@ impl crate::signin::SignInSource for SpotifySignIn {
             },
             details: match headers {
                 Some(h) => {
-                    serde_json::json!({ "status": status_view(s, who, h), "librespot": { "enabled": ls.enabled, "supported": supported, "credentials_from": ls.credentials_from } })
+                    serde_json::json!({ "status": status_view(s, who, h), "librespot": { "enabled": ls.enabled, "supported": supported, "credentials_from": ls.credentials_from, "signed_in": creds_user.is_some(), "user": creds_user.clone().flatten() } })
                 }
                 None => serde_json::Value::Null,
             },

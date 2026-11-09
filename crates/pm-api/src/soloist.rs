@@ -150,6 +150,28 @@ fn supported() -> bool {
     cfg!(unix)
 }
 
+/// A sound output Soloist can play on from the node's environment (Soloist inherits it): on
+/// macOS the system's own (Core Audio); on Linux a PipeWire or PulseAudio server, by
+/// `PULSE_SERVER`, `PIPEWIRE_REMOTE`, the sockets in `$XDG_RUNTIME_DIR`, or a system-wide
+/// PulseAudio. A node in a container or a system service without a desktop session has none, so
+/// Soloist would have nowhere to play.
+fn sound_output() -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    sound_output_in(|k| std::env::var_os(k).filter(|v| !v.is_empty()), |p| p.exists())
+}
+
+fn sound_output_in(env: impl Fn(&str) -> Option<std::ffi::OsString>, exists: impl Fn(&Path) -> bool) -> bool {
+    if env("PULSE_SERVER").is_some() || env("PIPEWIRE_REMOTE").is_some() {
+        return true;
+    }
+    env("XDG_RUNTIME_DIR").is_some_and(|d| {
+        let d = PathBuf::from(d);
+        exists(&d.join("pipewire-0")) || exists(&d.join("pulse").join("native"))
+    }) || exists(Path::new("/run/pulse/native"))
+}
+
 /// Spotify's archive for this machine (`soloist_release_<arch>.tar.gz`), Linux and macOS.
 fn archive() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -615,6 +637,9 @@ pub struct SoloistStatus {
     pub soloist: Option<Binary>,
     /// The node can download Soloist for this machine.
     pub can_download: bool,
+    /// A sound output Soloist can play on is reachable here: macOS's own, or a PipeWire or
+    /// PulseAudio server (none in a container or a service without a desktop session).
+    pub sound_output: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downloaded_at: Option<i64>,
     pub running: bool,
@@ -701,6 +726,7 @@ async fn view(s: &NodeState) -> SoloistStatus {
         pipewire_device: st.pipewire_device.clone(),
         soloist,
         can_download: archive().is_some(),
+        sound_output: supported() && sound_output(),
         downloaded_at: st.downloaded_at,
         running,
         pid,
@@ -983,6 +1009,29 @@ pub(crate) async fn uninstall(State(s): State<Arc<NodeState>>) -> ApiResult<Solo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sound_output_needs_a_pipewire_or_pulse_server() {
+        use std::ffi::OsString;
+        let none = |_: &str| None::<OsString>;
+        assert!(
+            !sound_output_in(none, |_| false),
+            "no environment: nowhere to play"
+        );
+        let run = |k: &str| (k == "XDG_RUNTIME_DIR").then(|| OsString::from("/run/user/1000"));
+        assert!(!sound_output_in(run, |_| false), "a runtime dir without sockets");
+        assert!(sound_output_in(run, |p| p.ends_with("pipewire-0")));
+        assert!(sound_output_in(run, |p| p.ends_with("pulse/native")));
+        let pulse = |k: &str| (k == "PULSE_SERVER").then(|| OsString::from("tcp:host"));
+        assert!(
+            sound_output_in(pulse, |_| false),
+            "a PulseAudio server named outright"
+        );
+        assert!(
+            sound_output_in(none, |p| p == Path::new("/run/pulse/native")),
+            "a system-wide PulseAudio"
+        );
+    }
 
     #[test]
     fn now_reads_soloists_playback_state() {

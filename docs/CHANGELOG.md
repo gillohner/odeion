@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-08
+
+- **Sign-in pages show only what works here, one sign-in per service** (owner: "it is not fully clear if you need to login to one or choose of apis … make sure ui is simpler. remove all options that don't work at the moment"). Each service's sign-in starts with one line saying what you get and what you need (Spotify: Premium and a free developer app). A way that can't be used on this node is not shown at all; one working way is just its button or form, and further ways sit under one closed "Other ways to sign in", a line each. Signed in is one row, "Signed in as … · what it gives", with Change only when another way works. Spotify is two numbered steps (your developer app, then Connect); librespot and Soloist moved to "Other ways to play" and appear only when librespot is installed or Soloist can play on this machine (`GET /v1/sources/spotify/soloist` now says `sound_output`; `DELETE /v1/sources/{source}/signin?way=…` signs out of the way named, so librespot's account can be signed out while the app is the one in use). TIDAL's own device client shows only once one is set; Qobuz starts from streamrip's or qobuz-dl's config instead of an app ID to request by email; YouTube's cookies file shows once "On your speakers" is on; Last.fm is two steps; Jamendo no longer shows a notice about apps when nothing can be done; Settings › This node › Service apps lists only apps that can be set or are in use, without "Advanced".
+
 ### 2026-11-07
 
 - **A stream that doesn't answer ends with an error instead of holding the zone.** A radio or web stream whose server accepts the connection but sends nothing now fails after 20 seconds, like one that stops sending mid-song. A live stream still plays for as long as it sends. Stop, Next and Play are taken while such a stream is being skipped, not after every item in the queue was tried, and the next song is opened ahead on its own thread, so a next item slow to answer never holds the zone.
