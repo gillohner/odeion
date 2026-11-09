@@ -40,6 +40,8 @@ pub struct Fake {
     pub refuse_pub: AtomicBool,
     /// The node can't delete its copy of the grant.
     pub disconnect_fails: AtomicBool,
+    /// Held (written) by a test: a bookmark write waits on it, keeping her person lock meanwhile.
+    pub gate: tokio::sync::RwLock<()>,
     /// Listings fail (more than the node reads, or too slow): the node can't catch up.
     pub list_fails: AtomicBool,
     /// Only listings of all their posts fail (more than the node lists); one collection's own
@@ -134,6 +136,7 @@ impl PersonalHomeserver for Fake {
             .unwrap_or_default())
     }
     async fn put_bookmark(&self, key: &str, uri: &str, created_at: i64) -> Result<(), PersonalError> {
+        let _open = self.gate.read().await;
         Self::moment().await;
         self.check(key, "put", uri)?;
         let mut all = self.bookmarks.lock().unwrap();

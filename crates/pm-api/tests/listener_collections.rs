@@ -579,7 +579,7 @@ async fn a_removed_listener_leaves_no_collections_and_disconnecting_keeps_hers()
     fake.connected.lock().unwrap().insert(ANN.to_string());
     let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
     assert_eq!(names(&v), vec!["Kept"], "{v}");
-    pm_api::accounts::forget_person(&s, ANN).unwrap();
+    pm_api::accounts::forget_person(&s, ANN).await.unwrap();
     let key = format!("person.{ANN}.collections");
     assert!(
         s.library.lock().unwrap().get_setting(&key).unwrap().is_none(),

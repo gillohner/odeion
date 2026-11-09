@@ -392,6 +392,9 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
     let name = clean_name(b.name);
     if !b.access.on_homeserver() {
         let key = valid_key(b.key.as_deref().unwrap_or(""))?;
+        // After a removal of theirs still running (People › Remove holds this lock)
+        let lock = crate::personal::person_lock(&key);
+        let _one = lock.lock().await;
         update(&s, |r| {
             if let Some(p) = r.people.iter_mut().find(|p| p.key == key) {
                 p.music_enabled = true;
@@ -490,6 +493,9 @@ pub(crate) async fn change(
     Json(b): Json<PersonChange>,
 ) -> ApiResult<Person> {
     let key = valid_key(&key)?;
+    // Music on again comes after a removal of theirs still running (People › Remove holds this)
+    let lock = crate::personal::person_lock(&key);
+    let _one = lock.lock().await;
     let r = reconcile(&s).await?;
     let Some(found) = r.people.iter().find(|p| p.key == key) else {
         return Err(ApiError::not_found("no such person"));
@@ -561,10 +567,14 @@ pub(crate) async fn change(
 pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<String>) -> ApiResult<Roster> {
     let key = valid_key(&key)?;
     reconcile(&s).await?;
+    // One at a time with whatever of theirs is on its way (a heart, an approval): the removal is
+    // whole when it answers, and a re-add (which takes the same lock) comes after all of it
+    let lock = crate::personal::person_lock(&key);
+    let _one = lock.lock().await;
     // Already off the roster, but a removal failed part way (their grant or copies are still on
     // the node): this one finishes it
     if !load(&s).people.iter().any(|p| p.key == key) && crate::personal::leftover(&s, &key) {
-        crate::accounts::forget_person(&s, &key)?;
+        crate::accounts::forget_person_locked(&s, &key).await?;
         return Ok(Json(load(&s)));
     }
     let ((), r) = update(&s, |r| {
@@ -583,7 +593,7 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
         Ok(())
     })
     .await?;
-    crate::accounts::forget_person(&s, &key)?;
+    crate::accounts::forget_person_locked(&s, &key).await?;
     Ok(Json(r))
 }
 

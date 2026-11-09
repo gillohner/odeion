@@ -1034,7 +1034,15 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
 /// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
-pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
+pub async fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
+    let lock = crate::personal::person_lock(key);
+    let _one = lock.lock().await;
+    forget_person_locked(s, key).await
+}
+
+/// [`forget_person`] with their person lock already held (People › Remove holds it across the
+/// roster change too, so a re-add waits for all of this).
+pub(crate) async fn forget_person_locked(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let signed_out = sign_out_everywhere(s, key);
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
@@ -1049,7 +1057,7 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
                     .try_for_each(|(k, _)| lib.delete_setting(&k).map(drop))
             })
     };
-    let grant = crate::personal::forget(s, key);
+    let grant = crate::personal::forget(s, key).await;
     // Everything else goes too before a failure above is answered (removing them again finishes
     // what is left)
     // Their sign-ins still on the way: they would land again when the service answers
@@ -1062,7 +1070,7 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
         .lock()
         .expect("pending")
         .retain(|_, p| p.who != theirs);
-    {
+    let rest = (|| -> Result<(), ApiError> {
         let lib = s.library.lock().expect("library poisoned");
         for (k, _) in lib.settings_with_prefix(&format!("{PERSON_PREFIX}{key}."))? {
             lib.delete_setting(&k)?;
@@ -1076,16 +1084,31 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
                 lib.delete_setting(&k)?;
             }
         }
-    }
+        Ok(())
+    })();
     let on_node = Who::ListenerOnNode(key.to_string()).tag();
     crate::tidal::forget_streams_of(key);
     crate::tidal::forget_streams_of(&on_node);
     crate::search::forget_answers_of(s, key);
     crate::search::forget_answers_of(s, &on_node);
     crate::devices::forget_all_of(s, key);
-    signed_out?;
-    personal?;
-    grant.map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Every failure is answered, a grant still on the node first (a key to their homeserver,
+    // and what removing them again is for)
+    let problems: Vec<String> = [
+        grant.err(),
+        signed_out.err().map(|e| e.message),
+        personal.err().map(|e| e.to_string()),
+        rest.err().map(|e| e.message),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !problems.is_empty() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            problems.join("; "),
+        ));
+    }
     Ok(())
 }
 
