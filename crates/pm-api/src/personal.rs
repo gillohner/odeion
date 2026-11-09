@@ -1415,7 +1415,7 @@ mod tests {
 
     /// A store that only says whether it was told to forget.
     #[derive(Default)]
-    struct Forgets(std::sync::atomic::AtomicBool);
+    struct Forgets(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool);
 
     #[async_trait::async_trait]
     impl PersonalHomeserver for Forgets {
@@ -1423,6 +1423,9 @@ mod tests {
             !self.0.load(std::sync::atomic::Ordering::SeqCst)
         }
         async fn disconnect(&self, _key: &str) -> Result<(), String> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("fixture: cannot delete grant".into());
+            }
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
@@ -1583,5 +1586,184 @@ mod tests {
         let roster = restore.await;
         assert!(s.removing_people.lock().unwrap().is_empty());
         drop(roster);
+    }
+
+    #[tokio::test]
+    async fn restore_also_waits_for_a_readds_retry_of_failed_removal() {
+        use axum::extract::{Path, State};
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = tempfile::tempdir().unwrap();
+        let key = "dddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let s = listener_state(dir.path(), key).await;
+        let store = Arc::new(Forgets::default());
+        s.set_personal_homeserver(store.clone());
+        store.1.store(true, SeqCst);
+        assert!(crate::people::remove(State(s.clone()), Path(key.into()))
+            .await
+            .is_err());
+        assert!(leftover(&s, key));
+        store.1.store(false, SeqCst);
+
+        // An admitted old operation holds up cleanup retried by the re-add.
+        let operation = person_lock(key);
+        let held = operation.lock().await;
+        let re_add = crate::people::invite(
+            State(s.clone()),
+            Json(crate::people::NewInvite {
+                access: crate::people::Access::Music,
+                key: Some(key.into()),
+                name: None,
+                storage_quota_mb: None,
+            }),
+        );
+        tokio::pin!(re_add);
+        assert!(futures_util::poll!(&mut re_add).is_pending());
+        assert!(s.removing_people.lock().unwrap().contains(key));
+        let restore = crate::people::roster_for_restore(&s);
+        tokio::pin!(restore);
+        assert!(futures_util::poll!(&mut restore).is_pending());
+        assert!(s.roster.try_lock().is_ok());
+        drop(held);
+        re_add.await.unwrap();
+        let roster = restore.await;
+        crate::people::restored_access(&s);
+        let setting = format!("person.{key}.tidal");
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&setting, "restored-fixture")
+            .unwrap();
+        drop(roster);
+        assert!(s.removing_people.lock().unwrap().is_empty());
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(&setting)
+                .unwrap()
+                .as_deref(),
+            Some("restored-fixture")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_completed_music_off_supersedes_older_queued_on_and_invite() {
+        use axum::extract::{Path, State};
+        for invite in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let key = "ffffffffffffffffffffffffffffffffffffffffffffffffffff";
+            let s = listener_state(dir.path(), key).await;
+            // Remove retains a bundled-homeserver person, with Music off.
+            let mut roster = crate::people::load(&s);
+            roster.people[0].access = crate::people::Access::HomeserverMusic;
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting("people", &serde_json::to_string(&roster).unwrap())
+                .unwrap();
+            let operation = person_lock(key);
+            let held = operation.lock().await;
+            let removal = tokio::spawn(crate::people::remove(State(s.clone()), Path(key.into())));
+            revoked(&s, key).await;
+            let enabling = async {
+                if invite {
+                    crate::people::invite(
+                        State(s.clone()),
+                        Json(crate::people::NewInvite {
+                            access: crate::people::Access::Music,
+                            key: Some(key.into()),
+                            name: None,
+                            storage_quota_mb: None,
+                        }),
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    crate::people::change(
+                        State(s.clone()),
+                        Path(key.into()),
+                        Json(crate::people::PersonChange {
+                            music: Some(true),
+                            ..Default::default()
+                        }),
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            };
+            tokio::pin!(enabling);
+            assert!(futures_util::poll!(&mut enabling).is_pending());
+            let off = crate::people::change(
+                State(s.clone()),
+                Path(key.into()),
+                Json(crate::people::PersonChange {
+                    music: Some(false),
+                    ..Default::default()
+                }),
+            );
+            tokio::pin!(off);
+            let std::task::Poll::Ready(answer) = futures_util::poll!(&mut off) else {
+                panic!("Music off waited for the held homeserver operation")
+            };
+            assert!(!answer.unwrap().0.music_enabled);
+            drop(held);
+            removal.await.unwrap().unwrap();
+            assert_eq!(enabling.await.unwrap_err().status, StatusCode::CONFLICT);
+            assert!(!crate::people::may_use_music(&s, key));
+            assert_eq!(crate::accounts::sessions_of(&s, key), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restore_that_wins_before_retry_cleanup_preserves_its_new_settings() {
+        use axum::extract::{Path, State};
+        let dir = tempfile::tempdir().unwrap();
+        let key = "gggggggggggggggggggggggggggggggggggggggggggggggggggg";
+        let s = listener_state(dir.path(), key).await;
+        let store = Arc::new(Forgets::default());
+        store.1.store(true, std::sync::atomic::Ordering::SeqCst);
+        s.set_personal_homeserver(store.clone());
+        assert!(crate::people::remove(State(s.clone()), Path(key.into()))
+            .await
+            .is_err());
+        store.1.store(false, std::sync::atomic::Ordering::SeqCst);
+        let membership = membership_lock(key);
+        let held = membership.lock().await;
+        let re_add = crate::people::invite(
+            State(s.clone()),
+            Json(crate::people::NewInvite {
+                access: crate::people::Access::Music,
+                key: Some(key.into()),
+                name: None,
+                storage_quota_mb: None,
+            }),
+        );
+        tokio::pin!(re_add);
+        assert!(futures_util::poll!(&mut re_add).is_pending());
+        // No cleanup was registered yet: restore wins, replaces access intent and settings.
+        let roster = crate::people::roster_for_restore(&s).await;
+        crate::people::restored_access(&s);
+        let setting = format!("person.{key}.tidal");
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&setting, "restored-fixture")
+            .unwrap();
+        drop(roster);
+        drop(held);
+        assert_eq!(re_add.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(&setting)
+                .unwrap()
+                .as_deref(),
+            Some("restored-fixture")
+        );
+        assert!(
+            store.connected(key),
+            "the superseded retry did not delete the restored state"
+        );
     }
 }
