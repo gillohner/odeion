@@ -783,11 +783,8 @@ const LISTENER_OWN_STATUS: &[&str] = &[
 pub const NODE_SOURCES_ONLY: &str =
     "this node plays everyone's music through its own sign-ins (its owner chose so in Settings)";
 
-/// Inside [`LISTENER_OWN`], still the owner's: checking the node's TIDAL device client and Qobuz app.
-const LISTENER_OWN_EXCEPTIONS: &[&str] = &[
-    "/sources/tidal/unofficial/client",
-    "/sources/qobuz/unofficial/app",
-];
+/// Inside [`LISTENER_OWN`], still the owner's: checking the node's TIDAL device client.
+const LISTENER_OWN_EXCEPTIONS: &[&str] = &["/sources/tidal/unofficial/client"];
 
 /// Inside [`LISTENER_READS`], still the owner's: identification candidates and suggestions.
 const LISTENER_READ_EXCEPTIONS: &[&str] = &["/candidates", "/suggestions"];
