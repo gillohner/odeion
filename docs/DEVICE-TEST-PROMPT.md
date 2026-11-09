@@ -168,8 +168,9 @@ nearly every phone. In a group it is "loosely synced": Android adds latency the 
 "This phone" is the app's own player: the app opens the node's song and plays it through the phone's
 output with the phone zone's path (Auto, bit-perfect, Exclusive USB), at home and through remote
 access. Checked in CI on an emulator (`android-emulator`): a song started in the page plays in the
-app in real time, in the background with the screen off, and the node's zone on the phone takes the
-output over (the app pauses). Not checked there: a USB DAC, remote access, a real phone's battery.
+app in real time, in the background with the screen off, the node's zone on the phone takes the
+output over (the app pauses), and a song downloaded in the app plays in airplane mode with the node
+stopped. Not checked there: a USB DAC, remote access, a real phone's battery.
 Downloads (Download in the ⋯ menu, the storage screen, the mark) are checked on a fixture page
 (`tools/ui-app-downloads.js`) and the sync with a stand-in node (`crates/pm-offline/tests/offline.rs`).
 
@@ -183,10 +184,13 @@ Edge or CI APK of the top PR of the stack. Start with the KA17's volume low (0-5
    buttons (pause, next) work.
 3. Download an album (its page's ⋯ menu > Download). Your library > Downloads lists it with its
    size and the download under way; when it is done, its songs and its tile carry the download mark.
-4. A TIDAL song (search for one, or a playlist with one): its ⋯ menu has no Download.
-5. Your library > Downloads > Remove on the album: it goes from the list, the marks go, and the
+4. Airplane mode on, close the app (swipe it away) and open it again: it says your node can't be
+   reached and opens what the phone keeps; the album plays, seek and next work, and it goes on
+   with the screen off. Airplane mode off: the app goes back to the node by itself.
+5. A TIDAL song (search for one, or a playlist with one): its ⋯ menu has no Download.
+6. Your library > Downloads > Remove on the album: it goes from the list, the marks go, and the
    album still plays from the node.
-6. If anything fails: `adb logcat -s pubky-music` (lines "the app's own player: …" say what it
+7. If anything fails: `adb logcat -s pubky-music` (lines "the app's own player: …" say what it
    plays and the path), the phone's model and Android version.
 ```
 

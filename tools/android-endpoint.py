@@ -15,6 +15,11 @@ and where it is every 5 s; it must play in real time, in the background too, whi
 on the same output stays silent; the node then playing that zone pauses the app's player (one
 stream per output).
 
+Last, offline: the song is downloaded in the app (Library › Songs › its ⋯ menu › Download), then
+airplane mode is on (`cmd connectivity airplane-mode enable`) and the node stopped; the app,
+started again, opens what it keeps and the song plays from the phone's copy through the app's
+own player, in real time.
+
 The emulator is behind its own NAT, so the node cannot reach the address the
 app registers itself under (the emulator's own, 10.0.2.15). This script makes
 that address reach the phone: it adds it to the runner's loopback and relays it
@@ -272,6 +277,42 @@ def in_app_player(address, track):
         assert tr == "playing" and 0.8 < rate < 1.2, f"the node's zone after the handover: {rate:.2f}x ({tr})"
         api("POST", f"/v1/zones/{phone['id']}/transport", {"action": "stop"})
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+
+
+def offline_playback(node, track):
+    """A song downloaded in the app plays with no network and no node (see the module's doc)."""
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    time.sleep(3)
+    mark = len(logcat())
+    tap(lambda n: 'text="Library"' in n or 'content-desc="Library"' in n, "Library")
+    tap(lambda n: 'text="Songs"' in n or 'content-desc="Songs"' in n, "Songs")
+    tap(lambda n: 'content-desc="More"' in n or 'text="More"' in n, "the song's ⋯ menu")
+    tap(lambda n: 'text="Download"' in n or 'content-desc="Download"' in n, "Download")
+    synced = re.compile(r"offline: synced downloaded=([1-9])")
+    until("the song downloaded to the phone", lambda: synced.search(logcat()[mark:]), timeout=120, every=3)
+    log("the song is on the phone")
+    shot("9-downloaded")
+    # No network, and no node
+    adb("shell", "cmd", "connectivity", "airplane-mode", "enable", check=False)
+    node.terminate()
+    node.wait(timeout=30)
+    log("airplane mode on, the node stopped")
+    adb("shell", "am", "force-stop", PKG)
+    fresh_logcat()
+    adb("logcat", "-c")
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    # The connect page finds the node out of reach and opens what the phone keeps
+    tap(lambda n: 'text="Shuffle"' in n or 'content-desc="Shuffle"' in n, "Downloads' Shuffle")
+    def playing():
+        return next((m for m in NATIVE.finditer(logcat()) if m.group(1) == "playing"), None)
+    m = until("the app's own player playing the kept song", playing, timeout=60)
+    log(f"offline: {m.group(0).strip()}")
+    assert m.group(2).startswith("/v1/library/tracks/"), f"the kept song: {m.group(2)}"
+    rate, n = until("its pace", lambda: native_pace(0)[0] and native_pace(0), timeout=60, every=5)
+    assert 0.8 < rate < 1.2, f"offline: {rate:.2f}x"
+    log(f"offline: the kept song plays at {rate:.2f}x real time ({n} positions)")
+    shot("10-offline")
+    adb("shell", "cmd", "connectivity", "airplane-mode", "disable", check=False)
 
 
 # The address the app registers: the emulator's own, on the player's usual port
@@ -583,7 +624,8 @@ def run(node):
             tap(lambda n: 'text="Continue"' in n, "Continue")
             wait_page("the node's page after the report", relaunch=True)
             log("Continue reconnects to the node")
-        log("PASS: the phone is a zone, plays in real time and in the background, the in-app player is the app's own, survives a restart, and reports a crash")
+        offline_playback(node, track)
+        log("PASS: the phone is a zone, plays in real time and in the background, the in-app player is the app's own, survives a restart, reports a crash, and plays a downloaded song with no network")
     finally:
         lc.terminate()
 

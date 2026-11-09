@@ -9,6 +9,8 @@ on:
       - crates/pm-desktop/**
       # The app's own player (the page's "This phone") and what it decodes with
       - crates/pm-app-player/**
+      # What the app keeps offline (the emulator plays a downloaded song in airplane mode)
+      - crates/pm-offline/**
       - crates/pm-audio/**
       - crates/pm-endpoint/**
       - crates/pm-stream/**
