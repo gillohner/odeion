@@ -43,7 +43,7 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
       const url = new URL(route.request().url());
       if (url.searchParams.get('q') !== frozen.query) return route.continue();
       const scope = url.searchParams.get('in') || 'everywhere';
-      const sources = scope === 'everywhere' ? frozen.sources : scope.split(',');
+      const sources = scope === 'everywhere' ? frozen.sources : scope === 'pubky' ? frozen.sources.filter((s) => ['pubky', 'people', 'posts'].includes(s)) : scope.split(',');
       const answers = frozen.answers.filter((a) => sources.includes(a.source));
       return route.fulfill({ status: 200, contentType: 'application/x-ndjson', headers: { 'x-pm-sources': sources.join(',') }, body: answers.map((a) => JSON.stringify(a)).join('\n') + '\n' });
     });
@@ -86,6 +86,19 @@ const api = async (path) => (await fetch(BASE + '/v1' + path, { headers: { Autho
   const seen = []; const clickedSigs = [];
   for (const view of views) {
     await p.goto(BASE + view); await settle();
+    if (process.env.UI_CONTROLS_INPUTS && view === '/search?q=queen') {
+      // Count the actual merged results. Raw hits may be duplicate copies or failed-source
+      // answers, neither of which supplies the controls that this audit must exercise.
+      const rendered = await p.evaluate(() => ({
+        moreSongs: !!document.querySelector('[data-sallsongs]'),
+        songs: document.querySelectorAll('[data-skind="song"] [data-srow]').length,
+        albums: document.querySelectorAll('[data-skind="album"] .tile').length,
+        artists: document.querySelectorAll('[data-skind="artist"] .tile').length,
+      }));
+      if (!rendered.moreSongs || rendered.songs < 6 || rendered.albums < 12 || rendered.artists < 1) {
+        throw new Error('shared search inputs lost rendered control coverage: ' + JSON.stringify(rendered));
+      }
+    }
     const list = await kinds();
     for (const k of list) {
       const lasting = SKIP.test(k.words) || SKIP.test(k.id) || /layoutPick/.test(k.sig);

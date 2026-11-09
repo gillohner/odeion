@@ -61,8 +61,8 @@ enabled = false
                 answers = [json.loads(line) for line in response.read().decode().splitlines() if line.strip()]
             if not sources or any(not s for s in sources) or {a["source"] for a in answers} != set(sources):
                 raise RuntimeError("search did not return every advertised source")
-            hits = [h for a in answers for h in a.get("hits", [])]
-            # Keep the rich search controls the live audit exercised, including See all songs.
+            hits = [h for a in answers if a.get("status") == "ok" for h in a.get("hits", [])]
+            # Preliminary check; every shard also checks the rendered, merged controls.
             for kind, minimum in [("song", 7), ("album", 12), ("artist", 1)]:
                 if sum(h["kind"] == kind for h in hits) < minimum:
                     raise RuntimeError(f"search capture lacks the required {kind} controls")
