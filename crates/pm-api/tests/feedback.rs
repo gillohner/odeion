@@ -99,6 +99,38 @@ fn stored(dir: &std::path::Path) -> String {
     serde_json::to_string(&inbox(dir).pending(pm_api::feedback::now()).unwrap()).unwrap()
 }
 
+fn set_roster(s: &NodeState, roster: &pm_api::people::Roster) {
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("people", &serde_json::to_string(roster).unwrap())
+        .unwrap();
+}
+
+async fn restore_backup(app: &axum::Router, bytes: Vec<u8>, pass: Option<&str>) {
+    let mut req = Request::post("/v1/restore")
+        .header("authorization", format!("Bearer {OWNER}"))
+        .header("content-type", "application/octet-stream");
+    if let Some(pass) = pass {
+        req = req.header(pm_api::backup::PASSPHRASE_HEADER, pass);
+    }
+    let (st, r) = send(app, req.body(Body::from(bytes)).unwrap()).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+}
+
+/// Run the production membership cleanup once, under its production lock order. Unlike waiting
+/// for an unchanged list, the returned count proves the delete step actually ran.
+async fn clean_memberships(s: &Arc<NodeState>) -> usize {
+    let s = s.clone();
+    tokio::task::spawn_blocking(move || {
+        let _one = s.roster.blocking_lock();
+        pm_api::feedback::forget_unlisted(&s.data_dir(), &pm_api::people::music_reporters(&s).unwrap())
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn the_owner_and_listeners_send_reports_to_the_nodes_private_inbox() {
     let dir = tempfile::tempdir().unwrap();
@@ -1134,6 +1166,280 @@ async fn reports_from_before_a_remove_never_come_back_with_music_again() {
     pm_api::feedback::start_housekeeping(&s);
     let want = ["ann's new", "ben's", "owner's"];
     assert_eq!(until_left(dir.path(), &want).await, want);
+}
+
+/// A successful Remove followed by a music-only re-invite creates B. Restoring A (named or
+/// legacy), through the real plain/sealed HTTP restore, must keep B's accepted reports.
+#[tokio::test]
+async fn restoring_an_older_backup_keeps_current_members_reports() {
+    for (pass, old_name) in [(None, Some("membership-a")), (Some("fixture-pass"), None)] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = node(dir.path(), Some(OWNER));
+        let mut roster = pm_api::people::load(&s);
+        roster.people[0].reports = old_name.map(str::to_string);
+        set_roster(&s, &roster);
+        let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+        let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+        let app = router(s.clone());
+        three_reports(&app, &ann, &ben).await;
+        let (backup, _) = pm_api::backup::make(&s, pass).unwrap();
+        let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(texts(dir.path()), ["ben's", "owner's"], "removal succeeded");
+        let (st, r) = call(
+            &app,
+            Some(OWNER),
+            "POST",
+            "/v1/people/invites",
+            Some(json!({"access": "music", "key": ANN})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let current = pm_api::people::reports_of(&s, ANN);
+        assert!(current.is_some());
+        assert_ne!(current.as_deref(), old_name);
+        let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+        let (st, saved) = call(
+            &app,
+            Some(&ann),
+            "POST",
+            "/v1/feedback",
+            Some(report("ann's new")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{saved}");
+        // The offline CLI's staging merge is exercised against the same real A -> Remove -> B
+        // history and inbox, before the HTTP restore replaces the live library.
+        let staged_path = dir.path().join("cli-staged.sqlite");
+        std::fs::write(&staged_path, pm_api::backup::parse(&backup).unwrap().database).unwrap();
+        {
+            let staged = Library::open(&staged_path).unwrap();
+            pm_api::backup::keep_this_nodes(&s.library.lock().unwrap(), &staged).unwrap();
+            let roster: pm_api::people::Roster =
+                serde_json::from_str(&staged.get_setting("people").unwrap().unwrap()).unwrap();
+            let ann = roster.people.iter().find(|p| p.key == ANN).unwrap();
+            assert_eq!(ann.reports, current);
+            let keep: Vec<_> = roster
+                .people
+                .into_iter()
+                .filter(|p| p.access.music())
+                .map(|p| (p.key, p.reports))
+                .collect();
+            assert_eq!(pm_api::feedback::forget_unlisted(dir.path(), &keep).unwrap(), 0);
+        }
+        restore_backup(&app, backup, pass).await;
+        assert_eq!(pm_api::people::reports_of(&s, ANN), current);
+        // Restore also replaces listener sessions; sign in again to check the report identity.
+        let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+        let (st, mine) = call(&app, Some(&ann), "GET", "/v1/feedback/mine", None).await;
+        assert_eq!(st, StatusCode::OK, "{mine}");
+        assert_eq!(mine.as_array().unwrap().len(), 1);
+        assert_eq!(mine[0]["id"], saved["id"]);
+        assert_eq!(clean_memberships(&s).await, 0);
+        assert_eq!(texts(dir.path()), ["ann's new", "ben's", "owner's"]);
+    }
+}
+
+/// A restore from another roster must preserve this node's legacy None membership, and named
+/// memberships whose music is paused. Restoring enabled access does not grant either anew.
+#[tokio::test]
+async fn restoring_music_keeps_legacy_and_paused_members_reports() {
+    for (membership, paused) in [(None, false), (Some("paused-membership"), true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let s = node(dir.path(), Some(OWNER));
+        let mut roster = pm_api::people::load(&s);
+        roster.people[0].reports = membership.map(str::to_string);
+        set_roster(&s, &roster);
+        let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+        let app = router(s.clone());
+        let (st, saved) = call(
+            &app,
+            Some(&ann),
+            "POST",
+            "/v1/feedback",
+            Some(report("ann's kept")),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED, "{saved}");
+        if paused {
+            let (st, r) = call(
+                &app,
+                Some(OWNER),
+                "PATCH",
+                &format!("/v1/people/{ANN}"),
+                Some(json!({"music": false})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{r}");
+        }
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = node(other_dir.path(), Some(OWNER));
+        let mut older = pm_api::people::load(&other);
+        older.people[0].reports = Some("backup-membership".into());
+        set_roster(&other, &older);
+        let (backup, _) = pm_api::backup::make(&other, None).unwrap();
+        restore_backup(&app, backup, None).await;
+        assert_eq!(pm_api::people::reports_of(&s, ANN).as_deref(), membership);
+        let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+        let (st, mine) = call(&app, Some(&ann), "GET", "/v1/feedback/mine", None).await;
+        assert_eq!(st, StatusCode::OK, "{mine}");
+        assert_eq!(mine[0]["id"], saved["id"]);
+        assert_eq!(clean_memberships(&s).await, 0);
+        assert_eq!(texts(dir.path()), ["ann's kept"]);
+    }
+}
+
+/// Restoring music to a removed listener is a fresh grant, even if an old inbox row survived a
+/// busy Remove. It must neither revive that report nor delete the new membership's report.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restoring_removed_music_never_revives_its_old_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let mut roster = pm_api::people::load(&s);
+    roster.people[0].access = pm_api::people::Access::HomeserverMusic;
+    roster.people[0].reports = Some("membership-a".into());
+    set_roster(&s, &roster);
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    let (backup, _) = pm_api::backup::make(&s, None).unwrap();
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    assert!(!pm_api::people::may_use_music(&s, ANN));
+    assert_eq!(texts(dir.path()), ["ann's", "ben's", "owner's"]);
+    restore_backup(&app, backup, None).await;
+    let current = pm_api::people::reports_of(&s, ANN).unwrap();
+    assert_ne!(current, "membership-a");
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let (st, mine) = call(&app, Some(&ann), "GET", "/v1/feedback/mine", None).await;
+    assert_eq!(st, StatusCode::OK, "{mine}");
+    assert!(mine.as_array().unwrap().is_empty());
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's new")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    assert_eq!(clean_memberships(&s).await, 1);
+    assert_eq!(texts(dir.path()), ["ann's new", "ben's", "owner's"]);
+}
+
+/// The library can refuse a roster write while the separate inbox is writable. A failed revoke
+/// must not destroy reports; a successful retry removes every membership of only that key.
+#[tokio::test]
+async fn a_failed_roster_write_keeps_access_and_every_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let mut roster = pm_api::people::load(&s);
+    roster.people[0].reports = Some("membership-a".into());
+    roster.people[1].reports = Some("ben-membership".into());
+    set_roster(&s, &roster);
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let ben = pm_api::accounts::mint(&s, BEN).unwrap();
+    let app = router(s.clone());
+    three_reports(&app, &ann, &ben).await;
+    // Rows from two memberships, as after an earlier cleanup failure and re-add.
+    roster.people[0].reports = Some("membership-b".into());
+    set_roster(&s, &roster);
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's new")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER no_people_i BEFORE INSERT ON settings WHEN NEW.key = 'people'
+           BEGIN SELECT RAISE(ABORT, 'fixture: roster write refused'); END;
+         CREATE TRIGGER no_people_u BEFORE UPDATE ON settings WHEN NEW.key = 'people'
+           BEGIN SELECT RAISE(ABORT, 'fixture: roster write refused'); END;",
+    )
+    .unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{r}");
+    assert_eq!(pm_api::people::load(&s), roster);
+    assert!(pm_api::people::may_use_music(&s, ANN));
+    assert!(pm_api::accounts::caller(&s, Some(&ann)).is_some());
+    assert_eq!(texts(dir.path()), ["ann's", "ann's new", "ben's", "owner's"]);
+    db.execute_batch("DROP TRIGGER no_people_i; DROP TRIGGER no_people_u;")
+        .unwrap();
+    let (st, r) = call(&app, Some(OWNER), "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert!(!pm_api::people::may_use_music(&s, ANN));
+    assert_eq!(texts(dir.path()), ["ben's", "owner's"]);
+}
+
+/// Moving cleanup off the runtime must not release roster exclusion when its request is
+/// cancelled: the worker's all-membership delete finishes before a re-invite can save B.
+#[tokio::test]
+async fn cancelling_remove_cannot_delete_reports_from_a_later_membership() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), Some(OWNER));
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let app = router(s.clone());
+    let (st, r) = call(&app, Some(&ann), "POST", "/v1/feedback", Some(report("ann's"))).await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    let hold = rusqlite::Connection::open(dir.path().join(pm_api::feedback::FILE)).unwrap();
+    hold.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let req = Request::delete(format!("/v1/people/{ANN}"))
+        .header("authorization", format!("Bearer {OWNER}"))
+        .body(Body::empty())
+        .unwrap();
+    let removal = tokio::spawn(send_owned(app.clone(), req));
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while pm_api::people::may_use_music(&s, ANN) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation is persisted while inbox cleanup waits");
+    assert!(!removal.is_finished(), "the inbox is still locked");
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    assert!(s.roster.try_lock().is_err(), "the worker still excludes re-adds");
+    let again = app.clone();
+    let mut readd = tokio::spawn(async move {
+        call(
+            &again,
+            Some(OWNER),
+            "POST",
+            "/v1/people/invites",
+            Some(json!({"access": "music", "key": ANN})),
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut readd)
+            .await
+            .is_err()
+    );
+    hold.execute_batch("ROLLBACK").unwrap();
+    drop(hold);
+    let (st, r) = readd.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let ann = pm_api::accounts::mint(&s, ANN).unwrap();
+    let (st, r) = call(
+        &app,
+        Some(&ann),
+        "POST",
+        "/v1/feedback",
+        Some(report("ann's new")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{r}");
+    assert_eq!(clean_memberships(&s).await, 0);
+    assert_eq!(texts(dir.path()), ["ann's new"]);
 }
 
 /// Housekeeping reads the roster and deletes by it in one step, never while a change to the
