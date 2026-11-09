@@ -43,6 +43,7 @@ pub struct Fake {
     /// Held (written) by a test: a bookmark write waits on it, keeping her person lock meanwhile.
     pub gate: tokio::sync::RwLock<()>,
     pub put_started: tokio::sync::Notify,
+    pub write_started: tokio::sync::Notify,
     /// Listings fail (more than the node reads, or too slow): the node can't catch up.
     pub list_fails: AtomicBool,
     /// Only listings of all their posts fail (more than the node lists); one collection's own
@@ -179,6 +180,8 @@ impl PersonalHomeserver for Fake {
             .and_then(|f| f.get(path).cloned()))
     }
     async fn write(&self, key: &str, path: &str, body: &serde_json::Value) -> Result<(), PersonalError> {
+        self.write_started.notify_one();
+        let _open = self.gate.read().await;
         Self::moment().await;
         self.check(key, "write", path)?;
         if self.rejects.lock().unwrap().contains(key) {

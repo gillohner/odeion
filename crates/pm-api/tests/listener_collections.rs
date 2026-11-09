@@ -1040,12 +1040,13 @@ async fn a_version_that_can_never_be_read_doesnt_hold_up_the_rest() {
 }
 
 #[tokio::test]
-async fn a_collection_bigger_than_the_node_can_read_back_is_refused() {
+async fn a_collection_rejected_by_post_validation_is_never_written_or_kept() {
     let dir = tempfile::tempdir().unwrap();
     let (s, fake, ann, _) = node(dir.path());
     fake.connected.lock().unwrap().insert(ANN.to_string());
     let app = router(s.clone());
-    // About 1.1 MB of links: more than the node could ever read back from her homeserver
+    // About 1.1 MB of links exceeds the Post validator first, before the node's 1 MiB read
+    // limit. Assert that actual refusal, including its reason, and that nothing is published.
     let uris: Vec<String> = (0..1_100)
         .map(|i| format!("https://example.com/{i}/{}", "a".repeat(990)))
         .collect();
@@ -1057,8 +1058,14 @@ async fn a_collection_bigger_than_the_node_can_read_back_is_refused() {
         Some(serde_json::json!({"name": "Huge", "uris": uris})),
     )
     .await;
-    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY, "{v}");
+    let why = v["error"].as_str().unwrap_or_default();
+    assert!(
+        why.contains("Post content exceeds maximum length") && why.contains("50000"),
+        "{v}"
+    );
     assert!(fake.paths(ANN, DRAFTS).is_empty(), "nothing written");
+    assert!(fake.paths(ANN, PUBLISHED).is_empty(), "nothing published");
     let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
     assert_eq!(v, serde_json::json!([]), "nor kept: {v}");
 }
@@ -1235,11 +1242,16 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
             .unwrap();
     };
     const CAP: usize = 32 * 1024 * 1024;
-    set_ballast(CAP - 300_000);
-    // Her phone makes this one about half a MiB: together over the cap, so not kept
+    set_ballast(CAP - 15_000);
+    assert!(
+        serde_json::to_vec(&shelf()).unwrap().len() < CAP,
+        "the existing shelf still fits"
+    );
+    // A valid Post below the content and per-object limits, but too big for the shelf's
+    // remaining room. An invalid oversized Post would test Unreadable instead of Held::Size.
     let phone = another_app_writes(&fake, &id, false, |c| {
         let one = c["items"][0].clone();
-        for i in 0..500 {
+        for i in 0..25 {
             let mut it = one.clone();
             it["uri"] = format!("https://example.com/{i}/{}", "a".repeat(990)).into();
             c["items"].as_array_mut().unwrap().push(it);
@@ -1248,12 +1260,27 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
     // And a new one of hers, as big: not kept either
     let yid = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 7_000_000);
     let big = fake.files.lock().unwrap()[ANN][&phone].clone();
+    let post: pubky_social_specs::PubkySocialPost = serde_json::from_slice(&big).unwrap();
+    pm_pubky::v1::validate_social(
+        &post,
+        &id,
+        pm_pubky::v1::Root::Priv,
+        &pm_pubky::v1::PubkyId::try_from(ANN).unwrap(),
+    )
+    .expect("the phone fixture must pass the same Post validation as a real collection");
+    let (_, edit_id) = pm_pubky::v1::parse_version(&phone).unwrap();
+    let content = pm_pubky::v1::from_social(&post, &id, &edit_id).unwrap();
+    pm_pubky::MusicPost::new(content)
+        .validate(Some(&id))
+        .expect("the phone fixture must also pass the node's collection checks");
+    assert!(big.len() < pm_pubky::homeserver::OBJECT_MAX);
     fake.files
         .lock()
         .unwrap()
         .get_mut(ANN)
         .unwrap()
         .insert(format!("{DRAFTS}{yid}/{yid}.json"), big);
+    let files_before = fake.files.lock().unwrap()[ANN].clone();
     let (st, v) = call(
         &app,
         &ann,
@@ -1273,6 +1300,11 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
             .unwrap_or_default()
             .contains("MiB of collections it keeps"),
         "{v}"
+    );
+    assert_eq!(
+        fake.files.lock().unwrap()[ANN],
+        files_before,
+        "no version was overwritten or deleted"
     );
     let (_, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
     assert_eq!(
@@ -1309,7 +1341,7 @@ async fn a_version_the_node_cant_keep_is_never_written_over() {
     assert_eq!(st, StatusCode::OK, "{v}");
     let (path, content) = newest(&fake, ANN, &id);
     assert!(path > phone, "{path} above her phone's {phone}");
-    assert_eq!(item_uris(&content).len(), 501, "her phone's songs are kept");
+    assert_eq!(item_uris(&content).len(), 26, "her phone's songs are kept");
     // Even with the copy over the cap, a delete goes, every version
     set_ballast(CAP + 100_000);
     let (st, v) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
@@ -1490,4 +1522,43 @@ async fn a_waiting_change_never_taken_shows_what_her_homeserver_has() {
     fake.rejects.lock().unwrap().insert(ANN.to_string());
     let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
     assert_eq!(names(&v), vec!["Mix"], "{v}");
+}
+
+#[tokio::test]
+async fn removing_a_listener_revokes_access_while_their_collection_write_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let hold = fake.gate.write().await;
+    let (a, t) = (app.clone(), ann.clone());
+    let writing = tokio::spawn(async move { create(&a, &t, "Held", &[SONG_B]).await });
+    fake.write_started.notified().await;
+    let a = app.clone();
+    let removal =
+        tokio::spawn(async move { call(&a, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while pm_api::people::may_use_music(&s, ANN) || pm_api::accounts::sessions_of(&s, ANN) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("revocation must not wait for her held collection write");
+    assert_eq!(
+        call(&app, &ann, "GET", "/v1/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(!writing.is_finished() && !removal.is_finished());
+    drop(hold);
+    writing.await.unwrap();
+    let (st, v) = removal.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(!fake.connected.lock().unwrap().contains(ANN));
+    assert!(s
+        .library
+        .lock()
+        .unwrap()
+        .settings_with_prefix(&format!("person.{ANN}."))
+        .unwrap()
+        .is_empty());
 }
