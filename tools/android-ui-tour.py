@@ -58,6 +58,17 @@ def run(h):
                     diff += 1
         return diff / max(1, n)
 
+    def settles(ref, box, over=None, under=None, timeout=12):
+        """The screen once box differs from ref by more than `over` (or by less than `under`), polled:
+        the emulator draws slowly (Now playing's first frame took over 2 s in CI). Returns (screen, share)."""
+        end = time.time() + timeout
+        while True:
+            now = raw()
+            share = changed(ref, now, box)
+            if (over is not None and share > over) or (under is not None and share < under) or time.time() > end:
+                return now, share
+            time.sleep(1)
+
     W, H = map(int, re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).group(1, 2))
     zid = None
     rec = None
@@ -125,60 +136,58 @@ def run(h):
         e = raw()
         log(f"swipe right on the mini player: queue {i1} -> {qi()}")
         # Swipe up on it: Now playing covers the bar
-        swipe(W // 2, cy, W // 2, H // 4, 250, settle=2)
+        swipe(W // 2, cy, W // 2, H // 4, 250, settle=1)
+        np, cover = settles(e, (0, y1, W, y2), over=0.2)
+        time.sleep(1.5)
         np = raw()
-        cover = changed(e, np, (0, y1, W, y2))
         assert cover > 0.2, f"a swipe up on the mini player didn't open Now playing ({cover:.3f})"
         log(f"swipe up on the mini player opens Now playing ({cover:.3f} of the bar's place changed)")
         shot("ui-3-now-playing")
         # Swipe up on the player: the Up next sheet covers its top part
-        swipe(W // 2, H * 55 // 100, W // 2, H * 20 // 100, 250, settle=2)
-        s1 = raw()
+        swipe(W // 2, H * 55 // 100, W // 2, H * 20 // 100, 250, settle=1)
         top = (0, H // 20, W, H // 2)
-        up = changed(np, s1, top)
+        s1, up = settles(np, top, over=0.2)
+        time.sleep(1)
+        s1 = raw()
         assert up > 0.2, f"a swipe up on Now playing didn't open the sheet ({up:.3f})"
         log(f"swipe up on Now playing opens Up next ({up:.3f})")
         shot("ui-4-sheet-up-next")
         # Sideways on the sheet: Lyrics, then More (the list below the tabs changes)
         body = (0, H * 30 // 100, W, H * 80 // 100)
-        swipe(W * 7 // 8, H * 60 // 100, W // 8, H * 60 // 100, settle=2)
+        swipe(W * 7 // 8, H * 60 // 100, W // 8, H * 60 // 100, settle=1)
+        s2, t1 = settles(s1, body, over=0.02)
+        time.sleep(1.5)
         s2 = raw()
-        t1 = changed(s1, s2, body)
         assert t1 > 0.02, f"a sideways swipe on the sheet didn't change its tab ({t1:.3f})"
         log(f"a sideways swipe on the sheet: Lyrics ({t1:.3f})")
         shot("ui-5-sheet-lyrics")
-        swipe(W * 7 // 8, H * 60 // 100, W // 8, H * 60 // 100, settle=2.5)
-        s3 = raw()
-        t2 = changed(s2, s3, body)
+        swipe(W * 7 // 8, H * 60 // 100, W // 8, H * 60 // 100, settle=1)
+        s3, t2 = settles(s2, body, over=0.02)
         assert t2 > 0.02, f"a second sideways swipe didn't change the tab ({t2:.3f})"
         log(f"again: More ({t2:.3f})")
         shot("ui-6-sheet-more")
         # Back: the sheet closes and Now playing stays (its top looks as before the sheet); Back again: it closes
         adb("shell", "input", "keyevent", "4")
-        time.sleep(2)
-        b1 = raw()
-        kept = changed(np, b1, top)
+        b1, kept = settles(np, top, under=0.15)
         assert kept < 0.15, f"Back didn't close the sheet to Now playing ({kept:.3f} of its top differs from Now playing)"
         log(f"Back closes the sheet, Now playing stays ({kept:.3f})")
         shot("ui-7-back-closes-sheet")
         adb("shell", "input", "keyevent", "4")
-        time.sleep(2)
-        b2 = raw()
-        bar = changed(e, b2, (0, y1, W, y2))
+        b2, bar = settles(e, (0, y1, W, y2), under=0.15)
         assert bar < 0.15, f"Back again didn't close Now playing ({bar:.3f} of the bar's place differs)"
         log(f"Back again closes Now playing ({bar:.3f})")
         # The mini player tapped: Now playing; the cover swiped left: the next song; a swipe down: closed
         adb("shell", "input", "tap", str(W // 2), str(cy))
-        time.sleep(2)
+        settles(b2, (0, y1, W, y2), over=0.2)
+        time.sleep(1.5)
         i4 = qi()
         swipe(W * 7 // 8, H * 30 // 100, W // 8, H * 30 // 100, settle=3)
         n2 = raw()
         i5 = until("the next song after a swipe on the cover", lambda: (qi(),) if qi() != i4 else None, timeout=15)[0]
         log(f"swipe left on the cover: queue {i4} -> {i5}")
         shot("ui-8-cover-swiped")
-        swipe(W // 2, H * 25 // 100, W // 2, H * 80 // 100, 250, settle=2)
-        c2 = raw()
-        shut = changed(n2, c2, (0, y1, W, y2))
+        swipe(W // 2, H * 25 // 100, W // 2, H * 80 // 100, 250, settle=1)
+        c2, shut = settles(n2, (0, y1, W, y2), over=0.2)
         assert shut > 0.2, f"a swipe down didn't close Now playing ({shut:.3f})"
         log(f"swipe down closes Now playing ({shut:.3f})")
         shot("ui-9-closed")

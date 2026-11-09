@@ -2212,3 +2212,8 @@ html:not([data-shell="phone"]) .np-bsheet { bottom: max(var(--kb, 0px), var(--pl
 /* Nothing playing on a phone: the top bar and the message */
 .np2.compact.np-idle { justify-content: flex-start; }
 .np2.compact.np-idle .empty { margin: auto 0; }
+/* Get started on the narrowest phones (320 px, the CI emulator): a step's text column may shrink below
+   its field's preferred width, so the field and its button wrap inside the card */
+.setup-steps { grid-template-columns: minmax(0, 1fr); }
+.setup-step > .grow { min-width: 0; }
+.setup-step .toolbar .input { flex-basis: 180px; }
