@@ -1864,3 +1864,64 @@ async fn a_level_the_device_announces_during_a_set_stands() {
         "a change read after the announcement shows"
     );
 }
+
+/// Every volume request for a zone is held to the node's limit for its output, whoever asks:
+/// absolute dB and percent before they reach the output, an up step after the read-back; mute
+/// is untouched, and without a limit requests pass as they are.
+#[tokio::test]
+async fn a_zones_volume_limit_holds_for_every_request() {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    let db_out: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Db {
+        min: -60.0,
+        max: 0.0,
+        step: 1.0,
+    }));
+    let pc_out: Arc<dyn Output> = Arc::new(NullOutput::with_volume(VolumeKind::Percent));
+    // A limit set reaches the zones there are and those made later
+    let db_zone = zones.create("Amp", db_out);
+    zones.set_volume_limit(Some(Arc::new(|o: &OutputId| match o.0.as_str() {
+        "null:db" => Some(-20.0),
+        "null:percent" => Some(-30.0),
+        _ => None,
+    })));
+    let pc_zone = zones.create("Linn", pc_out);
+    let level = |z: &pm_zones::Zone| z.state().volume.map(|v| (v.level, v.muted));
+    let set = |z: &Arc<pm_zones::Zone>, v: Volume| {
+        let z = z.clone();
+        async move {
+            z.set_volume(v).await.unwrap();
+            z.wait_acked().await;
+        }
+    };
+    // Absolute requests above the limit become the limit; under it they pass
+    set(&db_zone, Volume::Db(-3.0)).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-20.0), false)));
+    set(&db_zone, Volume::Db(-30.0)).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-30.0), false)));
+    // -30 dB is 50 % on a linear output
+    set(&pc_zone, Volume::Percent(100)).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(50), false)));
+    set(&pc_zone, Volume::Percent(20)).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(20), false)));
+    // A step up the device takes past the limit comes back to it
+    set(&db_zone, Volume::Db(-20.5)).await;
+    set(&db_zone, Volume::Up).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-20.0), false)));
+    set(&pc_zone, Volume::Percent(49)).await;
+    set(&pc_zone, Volume::Up).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(50), false)));
+    // Down and mute pass as they are
+    set(&db_zone, Volume::Down).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-21.0), false)));
+    set(&db_zone, Volume::Mute(true)).await;
+    assert_eq!(level(&db_zone), Some((VolumeLevel::Db(-21.0), true)));
+    // No limit: as asked
+    zones.set_volume_limit(None);
+    set(&pc_zone, Volume::Percent(100)).await;
+    assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(100), false)));
+}

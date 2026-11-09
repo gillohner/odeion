@@ -2123,24 +2123,11 @@ async fn volume(
     Json(body): Json<SetVolume>,
 ) -> Result<StatusCode, ApiError> {
     let zone = zone_of(&s, &id)?;
-    // A zone's volume limit (DSP settings) caps absolute requests.
-    let limit = s.sources.dsp_for(&zone.output().id()).max_volume_db;
-    let out = zone.output().clone();
-    zone.set_volume(cap_volume(body.volume, limit, |db| out.percent_for_db(db)))
-        .await?;
+    // The zone holds the request to its volume limit (DSP settings), as it does for every
+    // controller (pm_zones::Zone::set_volume)
+    zone.set_volume(body.volume).await?;
     announce::note_volume(zone.id(), &body.volume);
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Apply a zone's volume limit (dB) to an absolute request: a dB request is capped at it, a
-/// percent request at the level the zone's own output sets for that dB (`percent_for`: linear
-/// on UPnP and Snapcast, an amplitude on BluOS, MPD and Cast).
-fn cap_volume(v: pm_model::Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8) -> pm_model::Volume {
-    match (v, limit) {
-        (pm_model::Volume::Db(db), Some(max)) if db > max => pm_model::Volume::Db(max),
-        (pm_model::Volume::Percent(p), Some(max)) => pm_model::Volume::Percent(p.min(percent_for(max))),
-        (v, _) => v,
-    }
 }
 
 async fn repeat(
@@ -6279,6 +6266,50 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::FORBIDDEN, "a zone the owner kept back");
+        // A list the node can't read keeps listeners off every zone (never opens all of them)
+        // until the owner sets it again; the owner is told, and a list that isn't one is refused
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("accounts.listener_zones", "not a list")
+            .unwrap();
+        let (st, v) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+        assert!(v.to_string().contains("zone list"), "{v}");
+        let (_, me) = send("GET", "/v1/me".into(), tok.clone(), None).await;
+        assert_eq!(me["zones"], serde_json::json!([]), "{me}");
+        let (st, v) = send("GET", "/v1/people/zones".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+        let (st, _) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": "x"})),
+        )
+        .await;
+        assert!(st.is_client_error(), "{st}");
+        let (st, _) = send(
+            "PUT",
+            "/v1/people/zones".into(),
+            "s3cret".into(),
+            Some(serde_json::json!({"zones": [zid.clone()]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = send(
+            "POST",
+            format!("/v1/zones/{zid}/transport"),
+            tok.clone(),
+            Some(serde_json::json!({"action": "stop"})),
+        )
+        .await;
+        assert_ne!(st, StatusCode::FORBIDDEN, "{v}");
         // Music access taken away: the token stops at once; a made-up token never works
         s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": false, "added_at": 1}]}).to_string()).unwrap();
         let (st, _) = send("GET", "/v1/library/tracks".into(), tok.clone(), None).await;
@@ -7255,8 +7286,10 @@ mod tests {
         assert_eq!(cfg["volume_db"], -20.0, "software volume is capped at the limit");
         let (_, cfg) = call(&app, "GET", &format!("/v1/zones/{zid}/dsp"), None).await;
         assert_eq!(cfg["max_volume_db"], -20.0);
-        // Requests are capped before they reach the output.
+        // Requests are capped before they reach the output (pm_zones::cap_volume, applied in
+        // the zone for every controller)
         use pm_model::Volume;
+        use pm_zones::cap_volume;
         let linear = |db: f32| ((db.clamp(-60.0, 0.0) + 60.0) / 60.0 * 100.0).floor() as u8;
         assert_eq!(
             cap_volume(Volume::Db(-3.0), Some(-20.0), linear),
@@ -23357,5 +23390,164 @@ exec sleep 300
             "a long-unseen renderer isn't asked before it is dropped"
         );
         assert_eq!(named(&s, "Gone"), 0);
+    }
+
+    /// A zone's output that notes every volume request it is given.
+    struct NotedVolume {
+        inner: NullOutput,
+        asked: std::sync::Mutex<Vec<pm_model::Volume>>,
+    }
+
+    #[async_trait::async_trait]
+    impl pm_zones::Output for NotedVolume {
+        fn id(&self) -> OutputId {
+            self.inner.id()
+        }
+        fn name(&self) -> String {
+            self.inner.name()
+        }
+        fn caps(&self) -> &pm_model::OutputCaps {
+            self.inner.caps()
+        }
+        async fn open(
+            &self,
+            fmt: pm_model::AudioFormat,
+        ) -> Result<Box<dyn pm_zones::AudioSink>, pm_zones::SinkError> {
+            self.inner.open(fmt).await
+        }
+        async fn set_volume(&self, v: pm_model::Volume) -> Result<(), pm_zones::SinkError> {
+            self.asked.lock().unwrap().push(v);
+            self.inner.set_volume(v).await
+        }
+        async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, pm_zones::SinkError> {
+            self.inner.volume().await
+        }
+    }
+
+    /// A zone's volume limit holds whichever way the volume is set: the page's route, an
+    /// announcement's volume (and the level put back after it), a UPnP controller's SetVolume
+    /// (whose GetVolume then shows the level taken), a Subsonic client's jukebox gain, an up
+    /// step; the output never hears a level above it. Without a limit requests pass as asked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_volume_limit_holds_for_every_way_of_setting_the_volume() {
+        use pm_model::{Volume, VolumeKind, VolumeLevel};
+        use pm_renderer::{Act, Host};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let pc = Arc::new(NotedVolume {
+            inner: NullOutput::with_volume(VolumeKind::Percent),
+            asked: Default::default(),
+        });
+        let db = Arc::new(NotedVolume {
+            inner: NullOutput::with_volume(VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            asked: Default::default(),
+        });
+        let (pc_out, db_out): (Arc<dyn Output>, Arc<dyn Output>) = (pc.clone(), db.clone());
+        s.outputs.register(pc_out.clone());
+        s.outputs.register(db_out.clone());
+        let pc_zone = s.create_zone("Linn", pc_out);
+        let db_zone = s.create_zone("Amp", db_out);
+        let app = router(s.clone());
+        let (pz, dz) = (pc_zone.id().0.clone(), db_zone.id().0.clone());
+        // As the owner (the node has a token here, so the Subsonic client can sign in with it)
+        let owner = |method: &'static str, uri: String, body: Option<serde_json::Value>| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer s3cret")
+                    .body(match body {
+                        Some(b) => Body::from(b.to_string()),
+                        None => Body::empty(),
+                    })
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let status = resp.status();
+                let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+                (status, json)
+            }
+        };
+        for (z, max) in [(&pz, -30.0), (&dz, -20.0)] {
+            let (st, c) = owner(
+                "PUT",
+                format!("/v1/zones/{z}/dsp"),
+                Some(serde_json::json!({"max_volume_db": max})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{c}");
+        }
+        let asked = |o: &NotedVolume| o.asked.lock().unwrap().clone();
+        let clear = |o: &NotedVolume| o.asked.lock().unwrap().clear();
+        // The page's route: 100 % is 50 % on a linear output at -30 dB
+        let (st, _) = owner(
+            "POST",
+            format!("/v1/zones/{pz}/volume"),
+            Some(serde_json::json!({"volume": {"percent": 100}})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        assert_eq!(asked(&pc), [Volume::Percent(50)]);
+        clear(&pc);
+        // An announcement at full volume: the clip's level and the one put back afterwards (the
+        // 100 % asked above) both reach the output held to the limit
+        let (st, a) = owner(
+            "POST",
+            format!("/v1/zones/{pz}/announce"),
+            Some(serde_json::json!({"chime": true, "volume_percent": 100})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        assert_eq!(a["volume_applied"], true, "{a}");
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while asked(&pc).len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the level was not put back after the announcement");
+        assert_eq!(asked(&pc), [Volume::Percent(50), Volume::Percent(50)]);
+        clear(&pc);
+        // A UPnP controller's SetVolume 100: the output hears 50, and GetVolume answers 50
+        let r = crate::renderer::ZoneRenderers::new(&s);
+        r.act(&pz, Act::Volume(100)).await.unwrap();
+        assert_eq!(asked(&pc), [Volume::Percent(50)]);
+        assert_eq!(r.view(&pz).unwrap().volume, 50, "GetVolume shows the level taken");
+        clear(&pc);
+        // A Subsonic client's jukebox gain 1.0 (0 dB) on a zone limited to -20 dB
+        let (st, b) = call(
+            &app,
+            "GET",
+            &format!(
+                "/rest/jukeboxControl?action=setGain&gain=1.0&zone={dz}&u={}&p=s3cret&v=1.16.1&c=test&f=json",
+                s.subsonic_user
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        assert_eq!(asked(&db), [Volume::Db(-20.0)], "{b}");
+        clear(&db);
+        // A step up the device takes past the limit is set back to it
+        db_zone.set_volume(Volume::Db(-20.5)).await.unwrap();
+        db_zone.set_volume(Volume::Up).await.unwrap();
+        db_zone.wait_acked().await;
+        assert_eq!(asked(&db), [Volume::Db(-20.5), Volume::Up, Volume::Db(-20.0)]);
+        assert_eq!(
+            db_zone.state().volume.map(|v| v.level),
+            Some(VolumeLevel::Db(-20.0))
+        );
+        // No limit: as asked
+        let (st, _) = owner("DELETE", format!("/v1/zones/{pz}/dsp"), None).await;
+        assert_eq!(st, StatusCode::NO_CONTENT);
+        r.act(&pz, Act::Volume(100)).await.unwrap();
+        assert_eq!(asked(&pc), [Volume::Percent(100)]);
+        assert_eq!(r.view(&pz).unwrap().volume, 100);
     }
 }

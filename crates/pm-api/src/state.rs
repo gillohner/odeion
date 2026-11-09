@@ -536,6 +536,13 @@ impl NodeState {
             weak.upgrade()
                 .is_some_and(|s| crate::accounts::is_node_token_if_free(&s, t))
         })));
+        // Every volume request for a zone is held to its volume limit (DSP settings) in the zone
+        // itself, whoever asks: the pages, announcements, UPnP controllers, Subsonic clients
+        let weak = Arc::downgrade(&node);
+        node.zones
+            .set_volume_limit(Some(Arc::new(move |o: &pm_zones::OutputId| {
+                weak.upgrade().and_then(|s| s.sources.dsp_for(o).max_volume_db)
+            })));
         node
     }
 

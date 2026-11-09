@@ -165,6 +165,8 @@ pub struct Zone {
     /// The level last published, changed only together with the command that publishes it (the
     /// engine's state can lag the commands still queued). Never held across an await.
     volume_published: Arc<std::sync::Mutex<Published>>,
+    /// The zone's volume limit, when the node set one ([`Zones::set_volume_limit`]).
+    volume_limit: Arc<std::sync::RwLock<Option<VolumeLimit>>>,
 }
 
 /// What a zone last said its level was, and how many levels the device announced itself.
@@ -172,6 +174,38 @@ pub struct Zone {
 struct Published {
     level: Option<pm_model::ZoneVolume>,
     announced: u64,
+}
+
+/// A zone's volume limit in dB for an output (the node's DSP settings, `max_volume_db`), given
+/// by the node ([`Zones::set_volume_limit`]): every volume request for the zone, from whichever
+/// controller, is held to it in [`Zone::set_volume`].
+pub type VolumeLimit = Arc<dyn Fn(&OutputId) -> Option<f32> + Send + Sync>;
+
+/// Apply a volume limit (dB) to an absolute request: a dB request is capped at it, a percent
+/// request at the level the output itself sets for that dB (`percent_for`: linear on UPnP and
+/// Snapcast, an amplitude on BluOS, MPD and Cast). Up, down and mute pass as they are (a step
+/// that lands above the limit is brought back after the read-back).
+pub fn cap_volume(v: Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8) -> Volume {
+    match (v, limit) {
+        (Volume::Db(db), Some(max)) if db > max => Volume::Db(max),
+        (Volume::Percent(p), Some(max)) => Volume::Percent(p.min(percent_for(max))),
+        (v, _) => v,
+    }
+}
+
+/// The request that brings `level` back to `limit` when it is above it.
+fn back_to_limit(
+    level: pm_model::VolumeLevel,
+    limit: f32,
+    percent_for: impl Fn(f32) -> u8,
+) -> Option<Volume> {
+    match level {
+        pm_model::VolumeLevel::Db(d) if d > limit => Some(Volume::Db(limit)),
+        pm_model::VolumeLevel::Percent(p) if p > percent_for(limit) => {
+            Some(Volume::Percent(percent_for(limit)))
+        }
+        _ => None,
+    }
 }
 
 impl Zone {
@@ -222,6 +256,7 @@ impl Zone {
             crossfade,
             volume_io: Default::default(),
             volume_published: Default::default(),
+            volume_limit: Default::default(),
         }
     }
 
@@ -411,20 +446,55 @@ impl Zone {
     /// (the poll catches up). Controllers always hear the result, also when it equals what they
     /// had: one that showed the level it asked for learns that the device kept another. A level
     /// the device announced while this ran is newer than this read-back: it stays.
+    ///
+    /// Every request is held to the zone's volume limit when the node set one
+    /// ([`Zones::set_volume_limit`]): an absolute level above it becomes the limit before it
+    /// reaches the output ([`cap_volume`]), and a step up that the device took past it is set
+    /// back to the limit at once. This is the one place every controller's request passes
+    /// (the pages, announcements, UPnP controllers, Subsonic clients).
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let _io = self.volume_io.lock().await;
+        let limit = self.volume_limit();
+        let v = cap_volume(v, limit, |db| self.output.percent_for_db(db));
         let seen = self.published().announced;
-        self.output.set_volume(v).await?;
-        let read = self.output.volume().await;
+        let mut next = self.set_and_read(v).await?;
+        if let (Volume::Up, Some(max)) = (v, limit) {
+            let back = next.and_then(|n| back_to_limit(n.level, max, |db| self.output.percent_for_db(db)));
+            if let Some(back) = back {
+                next = self.set_and_read(back).await?;
+            }
+        }
         let mut p = self.published();
         if p.announced != seen {
             return Ok(());
         }
-        let next = match read {
+        if next.is_some() {
+            p.level = next;
+        }
+        self.send(Command::Volume(p.level));
+        Ok(())
+    }
+
+    /// The zone's volume limit now: the node's for this zone's output, if any.
+    fn volume_limit(&self) -> Option<f32> {
+        let limit = self
+            .volume_limit
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        limit.and_then(|f| f(&self.output.id()))
+    }
+
+    /// Set `v` on the output and read the level back: the device's own reading, else the level
+    /// implied by `v` over the last one published (`None`: nothing to publish).
+    async fn set_and_read(&self, v: Volume) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        self.output.set_volume(v).await?;
+        let read = self.output.volume().await;
+        Ok(match read {
             Ok(Some(read)) => Some(read),
             Err(_) => None,
             Ok(None) => {
-                let was = p.level;
+                let was = self.published().level;
                 let level = match v {
                     Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
                     Volume::Percent(p) => Some(pm_model::VolumeLevel::Percent(p.min(100))),
@@ -436,12 +506,7 @@ impl Zone {
                 };
                 level.map(|level| pm_model::ZoneVolume { level, muted })
             }
-        };
-        if next.is_some() {
-            p.level = next;
-        }
-        self.send(Command::Volume(p.level));
-        Ok(())
+        })
     }
 
     /// Read the output's level and publish it in the state (the poll). A read that fails, or an
@@ -537,6 +602,8 @@ pub struct Zones {
     node_origins: RwLock<Vec<String>>,
     /// The node's own sign-ins, for every zone's queue (`Queue::set_token_check`).
     token_check: RwLock<Option<crate::queue::TokenCheck>>,
+    /// The zones' volume limits, by output (`Zone::set_volume`).
+    volume_limit: RwLock<Option<VolumeLimit>>,
 }
 
 impl Zones {
@@ -546,7 +613,18 @@ impl Zones {
             inner: RwLock::new(BTreeMap::new()),
             node_origins: RwLock::new(Vec::new()),
             token_check: RwLock::new(None),
+            volume_limit: RwLock::new(None),
         }
+    }
+
+    /// How a zone learns its volume limit (dB) from its output: every volume request for a
+    /// zone, from whichever controller, is held to it. For zones made from now on and those
+    /// there are; read at every request, so a changed setting counts at once.
+    pub fn set_volume_limit(&self, limit: Option<VolumeLimit>) {
+        for z in self.inner.read().expect("zones poisoned").values() {
+            *z.volume_limit.write().unwrap_or_else(|e| e.into_inner()) = limit.clone();
+        }
+        *self.volume_limit.write().expect("zones poisoned") = limit;
     }
 
     /// How a queue tells the node's own sign-ins (the API token, an owner's session, a listener's
@@ -593,6 +671,8 @@ impl Zones {
             q.set_node_origins(origins);
             q.set_token_check(check);
         }
+        *zone.volume_limit.write().unwrap_or_else(|e| e.into_inner()) =
+            self.volume_limit.read().expect("zones poisoned").clone();
         map.insert(id, zone.clone());
         zone
     }
