@@ -57,10 +57,16 @@ export function keyLines(key) {
  * posted per zone and post once a track has played past the halfway mark
  * or 4 minutes, whichever comes first (the usual scrobble rule).
  */
+/** A failure worth another try: no answer at all (no status), the node busy (429) or failing (5xx). */
+function retryable(status) {
+  return status === undefined || status === null || status === 429 || status >= 500;
+}
+
 export class Scrobbler {
-  constructor(api, log = console) {
+  constructor(api, log = console, now = () => Date.now()) {
     this.api = api;
     this.log = log;
+    this.now = now;
     this.zoneState = new Map(); // zone_id -> { key, posted, length, seek }
   }
 
@@ -82,6 +88,7 @@ export class Scrobbler {
     }
     st.seek = np.seek_position;
     if (st.posted) return false;
+    if (st.retryAt && this.now() < st.retryAt) return false;
     const length = np.length || 0;
     const seek = np.seek_position || 0;
     const threshold = length ? Math.min(length / 2, 240) : 30;
@@ -99,10 +106,16 @@ export class Scrobbler {
     } catch (e) {
       if (e.status === 422) {
         this.log.log(`skipped (no canonical identity): ${l.line1} — ${l.line2}`);
-      } else {
-        // A timeout or a 5xx is tried again at the next report; only a refusal is final
+      } else if (retryable(e.status)) {
+        // The node didn't answer, or was busy: tried again, after a pause that doubles (5 s up to
+        // a minute), not at every report
         st.posted = false;
-        this.log.error(`scrobble failed: ${e.message}`);
+        st.tries = (st.tries || 0) + 1;
+        st.retryAt = this.now() + Math.min(60000, 5000 * 2 ** (st.tries - 1));
+        this.log.error(`scrobble failed, trying again later: ${e.message}`);
+      } else {
+        // Refused (a wrong token, a request it won't take): trying again changes nothing
+        this.log.error(`scrobble refused: ${e.message}`);
       }
       return false;
     }

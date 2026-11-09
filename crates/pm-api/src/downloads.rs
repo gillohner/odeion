@@ -221,12 +221,24 @@ fn evict(dir: &FsPath, cap: u64, keep: &FsPath) {
         .collect();
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     files.sort();
+    let mut left = Vec::new();
     for (modified, len, p) in files {
         if total <= cap {
             break;
         }
         let fresh = now.duration_since(modified).is_ok_and(|age| age < FRESH_FOR);
         if p != keep && !fresh && std::fs::remove_file(&p).is_ok() {
+            total = total.saturating_sub(len);
+        } else if p != keep {
+            left.push((len, p));
+        }
+    }
+    // Fresh files are spared only up to twice the cap: a burst never grows the cache past that
+    for (len, p) in left {
+        if total <= cap.saturating_mul(2) {
+            break;
+        }
+        if std::fs::remove_file(&p).is_ok() {
             total = total.saturating_sub(len);
         }
     }
@@ -629,8 +641,8 @@ mod tests {
         let made = old("being-made");
         let (c, d) = (fresh("fresh-c"), fresh("fresh-d"));
         let _held = lock_for("being-made").await;
-        // 500 bytes over a cap of 1: everything that may go, goes
-        evict(dir.path(), 1, &d);
+        // 500 bytes over a cap of 100: the old idle ones go; the fresh ones stay within twice the cap
+        evict(dir.path(), 100, &d);
         assert!(!a.exists() && !b.exists(), "old idle files go first");
         assert!(made.exists(), "a file being made stays");
         assert!(c.exists() && d.exists(), "fresh files stay");
@@ -639,8 +651,27 @@ mod tests {
         let f = std::fs::File::options().write(true).open(&made).unwrap();
         f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
             .unwrap();
-        evict(dir.path(), 1, &d);
+        evict(dir.path(), 100, &d);
         assert!(!made.exists());
+    }
+
+    /// Fresh files are spared only up to twice the cap: a burst past that loses its oldest.
+    #[test]
+    fn fresh_files_are_spared_only_up_to_twice_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = |name: &str, age_s: u64| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, [0u8; 100]).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_s))
+                .unwrap();
+            p
+        };
+        let (a, b, c) = (fresh("fa", 30), fresh("fb", 20), fresh("fc", 10));
+        // 300 bytes, cap 100: fresh files may stay up to 200, the oldest fresh one goes
+        evict(dir.path(), 100, &c);
+        assert!(!a.exists(), "past twice the cap, the oldest fresh file goes");
+        assert!(b.exists() && c.exists());
     }
 
     #[tokio::test]

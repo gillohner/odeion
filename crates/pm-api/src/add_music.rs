@@ -164,17 +164,54 @@ fn free_name(dest: &std::path::Path, hash: &str) -> Option<std::path::PathBuf> {
     unreachable!("an endless range")
 }
 
-/// One lock per destination in the mirror folder: two files for the same path, at once, get the
-/// free name one after the other, never the same one.
-fn mirror_locks() -> &'static std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> {
-    static L: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
-        std::sync::OnceLock::new();
+type FolderLocks = std::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>;
+
+/// One lock per folder of the mirror: every name `free_name` may choose there (`x.flac`,
+/// `x (2).flac`, …) is in that folder, so two files placed at once never take the same one,
+/// whichever name each asked for. An entry goes when its last holder is done.
+fn mirror_locks() -> &'static FolderLocks {
+    static L: std::sync::OnceLock<FolderLocks> = std::sync::OnceLock::new();
     L.get_or_init(Default::default)
+}
+
+/// A folder's lock, held; its map entry goes with the last holder.
+struct FolderLock {
+    folder: PathBuf,
+    _held: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for FolderLock {
+    fn drop(&mut self) {
+        let mut map = mirror_locks().lock().expect("mirror locks");
+        // The map's and ours: nobody else holds it or waits for it (both clone under this lock)
+        if map.get(&self.folder).is_some_and(|m| Arc::strong_count(m) == 2) {
+            map.remove(&self.folder);
+        }
+    }
+}
+
+/// How many folder locks the map holds (tests).
+#[cfg(test)]
+pub(crate) fn mirror_locks_held() -> usize {
+    mirror_locks().lock().expect("mirror locks").len()
+}
+
+async fn lock_folder(folder: &std::path::Path) -> FolderLock {
+    let m = mirror_locks()
+        .lock()
+        .expect("mirror locks")
+        .entry(folder.to_path_buf())
+        .or_default()
+        .clone();
+    FolderLock {
+        folder: folder.to_path_buf(),
+        _held: m.lock_owned().await,
+    }
 }
 
 /// Put `bytes` (content `hash`) at `dest` in the mirror folder without replacing anything: the
 /// same song there already is kept, anything else gets the next free name (`free_name`). Under
-/// the destination's lock from the name to the rename, with a part file of this write's own, so
+/// the folder's lock from the name to the rename, with a part file of this write's own, so
 /// two uploads of different songs to one path both land, whole, under two names. Returns the
 /// path written, `None` when the same song was there.
 pub(crate) async fn place_in_mirror(
@@ -182,13 +219,7 @@ pub(crate) async fn place_in_mirror(
     hash: &str,
     bytes: Vec<u8>,
 ) -> Result<Option<PathBuf>, String> {
-    let lock = mirror_locks()
-        .lock()
-        .expect("mirror locks")
-        .entry(dest.to_path_buf())
-        .or_default()
-        .clone();
-    let _held = lock.lock().await;
+    let _held = lock_folder(dest.parent().unwrap_or(std::path::Path::new("."))).await;
     let free = {
         let (dest, hash) = (dest.to_path_buf(), hash.to_string());
         tokio::task::spawn_blocking(move || free_name(&dest, &hash))

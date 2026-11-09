@@ -408,3 +408,63 @@ async fn a_subscription_made_during_the_upload_goes_up_at_the_next_sync() {
         .unwrap();
     assert!(last.contains(&fb) && !last.contains(&fc), "{last}");
 }
+
+/// A position set within the second a sync began, after the sync read the positions, goes up at
+/// the next sync (the cutoff noted is a second back, never the sync's own start).
+#[tokio::test]
+async fn a_position_set_in_the_syncs_own_second_goes_up_next_time() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let fa = format!("{base}/feeds/a.xml");
+    let shared: Shared = Arc::new(Mutex::new(Mock {
+        base: base.clone(),
+        ..Mock::default()
+    }));
+    tokio::spawn(mock(listener, shared.clone()));
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let app = router(s.clone());
+    let (st, sub) = call(
+        &app,
+        "POST",
+        "/v1/podcasts/subscriptions",
+        Some(serde_json::json!({"feed": fa})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let sub_id = sub["id"].as_str().unwrap().to_string();
+    let right = serde_json::json!({"server": format!("{base}/"), "username": "ann", "password": "secret"});
+    let (st, body) = call(&app, "PUT", "/v1/podcasts/gpodder", Some(right)).await;
+    assert_eq!(st, StatusCode::OK, "{body}");
+    let (_, show) = call(&app, "GET", &format!("/v1/podcasts/subscriptions/{sub_id}"), None).await;
+    let ep = show["items"][0]["id"].as_str().unwrap().to_string();
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
+    // A sync that begins and ends within one second: that second is when it began
+    let mut began = None;
+    for _ in 0..20 {
+        let before = now();
+        let (st, r) = call(&app, "POST", "/v1/podcasts/gpodder/sync", None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        if now() == before {
+            began = Some(before);
+            break;
+        }
+    }
+    let began = began.expect("a sync within one second");
+    // A position stamped in that very second (set after the sync read the positions)
+    let progress =
+        serde_json::json!({ ep.clone(): {"position_ms": 120_000, "played": false, "updated": began} });
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting("podcasts.progress", &progress.to_string())
+        .unwrap();
+    let (st, r) = call(&app, "POST", "/v1/podcasts/gpodder/sync", None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["sent_positions"], 1, "the position goes up: {r}");
+}

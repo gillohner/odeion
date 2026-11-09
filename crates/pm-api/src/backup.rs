@@ -1029,10 +1029,6 @@ fn load_schedule_in(lib: &Library) -> Schedule {
         })
 }
 
-fn save_schedule(s: &NodeState, sch: &Schedule) -> Result<(), ApiError> {
-    save_schedule_in(&s.library.lock().expect("library poisoned"), sch)
-}
-
 fn save_schedule_in(lib: &Library, sch: &Schedule) -> Result<(), ApiError> {
     lib.set_setting(
         SCHEDULE_KEY,
@@ -1109,9 +1105,22 @@ fn file_name(now: time::OffsetDateTime) -> String {
 /// Write one scheduled backup now (and prune). One at a time: a second run asked for while
 /// one is being written is refused ([`RUN_BUSY`]), not started alongside.
 pub async fn run_scheduled(s: &Arc<NodeState>) -> Result<String, String> {
-    let Ok(_one) = s.backup_run.try_lock() else {
+    let Ok(one) = s.backup_run.clone().try_lock_owned() else {
         return Err(RUN_BUSY.into());
     };
+    // The run is a task of its own holding the lock to its end: a caller that goes away (the
+    // page closed, the request dropped) doesn't end the lock while the backup is still being
+    // written, and the run's result is still noted
+    let s = s.clone();
+    tokio::spawn(async move {
+        let _one = one;
+        run_held(&s).await
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn run_held(s: &Arc<NodeState>) -> Result<String, String> {
     let sch = load_schedule(s);
     if sch.folder.trim().is_empty() {
         return Err("no backup folder set".into());
@@ -1293,7 +1302,6 @@ pub(crate) async fn put_schedule(
     State(s): State<Arc<NodeState>>,
     Json(u): Json<ScheduleUpdate>,
 ) -> ApiResult<ScheduleView> {
-    let mut sch = load_schedule(&s);
     let folder = u.folder.trim().to_string();
     if !folder.is_empty() {
         let p = Path::new(&folder);
@@ -1304,15 +1312,21 @@ pub(crate) async fn put_schedule(
         }
         std::fs::create_dir_all(p).map_err(|e| ApiError::bad_request(format!("{folder}: {e}")))?;
     }
-    sch.folder = folder;
-    sch.every_hours = u.every_hours.unwrap_or(sch.every_hours).clamp(1, 24 * 30);
-    sch.keep = u.keep.unwrap_or(sch.keep).clamp(1, 365);
-    match u.passphrase {
-        Some(p) if p.is_empty() => sch.passphrase = None,
-        Some(p) => sch.passphrase = Some(p),
-        None => {}
+    // Read, changed and written under one guard: a run noting its result meanwhile
+    // (`note_run`) is never written over with the copy read before it
+    {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut sch = load_schedule_in(&lib);
+        sch.folder = folder;
+        sch.every_hours = u.every_hours.unwrap_or(sch.every_hours).clamp(1, 24 * 30);
+        sch.keep = u.keep.unwrap_or(sch.keep).clamp(1, 365);
+        match u.passphrase {
+            Some(p) if p.is_empty() => sch.passphrase = None,
+            Some(p) => sch.passphrase = Some(p),
+            None => {}
+        }
+        save_schedule_in(&lib, &sch)?;
     }
-    save_schedule(&s, &sch)?;
     get_schedule(State(s)).await
 }
 

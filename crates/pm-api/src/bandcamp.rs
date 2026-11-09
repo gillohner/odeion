@@ -803,6 +803,28 @@ fn jobs() -> &'static std::sync::Mutex<HashMap<String, DownloadJob>> {
     J.get_or_init(Default::default)
 }
 
+/// A download claimed by a request and not yet handed to its task: dropped while armed (the
+/// request ended before the hand-over), it marks the job failed.
+struct Claim<'a> {
+    id: &'a str,
+    armed: bool,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            set_job(self.id, |j| {
+                j.state = "failed".into();
+                j.error = Some("the request ended before the download started; try again".into());
+            });
+        }
+    }
+}
+
+/// Bandcamp's site base is set per test process: tests that point it at a mock take this first.
+#[cfg(test)]
+pub(crate) static API_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Claim the download of purchase `id`: a `queued` job, unless one for it is still running
 /// (409). The check and the entry happen under one lock, before any network call.
 fn claim_job(id: &str) -> Result<(), ApiError> {
@@ -936,6 +958,10 @@ pub(crate) async fn download(
     // The job is claimed before any network call: two requests for one purchase at once make
     // one download, the other is told so (the check and the entry under one lock)
     claim_job(&id)?;
+    // Until the download task takes it over, the claim ends as a failed job whichever way the
+    // request ends: an error, or the request dropped mid-lookup (the page closed). Never left
+    // `queued` with nothing behind it, which would refuse that purchase until a restart
+    let mut claim = Claim { id: &id, armed: true };
     let looked_up = async {
         let (items, urls) = collection_of(&s, &cookie, &fan).await?;
         let p = items
@@ -955,6 +981,7 @@ pub(crate) async fn download(
         Ok(x) => x,
         Err(e) => {
             // The claim ends as a failed job, so the page shows why and a retry is possible
+            claim.armed = false;
             set_job(&id, |j| {
                 j.state = "failed".into();
                 j.error = Some(e.message.clone());
@@ -974,6 +1001,9 @@ pub(crate) async fn download(
         .cloned()
         .unwrap_or_default();
     let s2 = s.clone();
+    // Handed over: the task below ends the job, done or failed
+    claim.armed = false;
+    drop(claim);
     tokio::spawn(async move {
         let r = run_download(&s2, &id, &cookie, &page, &want, &p).await;
         match r {

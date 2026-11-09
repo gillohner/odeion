@@ -46,19 +46,31 @@ test("scrobbles once per track after the halfway mark, keyed per zone", async ()
   assert.equal(s.seekUpdate({ zone_id: "unknown", seek_position: 1 }), null);
 });
 
-test("a failure that isn't a refusal is tried again at the next report", async () => {
-  let fail = true;
-  const { fetchImpl, calls } = fakeFetch(() => (fail ? [503, { error: "busy" }] : [200, { uri: "https://musicbrainz.org/recording/x" }]));
-  const s = new Scrobbler(makeApi({ fetchImpl }), quiet);
+test("a busy or failing node is tried again after a pause; a refusal is final", async () => {
+  let status = 503;
+  const { fetchImpl, calls } = fakeFetch(() => (status === 200 ? [200, { uri: "https://musicbrainz.org/recording/x" }] : [status, { error: "no" }]));
+  let clock = 1000;
+  const s = new Scrobbler(makeApi({ fetchImpl }), quiet, () => clock);
   const zone = (seek) => ({ zone_id: "z", state: "playing", now_playing: { three_line: { line1: "Get Lucky", line2: "Daft Punk", line3: "RAM" }, length: 369, seek_position: seek } });
   assert.equal(await s.maybeScrobble(zone(10)), false, "not yet");
   assert.equal(await s.maybeScrobble(zone(200)), false, "the node was busy");
   assert.equal(calls.length, 1);
-  fail = false;
-  assert.equal(await s.maybeScrobble(zone(210)), true, "tried again, posted");
+  assert.equal(await s.maybeScrobble(zone(201)), false, "not again at once");
+  assert.equal(calls.length, 1);
+  clock += 5000;
+  status = 200;
+  assert.equal(await s.maybeScrobble(zone(210)), true, "tried again after the pause, posted");
   assert.equal(calls.length, 2);
   assert.equal(await s.maybeScrobble(zone(220)), false, "posted once");
   assert.equal(calls.length, 2);
+  // A refusal (here 401) is not tried again
+  status = 401;
+  const t = new Scrobbler(makeApi({ fetchImpl }), quiet, () => clock);
+  await t.maybeScrobble(zone(10));
+  assert.equal(await t.maybeScrobble(zone(200)), false);
+  clock += 120000;
+  assert.equal(await t.maybeScrobble(zone(230)), false);
+  assert.equal(calls.length, 3, "one try, no retry");
 });
 
 test("a 422 from the node is a skip, not a failure", async () => {

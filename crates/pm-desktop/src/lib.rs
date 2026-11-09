@@ -57,13 +57,10 @@ impl AppState {
         self.settings.lock().ok()?.clone()
     }
 
+    /// Save `s` and make it the current settings, both under the settings lock: a registration's
+    /// [`AppState::store_if_node`] can't write its file between this save and this set.
     fn store(&self, s: Option<Settings>) {
-        if let Err(e) = settings::save(&self.path, s.as_ref()) {
-            tracing::warn!("cannot save the app settings: {e}");
-        }
-        if let Ok(mut cur) = self.settings.lock() {
-            *cur = s;
-        }
+        store_in(&self.settings, &self.path, s);
     }
 
     /// Store `s` only while the current settings still name `node_url`: the check and the store
@@ -72,6 +69,15 @@ impl AppState {
     fn store_if_node(&self, node_url: &str, s: Settings) -> bool {
         store_if_node(&self.settings, &self.path, node_url, s)
     }
+}
+
+/// [`AppState::store`] on the settings cell itself (also for tests).
+fn store_in(cell: &Mutex<Option<Settings>>, path: &std::path::Path, s: Option<Settings>) {
+    let mut cur = cell.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Err(e) = settings::save(path, s.as_ref()) {
+        tracing::warn!("cannot save the app settings: {e}");
+    }
+    *cur = s;
 }
 
 /// [`AppState::store_if_node`] on the settings cell itself (also for tests).
@@ -964,6 +970,38 @@ fn page_event(app: &tauri::AppHandle, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Connecting saves and sets the settings under the settings lock: while it is held, nothing
+    /// is written (a late registration's store can't land between this save and this set).
+    #[test]
+    fn connecting_saves_and_sets_under_the_settings_lock() {
+        let dir = std::env::temp_dir().join(format!("pm-desktop-store-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let cell = std::sync::Arc::new(Mutex::new(None::<Settings>));
+        let held = cell.lock().unwrap();
+        let writer = {
+            let (cell, path) = (cell.clone(), path.clone());
+            std::thread::spawn(move || {
+                store_in(
+                    &cell,
+                    &path,
+                    Some(Settings {
+                        node_url: "http://b:7788".into(),
+                        ..Settings::default()
+                    }),
+                )
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(!path.exists(), "saved before the lock was taken");
+        drop(held);
+        writer.join().unwrap();
+        let saved: Settings = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.node_url, "http://b:7788");
+        assert_eq!(cell.lock().unwrap().as_ref().unwrap().node_url, "http://b:7788");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A registration that ends after the app connected to another node never writes that
     /// node's settings over the new one's: the check and the store happen under one lock.

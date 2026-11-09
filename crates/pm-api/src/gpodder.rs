@@ -367,8 +367,10 @@ async fn sync_with(s: &NodeState, a: &mut Account) -> Result<SyncReport, String>
 
     // 3. Positions: the node's changes out, then the server's in.
     let started_at = podcasts::now();
-    let feeds = podcasts::feeds(s);
-    let prog = podcasts::progress(s);
+    let (feeds, prog) = {
+        let _docs = podcasts::documents();
+        (podcasts::feeds(s), podcasts::progress(s))
+    };
     let mut out = Vec::new();
     for f in &feeds {
         for e in &f.episodes {
@@ -398,7 +400,9 @@ async fn sync_with(s: &NodeState, a: &mut Account) -> Result<SyncReport, String>
         send::<Uploaded>(a, http.post(actions_post(a)).json(&out)).await?;
         report.sent_positions = out.len();
     }
-    a.sent_until = started_at;
+    // A second back: a position set within the second this sync began, after the snapshot above,
+    // is newer than `sent_until` and goes next time (one sent again is harmless)
+    a.sent_until = started_at - 1;
 
     let remote: Actions = send(
         a,
@@ -410,6 +414,9 @@ async fn sync_with(s: &NodeState, a: &mut Account) -> Result<SyncReport, String>
         .iter()
         .flat_map(|f| f.episodes.iter().map(|e| (e.url.as_str(), e)))
         .collect();
+    // The merge reads and writes the progress document under its lock (no await inside), so a
+    // position set or written meanwhile isn't overwritten
+    let _docs = podcasts::documents();
     let mut prog = podcasts::progress(s);
     for act in &remote.actions {
         if !act.action.eq_ignore_ascii_case("play") {
