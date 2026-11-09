@@ -68,9 +68,16 @@ def run(h):
         idx1 = until("the next song after a swipe left", lambda: (lambda i: i if i is not None and i > idx0 else None)(api("GET", f"/v1/zones/{zid}").get("queue_index")), timeout=15)
         log(f"swipe left on the mini player: queue {idx0} -> {idx1}")
         shot("ui-2-after-swipe-left")
+        time.sleep(3)
+        pos1 = ((api("GET", f"/v1/zones/{zid}").get("now_playing") or {}).get("position_ms")) or 0
         swipe(x1 + (x2 - x1) // 6, cy, x1 + (x2 - x1) * 3 // 4, cy)
-        # (previous goes back a song, or to the start of this one when it has played a few seconds)
-        idx2 = api("GET", f"/v1/zones/{zid}").get("queue_index")
+        # (previous goes back a song, or to the start of this one when it has played a few seconds:
+        # either way the queue goes back or the position does)
+        def went_back():
+            z = api("GET", f"/v1/zones/{zid}")
+            i = z.get("queue_index"); pos = ((z.get("now_playing") or {}).get("position_ms")) or 0
+            return i if i is not None and (i < idx1 or pos < pos1 - 1000) else None
+        idx2 = until("the previous song (or this one's start) after a swipe right", went_back, timeout=15)
         log(f"swipe right on the mini player: queue {idx1} -> {idx2}")
         # A vertical scroll of the page doesn't change the song
         w = int(re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).group(1))
@@ -91,7 +98,9 @@ def run(h):
         # Sideways on the sheet: Lyrics
         sw, sh = int(re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).group(1)), int(re.search(r"(\d+)x(\d+)", adb("shell", "wm", "size")).group(2))
         swipe(sw * 3 // 4, sh * 2 // 3, sw // 6, sh * 2 // 3)
-        time.sleep(2)
+        # (the test tone has no lyrics: the Lyrics tab says so)
+        until("the Lyrics tab after a sideways swipe on the sheet", lambda: has("No lyrics found for this song.") or "Synced" in nodes_text(), timeout=20)
+        log("a sideways swipe on the sheet moves to Lyrics")
         shot("ui-5-sheet-lyrics")
         # (the sheet's tab: the topmost "More"; the button under the player is behind the sheet)
         more = sorted((n for n in ui_nodes() if 'text="More"' in n), key=lambda n: bounds(n)[1])

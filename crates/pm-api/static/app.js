@@ -3095,7 +3095,7 @@
   const qPanel = $('#qpanel');
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
-  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
+  const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); const op = $(qOpener); if (op) op.setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) { if (op && op.getClientRects().length) op.focus(); } qOpener = '#quality'; if (fromBack !== true) popTransient(); };
   const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) + fullLevelNote(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
@@ -3164,16 +3164,16 @@
   const openQPanel = (opener) => {
     closePop(); closeJobPop();
     renderQPanel();
-    qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; $(opener).setAttribute('aria-expanded', 'true'); pushTransient();
+    qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; { const op = $(opener); if (op) op.setAttribute('aria-expanded', 'true'); } pushTransient();
     loadDsp();
     if (isOwner() && !state.outputs) loadOutputs().then(() => syncQPanel()).catch(() => {});
+    // Its first control; with none (the in-page player: no DSP, no volume here) the panel itself,
+    // so Escape and the arrows work and a screen reader lands in it
+    const first = $('[data-dsp]:not(:disabled), button', qPanel) || qPanel; first.focus();
   };
   $('#quality').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#quality');
-    // Its first control; with none (the in-page player: no DSP, no volume here) the panel itself,
-    // so Escape and the arrows work and a screen reader lands in it
-    const first = $('[data-dsp]:not(:disabled), button', qPanel) || qPanel; first.focus();
   };
   // Where the bar has no room for the slider (narrow tablets and desktops): a small volume popover
   $('#volbtn').onclick = () => { if (!volPop().hidden) closeVolPop(); else openVolPop(); };
@@ -3235,7 +3235,10 @@
     document.body.classList.toggle('np-open', open);
     // (a toast on screen moves with the bars: Now playing hides the mini player and the tabs)
     { const t = $('#toast'); if (t.classList.contains('show')) placeToast(t); }
-    if (open) { renderNowPlaying(); if (!was) { transients.push(npTr); pushTransient(); } return; }
+    // (on a phone Now playing covers the whole page: what is under it is out of reach for Tab and
+    // screen readers)
+    $('.shell').inert = open && shellMode() === 'phone';
+    if (open) { if (!was) { transients.push(npTr); pushTransient(); } renderNowPlaying(); return; }
     const k = transients.indexOf(npTr); if (k >= 0) transients.splice(k, 1);
     const ks = transients.indexOf(npSheetTr); if (ks >= 0) transients.splice(ks, 1);
     if (npCompact()) state.npSheet = null;
@@ -3252,12 +3255,13 @@
   const swipeable = (el, o) => {
     let s = null;
     const reset = () => { if (s && s.move) { s.move.classList.remove('dragging'); s.move.style.transform = ''; s.move.style.opacity = ''; } s = null; };
-    // (a second finger is ignored while the first one swipes)
+    // (a second finger is not primary and is ignored; a new primary press replaces a gesture whose end
+    // never came here)
     el.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse' || !e.isPrimary) return;
-      if (s && s.id !== e.pointerId) return;
-      if ((o.when && !o.when(e)) || e.target.closest('input, textarea, select, [data-noswipe]')) { reset(); return; }
-      s = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, dir: null, move: o.move ? o.move(e) : null, xok: o.x ? o.x(e) : true };
+      reset();
+      if ((o.when && !o.when(e)) || e.target.closest('input, textarea, select, [data-noswipe]')) return;
+      s = { x: e.clientX, y: e.clientY, t: e.timeStamp, id: e.pointerId, dir: null, from: e.target, move: o.move ? o.move(e) : null, xok: o.x ? o.x(e) : true };
     });
     el.addEventListener('pointermove', (e) => {
       if (!s || e.pointerId !== s.id) return;
@@ -3288,7 +3292,7 @@
           setTimeout(() => { m.classList.remove('snap'); m.style.transform = `translateX(${dx < 0 ? w * 0.4 : -w * 0.4}px)`; void m.offsetWidth; m.classList.add('snap'); m.style.transform = ''; m.style.opacity = ''; setTimeout(() => m.classList.remove('snap'), 260); }, 200);
         } else { m.style.transform = ''; m.style.opacity = ''; setTimeout(() => m.classList.remove('snap'), 260); }
       } else if (m) { m.classList.remove('dragging'); m.style.transform = ''; m.style.opacity = ''; }
-      if (run) run();
+      if (run) run(g.from);
     });
     el.addEventListener('pointercancel', (e) => { if (s && e.pointerId === s.id) reset(); });
     // (its own capture only: taking it makes the pressed child lose its implicit one, which bubbles here)
@@ -3339,7 +3343,7 @@
     return { sheet: overlay.dataset.sheet || '', scroll: body ? body.scrollTop : 0, lyric: lines ? lines.scrollTop : 0, focus };
   };
   // The sheet over a phone's player is a layer of its own for back: back closes it first, then Now playing
-  const npSheetTr = { layer: true, open: () => !overlay.hidden && npCompact() && !!state.npSheet, close: () => closeNpSheet(true) };
+  const npSheetTr = { layer: true, open: () => !overlay.hidden && npCompact() && !!state.npSheet && !!$('.np-bsheet:not([hidden])', overlay), close: () => closeNpSheet(true) };
   const closeNpSheet = (fromBack) => {
     const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1);
     if (!state.npSheet) return;
@@ -3361,6 +3365,8 @@
       $('#npzone').onclick = () => $('#zonebtn').click();
       { const sb = $('#npsound'); if (sb) sb.onclick = () => openQPanel('#npsound'); }
       { const k = transients.indexOf(npSheetTr); if (k >= 0) transients.splice(k, 1); }
+      if (npCompact()) state.npSheet = null;
+      overlay.dataset.layout = `${shellMode()}-${npCompact()}`; overlay.dataset.sheet = ''; overlay.dataset.npuri = '';
       return;
     }
     const it = np.item;
@@ -3480,24 +3486,9 @@
     // The quality line opens Details (the signal path)
     $('#npquality').onclick = () => openSheet('details');
     if (one) {
-      // Phones: the first screen. Down closes Now playing, up opens Up next; the cover goes to the
-      // next song left and the previous one right, following the finger
-      const pg = $('.np-page', overlay);
-      swipeable(pg, {
-        when: (e) => !state.npSheet && !e.target.closest('.np-bsheet'),
-        move: (e) => (e.target.closest('.np-big') ? $('.np-big', overlay) : null),
-        left: () => { $('#next').click(); setTimeout(renderNowPlaying, 400); },
-        right: () => { $('#prev').click(); setTimeout(renderNowPlaying, 400); },
-        up: () => openSheet('queue'), down: () => toggleNowPlaying(),
-        x: (e) => !!e.target.closest('.np-big'),
-      });
-      // The sheet: a swipe down on its head (or a tap on the handle) closes it; sideways anywhere on
-      // it moves between its tabs
+      // (the swipes are bound once, on the overlay: see npSwipes)
       const sh = $('.np-bsheet', overlay);
       if (sh && sheet) {
-        const ks = NP_COMPACT.map(([k]) => k); const step = (d) => { const j = ks.indexOf(sheet) + d; if (j >= 0 && j < ks.length) openSheet(ks[j]); };
-        swipeable($('.np-sheet-head', sh), { down: () => closeNpSheet(), left: () => step(1), right: () => step(-1) });
-        swipeable($('.np-sheet-body', sh), { left: () => step(1), right: () => step(-1) });
         $('#npgrab', sh).onclick = () => closeNpSheet();
         if (sheet === 'more') {
           const pb = $('#nppage', sh); if (pb) pb.onclick = () => setView('item', { kind: 'song', id: songPage });
@@ -3531,6 +3522,23 @@
     npRestore();
     refreshSleep();
   };
+  // Now playing's swipes on a phone, bound once on the overlay (a render replaces everything in it, and
+  // the gesture must survive that): on the first screen down closes Now playing, up opens Up next, and
+  // the cover goes to the next song left and the previous one right, following the finger; on the
+  // sheet a swipe down on its head closes it, and sideways anywhere on it moves between its tabs
+  {
+    const npStep = (d) => { const ks = NP_COMPACT.map(([k]) => k); const j = ks.indexOf(state.npSheet) + d; if (j >= 0 && j < ks.length) { state.npSheet = ks[j]; renderNowPlaying(); const f = $(`.np-sheet-tabs [data-npsheet="${ks[j]}"]`, overlay); if (f) f.focus({ preventScroll: true }); } };
+    const onSheet = (t) => !!(t && t.closest && t.closest('.np-bsheet'));
+    swipeable(overlay, {
+      when: () => npCompact() && !!$('.np2.compact:not(.np-idle)', overlay),
+      move: (e) => (!state.npSheet && e.target.closest('.np-big') ? $('.np-big', overlay) : null),
+      x: (e) => (state.npSheet ? onSheet(e.target) : !!e.target.closest('.np-big')),
+      left: (t) => { if (onSheet(t)) npStep(1); else { $('#next').click(); setTimeout(renderNowPlaying, 400); } },
+      right: (t) => { if (onSheet(t)) npStep(-1); else { $('#prev').click(); setTimeout(renderNowPlaying, 400); } },
+      up: (t) => { if (!state.npSheet && !onSheet(t)) { state.npSheet = 'queue'; renderNowPlaying(); const f = $('.np-sheet-tabs [data-npsheet="queue"]', overlay); if (f) f.focus({ preventScroll: true }); } },
+      down: (t) => { if (onSheet(t)) { if (t.closest('.np-sheet-head')) closeNpSheet(); } else if (!state.npSheet) toggleNowPlaying(); },
+    });
+  }
   // The quality sheet (STEWARD-UX-PLAYER-SOURCES §2), from the player's quality label: what is
   // arriving, what the zone makes of it and why, the service's quality choice, and the way to the
   // Play from order and the zone's output settings.
@@ -4048,6 +4056,7 @@
     const typing = ['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable;
     // Escape closes what is on top: a panel or menu, else the phone's sheet, else Now playing
     if (e.key === 'Escape') {
+      if (document.querySelector('dialog[open]')) return; // (it closes itself, and only itself)
       const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden;
       if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
       if (npSheetTr.open()) { closeNpSheet(); return; }

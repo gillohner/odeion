@@ -2152,7 +2152,9 @@ html[data-shell="phone"] #main > .hero.item-hero h1 { font-size: var(--fs-xl); l
 html[data-shell="phone"] #main > .hero.item-hero .sub { font-size: var(--fs-md); }
 html[data-shell="phone"] #main > .hero.item-hero .eyebrow { font-size: var(--fs-2xs); }
 html[data-shell="phone"] #main > .hero.item-hero > div:not(.art) > :is(.htags, .actions, .hmatch-slot, .also-icons, .hero-tags) { grid-column: 1 / -1; }
-html[data-shell="phone"] #main > .hero.item-hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: nowrap; }
+html[data-shell="phone"] #main > .hero.item-hero .actions { margin-top: 12px !important; gap: 8px; flex-wrap: wrap; }
+/* (Also on and Open in: a row of their own under Play and the icons) */
+html[data-shell="phone"] #main > .hero.item-hero .actions > .also-icons { order: 4; flex: 1 0 100%; margin: 0; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#iplay, #ishuffle) { min-height: 48px; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#izone, #ifav, #imore) { width: 48px; height: 48px; min-width: 48px; padding: 0; justify-content: center; border: 0; background: none; color: var(--fg-2); border-radius: 50%; }
 html[data-shell="phone"] #main > .hero.item-hero .actions > :is(#izone, #ifav, #imore) .ic { width: 24px; height: 24px; }
@@ -2203,7 +2205,8 @@ html:not([data-shell="phone"]) .np-bsheet { bottom: max(var(--kb, 0px), var(--pl
 /* The sheet's own scroll keeps vertical panning for the browser and leaves sideways drags to the page
    (a scroller allows both by itself, and a sideways drag was taken as a pan and cancelled) */
 .np-bsheet .np-sheet-body, .np-bsheet .lyric-lines { touch-action: pan-y; }
-/* A short screen (split screen, a large system font): the first screen scrolls rather than cut off */
+/* A short screen (split screen, landscape, a large system font): the first screen scrolls rather than
+   cut off. Its vertical swipes are then the scroll's (the chevron and the three buttons still work). */
 @media (max-height: 540px) { .np2.compact { overflow-y: auto; touch-action: pan-y; } .np2.compact .np-body { flex: none; } }
 /* Nothing playing on a phone: the top bar and the message */
 .np2.compact.np-idle { justify-content: flex-start; }

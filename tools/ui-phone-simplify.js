@@ -43,7 +43,7 @@ const lyrics = { synced: true, source: 'lrclib', lines: Array.from({ length: 40 
 // An album of the library, one artist, not matched to MusicBrainz; its first song is the one playing
 const albumPage = { kind: 'album', id: 'lib-7', uri: null, target: { album_id: 7 }, title: 'Eric Clapton Story', artist: { name: 'Eric Clapton', id: 'lib-31' }, album: null, year: 1990, image: null, source: 'library', source_id: '7', plays_from: { service: 'library', label: 'Your library' }, connect: [], reading: false, pending: false,
   songs: queue.map((t, i) => ({ no: i + 1, title: t.title, artist: 'Eric Clapton', duration_ms: t.duration_ms, uri: t.uri, track_id: t.id, id: 'lib-' + t.id, page: 'lib-' + t.id })),
-  total_ms: queue.reduce((a, t) => a + t.duration_ms, 0), albums: [], versions: [], also_on: [], about: [], open_on: [], related: [], concerts: [], about_pending: false, section: 'library' };
+  total_ms: queue.reduce((a, t) => a + t.duration_ms, 0), albums: [], versions: [], also_on: [{ source: 'tidal', url: 'https://tidal.com/browse/album/1', label: 'TIDAL' }, { source: 'qobuz', url: 'https://www.qobuz.com/album/x', label: 'Qobuz' }], about: [], open_on: [], related: [], concerts: [], about_pending: false, section: 'library' };
 // Confirm matches: one folder, a song with two candidates and a long file name
 const longFile = '/music/Alizee/Moi Lolita/4f14aed932a1a1a6-1-Moi..._Lolita__Single_Version_.flac';
 const opt = (id, title) => ({ id, track_id: 11, recording_mbid: `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`, release_mbid: null, title, artist: 'Alizée', release_title: null, score: 0.99, source: 'fingerprint' });
@@ -225,6 +225,7 @@ const overflow = (page) => page.evaluate(() => {
     await page.setViewportSize({ width: w, height: h });
     await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [zone] })); });
     await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); localStorage.setItem('pm.theme', 'dark'); window.pmDesktop = { platform: 'android', version: '0.0.0' }; });
+    await page.emulateMedia({ reducedMotion: 'no-preference' }); // (the slide runs, and must end clean)
     const cdp = await context.newCDPSession(page);
     const touch = async (pts, opts = {}) => {
       const [x0, y0] = pts[0];
@@ -236,10 +237,17 @@ const overflow = (page) => page.evaluate(() => {
     const line = (x0, y0, dx, dy, n = 8) => Array.from({ length: n + 1 }, (_, i) => [x0 + (dx * i) / n, y0 + (dy * i) / n]);
     const mid = (sel) => page.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; });
     await fx.go(page, '/album/lib-7'); await page.waitForSelector('#isongs .srow'); await sleep(600);
-    // a sideways swipe on the mini player while it redraws (as it does several times a second while playing)
+    // a swipe up on the mini player while it redraws (as it does several times a second while playing):
+    // the finger leaves the bar, so only the bar's own capture brings the release back to it
+    const redraw = () => { const np = document.querySelector('#np'); np.innerHTML = np.innerHTML; };
+    let [mx, my] = await mid('#np .np-text');
+    await touch(line(mx, my, 0, -260), { mid: redraw }); await sleep(600);
+    check(await page.evaluate(() => !document.querySelector('#nowplaying').hidden), `${at}: a finger's swipe up on the mini player opens Now playing, also when the bar redraws during it`);
+    await page.keyboard.press('Escape'); await sleep(400);
+    // a sideways swipe while it redraws, with the slide on: the next song, and the bar back in place
     const n0 = sent(state, 'next');
-    const [mx, my] = await mid('#np .np-text');
-    await touch(line(mx + 60, my, -170, 0), { mid: () => { const np = document.querySelector('#np'); np.innerHTML = np.innerHTML; } }); await sleep(700);
+    [mx, my] = await mid('#np .np-text');
+    await touch(line(mx + 60, my, -170, 0), { mid: redraw }); await sleep(900);
     const after = await page.evaluate(() => ({ t: document.querySelector('#np').style.transform, cls: document.querySelector('#np').className }));
     check(sent(state, 'next') === n0 + 1 && !after.t && !/dragging/.test(after.cls), `${at}: a finger's swipe left on the mini player is the next song, also when the bar redraws during it (${sent(state, 'next') - n0}, transform "${after.t}")`);
     // a finger held on a row: selection with that row ticked
@@ -259,15 +267,35 @@ const overflow = (page) => page.evaluate(() => {
     await page.keyboard.press('Escape'); await sleep(400);
     check(await page.evaluate(() => document.querySelector('.np-bsheet').hidden && !document.querySelector('#nowplaying').hidden), `${at}: Escape closes the sheet first`);
     // Sound from ···: the panel, and the focus back on ··· after it
-    await page.click('#npmore'); await page.click('.popover.menu:not([hidden]) >> text=Sound'); await page.waitForSelector('#qpanel:not([hidden])');
+    await page.click('#npmore'); await page.click('.popover.menu:not([hidden]) >> text=Sound'); await page.waitForSelector('#qpanel:not([hidden])'); await sleep(100);
+    const inPanel = await page.evaluate(() => document.querySelector('#qpanel').contains(document.activeElement));
     await page.keyboard.press('Escape'); await sleep(300);
-    check(await page.evaluate(() => document.querySelector('#qpanel').hidden && document.activeElement && document.activeElement.id === 'npmore'), `${at}: Sound opens from Now playing's ···, and the focus comes back to ···`);
+    check(inPanel && await page.evaluate(() => document.querySelector('#qpanel').hidden && document.activeElement && document.activeElement.id === 'npmore' && document.querySelector('#npmore').getAttribute('aria-expanded') !== 'true'), `${at}: Sound opens from Now playing's ··· with the focus in it, and the focus comes back to ··· (in the panel: ${inPanel})`);
     await page.keyboard.press('Escape'); await sleep(300);
-    check(await page.evaluate(() => document.querySelector('#nowplaying').hidden), `${at}: Escape again closes Now playing`);
+    check(await page.evaluate(() => document.querySelector('#nowplaying').hidden && !document.querySelector('.shell').inert), `${at}: Escape again closes Now playing (the page behind is in reach again)`);
     // a playlist page keeps its own header (the album layout is for the item pages)
     await fx.go(page, '/playlist/c1'); await page.waitForSelector('#plsongs .srow'); await sleep(400);
     const pl = await page.evaluate(() => { const hero = document.querySelector('#main > .hero'); const kids = [...hero.querySelectorAll(':scope > div:not(.art) > *')].map((e) => Math.round(e.getBoundingClientRect().width)); return { item: hero.classList.contains('item-hero'), min: Math.min(...kids.filter((x) => x > 0)), sw: document.documentElement.scrollWidth, vw: innerWidth }; });
     check(!pl.item && pl.min > 150 && pl.sw <= pl.vw, `${at}: a playlist's header is laid out as before (narrowest part ${pl.min} px, page ${pl.sw} of ${pl.vw})`);
+    await context.close();
+  }
+  // ---- nothing playing: Now playing still names the zone and opens Play to and Sound ----
+  {
+    const w = 360; const at = `${w}x800 idle`;
+    const idle = { ...zone, transport: 'stopped', now_playing: null, queue: [], queue_index: null };
+    const { page, context, state } = await fx.create(browser, w, { mobile: true, fixtures: { ...fixtures, '/zones': { body: [idle] }, '/zones/linn/queue': { body: [] } } });
+    await page.setViewportSize({ width: w, height: 800 });
+    await context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [idle] })); });
+    await context.addInitScript(() => { localStorage.setItem('pm.zone', 'linn'); localStorage.setItem('pm.theme', 'dark'); window.pmDesktop = { platform: 'android', version: '0.0.0' }; });
+    await fx.go(page, '/albums'); await page.waitForSelector('#np'); await sleep(600);
+    await page.click('#np'); await page.waitForSelector('#nowplaying:not([hidden]) #npzone'); await sleep(300);
+    const idl = await page.evaluate(() => ({ zone: document.querySelector('#npzone').textContent.trim(), sound: !!document.querySelector('#npsound'), sw: document.documentElement.scrollWidth, vw: innerWidth }));
+    await page.screenshot({ path: path.join(SHOTS, `nowplaying-idle-${w}.png`) });
+    await page.click('#npzone'); await sleep(300);
+    const pop = await page.evaluate(() => !document.querySelector('#zonepop').hidden);
+    await page.keyboard.press('Escape'); await sleep(200); await page.keyboard.press('Escape'); await sleep(300);
+    check(/Linn/.test(idl.zone) && idl.sound && pop && idl.sw <= idl.vw && await page.evaluate(() => document.querySelector('#nowplaying').hidden), `${at}: with nothing playing, Now playing names the zone ("${idl.zone}"), opens Play to (${pop}) and has Sound (${idl.sound}); Escape twice closes Play to, then it`);
+    check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     check(!state.errors.length, `${at}: no page errors${state.errors.length ? ': ' + state.errors.join(' | ') : ''}`);
     await context.close();
   }
