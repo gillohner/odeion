@@ -688,3 +688,191 @@ async fn a_delete_waiting_removes_every_version_even_another_devices() {
         "every version went, the other app's too"
     );
 }
+
+/// Another app of hers writes a newer version of `id` (drafted, and published when `published`),
+/// its content changed by `edit`, without the node reading it. Its draft's path.
+fn another_app_writes(
+    fake: &Fake,
+    id: &str,
+    published: bool,
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> String {
+    let (draft, mut content) = newest(fake, ANN, id);
+    edit(&mut content);
+    let mut post = fake.json(ANN, &draft);
+    post["content"] = content.to_string().into();
+    let later = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 5_000_000);
+    let roots: &[&str] = if published {
+        &[DRAFTS, PUBLISHED]
+    } else {
+        &[DRAFTS]
+    };
+    for root in roots {
+        fake.files.lock().unwrap().get_mut(ANN).unwrap().insert(
+            format!("{root}{id}/{later}.json"),
+            serde_json::to_vec(&post).unwrap(),
+        );
+    }
+    format!("{DRAFTS}{id}/{later}.json")
+}
+
+#[tokio::test]
+async fn a_change_made_at_once_starts_from_her_other_apps_newer_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "Mix", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    // Her phone adds a song; the node hasn't read it when she renames here
+    let phone = another_app_writes(&fake, &id, false, |c| {
+        let mut it = c["items"][0].clone();
+        it["uri"] = SONG_B.into();
+        c["items"].as_array_mut().unwrap().push(it);
+    });
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Mix 2"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (path, content) = newest(&fake, ANN, &id);
+    assert!(path > phone, "{path} above her phone's {phone}");
+    assert_eq!(content["name"], "Mix 2");
+    assert_eq!(
+        item_uris(&content),
+        vec![SONG_A, SONG_B],
+        "her phone's song stays: {content}"
+    );
+}
+
+#[tokio::test]
+async fn a_delete_made_at_once_removes_her_other_apps_newer_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Going", "uris": [SONG_A], "public": true})),
+    )
+    .await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    another_app_writes(&fake, &id, true, |c| c["name"] = "Still here?".into());
+    let (st, _) = call(&app, &ann, "DELETE", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::NO_CONTENT);
+    assert!(
+        fake.paths(ANN, DRAFTS).is_empty() && fake.paths(ANN, PUBLISHED).is_empty(),
+        "every version went, the other app's newer one too"
+    );
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(v, serde_json::json!([]), "nothing comes back: {v}");
+}
+
+#[tokio::test]
+async fn private_again_at_once_unpublishes_her_other_apps_newer_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Shared", "uris": [SONG_A], "public": true})),
+    )
+    .await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    another_app_writes(&fake, &id, true, |_| {});
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}/visibility"),
+        Some(serde_json::json!({"public": false})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v["summary"]["visibility"].clone(), v["summary"]["synced"].clone()),
+        (serde_json::json!("private"), serde_json::json!(true)),
+        "{v}"
+    );
+    assert!(
+        fake.paths(ANN, PUBLISHED).is_empty(),
+        "no public copy is left, the other app's newer one neither"
+    );
+}
+
+#[tokio::test]
+async fn her_homeserver_cant_make_the_node_keep_more_than_a_thousand() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (_, v) = create(&app, &ann, "One", &[SONG_A]).await;
+    let id = v["summary"]["id"].as_str().unwrap().to_string();
+    // 999 more on her homeserver, already kept by the node (same versions, nothing to read)
+    let key = format!("person.{ANN}.collections");
+    let lib_shelf = || -> serde_json::Value {
+        serde_json::from_str(&s.library.lock().unwrap().get_setting(&key).unwrap().unwrap()).unwrap()
+    };
+    let mut shelf = lib_shelf();
+    let one = shelf["items"][0].clone();
+    let (draft, _) = newest(&fake, ANN, &id);
+    let body = fake.files.lock().unwrap()[ANN][&draft].clone();
+    let base = pm_pubky::ids::now_micros() - 60_000_000_000;
+    for i in 0..999 {
+        let cid = pm_pubky::v1::id_of(base + i * 1_000);
+        let path = format!("{DRAFTS}{cid}/{cid}.json");
+        fake.files
+            .lock()
+            .unwrap()
+            .get_mut(ANN)
+            .unwrap()
+            .insert(path.clone(), body.clone());
+        let mut k = one.clone();
+        k["id"] = cid.clone().into();
+        k["head"] = cid.into();
+        k["versions"] = serde_json::json!([path]);
+        shelf["items"].as_array_mut().unwrap().push(k);
+    }
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(&key, &shelf.to_string())
+        .unwrap();
+    // One more from her homeserver: not taken; one more here: refused
+    let late = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 5_000_000);
+    fake.files
+        .lock()
+        .unwrap()
+        .get_mut(ANN)
+        .unwrap()
+        .insert(format!("{DRAFTS}{late}/{late}.json"), body.clone());
+    let (_, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(
+        v.as_array().map(Vec::len),
+        Some(1_000),
+        "the node keeps a thousand"
+    );
+    assert!(
+        !fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c.ends_with(&format!("read {DRAFTS}{late}/{late}.json"))),
+        "the one over isn't even downloaded"
+    );
+    let (st, v) = create(&app, &ann, "Too many", &[SONG_A]).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert_eq!(lib_shelf()["items"].as_array().unwrap().len(), 1_000);
+}

@@ -37,6 +37,16 @@ pub const PERSONAL_CAPABILITIES: &str =
 
 /// How long one call to a listener's homeserver may take before the node answers from its copy.
 const CALL_LIMIT: Duration = Duration::from_secs(8);
+/// How far a listing of a listener's folder goes: whole or not at all (a cut listing is an
+/// error, so nothing the node holds is read as deleted there), at most 10,000 entries in 100
+/// pages within [`CALL_LIMIT`]. Their homeserver can't make the node hold more.
+const PERSONAL_LIST: pm_pubky::homeserver::ListBounds = pm_pubky::homeserver::ListBounds {
+    max_entries: 10_000,
+    max_pages: 100,
+    deadline: CALL_LIMIT,
+    newest_first: false,
+    whole: true,
+};
 /// How long a Ring approval for the grant may wait.
 const CONNECT_TTL: Duration = Duration::from_secs(600);
 
@@ -332,7 +342,9 @@ impl PersonalHomeserver for Grants {
             |v: &Vec<String>| expected && v.is_empty(),
             |session| async move {
                 let (visibility, session) = visibility_of(dir, &session);
-                hs.list_tree(key, dir, visibility, session).await
+                hs.list_tree(key, dir, visibility, session, PERSONAL_LIST)
+                    .await
+                    .map(|l| l.entries)
             },
         )
         .await

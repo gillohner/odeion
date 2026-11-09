@@ -35,6 +35,11 @@ use std::sync::Arc;
 /// many); the rest come with the next.
 const READS_PER_REQUEST: usize = 16;
 
+/// At most this many of their collections are kept on the node; newer ones from their homeserver
+/// beyond it aren't taken, and making one more here is refused. Their listings are bounded too
+/// (`personal::PERSONAL_LIST`), so their homeserver can't make the node hold more.
+const MAX_COLLECTIONS: usize = 1_000;
+
 /// The node's copy of one listener's collections.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Shelf {
@@ -161,13 +166,15 @@ fn read_outcome(s: &NodeState, key: &str, e: PersonalError) -> Result<bool, ApiE
     }
 }
 
-/// Writes what waited, then takes what their homeserver has that the copy doesn't. Answers
-/// whether their homeserver didn't answer (the copy is what the node had).
+/// Writes what waited, then takes what their homeserver has that the copy doesn't, `first` (the
+/// collection about to be changed) before any other. Answers whether their homeserver didn't
+/// answer (the copy is what the node had). A listing it can't make whole changes nothing.
 async fn refresh(
     s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
+    first: Option<&str>,
 ) -> Result<bool, ApiError> {
     // What the node knows there: an empty listing then is checked again (a gone user lists as empty)
     let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
@@ -200,6 +207,11 @@ async fn refresh(
                     k.versions.push(v.clone());
                 }
             }
+            // Above every version there (another device's, even one dated ahead of this
+            // node's clock), so the change waiting here is the newest
+            if h.edit_id.as_bytes() > k.head.as_bytes() {
+                k.head = h.edit_id.clone();
+            }
         }
         match push(b, key, k).await {
             Ok(()) => {
@@ -229,6 +241,8 @@ async fn refresh(
     sh.other.retain(|p| private.values().any(|h| &h.path == p));
 
     let mut wanted: Vec<(&String, &v1::Head)> = Vec::new();
+    // New ones are downloaded only while the node keeps fewer than MAX_COLLECTIONS
+    let mut room = MAX_COLLECTIONS.saturating_sub(sh.items.len());
     for (id, head) in &private {
         let mut versions = head.versions.clone();
         versions.extend(public.get(id).map(|h| h.versions.clone()).unwrap_or_default());
@@ -245,11 +259,23 @@ async fn refresh(
                 }
             }
             None if sh.other.contains(&head.path) => {}
-            None => wanted.push((id, head)),
+            None if room == 0 => {
+                tracing::warn!(%key, %id, "a listener has more than {MAX_COLLECTIONS} collections; this one isn't kept on the node");
+            }
+            None => {
+                room -= 1;
+                wanted.push((id, head));
+            }
         }
     }
-    // The newest first: a listener with many other drafts sees their latest collections soonest
-    wanted.sort_by(|a, b| b.1.edit_id.cmp(&a.1.edit_id));
+    // The newest first: a listener with many other drafts sees their latest collections soonest;
+    // the one about to be changed before all
+    wanted.sort_by(|a, b| {
+        let is_first = |w: &(&String, &v1::Head)| Some(w.0.as_str()) == first;
+        is_first(b)
+            .cmp(&is_first(a))
+            .then_with(|| b.1.edit_id.cmp(&a.1.edit_id))
+    });
     let mut stale = false;
     for (id, head) in wanted.into_iter().take(READS_PER_REQUEST) {
         let bytes = match b.read(key, &head.path).await {
@@ -339,8 +365,12 @@ async fn read(s: &NodeState, key: &str) -> Result<Option<Shelf>, ApiError> {
     }
     let mut sh = load(s, key);
     if !personal::is_lost(s, key) {
-        refresh(s, b.as_ref(), key, &mut sh).await?;
-        save(s, key, &sh)?;
+        let before = serde_json::to_string(&sh).expect("serializes");
+        refresh(s, b.as_ref(), key, &mut sh, None).await?;
+        // Unchanged (the usual read): not written again
+        if serde_json::to_string(&sh).expect("serializes") != before {
+            save(s, key, &sh)?;
+        }
     }
     Ok(Some(sh))
 }
@@ -367,6 +397,22 @@ async fn change(
         return Ok(personal::needs_connect(true));
     }
     let mut sh = load(s, key);
+    // What their homeserver has now (another device's newer version, this one first), so the
+    // change starts from it, and a delete or "private again" reaches every version there
+    let before = serde_json::to_string(&sh).expect("serializes");
+    refresh(s, b.as_ref(), key, &mut sh, id).await?;
+    if serde_json::to_string(&sh).expect("serializes") != before {
+        save(s, key, &sh)?;
+    }
+    if personal::is_lost(s, key) {
+        return Ok(personal::needs_connect(true));
+    }
+    if id.is_none() && sh.items.iter().filter(|k| !k.deleted).count() >= MAX_COLLECTIONS {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("You have {MAX_COLLECTIONS} collections here: delete one first"),
+        ));
+    }
     let at = match id {
         Some(id) => Some(
             sh.items
@@ -409,7 +455,7 @@ async fn change(
                 save(s, key, &sh)?;
             }
             return Err(ApiError::new(
-                StatusCode::BAD_GATEWAY,
+                StatusCode::UNPROCESSABLE_ENTITY,
                 format!("Your homeserver won't keep this collection: {m}"),
             ));
         }
