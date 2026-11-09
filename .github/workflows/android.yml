@@ -1,0 +1,475 @@
+name: android
+# The Android app on emulators, from one APK build job (`apk`): every check below installs what it
+# built, instead of each building its own.
+# - phone-as-zone (tools/android-endpoint.py): the player connected by address to a node on the
+#   runner, playing in real time, in the background, after a restart and after a crash.
+# - ring transport (tools/android-ring-probe.py): an APK with the `ring-transport-probe` feature
+#   routes a fixture Pubky Ring grant exchange (signed cached PKARR packet, direct endpoint
+#   refused, ICANN endpoint on the runner) and a lookup of a public homeserver through the app's
+#   own TLS verifier.
+# - update (tools/android-update-probe.py): builds N (versionCode 1000) and N+1 (1001) with the
+#   `update-feed-fixture` feature, signed with one throwaway key; a tampered download must not
+#   install, the right one must install over N from inside the app and keep its data. Also checks
+#   that the .aab is built without the updater.
+# - background playback (tools/android-background-probe.py): the phone's own zone and the in-app
+#   player, each sent to the background.
+# On a pull request each check runs only when what it covers changed (the `changes` job), on one
+# Android version (API 35). On main, every night and for a release tag (release.yml) each runs on
+# all its versions: 30 (the oldest the app supports), 35 and Android 17 (37.0). Android 17 runs on
+# the google_atd image: on the runners the google_apis 37.0 and 37.1 images crash-loop
+# surfaceflinger (SIGABRT in RegionSampling) every ~20 s, which restarts system_server, so installs
+# and launches fail (run 41896087891). The release workflow also runs phone-as-zone with the signed
+# release APK.
+on:
+  pull_request:
+    paths:
+      - crates/pm-desktop/**
+      - crates/pm-endpoint/**
+      - crates/pm-stream/**
+      - crates/pm-out-net/**
+      - crates/pm-out-local/**
+      - crates/pm-usb-audio/**
+      - crates/pm-api/**
+      - crates/pm-zones/**
+      - crates/pm-node/**
+      - crates/pm-pubky/**
+      - Cargo.toml
+      - Cargo.lock
+      - tools/android-*.py
+      - tools/release/android/**
+      - tools/release/android-patch.py
+      - tools/release/updater-manifest.py
+      - tools/release/aab-check.py
+      - tools/release/android-sign.sh
+      - .github/workflows/release.yml
+      - .github/workflows/android.yml
+  push:
+    branches: [main]
+  schedule:
+    # Every night (UTC), all checks on all their versions
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: every Android version (off - API 35 only)
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      full:
+        type: boolean
+        default: true
+concurrency:
+  group: android-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+jobs:
+  # Which checks run, and on which versions: on a pull request, each check whose files changed on
+  # API 35; on a push to main, each check whose files changed on all its versions; every night, by
+  # hand and from release.yml, every check (on all versions unless `full` is off).
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      zone: ${{ steps.pick.outputs.zone }}
+      ring: ${{ steps.pick.outputs.ring }}
+      update: ${{ steps.pick.outputs.update }}
+      background: ${{ steps.pick.outputs.background }}
+      node: ${{ steps.pick.outputs.node }}
+      zone_matrix: ${{ steps.pick.outputs.zone_matrix }}
+      ring_matrix: ${{ steps.pick.outputs.ring_matrix }}
+      update_matrix: ${{ steps.pick.outputs.update_matrix }}
+      background_matrix: ${{ steps.pick.outputs.background_matrix }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FULL: ${{ inputs.full }}
+        run: |
+          case "$EVENT" in
+            pull_request) full=false ;;
+            push) full=true ;;
+            schedule) full=true ;;
+            *) if [ "$FULL" = false ]; then full=false; else full=true; fi ;;
+          esac
+          all=false
+          if [ "$EVENT" != pull_request ] && [ "$EVENT" != push ]; then all=true; fi
+          if [ "$all" = false ] && { [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; }; then all=true; fi
+          files=""
+          [ "$all" = true ] || files=$(git diff --name-only "$BASE" "$GITHUB_SHA")
+          # A check runs when a file it covers changed (or this workflow did)
+          covers() {
+            if [ "$all" = true ]; then echo true; return; fi
+            if printf '%s\n' "$files" | grep -Eq "^(\.github/workflows/android\.yml$|$1)"; then echo true; else echo false; fi
+          }
+          zone=$(covers 'crates/(pm-desktop|pm-endpoint|pm-stream|pm-out-net|pm-out-local|pm-usb-audio|pm-api|pm-zones|pm-node)/|Cargo\.(toml|lock)$|tools/android-endpoint\.py$|tools/release/android-patch\.py$|tools/release/android/')
+          ring=$(covers 'crates/(pm-desktop|pm-pubky)/|tools/android-ring-probe\.py$|tools/release/android-patch\.py$')
+          update=$(covers 'crates/pm-desktop/|tools/android-update-probe\.py$|tools/release/(android-patch\.py|android/|updater-manifest\.py|aab-check\.py|android-sign\.sh)|\.github/workflows/release\.yml$')
+          background=$(covers 'crates/pm-desktop/|tools/release/android/|tools/release/android-patch\.py$|tools/android-background-probe\.py$|tools/android-endpoint\.py$')
+          node=false
+          if [ "$zone" = true ] || [ "$background" = true ]; then node=true; fi
+          one='{"include":[{"api":"35","target":"google_apis"}]}'
+          three='{"include":[{"api":"30","target":"google_apis"},{"api":"35","target":"google_apis"},{"api":"37.0","target":"google_atd"}]}'
+          # The update check has run on 35 and 37.0 since it was added
+          two='{"include":[{"api":"35","target":"google_apis"},{"api":"37.0","target":"google_atd"}]}'
+          if [ "$full" = true ]; then zm=$three; rm=$three; um=$two; bm=$three; else zm=$one; rm=$one; um=$one; bm=$one; fi
+          {
+            echo "zone=$zone"; echo "ring=$ring"; echo "update=$update"; echo "background=$background"; echo "node=$node"
+            echo "zone_matrix=$zm"; echo "ring_matrix=$rm"; echo "update_matrix=$um"; echo "background_matrix=$bm"
+          } | tee -a "$GITHUB_OUTPUT"
+          echo "$(printf '%s\n' "$files" | grep -c . || true) files changed; full matrix: $full"
+
+  # Every APK the checks install, built once: the plain x86_64 APK (phone-as-zone, background), the
+  # ring-transport-probe one and the update pair N/N+1 plus the .aab check. Each signed with this
+  # run's throwaway key. Only what the selected checks need is built.
+  apk:
+    needs: changes
+    if: needs.changes.outputs.zone == 'true' || needs.changes.outputs.ring == 'true' || needs.changes.outputs.update == 'true' || needs.changes.outputs.background == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PLAIN: ${{ needs.changes.outputs.zone == 'true' || needs.changes.outputs.background == 'true' }}
+      RING: ${{ needs.changes.outputs.ring }}
+      UPDATE: ${{ needs.changes.outputs.update }}
+      # A fresh Gradle per build: each build's own environment (the update feed, the probe's CA)
+      # reaches the Rust build, never a daemon's from the build before
+      GRADLE_OPTS: -Dorg.gradle.daemon=false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-linux-android
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates/pm-desktop
+          key: android-apk
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+      # As in release.yml: gen/android is not committed
+      - name: generate the Android project
+        working-directory: crates/pm-desktop
+        run: |
+          echo "NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npm ci --no-audit --no-fund
+          npx tauri android init --ci --skip-targets-install
+          npx tauri icon ../pm-api/static/icon.svg
+          python3 -I ../../tools/release/android-patch.py .
+      - name: a throwaway signing key, and the signing helper
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/ci.p12" -storetype PKCS12 -storepass ci-only -keypass ci-only \
+            -alias ci -keyalg RSA -keysize 2048 -validity 30 -dname "CN=android CI"
+          cat > "$RUNNER_TEMP/sign.sh" <<'SH'
+          # sign.sh <unsigned apk> <signed apk>
+          set -eu
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$bt/zipalign" -f 4 "$1" "$1.aligned"
+          "$bt/apksigner" sign --ks "$RUNNER_TEMP/ci.p12" --ks-pass pass:ci-only --out "$2" "$1.aligned"
+          SH
+          # The newest release APK the last build wrote (copied out before the next build replaces it)
+          cat > "$RUNNER_TEMP/built.sh" <<'SH'
+          set -eu
+          apk=$(find crates/pm-desktop/gen/android/app/build/outputs/apk -name '*release*.apk' | head -1)
+          test -n "$apk" || { find crates/pm-desktop/gen/android/app/build/outputs -type f; exit 1; }
+          echo "$apk"
+          SH
+          mkdir -p out/plain out/ring out/update
+      # A CA and a localhost certificate for this run only: the fixture homeserver's ICANN endpoint
+      # (the ring-transport-probe build compiles the CA in; the other builds do not read it).
+      - name: fixture certificate
+        if: env.RING == 'true'
+        run: |
+          d="$RUNNER_TEMP/fixture"; mkdir -p "$d"; cd "$d"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+            -subj "/CN=ring-probe fixture CA" -keyout ca.key -out ca.pem \
+            -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign,cRLSign
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=localhost" \
+            -keyout leaf.key -out leaf.csr
+          printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\n' > ext.cnf
+          openssl x509 -req -in leaf.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 2 -extfile ext.cnf -out leaf.pem
+          rm ca.key leaf.csr
+          echo "RING_PROBE_CA=$d/ca.pem" >> "$GITHUB_ENV"
+      - name: the APK (x86_64), for phone-as-zone and background playback
+        if: env.PLAIN == 'true'
+        run: |
+          (cd crates/pm-desktop && npx tauri android build --ci --apk --target x86_64)
+          bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" out/plain/app.apk
+      - name: the APK with the Ring transport probe (x86_64)
+        if: env.RING == 'true'
+        run: |
+          (cd crates/pm-desktop && npx tauri android build --ci --apk --target x86_64 --features ring-transport-probe)
+          bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" out/ring/app.apk
+          cp "$RUNNER_TEMP"/fixture/{ca.pem,leaf.pem,leaf.key} out/ring/
+      - name: N and N+1 with the fixture update feed (x86_64)
+        if: env.UPDATE == 'true'
+        working-directory: crates/pm-desktop
+        env:
+          ODEION_UPDATE_CHANNEL: edge
+          ODEION_UPDATE_FEED: http://127.0.0.1:18480/latest.json
+        run: |
+          for build in "1000 0.0.1-1 old" "1001 0.0.1-2 new"; do
+            read -r code version name <<< "$build"
+            echo "{\"version\":\"$version\",\"bundle\":{\"android\":{\"versionCode\":$code}}}" > update.conf.json
+            npx tauri android build --ci --apk --target x86_64 --features update-feed-fixture --config update.conf.json
+            (cd "$GITHUB_WORKSPACE" && bash "$RUNNER_TEMP/sign.sh" "$(bash "$RUNNER_TEMP/built.sh")" "out/update/$name.apk")
+          done
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$bt/aapt2" dump badging "$GITHUB_WORKSPACE/out/update/old.apk" | grep -E "^package|REQUEST_INSTALL_PACKAGES"
+          "$bt/aapt2" dump badging "$GITHUB_WORKSPACE/out/update/new.apk" | grep -E "^package"
+      # As release.yml builds it: the APKs have the updater, the .aab has none. Last: it patches the
+      # project without the updater.
+      - name: the .aab has no updater
+        if: env.UPDATE == 'true'
+        working-directory: crates/pm-desktop
+        env:
+          ODEION_UPDATE_FEED: http://127.0.0.1:18480/latest.json
+        run: |
+          python3 -I ../../tools/release/android-patch.py . --without-updater
+          ODEION_UPDATE_CHANNEL= npx tauri android build --ci --aab --target x86_64 --features update-feed-fixture \
+            --config update.conf.json
+          python3 -I ../../tools/release/aab-check.py gen/android/app/build/outputs "$GITHUB_WORKSPACE/out/update/old.apk"
+      - if: env.PLAIN == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-plain
+          path: out/plain/
+          retention-days: 3
+      - if: env.RING == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-ring
+          path: out/ring/
+          retention-days: 3
+      - if: env.UPDATE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-update
+          path: out/update/
+          retention-days: 3
+
+  # The node the phone plays from (phone-as-zone, background playback), next to the APK build
+  node:
+    needs: changes
+    if: needs.changes.outputs.node == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: android-node
+      - run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+          cargo build --locked -p pm-node
+          mkdir -p out && cp target/debug/pm-node out/ && chmod +x out/pm-node && tar -czf node.tgz -C out pm-node
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-node
+          path: node.tgz
+          compression-level: 0
+          retention-days: 3
+
+  phone-as-zone:
+    needs: [changes, apk, node]
+    if: needs.changes.outputs.zone == 'true'
+    name: phone-as-zone (API ${{ matrix.api }}, ${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.zone_matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-plain
+          path: apk
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: android-node
+      - run: tar -xzf node.tgz && rm node.tgz
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: the phone as a zone
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          # No sound card on the runner: the emulator's audio is consumed in real time and dropped.
+          QEMU_AUDIO_DRV: none
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: ${{ matrix.target }}
+          ram-size: 6144M
+          # The API 37 image's default data partition cannot take the x86_64 APK.
+          disk-size: 8192M
+          cores: 4
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
+          disable-animations: true
+          script: python3 -I tools/android-endpoint.py apk/app.apk ./pm-node /tmp/ae
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: phone-as-zone-api${{ matrix.api }}-${{ matrix.target }}
+          path: |
+            /tmp/ae/*.png
+            /tmp/ae/*.txt
+            /tmp/ae/*.log
+          if-no-files-found: ignore
+
+  ring-transport:
+    needs: [changes, apk]
+    if: needs.changes.outputs.ring == 'true'
+    name: ring transport (API ${{ matrix.api }}, ${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.ring_matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-ring
+          path: probe
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: the Ring transport in the app
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: ${{ matrix.target }}
+          ram-size: 6144M
+          # The API 37 image's default data partition cannot take the x86_64 APK.
+          disk-size: 8192M
+          cores: 4
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none -no-audio
+          disable-animations: true
+          script: python3 -I tools/android-ring-probe.py probe/app.apk probe /tmp/rp
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ring-probe-api${{ matrix.api }}-${{ matrix.target }}
+          path: /tmp/rp/
+          if-no-files-found: ignore
+
+  update:
+    needs: [changes, apk]
+    if: needs.changes.outputs.update == 'true'
+    name: update (API ${{ matrix.api }}, ${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.update_matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-update
+          path: update
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: the app updates itself
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: ${{ matrix.target }}
+          ram-size: 6144M
+          disk-size: 8192M
+          cores: 4
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none -no-audio
+          disable-animations: true
+          script: python3 -I tools/android-update-probe.py update/old.apk update/new.apk /tmp/up ${{ matrix.target == 'google_atd' && '--settings-optional' || '' }}
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: update-probe-api${{ matrix.api }}-${{ matrix.target }}
+          path: /tmp/up/
+          if-no-files-found: ignore
+
+  background:
+    needs: [changes, apk, node]
+    if: needs.changes.outputs.background == 'true'
+    name: background playback (API ${{ matrix.api }}, ${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.changes.outputs.background_matrix) }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-plain
+          path: probe
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: android-node
+      - run: tar -xzf node.tgz -C probe && rm node.tgz
+      - name: enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: the app in the background
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api }}
+          arch: x86_64
+          target: ${{ matrix.target }}
+          ram-size: 6144M
+          disk-size: 8192M
+          cores: 4
+          emulator-boot-timeout: 1500
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -no-boot-anim -camera-back none
+          disable-animations: true
+          script: python3 -I tools/android-background-probe.py probe/app.apk probe/pm-node /tmp/bg
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: background-api${{ matrix.api }}-${{ matrix.target }}
+          path: /tmp/bg
+          retention-days: 7

@@ -4,6 +4,11 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-09
+
+- **CI takes about half as long per change, with the same checks.** The node is built once per run and the jobs that only run it download it. The controls audit, the other browser checks and the pages checked against fixtures each run on two or three runners at once, and the controls audit no longer waits a fixed 900 ms after a click that already showed its effect (one that shows nothing is still watched for the full 900 ms). The image build runs on a pull request only when what the image is made of changes (Dockerfile, Cargo files, `deploy/docker/`, the release tooling, a workflow); always on main. The four Android workflows are one, `android.yml`: one job builds every APK the checks install. On a pull request each Android check runs on Android 15 only, and only when what it covers changed; on main, every night and for a release tag on Android 11, 15 and 17 (the update check on 15 and 17, as before).
+- **Two flaky Android checks fixed.** The phone-as-zone check taps the connect page only once it holds still (it relaid itself out while looking for nodes, so a tap could miss the address field), waits for each field to take the focus and checks the address it typed landed whole. The Ring transport check records which signed record of the public homeserver its unused client decided on: when pkarr kept an older record (one naming `localhost`), the route that record gives is reported as a warning instead of a failure; a wrong route on the newest record still fails.
+
 ### 2026-11-07
 
 - **A stream that doesn't answer ends with an error instead of holding the zone.** A radio or web stream whose server accepts the connection but sends nothing now fails after 20 seconds, like one that stops sending mid-song. A live stream still plays for as long as it sends. Stop, Next and Play are taken while such a stream is being skipped, not after every item in the queue was tried, and the next song is opened ahead on its own thread, so a next item slow to answer never holds the zone.

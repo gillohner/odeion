@@ -8,10 +8,13 @@
 // Screens: Home, the library pages, an album, a song, an artist, search, playlists, queue, zones,
 // sources, radio, favourites, every Settings tab, every Sources tab, the now-playing overlay and a dialog.
 //   npm install playwright@1.49.1 && npx playwright install chromium   (anywhere; run from there)
-//   node tools/ui-overlap.js <api token> [http://127.0.0.1:7788]
+//   node tools/ui-overlap.js <api token> [http://127.0.0.1:7788]   (UI_SCHEMES=dark|light for one scheme)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
 const TOKEN = process.argv[2] || ''; const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// UI_SCHEMES=dark or light: one colour scheme only (CI runs each on its own runner); both by default
+const SCHEMES = (process.env.UI_SCHEMES || 'dark,light').split(',').map((s) => s.trim()).filter(Boolean);
+if (!SCHEMES.length || SCHEMES.some((s) => s !== 'dark' && s !== 'light')) { console.log(`UI_SCHEMES must be dark, light or both, not ${process.env.UI_SCHEMES}`); process.exit(2); }
 const SETTINGS = ['accounts', 'home', 'quality', 'appearance', 'apps', 'nodehome', 'library', 'playback', 'discover', 'backup', 'import', 'about'];
 
 const inspect = () => {
@@ -62,7 +65,7 @@ const inspect = () => {
     ...['library', ...((await api('/sources')) || []).map((x) => x.id)].map((id) => [`Sources › ${id}`, `/sources/${id}`])];
   const browser = await chromium.launch();
   const problems = [];
-  for (const scheme of ['dark', 'light']) {
+  for (const scheme of SCHEMES) {
     for (const [w, h] of [[1440, 900], [1024, 768], [390, 844]]) {
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, colorScheme: scheme, reducedMotion: 'reduce' });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () {}; }, TOKEN);
@@ -87,5 +90,5 @@ const inspect = () => {
   await browser.close();
   for (const x of problems) console.log('OVERLAP ' + x);
   if (problems.length) { console.log(`${problems.length} problems`); process.exit(1); }
-  console.log('no overlap, no spill, no sideways scroll');
+  console.log(`no overlap, no spill, no sideways scroll (${SCHEMES.join(' and ')})`);
 })();

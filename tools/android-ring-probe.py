@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The Pubky Ring sign-in transport, inside the app on an Android emulator (CI:
-android-ring-transport.yml).
+android.yml, ring transport).
 
 The APK is built with the `ring-transport-probe` feature (crates/pm-desktop/src/ring_probe.rs):
 right after the app sets up its TLS verifier it routes requests the way the Ring grant exchange
@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 
 PKG = "to.synonym.pubkymusic"
+# The public homeserver ring_probe.rs looks up (PUBLIC_HOMESERVER there)
+PUBLIC_KEY = "p815irkx17jo489ba9ym56kb5zmcuf385w88jz8ncq5b38t7k1ay"
 PORT = 18443
 apk, fixture_dir, out = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])
 out.mkdir(parents=True, exist_ok=True)
@@ -288,11 +290,35 @@ def main():
     if rr.get("outcome") != "waiting":
         failures.append(f"relay_restore: the app's wait ended instead of listening again: {rr}")
     for name, info in (("default client", default.get("info") or {}),
-                       ("grant exchange after Ring's approval came in while away", ex.get("info") or {}),
-                       ("unused held client back in the foreground", (ret.get("held_clean") or {}).get("info") or {})):
+                       ("grant exchange after Ring's approval came in while away", ex.get("info") or {})):
         if found_icann and direct.get("reachable") is False and info.get("host") != "homeserver.riginode.xyz":
             failures.append(f"public homeserver, {name}: direct endpoint unreachable and an ICANN endpoint exists, "
                             f"but it sent to {info.get('sent_to')!r} ({info.get('outcome') or info.get('error')})")
+    # The unused held client, back in the foreground, looks the homeserver up for the first time now.
+    # pkarr's CacheFirst lookup keeps the first signed packet a relay or DHT node answers with, which
+    # can be an older record of the homeserver's own: runs 42397028826 and 42379674214 decided on a
+    # record naming `localhost` as the ICANN endpoint while the newest names homeserver.riginode.xyz
+    # (logcat: "ICANN fallback to localhost" for this key). That is pkarr's choice of record, not the
+    # app's routing. So the request must go where the record it decided on says (its ICANN endpoint
+    # when the direct one is unreachable, never the raw key), and to homeserver.riginode.xyz whenever
+    # that record is the newest; a decision made on an older record is logged with both records.
+    clean = ret.get("held_clean") or {}
+    info = clean.get("info") or {}
+    decided = clean.get("decided_on") or {}
+    newest = (clean.get("lookup") or {}).get("packet") or {}
+    host = info.get("host")
+    older = (isinstance(decided.get("timestamp_us"), int) and isinstance(newest.get("timestamp_us"), int)
+             and decided["timestamp_us"] < newest["timestamp_us"])
+    if found_icann and direct.get("reachable") is False and host != "homeserver.riginode.xyz":
+        if older and host and host != PUBLIC_KEY and host in (decided.get("targets") or []):
+            log(f"note: the unused held client decided on an older signed record of the homeserver's ({decided}) "
+                f"than the newest ({newest}) and sent to that record's ICANN endpoint {host!r}")
+            print(f"::warning::ring probe: pkarr kept an older signed record of the public homeserver "
+                  f"(ICANN endpoint {host}); the app routed as that record says")
+        else:
+            failures.append(f"public homeserver, unused held client back in the foreground: direct endpoint unreachable "
+                            f"and an ICANN endpoint exists, but it sent to {info.get('sent_to')!r} "
+                            f"({info.get('outcome') or info.get('error')}); decided on {decided}, newest {newest}")
     if not found_icann:
         failures.append("public homeserver: no lookup (relays, DHT, default) found its ICANN endpoint "
                         f"(relays: {steps.get('resolve_relays', {}).get('lookup')}, "

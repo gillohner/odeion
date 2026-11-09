@@ -163,10 +163,18 @@ pub async fn run() {
     let mut on_return = json!({ "waited_ms": waited, "tries": tries });
     for (name, client) in [("held", &held), ("held_clean", &held_clean)] {
         on_return[name] = match client {
-            Ok(c) => json!({
-                "info": routed(c, Method::GET, &format!("https://{PUBLIC_HOMESERVER}/info"), None).await,
-                "lookup": lookups(c.pkarr(), PUBLIC_HOMESERVER).await,
-            }),
+            Ok(c) => {
+                let info = routed(c, Method::GET, &format!("https://{PUBLIC_HOMESERVER}/info"), None).await;
+                // The packet the routing above decided on: the first one the client's lookup got,
+                // kept in its cache. The network's newest one comes next (`lookup`): when they
+                // differ, the transport was chosen from an older record of the homeserver's.
+                let decided_on = cached_packet(c.pkarr(), PUBLIC_HOMESERVER).await;
+                json!({
+                    "info": info,
+                    "decided_on": decided_on,
+                    "lookup": lookups(c.pkarr(), PUBLIC_HOMESERVER).await,
+                })
+            }
             Err(e) => json!({ "error": chain(e) }),
         };
     }
@@ -258,6 +266,28 @@ async fn plain_get() -> Value {
     match client.get("https://homeserver.riginode.xyz/info").send().await {
         Ok(r) => json!({ "status": r.status().as_u16(), "ms": started.elapsed().as_millis() as u64 }),
         Err(e) => json!({ "error": chain(&e), "ms": started.elapsed().as_millis() as u64 }),
+    }
+}
+
+/// The signed packet the client holds for `z32` right now (cache only): its time and the targets
+/// of its HTTPS records (`.` for the direct endpoint, else an ICANN domain or a key).
+async fn cached_packet(pkarr: &pkarr::Client, z32: &str) -> Value {
+    let pk = match pkarr::PublicKey::try_from(z32) {
+        Ok(pk) => pk,
+        Err(e) => return json!({ "error": e.to_string() }),
+    };
+    match pkarr.resolve(&pk, pkarr::ResolvePolicy::CacheOnly).await {
+        Err(e) => json!({ "error": chain(&e) }),
+        Ok(p) => {
+            let targets: Vec<String> = p
+                .all_resource_records()
+                .filter_map(|r| match &r.rdata {
+                    pkarr::dns::rdata::RData::HTTPS(h) => Some(h.0.target.to_string()),
+                    _ => None,
+                })
+                .collect();
+            json!({ "timestamp_us": p.timestamp().as_u64(), "targets": targets })
+        }
     }
 }
 
