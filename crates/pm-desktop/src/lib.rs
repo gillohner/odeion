@@ -561,7 +561,7 @@ async fn ring_connect(app: AppHandle, state: State<'_, AppState>) -> Result<Stri
     let identity = state
         .current()
         .and_then(|c| pm_pubky::homeserver::PublicKey::try_from(c.owner.as_str()).ok());
-    let records = hs.fresh_for_sign_in(identity.as_ref(), None).await;
+    let records = hs.fresh_for_sign_in(identity.as_ref(), None, false).await?;
     tracing::info!(?records, "Ring: homeserver records before the sign-in");
     let flow = hs
         .start_login_with("pubky-music-desktop", RING_CAPS)
@@ -725,9 +725,13 @@ impl ring_wait::Pending for RingFlow {
     }
     /// Back on screen: the newest records again before the exchange (the ones held from before
     /// the app went away, and pubky's transport choice on them, may be behind).
-    async fn returned(&self) {
-        let records = self.hs.fresh_for_sign_in(self.identity.as_ref(), None).await;
+    async fn returned(&self) -> Result<(), String> {
+        let records = self
+            .hs
+            .fresh_for_sign_in(self.identity.as_ref(), None, false)
+            .await?;
         tracing::info!(?records, "Ring: homeserver records on return");
+        Ok(())
     }
 }
 

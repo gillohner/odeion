@@ -229,16 +229,24 @@ pub(crate) async fn owner_signup(State(s): State<Arc<NodeState>>) -> ApiResult<c
         .ok_or_else(|| unreachable("no public key in /info"))?
         .to_string();
     let token = owner_token(&s).await?;
-    let flow = s
+    let client = s
         .homeserver()
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The sign-up's homeserver is known: its newest record first, as for a sign-in (this
+    // homeserver is the node's own, local by design)
+    let target = pubky::PublicKey::try_from(hs.as_str()).ok();
+    let records = client
+        .fresh_for_sign_in(None, target.as_ref(), true)
+        .await
+        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
+    let flow = client
         .start_signup("pubky-music-node", &hs, &token)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     *s.login.lock().await = Some(flow);
     tracing::info!(homeserver = %hs, "owner sign-up on the bundled homeserver started");
     Ok(Json(crate::types::LoginStarted {
-        records: Vec::new(),
+        records,
         qr_svg: crate::qr_svg(&url),
         url,
     }))

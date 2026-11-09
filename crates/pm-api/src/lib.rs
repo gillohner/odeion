@@ -3329,7 +3329,10 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
     let identity = s
         .sync_handle()
         .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
-    let records = hs.fresh_for_sign_in(identity.as_ref(), None).await;
+    let records = hs
+        .fresh_for_sign_in(identity.as_ref(), None, s.bundled_homeserver().is_some())
+        .await
+        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     let flow = hs
         .start_login("pubky-music-node")
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -3504,6 +3507,18 @@ async fn controller_login_start(
     };
     let renew_asked = asked.renewal.is_some_and(|code| renewal_good(&s, &code));
     let device = asked.device;
+    let hs = s
+        .homeserver()
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The newest records first, so the grant exchange routes on them (the owner's identity is
+    // the one that approves). Before the sign-ins' lock: these are network lookups, and the
+    // polls of every waiting sign-in take that lock too
+    let identity = s
+        .sync_handle()
+        .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
+    hs.fresh_for_sign_in(identity.as_ref(), None, s.bundled_homeserver().is_some())
+        .await
+        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
@@ -3513,18 +3528,9 @@ async fn controller_login_start(
             "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `odeiond login`), or restart it once its homeserver answers",
         ));
     };
-    let hs = s
-        .homeserver()
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     // The node's own session lacks folders and the owner asked: this log in asks for them too, so
     // the owner's approval renews it (no separate "sign in again")
     let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
-    // The newest records first, so the grant exchange routes on them (the owner's identity is
-    // the one that approves)
-    let identity = s
-        .sync_handle()
-        .and_then(|h| pubky::PublicKey::try_from(h.z32()).ok());
-    hs.fresh_for_sign_in(identity.as_ref(), None).await;
     let flow = hs
         .start_login_with("pubky-music-controller", caps)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;

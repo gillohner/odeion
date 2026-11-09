@@ -123,6 +123,9 @@ async fn the_newest_record_wins_over_an_older_cached_one() {
     *r.packets.lock().unwrap() = vec![old.clone()];
     let f = freshen_one(c.pkarr(), &pk).await;
     assert_eq!(cache.get(&key).unwrap().timestamp(), new.timestamp(), "{f:?}");
+    // ...and what is reported is the record that routes: the newer one the cache kept
+    assert_eq!(f.timestamp_us, Some(new.timestamp().as_u64()), "{f:?}");
+    assert_eq!(f.from, From::Network);
 }
 
 /// With no network the sign-in goes on with the copy held here, and says so.
@@ -160,4 +163,27 @@ async fn a_record_naming_only_localhost_is_reported() {
     let (c, _) = client(&url, &[]);
     let f = freshen_one(c.pkarr(), &hs.public_key()).await;
     assert_eq!((f.from, f.loopback), (From::Network, true), "{f:?}");
+}
+
+/// The whole sign-in step on the public network: a public homeserver the network has no record
+/// of (here: a relay that knows nothing) refuses the sign-in before it starts, within the step's
+/// bound; on a local testnet nothing is refused.
+#[tokio::test]
+async fn a_sign_in_with_no_homeserver_record_is_refused_before_it_starts() {
+    let (url, _) = relay(vec![]).await;
+    let (c, _) = client(&url, &[]);
+    let hs = pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
+        pubky::Pubky::with_client(c.clone()),
+        pm_pubky::Network::Mainnet,
+    );
+    let started = std::time::Instant::now();
+    let r = hs.fresh_for_sign_in(None, None, false).await;
+    assert!(r.is_err(), "{r:?}");
+    assert!(r.unwrap_err().contains("couldn't be found"));
+    assert!(started.elapsed() <= pm_pubky::records::SIGN_IN_LOOKUPS + std::time::Duration::from_secs(1));
+    let testnet = pm_pubky::homeserver::NodeHomeserver::from_pubky_on(
+        pubky::Pubky::with_client(c),
+        pm_pubky::Network::Testnet,
+    );
+    assert!(testnet.fresh_for_sign_in(None, None, false).await.is_ok());
 }

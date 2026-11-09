@@ -321,8 +321,9 @@ def main():
             failures.append(f"public homeserver, {name}: decided on an older record ({decided}) than the newest found "
                             f"({newest}); freshened {fresh}")
         records = (fresh.get("records") or [])
-        if records and records[0].get("from") != "network":
-            failures.append(f"public homeserver, {name}: the network-first lookup fell back ({records[0]})")
+        # Every client took the sign-in's step, and the network answered it
+        if len(records) != 1 or records[0].get("from") != "network":
+            failures.append(f"public homeserver, {name}: the network-first lookup didn't answer from the network ({fresh})")
     if not found_icann:
         failures.append("public homeserver: no lookup (relays, DHT, default) found its ICANN endpoint "
                         f"(relays: {steps.get('resolve_relays', {}).get('lookup')}, "

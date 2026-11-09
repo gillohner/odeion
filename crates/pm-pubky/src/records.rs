@@ -23,7 +23,13 @@ use serde::{Deserialize, Serialize};
 pub const PUBLIC_HOMESERVER: &str = "p815irkx17jo489ba9ym56kb5zmcuf385w88jz8ncq5b38t7k1ay";
 
 /// How long one network-first lookup may take: a sign-in waits for it, so it is short.
-pub const FRESHEN_TIMEOUT: Duration = Duration::from_secs(10);
+pub const FRESHEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long reading the copy held here may take (pkarr's cache-only lookup asks the relays'
+/// caches when the client has none).
+pub const CACHE_TIMEOUT: Duration = Duration::from_secs(1);
+/// The most all of a sign-in's lookups take together (the identity's record, then its
+/// homeserver's): the node's sign-in start must answer the app well within its own wait.
+pub const SIGN_IN_LOOKUPS: Duration = Duration::from_secs(9);
 
 /// Where a record came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,22 +73,21 @@ pub async fn freshen(pkarr: &pkarr::Client, keys: &[&str]) -> Vec<Freshened> {
 pub async fn freshen_one(pkarr: &pkarr::Client, pk: &PublicKey) -> Freshened {
     let key = pk.to_string();
     let network = tokio::time::timeout(FRESHEN_TIMEOUT, pkarr.resolve(pk, ResolvePolicy::NetworkOnly)).await;
-    let (packet, from, error) = match network {
-        Ok(Ok(p)) => (Some(p), From::Network, None),
-        Ok(Err(e)) => (None, From::None, Some(e.to_string())),
-        Err(_) => (
-            None,
-            From::None,
-            Some("the network didn't answer in time".to_string()),
-        ),
+    let (from, error) = match network {
+        Ok(Ok(_)) => (From::Network, None),
+        Ok(Err(e)) => (From::None, Some(e.to_string())),
+        Err(_) => (From::None, Some("the network didn't answer in time".to_string())),
     };
-    let (packet, from) = match packet {
-        Some(p) => (Some(p), from),
-        // The network failed: the copy held here, which may be the only one there is
-        None => match pkarr.resolve(pk, ResolvePolicy::CacheOnly).await {
-            Ok(p) => (Some(p), From::Cache),
-            Err(_) => (None, From::None),
-        },
+    // What the client holds now is what routes next: the network's answer, or a newer copy the
+    // cache kept over it (pkarr never replaces a newer one), or, the network failed, the copy held
+    let held = tokio::time::timeout(CACHE_TIMEOUT, pkarr.resolve(pk, ResolvePolicy::CacheOnly))
+        .await
+        .ok()
+        .and_then(Result::ok);
+    let (packet, from) = match (held, from) {
+        (Some(p), From::Network) => (Some(p), From::Network),
+        (Some(p), _) => (Some(p), From::Cache),
+        (None, _) => (None, From::None),
     };
     Freshened {
         key,
@@ -91,6 +96,41 @@ pub async fn freshen_one(pkarr: &pkarr::Client, pk: &PublicKey) -> Freshened {
         loopback: packet.as_ref().is_some_and(routes_to_loopback),
         error,
     }
+}
+
+/// Why a sign-in on the public network must not start with these homeserver records, if it must
+/// not: a homeserver whose newest record names only the client's own machine (an old record of a
+/// public homeserver did), or one nothing is known of (the exchange would take the first record
+/// some node answers with, which is what went wrong). Refused before the sign-in's link exists,
+/// so the person tries again without spending a Ring approval.
+///
+/// `allow_local`: the node is configured for a local homeserver (its bundled one), whose record
+/// names a local address by design, and which needs no lookup on the wider network: only a
+/// loopback record of the public homeserver refuses then.
+pub fn refusal(records: &[Freshened], allow_local: bool) -> Option<String> {
+    let held = |r: &&Freshened| !allow_local || r.key == PUBLIC_HOMESERVER;
+    if let Some(r) = records.iter().filter(held).find(|r| r.loopback) {
+        return Some(format!(
+            "the homeserver's record ({}) names only this device; try again in a moment",
+            short(&r.key)
+        ));
+    }
+    if let Some(r) = records
+        .iter()
+        .filter(|_| !allow_local)
+        .find(|r| r.from == From::None)
+    {
+        return Some(format!(
+            "the homeserver's current address couldn't be found ({}{}); check the connection and try again",
+            short(&r.key),
+            r.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
+        ));
+    }
+    None
+}
+
+fn short(key: &str) -> &str {
+    &key[..key.len().min(8)]
 }
 
 /// The homeserver a user's freshened record names (`_pubky`), if any: the key the grant exchange
@@ -184,6 +224,40 @@ mod tests {
         assert!(!routes_to_loopback(&record(None, Some("139.162.128.88"))));
         // Nothing named: not loopback (nothing to route to either)
         assert!(!routes_to_loopback(&record(None, None)));
+    }
+
+    fn freshened(key: &str, from: From, loopback: bool) -> Freshened {
+        Freshened {
+            key: key.into(),
+            from,
+            timestamp_us: (from != From::None).then_some(1),
+            loopback,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn a_sign_in_is_refused_on_a_loopback_or_unknown_homeserver() {
+        let other = "8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo";
+        assert_eq!(
+            refusal(&[freshened(PUBLIC_HOMESERVER, From::Network, false)], false),
+            None
+        );
+        assert_eq!(
+            refusal(&[freshened(PUBLIC_HOMESERVER, From::Cache, false)], false),
+            None
+        );
+        assert!(refusal(&[freshened(PUBLIC_HOMESERVER, From::Network, true)], false).is_some());
+        assert!(refusal(&[freshened(PUBLIC_HOMESERVER, From::None, false)], false).is_some());
+        assert!(refusal(&[freshened(other, From::Network, true)], false).is_some());
+        // A node with a homeserver of its own: that one may be local; the public one never
+        assert_eq!(refusal(&[freshened(other, From::Network, true)], true), None);
+        assert_eq!(refusal(&[freshened(other, From::None, false)], true), None);
+        assert_eq!(
+            refusal(&[freshened(PUBLIC_HOMESERVER, From::None, false)], true),
+            None
+        );
+        assert!(refusal(&[freshened(PUBLIC_HOMESERVER, From::Network, true)], true).is_some());
     }
 
     #[test]
