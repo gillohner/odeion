@@ -22,6 +22,12 @@ with patch.object(sys, "argv", ["android-endpoint.py", "fixture.apk", "fixture-n
 
 
 class TransportTests(unittest.TestCase):
+    def setUp(self):
+        self.route = "10.0.2.2 dev wlan0 src 10.0.2.16 uid 2000\n"
+        self.reverse_state = patch.object(ep, "reverse_installed", False)
+        self.reverse_state.start()
+        self.addCleanup(self.reverse_state.stop)
+
     def guest_process(self, script):
         """An actual pipe-backed child, standing in for adb/nc; no sockets or device."""
         popen = subprocess.Popen
@@ -70,17 +76,17 @@ if not select.select([0], [], [], .1)[0]:
 
     def test_explicit_transport_requires_401_even_if_host_alias_fails(self):
         with patch.object(ep, "NODE", "http://127.0.0.1:7799"), \
-                patch.object(ep, "adb") as adb, patch.object(ep, "log") as log, \
+                patch.object(ep, "adb", return_value=self.route) as adb, patch.object(ep, "log") as log, \
                 patch.object(ep, "guest_http_status", side_effect=["timeout", "401"]) as probe:
-            self.assertEqual(ep.prepare_node_transport(), "127.0.0.1:17788")
-        adb.assert_called_once_with("reverse", "--no-rebind", "tcp:17788", "tcp:7799")
-        self.assertEqual(probe.call_args_list[-1].args, ("127.0.0.1", 17788))
+            self.assertEqual(ep.prepare_node_transport(), "10.0.2.16:17788")
+        adb.assert_any_call("reverse", "--no-rebind", "tcp:17788", "tcp:7799")
+        self.assertEqual(probe.call_args_list[-1].args, ("10.0.2.16", 17788))
         self.assertIn("timeout", log.call_args_list[0].args[0])
 
     def test_reachable_open_or_broken_node_is_not_an_accepted_fixture(self):
         for status in ["200", "403", "404", "503", "timeout", "no HTTP response", "exit 1"]:
             with self.subTest(status=status), patch.object(ep, "NODE", "http://127.0.0.1:7788"), \
-                    patch.object(ep, "adb"), patch.object(ep, "log"), \
+                    patch.object(ep, "adb", return_value=self.route), patch.object(ep, "log"), \
                     patch.object(ep, "guest_http_status", side_effect=["401", status]):
                 with self.assertRaisesRegex(RuntimeError, "must refuse an absent token with 401"):
                     ep.prepare_node_transport()
@@ -88,9 +94,10 @@ if not select.select([0], [], [], .1)[0]:
     def test_reverse_setup_failure_is_fatal(self):
         with patch.object(ep, "NODE", "http://localhost:7788"), patch.object(ep, "log"), \
                 patch.object(ep, "guest_http_status", return_value="401"), \
-                patch.object(ep, "adb", side_effect=RuntimeError("port already bound")):
+                patch.object(ep, "adb", side_effect=[self.route, RuntimeError("port already bound")]):
             with self.assertRaisesRegex(RuntimeError, "port already bound"):
                 ep.prepare_node_transport()
+            self.assertFalse(ep.reverse_installed)
 
     def test_external_fixture_is_refused_before_adb(self):
         for node in ["https://localhost:7788", "http://example.com:7788"]:
@@ -99,8 +106,38 @@ if not select.select([0], [], [], .1)[0]:
                     ep.prepare_node_transport()
                 adb.assert_not_called()
 
+    def test_loopback_or_missing_guest_route_is_not_accepted(self):
+        for route in ["", "local 10.0.2.2 dev lo src 127.0.0.1", "src 0.0.0.0", "src 8.8.8.8"]:
+            with self.subTest(route=route), patch.object(ep, "adb", return_value=route) as adb, \
+                    patch.object(ep, "NODE", "http://localhost:7788"):
+                with self.assertRaises(RuntimeError):
+                    ep.prepare_node_transport()
+                self.assertFalse(ep.reverse_installed)
+                self.assertEqual(adb.call_count, 1, "no reverse mapping on an invalid route")
+
+    def test_cleanup_removes_only_this_runs_mapping(self):
+        with patch.object(ep, "adb") as adb:
+            ep.cleanup_node_transport()
+            adb.assert_not_called()
+            ep.reverse_installed = True
+            ep.cleanup_node_transport()
+            adb.assert_called_once_with("reverse", "--remove", "tcp:17788", check=False)
+            ep.cleanup_node_transport()
+            self.assertEqual(adb.call_count, 1)
+
 
 class AcceptanceTests(unittest.TestCase):
+    def test_first_registration_failure_is_not_hidden_by_later_success(self):
+        failed = "WARN player not registered (the node must reach this machine): refused address=10.0.2.16:7790"
+        passed = "INFO player registered with the node address=10.0.2.16:7790 outputs=1"
+        with patch.object(ep, "logcat", return_value=failed + "\n" + passed):
+            self.assertEqual(ep.registered(), (False, "10.0.2.16:7790"))
+        with patch.object(ep, "logcat", return_value=passed):
+            self.assertEqual(ep.registered(), (True, "10.0.2.16:7790"))
+        with patch.object(ep, "logcat", return_value="WARN no player: cannot listen\n" + passed):
+            with self.assertRaisesRegex(RuntimeError, "cannot listen"):
+                ep.registered()
+
     def test_enabled_tour_failure_propagates_for_both_enable_values(self):
         def failed(_):
             raise AssertionError("gesture did not open the sheet")

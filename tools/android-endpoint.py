@@ -2,14 +2,15 @@
 """The phone as a zone, on an Android emulator (CI: android.yml, phone-as-zone; release.yml, android-emulator).
 
 The release APK is installed and connected by address to a node on the host
-(127.0.0.1:17788 through adb reverse) over plain http, and must show the node's page.
+(the emulator's LAN address on port 17788, through adb reverse) over plain http,
+and must show the node's page.
 Its built-in player (AAudio through cpal)
 must become a zone that plays a track in real time, and keep playing with the
 app in the background: the foreground service (PlayerService.kt) keeps the
 process alive.
 
 The emulator is behind its own NAT, so the node cannot reach the address the
-app registers itself under (the emulator's own, 10.0.2.15). This script makes
+app registers itself under (the emulator's own LAN address). This script makes
 that address reach the phone: it adds it to the runner's loopback and relays it
 through `adb forward` to the player's port. The app's own registration (its
 address and the player's key, which only it and the node know) then works as on
@@ -26,6 +27,7 @@ Then, as a phone does on later days:
 Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
 """
 import json
+import ipaddress
 import os
 import re
 import secrets
@@ -45,6 +47,7 @@ NODE = os.environ.get("PM_TEST_NODE", "http://127.0.0.1:7788")
 # An API token made per run, required even over the emulator's adb-reverse connection.
 TOKEN = secrets.token_hex(16)
 apk, node_bin, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+reverse_installed = False
 
 
 def log(msg):
@@ -112,17 +115,36 @@ def prepare_node_transport():
     answered. Record that alias separately; use adb reverse for a stable fixture route, as
     the update/Ring probes do. The real app still submits the token and connects over HTTP.
     """
+    global reverse_installed
     node = urlsplit(NODE)
     if node.scheme != "http" or node.hostname not in ("127.0.0.1", "localhost"):
         raise RuntimeError("PM_TEST_NODE must name the HTTP fixture on the runner's loopback")
     port = node.port or 80
+    route = adb("shell", "ip", "-4", "route", "get", "10.0.2.2")
+    src = re.search(r"\bsrc ([0-9.]+)\b", route)
+    if not src:
+        raise RuntimeError("cannot find the emulator's LAN address for the fixture")
+    guest = ipaddress.IPv4Address(src.group(1))
+    if guest.is_loopback or guest.is_unspecified or not guest.is_private:
+        raise RuntimeError("the emulator fixture needs a private non-loopback LAN address")
     log(f"diagnostic host alias without a token: {guest_http_status('10.0.2.2', port)}")
+    # On the device, reverse tcp:<port> listens on all interfaces. Use its LAN address:
+    # loopback would make player::plan test the node-on-this-machine mode instead.
     adb("reverse", "--no-rebind", "tcp:17788", f"tcp:{port}")
-    status = guest_http_status("127.0.0.1", 17788)
+    reverse_installed = True
+    status = guest_http_status(str(guest), 17788)
     if status != "401":
         raise RuntimeError(f"emulator fixture preflight must refuse an absent token with 401; got {status}")
     log("emulator fixture reachable through adb reverse; an absent token is refused (401)")
-    return "127.0.0.1:17788"
+    return f"{guest}:17788"
+
+
+def cleanup_node_transport():
+    """Remove only the reverse mapping successfully created by this run."""
+    global reverse_installed
+    if reverse_installed:
+        adb("reverse", "--remove", "tcp:17788", check=False)
+        reverse_installed = False
 
 
 def run_ui_tour():
@@ -191,6 +213,18 @@ KILLED = re.compile(r"Killing \d+:" + re.escape(PKG) + r"/\S+ \(adj -?\d+\): (.*
 
 def system_kills():
     return KILLED.findall(logcat())
+
+
+def registered():
+    """The first registration result since launch; a later success cannot hide a failure."""
+    event = re.search(r"[^\n]*(?:player registered with the node|player not registered|no player:)[^\n]*", logcat())
+    if not event:
+        return None
+    line = event.group(0)
+    address = re.search(r"\baddress=(\S+)", line)
+    if address:
+        return ("player registered with the node" in line, address.group(1))
+    raise RuntimeError(f"player could not register: {line.strip()}".replace(TOKEN, "[redacted]"))
 
 
 # (any case: the API 37 image says "DON’T ALLOW")
@@ -405,6 +439,7 @@ enabled = false
         run(node)
     finally:
         node.terminate()
+        cleanup_node_transport()
 
 
 def run(node):
@@ -422,9 +457,11 @@ def run(node):
     log(f"Android API {sdk}")
     # Android 13+: nothing granted up front; the notification prompt is refused below
     log(adb("install", "-r", *([] if sdk >= 33 else ["-g"]), apk).strip())
-    # Before the app starts: the address it will register reaches its player
-    relay(GUEST)
     app_node = prepare_node_transport()
+    # Before the app starts: its LAN address reaches its player. Registration must work
+    # on the first launch, rather than a force-stop hiding a missing fixture route.
+    expected_player = f"{app_node.rsplit(':', 1)[0]}:7790"
+    relay(expected_player)
     adb("logcat", "-c")
     lc = subprocess.Popen(["adb", "logcat", "-v", "time", "pubky-music:V", "AndroidRuntime:E", "ActivityManager:I", "*:S"],
                           stdout=open(out / "logcat.txt", "w"), stderr=subprocess.STDOUT)
@@ -493,35 +530,9 @@ def run(node):
         adb("shell", "cmd", "uimode", "night", "no")
         until("the player service", lambda: "player service started" in logcat(), timeout=90)
 
-        def registered():
-            """`(True, address)` once the app registered its player with the node, `(False,
-            address)` when the node could not reach it."""
-            text = logcat()
-            ok = re.search(r"player registered with the node address=(\S+)", text)
-            if ok:
-                return (True, ok.group(1))
-            bad = re.search(r"player not registered[^\n]*address=(\S+)", text)
-            if bad:
-                return (False, bad.group(1))
-            # No address to relay: the player can't be registered at all; say why
-            stuck = re.search(r"[^\n]*(player not registered|no player:)[^\n]*", text)
-            if stuck:
-                raise SystemExit(f"FAIL: {stuck.group(0).strip()}")
-            return None
-
         done, address = until("the player's registration", registered, timeout=60)
-        if not done:
-            # The emulator gave it another address or port: relay that one, and start the app
-            # again so it registers once more (with a new key)
-            log(f"the player registered as {address}, not {GUEST}: relaying that and starting the app again")
-            relay(address)
-            adb("shell", "am", "force-stop", PKG)
-            fresh_logcat()
-            adb("logcat", "-c")
-            adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
-            wait_page("the node's page after starting again", relaunch=True)
-            done, address = until("the player's registration", registered, timeout=90)
-            assert done, f"the node cannot reach the player at {address}"
+        assert address == expected_player, f"player registered {address}, expected the emulator's LAN address {expected_player}"
+        assert done, f"the node cannot reach the player at {address} on the first launch"
         log(f"app connected; player registered with the node as {address}; service started")
         shot("2-connected")
 
