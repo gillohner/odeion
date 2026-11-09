@@ -29,6 +29,7 @@ import json
 import os
 import re
 import secrets
+import selectors
 import socket
 import subprocess
 import sys
@@ -63,15 +64,45 @@ def adb(*args, check=True):
 def guest_http_status(host, port):
     """Probe from Android without credentials; retain only the HTTP status, never the body."""
     request = f"GET /v1/info HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    proc = subprocess.Popen(["adb", "shell", "toybox", "nc", "-w", "5", host, str(port)],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
-        r = subprocess.run(["adb", "shell", "toybox", "nc", "-w", "5", host, str(port)],
-                           input=request, capture_output=True, text=True, timeout=10)
-    except subprocess.TimeoutExpired:
-        return "timeout"
-    if r.returncode:
-        return f"exit {r.returncode}"
-    status = re.match(r"HTTP/1\.[01] (\d{3})\b", r.stdout)
-    return status.group(1) if status else "no HTTP response"
+        # Keep stdin open until the response: nc half-closes its socket on EOF, and adb
+        # reverse can then tear down both directions before the node's reply arrives.
+        proc.stdin.write(request.encode())
+        proc.stdin.flush()
+        deadline = time.monotonic() + 10
+        response = b""
+        with selectors.DefaultSelector() as ready:
+            ready.register(proc.stdout, selectors.EVENT_READ)
+            while len(response) < 4096:
+                if not ready.select(max(0, deadline - time.monotonic())):
+                    return "timeout"
+                chunk = os.read(proc.stdout.fileno(), 4096 - len(response))
+                if not chunk:
+                    code = proc.wait(timeout=2)
+                    return f"exit {code}" if code else "no HTTP response"
+                response += chunk
+                if b"\n" in response:
+                    status = re.match(rb"HTTP/1\.[01] (\d{3})\b", response)
+                    return status.group(1).decode() if status else "no HTTP response"
+        return "invalid HTTP status"
+    except BrokenPipeError:
+        return "request pipe closed"
+    finally:
+        # This is the subprocess we just created, not the adb server or any other client.
+        try:
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
 
 
 def prepare_node_transport():

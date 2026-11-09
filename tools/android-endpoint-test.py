@@ -22,25 +22,50 @@ with patch.object(sys, "argv", ["android-endpoint.py", "fixture.apk", "fixture-n
 
 
 class TransportTests(unittest.TestCase):
+    def guest_process(self, script):
+        """An actual pipe-backed child, standing in for adb/nc; no sockets or device."""
+        popen = subprocess.Popen
+        return patch.object(ep.subprocess, "Popen", side_effect=lambda *_, **kw:
+                            popen([sys.executable, "-c", script], **kw))
+
     def test_guest_probe_uses_no_credentials_and_keeps_only_status(self):
-        response = SimpleNamespace(returncode=0, stdout="HTTP/1.1 401 Unauthorized\r\n\r\nprivate response", stderr="")
-        with patch.object(ep.subprocess, "run", return_value=response) as run:
+        script = '''import sys
+request = b"".join(sys.stdin.buffer.readline() for _ in range(4))
+assert request.startswith(b"GET /v1/info HTTP/1.1\\r\\n")
+assert b"authorization" not in request.lower()
+assert b"Host: 127.0.0.1:17788\\r\\n" in request
+print("HTTP/1.1 401 Unauthorized\\r\\n\\r\\nprivate response", flush=True)
+'''
+        with self.guest_process(script) as run:
             self.assertEqual(ep.guest_http_status("127.0.0.1", 17788), "401")
-        request = run.call_args.kwargs["input"]
-        self.assertIn("GET /v1/info HTTP/1.1\r\n", request)
-        self.assertNotIn("authorization", request.lower())
-        self.assertNotIn(ep.TOKEN, request)
         self.assertEqual(run.call_args.args[0][-2:], ["127.0.0.1", "17788"])
 
+    def test_guest_stdin_stays_open_until_the_reply(self):
+        # Model adb reverse's teardown on EOF. subprocess.run(input=...) closes stdin,
+        # so the old preflight deterministically loses the reply from this same child.
+        script = '''import os, select, sys
+request = b""
+while not request.endswith(b"\\r\\n\\r\\n"):
+    request += os.read(0, 1)
+if not select.select([0], [], [], .1)[0]:
+    print("HTTP/1.1 401 Unauthorized\\r\\n\\r\\n", flush=True)
+'''
+        old = subprocess.run([sys.executable, "-c", script], input="GET /v1/info HTTP/1.1\r\n\r\n",
+                             capture_output=True, text=True, timeout=3)
+        self.assertEqual(old.stdout, "", "negative control: EOF destroys the reply")
+        with self.guest_process(script):
+            self.assertEqual(ep.guest_http_status("127.0.0.1", 17788), "401")
+
     def test_guest_probe_distinguishes_failures_without_response_disclosure(self):
-        for response, expected in [
-            (SimpleNamespace(returncode=0, stdout="not HTTP: private response", stderr=""), "no HTTP response"),
-            (SimpleNamespace(returncode=1, stdout="", stderr="private error"), "exit 1"),
-            (SimpleNamespace(returncode=0, stdout="HTTP/1.0 503 Unavailable\r\n\r\n", stderr=""), "503"),
+        for script, expected in [
+            ('print("not HTTP: private response")', "no HTTP response"),
+            ('import sys; print("private error", file=sys.stderr); sys.exit(1)', "exit 1"),
+            ('print("HTTP/1.0 503 Unavailable\\r\\n\\r\\n")', "503"),
         ]:
-            with self.subTest(expected=expected), patch.object(ep.subprocess, "run", return_value=response):
+            with self.subTest(expected=expected), self.guest_process(script):
                 self.assertEqual(ep.guest_http_status("127.0.0.1", 17788), expected)
-        with patch.object(ep.subprocess, "run", side_effect=subprocess.TimeoutExpired("adb", 10)):
+        with self.guest_process('import time; time.sleep(30)'), \
+                patch.object(ep.time, "monotonic", side_effect=[0, 11]):
             self.assertEqual(ep.guest_http_status("127.0.0.1", 17788), "timeout")
 
     def test_explicit_transport_requires_401_even_if_host_alias_fails(self):
