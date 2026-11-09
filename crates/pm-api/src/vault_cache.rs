@@ -221,6 +221,11 @@ fn lineage_key(service: &str) -> String {
 /// A source signed in interactively (not a refresh): its sign-in gets a new id, so the vault can
 /// tell it from a refresh of the old one.
 pub fn new_sign_in(lib: &Library, service: &str) {
+    let _ = lib.set_setting(&lineage_key(service), &new_lineage(service));
+}
+
+/// Generate a lineage separately when its setting belongs to an atomic account update.
+pub(crate) fn new_lineage(service: &str) -> String {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t = std::time::SystemTime::now()
@@ -228,7 +233,7 @@ pub fn new_sign_in(lib: &Library, service: &str) {
         .map_or(0, |d| d.as_nanos());
     let id = blake3::hash(format!("{t}.{n}.{}.{service}", std::process::id()).as_bytes()).to_hex();
     let at = pm_library::db::now_unix().max(0);
-    let _ = lib.set_setting(&lineage_key(service), &format!("{at}-{}", &id.as_str()[..16]));
+    format!("{at}-{}", &id.as_str()[..16])
 }
 
 /// When a sign-in id was made (Unix seconds; 0 for an id made for a sign-in that was already

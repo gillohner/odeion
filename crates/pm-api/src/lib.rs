@@ -25132,6 +25132,84 @@ exec sleep 300
         }
     }
 
+    /// Failed account lifecycle writes must leave every related setting unchanged and an
+    /// already captured, unpolled counted play deliverable under the still-current account.
+    #[tokio::test]
+    async fn failed_listenbrainz_account_changes_preserve_unpolled_plays() {
+        for generation in [None, Some("generation-A")] {
+            for (disconnect, key) in [
+                (false, "listenbrainz.account"),
+                (false, "vault.lineage.listenbrainz"),
+                (true, "listenbrainz.account"),
+                (true, "listenbrainz.pending"),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let s = state(dir.path(), None).await;
+                let (gate, got, _) = gated_listenbrainz(&s).await;
+                gate.add_permits(10);
+                {
+                    let lib = s.library.lock().unwrap();
+                    if let Some(g) = generation {
+                        lib.set_setting("listenbrainz.send_generation", g).unwrap();
+                    }
+                    lib.set_setting("vault.lineage.listenbrainz", "1-original")
+                        .unwrap();
+                    crate::send_queue::enqueue(&lib, "listenbrainz.pending", vec![a_listen(8)], 1000)
+                        .unwrap();
+                }
+                let snapshot = || {
+                    let lib = s.library.lock().unwrap();
+                    [
+                        "listenbrainz.account",
+                        "listenbrainz.send_generation",
+                        "listenbrainz.pending",
+                        "vault.lineage.listenbrainz",
+                    ]
+                    .map(|key| lib.get_setting(key).unwrap())
+                };
+                let before = snapshot();
+                let old = listenbrainz::send_play(s.clone(), vec![a_listen(1)]);
+                let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+                let (op, row) = if disconnect {
+                    ("DELETE", "OLD")
+                } else {
+                    ("INSERT", "NEW")
+                };
+                db.execute_batch(&format!(
+                    "CREATE TRIGGER reject_account_change BEFORE {op} ON settings WHEN {row}.key = '{key}' BEGIN SELECT RAISE(ABORT, 'fixture persistence failure'); END;"
+                )).unwrap();
+                let failed = if disconnect {
+                    listenbrainz::disconnect(axum::extract::State(s.clone()))
+                        .await
+                        .is_err()
+                } else {
+                    listenbrainz::connect(
+                        axum::extract::State(s.clone()),
+                        Json(ListenBrainzForm {
+                            token: Some("NEXT".into()),
+                            submit: Some(true),
+                        }),
+                    )
+                    .await
+                    .is_err()
+                };
+                assert!(failed, "the injected {key} failure must reach the caller");
+                assert_eq!(snapshot(), before, "all account state rolls back for {key}");
+                db.execute_batch("DROP TRIGGER reject_account_change").unwrap();
+                old.await;
+                let mut sent: Vec<u64> = got
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["listened_at"].as_u64().unwrap())
+                    .collect();
+                sent.sort();
+                assert_eq!(sent, [1, 8], "the original account can still deliver both plays");
+                assert!(waiting_listens(&s).is_empty());
+            }
+        }
+    }
+
     /// A new listen the library refuses to store (a failing write) is still sent with the rest,
     /// from memory: it isn't lost before any try.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

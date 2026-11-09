@@ -398,12 +398,17 @@ pub(crate) async fn connect(
                 acct.user = cur.user;
             }
         }
+        let account = serde_json::to_string(&acct).expect("serializes");
         if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
-            lib.set_setting(GENERATION_KEY, &uuid::Uuid::new_v4().to_string())?;
-        }
-        lib.set_setting(ACCOUNT_KEY, &serde_json::to_string(&acct).expect("serializes"))?;
-        if body.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
-            crate::vault_cache::new_sign_in(&lib, "listenbrainz");
+            let generation = uuid::Uuid::new_v4().to_string();
+            let lineage = crate::vault_cache::new_lineage("listenbrainz");
+            lib.update_settings_atomic(&[
+                (GENERATION_KEY, Some(&generation)),
+                (ACCOUNT_KEY, Some(&account)),
+                ("vault.lineage.listenbrainz", Some(&lineage)),
+            ])?;
+        } else {
+            lib.set_setting(ACCOUNT_KEY, &account)?;
         }
     }
     if acct.submit && !pending(&s).is_empty() {
@@ -416,9 +421,12 @@ pub(crate) async fn connect(
 pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<ListenBrainzView> {
     {
         let lib = s.library.lock().expect("library poisoned");
-        lib.set_setting(GENERATION_KEY, &uuid::Uuid::new_v4().to_string())?;
-        lib.delete_setting(ACCOUNT_KEY)?;
-        lib.delete_setting(PENDING_KEY)?;
+        let generation = uuid::Uuid::new_v4().to_string();
+        lib.update_settings_atomic(&[
+            (GENERATION_KEY, Some(&generation)),
+            (ACCOUNT_KEY, None),
+            (PENDING_KEY, None),
+        ])?;
     }
     Ok(Json(view(&s)))
 }

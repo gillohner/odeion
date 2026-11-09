@@ -3371,6 +3371,28 @@ impl Library {
         Ok(())
     }
 
+    /// Apply related setting writes/deletions together. Any error rolls back this group,
+    /// including when the connection already belongs to a larger batch.
+    pub fn update_settings_atomic(&self, changes: &[(&str, Option<&str>)]) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.savepoint()?;
+        for (key, value) in changes {
+            match value {
+                Some(value) => {
+                    tx.execute(
+                        "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        params![key, value],
+                    )?;
+                }
+                None => {
+                    tx.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ---- content hashes (files on the homeserver) ----
 
     /// Library files present on disk whose size is one of `sizes`: (path, size, mtime).
