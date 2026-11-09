@@ -565,6 +565,43 @@ async fn a_backup_leaves_out_the_published_token_mark() {
     );
 }
 
+/// The note of sign-ins found in saved queues at a start whose cleaning didn't finish
+/// (`accounts.queue_cleanup_pending`, hashes, the API token's among them) is this node's own: never
+/// in a backup, plain or locked, and a restore keeps the node's own note.
+#[tokio::test]
+async fn a_backup_leaves_out_the_pending_queue_cleanup_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = node(dir.path(), "a", None);
+    let note_hash = ["fixture", "hash", "of", "a", "token"].join("-");
+    let note = serde_json::json!([note_hash]).to_string();
+    a.library
+        .lock()
+        .unwrap()
+        .set_setting("accounts.queue_cleanup_pending", &note)
+        .unwrap();
+    for pass in [None, Some("fixture-passphrase")] {
+        let (bytes, _) = pm_api::backup::make(&a, pass).unwrap();
+        let db = pm_api::backup::parse(&bytes).unwrap().database;
+        assert!(
+            !String::from_utf8_lossy(&db).contains(&note_hash),
+            "the note is in the backup's library ({pass:?})"
+        );
+    }
+    // Restored on another node: that node's own note (none) stays
+    let (plain, _) = pm_api::backup::make(&a, None).unwrap();
+    let b = node(dir.path(), "b", None);
+    let (st, r) = restore(&router(b.clone()), &plain, None).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        b.library
+            .lock()
+            .unwrap()
+            .get_setting("accounts.queue_cleanup_pending")
+            .unwrap(),
+        None
+    );
+}
+
 /// The library file inside a backup (the zip's `library.db`).
 fn library_db_of(backup: &[u8]) -> Vec<u8> {
     use std::io::Read;
