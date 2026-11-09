@@ -169,12 +169,27 @@ pub(crate) async fn roster_for_restore(s: &NodeState) -> tokio::sync::MutexGuard
 
 /// Installed under the roster lock, before its revoked state is visible. The removal task owns
 /// this until all cleanup finishes; dropping the HTTP request does not drop the task.
-struct Removing {
-    state: Arc<NodeState>,
+struct Removing<'a> {
+    state: &'a NodeState,
     key: String,
 }
 
-impl Drop for Removing {
+impl<'a> Removing<'a> {
+    /// The caller holds membership, then roster.
+    fn new(state: &'a NodeState, key: &str) -> Self {
+        state
+            .removing_people
+            .lock()
+            .expect("removing people")
+            .insert(key.to_string());
+        Self {
+            state,
+            key: key.to_string(),
+        }
+    }
+}
+
+impl Drop for Removing<'_> {
     fn drop(&mut self) {
         self.state
             .removing_people
@@ -184,11 +199,63 @@ impl Drop for Removing {
     }
 }
 
+/// Revocations invalidate enabling requests that started earlier, including ones still waiting
+/// for homeserver calls or cleanup. The serial is node-local intent ordering, not wall time.
+#[derive(Default)]
+pub(crate) struct AccessRevisions {
+    serial: u64,
+    restored: u64,
+    revoked: std::collections::HashMap<String, u64>,
+}
+
+fn access_started(s: &NodeState) -> u64 {
+    s.people_access.lock().expect("people access").serial
+}
+
+fn access_current(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
+    let revisions = s.people_access.lock().expect("people access");
+    if revisions.restored > started || revisions.revoked.get(key).is_some_and(|r| *r > started) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "music access changed while this request waited: try again",
+        ));
+    }
+    Ok(())
+}
+
+/// Called under the roster lock so checking an enable and applying a revocation are atomic.
+fn revoke_access(s: &NodeState, key: &str) {
+    let mut revisions = s.people_access.lock().expect("people access");
+    revisions.serial = revisions
+        .serial
+        .checked_add(1)
+        .expect("access revision exhausted");
+    let serial = revisions.serial;
+    revisions.revoked.insert(key.to_string(), serial);
+}
+
+/// A restore replaces the roster's access intent too. Called with the restore roster guard.
+pub(crate) fn restored_access(s: &NodeState) {
+    let mut revisions = s.people_access.lock().expect("people access");
+    revisions.serial = revisions
+        .serial
+        .checked_add(1)
+        .expect("access revision exhausted");
+    revisions.restored = revisions.serial;
+}
+
 /// A failed removal must be finished before a new membership can reuse this key. Music off
 /// alone keeps the person's data; Remove leaves no person, or a homeserver-only person.
-async fn finish_previous_removal(s: &NodeState, key: &str) -> Result<(), ApiError> {
-    let removed = !load(s).people.iter().any(|p| p.key == key && p.access.music());
-    if removed && crate::personal::leftover(s, key) {
+async fn finish_previous_removal(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
+    // Decide and register under roster, just like initial Remove. If restore won that lock,
+    // re-evaluate against its roster before touching any newly restored data.
+    let (cleanup, _) = update(s, |r| {
+        access_current(s, key, started)?;
+        let removed = !r.people.iter().any(|p| p.key == key && p.access.music());
+        Ok((removed && crate::personal::leftover(s, key)).then(|| Removing::new(s, key)))
+    })
+    .await?;
+    if let Some(_removing) = cleanup {
         crate::accounts::forget_person(s, key).await?;
     }
     Ok(())
@@ -245,6 +312,7 @@ async fn used_tokens(s: &NodeState) -> Result<Vec<(String, String)>, ApiError> {
 /// Turns used invites into people (once). The homeserver is asked first; the people it names are
 /// then added to the roster as it is by then.
 async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
+    let started = access_started(s);
     let r = load(s);
     if r.invites.iter().all(|i| i.token.is_none()) || s.bundled_homeserver().is_none() {
         return Ok(r);
@@ -260,8 +328,9 @@ async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
             .iter()
             .any(|i| i.token.as_deref() == Some(pair.0.as_str()))
         {
-            finish_previous_removal(s, &pair.1).await?;
+            finish_previous_removal(s, &pair.1, started).await?;
             update(s, |r| {
+                access_current(s, &pair.1, started)?;
                 add_used(r, std::slice::from_ref(pair));
                 Ok(())
             })
@@ -451,10 +520,12 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
     let name = clean_name(b.name);
     if !b.access.on_homeserver() {
         let key = valid_key(b.key.as_deref().unwrap_or(""))?;
+        let started = access_started(&s);
         let lock = crate::personal::membership_lock(&key);
         let _membership = lock.lock().await;
-        finish_previous_removal(&s, &key).await?;
+        finish_previous_removal(&s, &key, started).await?;
         update(&s, |r| {
+            access_current(&s, &key, started)?;
             if let Some(p) = r.people.iter_mut().find(|p| p.key == key) {
                 p.music_enabled = true;
                 if p.access == Access::Homeserver {
@@ -552,6 +623,7 @@ pub(crate) async fn change(
     Json(b): Json<PersonChange>,
 ) -> ApiResult<Person> {
     let key = valid_key(&key)?;
+    let started = access_started(&s);
     // An already listed person's revocation needn't wait for a homeserver invite lookup.
     let mut r = load(&s);
     if !r.people.iter().any(|p| p.key == key) {
@@ -595,7 +667,7 @@ pub(crate) async fn change(
     let lock = crate::personal::membership_lock(&key);
     let _membership = if b.music == Some(true) {
         let guard = lock.lock().await;
-        finish_previous_removal(&s, &key).await?;
+        finish_previous_removal(&s, &key, started).await?;
         Some(guard)
     } else {
         None
@@ -609,6 +681,11 @@ pub(crate) async fn change(
             p.homeserver_enabled = on;
         }
         if let Some(m) = b.music {
+            if m {
+                access_current(&s, &key, started)?;
+            } else {
+                revoke_access(&s, &key);
+            }
             p.music_enabled = m;
             if m && p.access == Access::Homeserver {
                 p.access = Access::HomeserverMusic;
@@ -666,14 +743,8 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
         } else if !crate::personal::leftover(&s, &key) {
             return Err(ApiError::not_found("no such person"));
         }
-        s.removing_people
-            .lock()
-            .expect("removing people")
-            .insert(key.clone());
-        Ok(Removing {
-            state: s.clone(),
-            key: key.clone(),
-        })
+        revoke_access(&s, &key);
+        Ok(Removing::new(&s, &key))
     })
     .await?;
     // Access is already revoked by the roster, even if the token write fails. Cleanup retries

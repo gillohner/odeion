@@ -210,6 +210,7 @@ pub struct NodeState {
     /// Removals whose roster change has landed but whose cleanup is still running. Restore
     /// waits for these without holding the roster lock, so it cannot re-add someone midway.
     pub(crate) removing_people: Mutex<std::collections::HashSet<String>>,
+    pub(crate) people_access: Mutex<crate::people::AccessRevisions>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -489,6 +490,7 @@ impl NodeState {
             sleep: Mutex::new(HashMap::new()),
             roster: tokio::sync::Mutex::new(()),
             removing_people: Mutex::new(Default::default()),
+            people_access: Mutex::new(Default::default()),
             discover: Mutex::new(None),
             endpoint_keys: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
