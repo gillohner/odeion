@@ -162,6 +162,7 @@ pub struct Zone {
     /// A set and its read-back, or a poll's read, one at a time (the device's I/O): a poll that
     /// started before a set can't publish after it.
     volume_io: Arc<tokio::sync::Mutex<()>>,
+    unmute_safety: crate::sink::UnmuteSafety,
     /// The level last published, changed only together with the command that publishes it (the
     /// engine's state can lag the commands still queued). Never held across an await.
     volume_published: Arc<std::sync::Mutex<Published>>,
@@ -259,6 +260,7 @@ impl Zone {
             events,
             crossfade,
             volume_io: Default::default(),
+            unmute_safety: Default::default(),
             volume_published: Default::default(),
             volume_limit: Default::default(),
         }
@@ -499,6 +501,11 @@ impl Zone {
         }
         let percent_for = |db: f32| self.output.percent_for_db(db);
         let (mut next, _) = self.set_and_read(v).await?;
+        // A successful absolute group write establishes every member's level. Mute changes
+        // and aggregate readback say nothing about a previously unreadable member.
+        if matches!(v, Volume::Db(_) | Volume::Percent(_)) {
+            self.unmute_safety.clear();
+        }
         if let (Volume::Up, Some(max)) = (v, limit) {
             // A step the device took past the limit
             if let Some(back) = next.and_then(|n| back_to_limit(n.level, max, percent_for)) {
@@ -532,7 +539,10 @@ impl Zone {
         let chooses = !self.output.unmute_restores_level();
         let last = || self.published().level.map(|l| l.level);
         let last: &(dyn Fn() -> Option<pm_model::VolumeLevel> + Send + Sync) = &last;
-        let r = self.output.unmute_held(held, max, Some(last), true).await;
+        let r = self
+            .output
+            .unmute_held(held, max, Some(last), true, &self.unmute_safety)
+            .await;
         if !r.any {
             // Nothing came back: the zone stays as it was shown
             return Err(r

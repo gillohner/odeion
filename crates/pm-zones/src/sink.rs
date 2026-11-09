@@ -543,18 +543,48 @@ impl Unmuted {
 /// replaces the one the unmute began with).
 pub type LastLevel<'a> = Option<&'a (dyn Fn() -> Option<pm_model::VolumeLevel> + Send + Sync)>;
 
+/// Members whose level has not yet been established safe after an unmute refusal.
+/// This belongs to the zone, independently of its aggregate displayed level.
+#[derive(Default)]
+pub struct UnmuteSafety(std::sync::Mutex<std::collections::HashSet<OutputId>>);
+
+impl UnmuteSafety {
+    fn unresolved(&self, id: &OutputId) -> bool {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+    }
+
+    fn record(&self, id: OutputId, unsafe_level: bool) {
+        let mut members = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if unsafe_level {
+            members.insert(id);
+        } else {
+            members.remove(&id);
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
 /// [`Output::unmute_held`] for each of a group's `players` in turn (a node group's members, or the
 /// players of a native Sonos, HEOS or BluOS group), each by its own level: none is given the
 /// group's (a player may have been turned down on its own); `last`, the group's, only tells
 /// whether one that can't report may be above the limit.
-pub async fn unmute_each(players: &[&dyn Output], level: Volume, max: f32, last: LastLevel<'_>) -> Unmuted {
+pub async fn unmute_each(
+    players: &[&dyn Output],
+    level: Volume,
+    max: f32,
+    last: LastLevel<'_>,
+    safety: &UnmuteSafety,
+) -> Unmuted {
     let mut out = Unmuted {
         any: false,
         error: None,
         held: true,
     };
     for p in players {
-        out = out.and(p.unmute_held(level, max, last, false).await);
+        out = out.and(p.unmute_held(level, max, last, false, safety).await);
     }
     out
 }
@@ -591,12 +621,20 @@ pub trait Output: Send + Sync {
     /// the unmute, whether or not the device said yes (a native group may have unmuted a player
     /// before another refused), it is brought down again when its reading, else (`sole`) `last`
     /// asked for now, is above the limit.
-    async fn unmute_held(&self, level: Volume, max: f32, last: LastLevel<'_>, sole: bool) -> Unmuted {
+    async fn unmute_held(
+        &self,
+        level: Volume,
+        max: f32,
+        last: LastLevel<'_>,
+        sole: bool,
+        safety: &UnmuteSafety,
+    ) -> Unmuted {
         let back = |l| crate::zone::back_to_limit(l, max, |db| self.percent_for_db(db));
         if !self.unmute_restores_level() {
             if let Err(e) = self.set_volume(level).await {
                 return Unmuted::nothing(e);
             }
+            safety.record(self.id(), false);
             return match self.set_volume(Volume::Mute(false)).await {
                 Ok(()) => Unmuted {
                     any: true,
@@ -616,11 +654,16 @@ pub trait Output: Send + Sync {
             Ok(Some(v)) => {
                 if let Some(b) = back(v.level) {
                     if let Err(e) = self.set_volume(b).await {
+                        safety.record(self.id(), true);
                         return Unmuted::nothing(e);
                     }
                 }
+                safety.record(self.id(), false);
             }
-            _ if !sole && last.and_then(|f| f()).and_then(back).is_some() => {
+            _ if !sole
+                && (safety.unresolved(&self.id()) || last.and_then(|f| f()).and_then(back).is_some()) =>
+            {
+                safety.record(self.id(), true);
                 return Unmuted::nothing(SinkError::Device(format!(
                     "{}: its level can't be read, so it stays muted under the volume limit",
                     self.name()
@@ -642,6 +685,9 @@ pub trait Output: Send + Sync {
             Some(b) => self.set_volume(b).await.err(),
             None => None,
         };
+        if now.is_some() {
+            safety.record(self.id(), fix.is_some());
+        }
         Unmuted {
             any,
             held: fix.is_none(),

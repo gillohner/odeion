@@ -2171,7 +2171,7 @@ impl ChoosesOnUnmute {
 #[async_trait::async_trait]
 impl Output for ChoosesOnUnmute {
     fn id(&self) -> OutputId {
-        self.inner.id()
+        OutputId::new("chooses", "1")
     }
     fn name(&self) -> String {
         self.inner.name()
@@ -2593,6 +2593,16 @@ async fn a_member_that_cant_report_stays_muted_when_the_limit_came_down_below_th
         VolumeLevel::Db(-20.0)
     );
     assert_eq!(zone.state().volume.map(|v| v.muted), Some(false));
+    // A peer's capped publication must not clear this member's unresolved refusal, either
+    // on a direct retry or after another mute. No safe read or level write has happened.
+    for mute_first in [false, true] {
+        if mute_first {
+            zone.set_volume(Volume::Mute(true)).await.unwrap();
+        }
+        assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+        let k = keeps.inner.volume().await.unwrap().unwrap();
+        assert_eq!((k.level, k.muted), (VolumeLevel::Db(-10.0), true));
+    }
     // Under the limit it is unmuted as before
     zone.set_volume(Volume::Db(-30.0)).await.unwrap();
     zone.set_volume(Volume::Mute(true)).await.unwrap();

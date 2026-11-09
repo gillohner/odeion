@@ -333,9 +333,10 @@ impl Output for GroupOutput {
         max: f32,
         last: crate::sink::LastLevel<'_>,
         _sole: bool,
+        safety: &crate::sink::UnmuteSafety,
     ) -> crate::sink::Unmuted {
         let members: Vec<&dyn Output> = self.members.iter().map(|m| m.as_ref() as &dyn Output).collect();
-        crate::sink::unmute_each(&members, level, max, last).await
+        crate::sink::unmute_each(&members, level, max, last, safety).await
     }
 
     async fn standby(&self, on: bool) -> Result<(), SinkError> {

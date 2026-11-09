@@ -244,10 +244,11 @@ impl Output for HeosGroup {
         max: f32,
         last: pm_zones::LastLevel<'_>,
         _sole: bool,
+        safety: &pm_zones::UnmuteSafety,
     ) -> pm_zones::Unmuted {
         let mut players: Vec<&dyn Output> = vec![self.lead.as_ref() as &dyn Output];
         players.extend(self.members.iter().map(|m| m.as_ref() as &dyn Output));
-        pm_zones::unmute_each(&players, level, max, last).await
+        pm_zones::unmute_each(&players, level, max, last, safety).await
     }
 }
 

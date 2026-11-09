@@ -34,7 +34,7 @@ pub use sink::{
     DsdKind, MemberStatus, Output, OutputDevice, OutputId, OutputInfo, PreferredMode, SinkError, SyncClass,
     TrackMeta, Unmuted, UsbIds, GONE,
 };
-pub use sink::{caps_for_source, unmute_each, DeviceFormat, LastLevel};
+pub use sink::{caps_for_source, unmute_each, DeviceFormat, LastLevel, UnmuteSafety};
 pub use source::{
     FrameSource, Processor, ReplayGain, SkipFrames, SourceError, SourceFactory, StreamInfo, WithReplayGain,
 };

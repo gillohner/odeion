@@ -283,31 +283,24 @@ impl Output for SnapcastOutput {
         Ok(Box::new(opened))
     }
 
-    /// The group's level: its first client's volume in `Server.GetStatus` (the node sets them
-    /// all alike).
+    /// Keep the first reported level, but the group is muted only when every client is.
     async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
         let server = self.server.clone();
-        let Some(first) = self.group.clients.first().map(|(id, _)| id.clone()) else {
-            return Ok(None);
-        };
+        let clients: Vec<String> = self.group.clients.iter().map(|(id, _)| id.clone()).collect();
         tokio::task::spawn_blocking(move || -> Result<Option<pm_model::ZoneVolume>, SnapError> {
             let mut c = Control::connect(&server)?;
-            let status = c.call("Server.GetStatus", Value::Null)?;
-            Ok(status
-                .pointer("/server/groups")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|g| g.get("clients").and_then(Value::as_array))
-                .flatten()
-                .find(|cl| cl.get("id").and_then(Value::as_str) == Some(first.as_str()))
-                .and_then(|cl| {
-                    let vol = cl.pointer("/config/volume")?;
-                    Some(pm_model::ZoneVolume {
-                        level: pm_model::VolumeLevel::Percent(vol.get("percent")?.as_u64()?.min(100) as u8),
-                        muted: vol.get("muted").and_then(Value::as_bool).unwrap_or(false),
-                    })
-                }))
+            let levels = client_volumes(&c.call("Server.GetStatus", Value::Null)?);
+            let first = clients.iter().find_map(|id| levels.get(id));
+            let audible = clients
+                .iter()
+                .any(|id| levels.get(id).is_some_and(|(_, muted)| !muted));
+            if !audible && clients.iter().any(|id| !levels.contains_key(id)) {
+                return Ok(None);
+            }
+            Ok(first.map(|(percent, _)| pm_model::ZoneVolume {
+                level: pm_model::VolumeLevel::Percent(*percent),
+                muted: !audible,
+            }))
         })
         .await
         .map_err(|_| SinkError::Device("snapcast volume read panicked".into()))?
@@ -322,6 +315,7 @@ impl Output for SnapcastOutput {
         max: f32,
         _last: pm_zones::LastLevel<'_>,
         _sole: bool,
+        _safety: &pm_zones::UnmuteSafety,
     ) -> pm_zones::Unmuted {
         let server = self.server.clone();
         let clients: Vec<String> = self.group.clients.iter().map(|(id, _)| id.clone()).collect();
@@ -619,6 +613,10 @@ mod tests {
     type Taken = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
 
     fn fake_server(status: Value) -> (String, Taken) {
+        fake_server_refusing(status, None)
+    }
+
+    fn fake_server_refusing(mut status: Value, refuses: Option<String>) -> (String, Taken) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let set = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -634,6 +632,21 @@ mod tests {
                         Some("Server.GetStatus") => status.clone(),
                         Some("Client.SetVolume") => {
                             let p = &req["params"];
+                            if p["id"].as_str() == refuses.as_deref() {
+                                let response = json!({"id": req["id"], "jsonrpc": "2.0",
+                                    "error": {"code": -1, "message": "fixture refusal"}});
+                                w.write_all(format!("{response}\r\n").as_bytes()).unwrap();
+                                continue;
+                            }
+                            for group in status["server"]["groups"].as_array_mut().unwrap() {
+                                for client in group["clients"].as_array_mut().unwrap() {
+                                    if client["id"] == p["id"] {
+                                        for (key, value) in p["volume"].as_object().unwrap() {
+                                            client["config"]["volume"][key] = value.clone();
+                                        }
+                                    }
+                                }
+                            }
                             seen.lock()
                                 .unwrap()
                                 .push((p["id"].as_str().unwrap().to_string(), p["volume"].clone()));
@@ -678,7 +691,15 @@ mod tests {
         let max = -30.0;
         let limit = out.percent_for_db(max);
         assert!(limit > 20 && limit < 80, "{limit}");
-        let r = out.unmute_held(Volume::Percent(limit), max, None, true).await;
+        let r = out
+            .unmute_held(
+                Volume::Percent(limit),
+                max,
+                None,
+                true,
+                &pm_zones::UnmuteSafety::default(),
+            )
+            .await;
         assert!(r.any && r.held, "{r:?}");
         assert!(r.error.is_some(), "the unreported client is said: {r:?}");
         let set = set.lock().unwrap().clone();
@@ -689,6 +710,56 @@ mod tests {
                 ("quiet".to_string(), json!({"muted": false})),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_later_audible_client_keeps_the_zone_shown_unmuted() {
+        struct NoAudio;
+        impl pm_zones::SourceFactory for NoAudio {
+            fn open(
+                &self,
+                _: &pm_zones::QueueItem,
+            ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
+                panic!("volume test never opens audio")
+            }
+            fn plan(
+                &self,
+                _: &dyn pm_zones::FrameSource,
+                _: &pm_model::OutputCaps,
+                _: &OutputId,
+            ) -> Result<Box<dyn pm_zones::Processor>, pm_zones::SourceError> {
+                panic!("volume test never plans audio")
+            }
+        }
+        let status = json!({"server": {"groups": [{"id": "g", "clients": [
+            {"id": "first", "config": {"volume": {"percent": 20, "muted": true}}},
+            {"id": "later", "config": {"volume": {"percent": 20, "muted": true}}}
+        ]}]}});
+        let (addr, taken) = fake_server_refusing(status, Some("first".into()));
+        let out = std::sync::Arc::new(SnapcastOutput::new(
+            &addr,
+            Group {
+                id: "g".into(),
+                name: String::new(),
+                stream_id: "default".into(),
+                clients: vec![("first".into(), "First".into()), ("later".into(), "Later".into())],
+            },
+        ));
+        let zones = pm_zones::Zones::new(std::sync::Arc::new(NoAudio));
+        zones.set_volume_limit(Some(std::sync::Arc::new(|_| Some(-30.0))));
+        let zone = zones.create("Pair", out.clone());
+        zone.announce_volume(pm_model::ZoneVolume {
+            level: pm_model::VolumeLevel::Percent(20),
+            muted: true,
+        });
+        assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+        zone.wait_acked().await;
+        assert_eq!(
+            *taken.lock().unwrap(),
+            vec![("later".to_string(), json!({"muted": false}))]
+        );
+        assert!(!out.volume().await.unwrap().unwrap().muted);
+        assert!(!zone.state().volume.unwrap().muted);
     }
 
     #[test]
