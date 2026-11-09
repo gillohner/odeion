@@ -323,6 +323,24 @@ impl Output for GroupOutput {
         self.members.iter().all(|m| m.unmute_restores_level())
     }
 
+    /// Per member: one that chooses its level on unmuting gets `level` first, one that restores
+    /// its own is only unmuted (a mixed group never raises the member that kept a lower level).
+    /// Every member is tried; the group came back when any member did.
+    async fn unmute_held(&self, level: Volume) -> crate::sink::Unmuted {
+        let mut out = crate::sink::Unmuted {
+            any: false,
+            error: None,
+        };
+        for m in &self.members {
+            let r = m.unmute_held(level).await;
+            out.any |= r.any;
+            if out.error.is_none() {
+                out.error = r.error;
+            }
+        }
+        out
+    }
+
     async fn standby(&self, on: bool) -> Result<(), SinkError> {
         if !self.caps.standby {
             return Err(SinkError::NoStandby(self.id()));

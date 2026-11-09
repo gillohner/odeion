@@ -504,6 +504,14 @@ pub fn amplitude_percent(db: f32) -> u8 {
 }
 
 /// One place audio can go (handoff §6.4).
+/// What [`Output::unmute_held`] did: whether any device came back (one, or a member of a group),
+/// and the first refusal.
+#[derive(Debug)]
+pub struct Unmuted {
+    pub any: bool,
+    pub error: Option<SinkError>,
+}
+
 #[async_trait]
 pub trait Output: Send + Sync {
     fn id(&self) -> OutputId;
@@ -515,6 +523,30 @@ pub trait Output: Send + Sync {
     /// level to its limit itself.
     fn unmute_restores_level(&self) -> bool {
         true
+    }
+
+    /// Unmute, with `level` (the zone's level, held to its limit) for a device that chooses its
+    /// level on unmuting: it gets `level` first, so it never comes back above it; a device that
+    /// restores its own level is only unmuted, never raised. A group does this per member.
+    async fn unmute_held(&self, level: Volume) -> Unmuted {
+        let r = if self.unmute_restores_level() {
+            self.set_volume(Volume::Mute(false)).await
+        } else {
+            match self.set_volume(level).await {
+                Ok(()) => self.set_volume(Volume::Mute(false)).await,
+                Err(e) => Err(e),
+            }
+        };
+        match r {
+            Ok(()) => Unmuted {
+                any: true,
+                error: None,
+            },
+            Err(e) => Unmuted {
+                any: false,
+                error: Some(e),
+            },
+        }
     }
 
     /// The device's maker and model in words, when the protocol tells (UPnP, AirPlay, Cast,

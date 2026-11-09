@@ -2271,3 +2271,84 @@ async fn a_groups_unmute_is_capped_when_a_member_refuses_it() {
         "the first member, back at full, is held to the level last published"
     );
 }
+
+/// A group of a device that chooses its level on unmuting and one that restores its own: the
+/// unmute gives the first the zone's level held to the limit, and only unmutes the second, which
+/// keeps the lower level it had through the mute (it is never raised to the group's level).
+#[tokio::test]
+async fn a_mixed_groups_unmute_never_raises_the_member_that_kept_a_lower_level() {
+    use pm_model::VolumeLevel;
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    let chooses = Arc::new(ChoosesOnUnmute::new());
+    let keeps = Arc::new(Mute {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let members: Vec<Arc<dyn Output>> = vec![chooses.clone(), keeps.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    // The second member is turned down on its own (its own remote, say), then the pair is muted
+    keeps.inner.set_volume(Volume::Db(-45.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    zone.set_volume(Volume::Mute(false)).await.unwrap();
+    zone.wait_acked().await;
+    let k = keeps.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (k.level, k.muted),
+        (VolumeLevel::Db(-45.0), false),
+        "the member that kept a lower level stays there"
+    );
+    let c = chooses.inner.volume().await.unwrap().unwrap();
+    assert_eq!((c.level, c.muted), (VolumeLevel::Db(-30.0), false));
+}
+
+/// An unmute that went nowhere (a single device that refuses it, or every member of a group)
+/// leaves the zone shown muted, and says why.
+#[tokio::test]
+async fn an_unmute_that_went_nowhere_leaves_the_zone_muted() {
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|_: &OutputId| Some(-20.0))));
+    let refuser = || {
+        let mut o = ChoosesOnUnmute::new();
+        o.refuse_unmute = true;
+        Arc::new(o)
+    };
+    // One device
+    let alone = refuser();
+    let zone = zones.create("Receiver", alone.clone());
+    zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    zone.set_volume(Volume::Mute(true)).await.unwrap();
+    assert!(zone.set_volume(Volume::Mute(false)).await.is_err());
+    zone.wait_acked().await;
+    assert_eq!(
+        zone.state().volume.map(|v| v.muted),
+        Some(true),
+        "still shown muted"
+    );
+    // Every member of a group
+    let members: Vec<Arc<dyn Output>> = vec![refuser(), refuser()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let pair = zones.create("Pair", group);
+    pair.set_volume(Volume::Db(-30.0)).await.unwrap();
+    pair.set_volume(Volume::Mute(true)).await.unwrap();
+    assert!(pair.set_volume(Volume::Mute(false)).await.is_err());
+    pair.wait_acked().await;
+    assert_eq!(
+        pair.state().volume.map(|v| v.muted),
+        Some(true),
+        "still shown muted"
+    );
+}
