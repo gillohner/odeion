@@ -1510,6 +1510,9 @@
       }
       if (st.url !== src) return;
       if (st.refused) { live = false; want = false; fire('nativerefused', st.refused); return; }
+      // A refused resume can stay paused (for example, its DAC went away). This is a
+      // completed play request, not a stream failure to retry on another output.
+      if (st.transport === 'paused' && st.error && !st.broke) { want = false; fire('pause'); return; }
       // A break mid-song: the page's mid-song retry, whatever the page heard before it (at its
       // very start: the song's one retry)
       if (st.broke && !(was && was.url === src && was.broke) && !st.taken) { fire('pause'); if (st.position_ms > 0) fire('error'); else fire('nativefailed', { why: st.error || 'the stream broke off', at: 0 }); return; }
@@ -1568,7 +1571,7 @@
           // An open under way (a load, or a play that reopens) carries the outcome: this press
           // only says play
           if (opening) { want = true; call('native_play').catch(() => {}); return; }
-          want = true; const tok = ++seq; const pos = this.currentTime;
+          want = true; const tok = ++seq; const pos = this.currentTime; const prior = st;
           // (a play can reopen the song: after the node took the output, a break, the end)
           opening = true;
           try { await call('native_play'); } catch (e) {
@@ -1582,6 +1585,7 @@
           if (opening) {
             opening = false;
             if (src && st && st.url === src && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
+            else if (st !== prior && mine() && st.transport === 'paused' && st.error && !st.broke) { want = false; fire('pause'); }
             // (the output didn't open: said, as for a failed start)
             else if (src && st && st.url === src && st.transport === 'stopped' && st.error && !st.broke) { want = false; live = false; fire('pause'); fire('nativefailed', { why: st.error, at: pos }); return; }
           }
@@ -1590,7 +1594,7 @@
         }
         // Its first events may come before the answer. Only the latest play() changes anything
         // once its answer comes (play pressed twice while a song opens)
-        want = true; live = true; fresh = true; const u = src; const tok = ++seq;
+        want = true; live = true; fresh = true; const u = src; const tok = ++seq; const prior = st;
         // A seek the page makes as the song loads (moving here from a zone, a restore) comes
         // first: the song opens there
         await new Promise((r) => setTimeout(r, 0));
@@ -1611,6 +1615,7 @@
         opening = false;
         // Its start, as the app says it now (the updates waited while it opened)
         if (src === u && st && st.url === u && st.transport === 'playing' && !held) { fresh = false; want = false; done = false; fire('play'); fire('playing'); }
+        else if (st !== prior && mine() && st.transport === 'paused' && st.error && !st.broke) { want = false; fire('pause'); }
         else if (src === u && st && st.url === u && st.transport === 'stopped' && st.error && !st.broke) { want = false; live = false; fire('pause'); fire('nativefailed', { why: st.error, at: at }); return; }
         // Paused while it opened
         if (held && src === u) call('native_pause').catch(() => {});
@@ -3632,6 +3637,7 @@
     if (state.npPop && now - state.npPop < 300) $$('[data-npt="toggle"] .ic', overlay).forEach((ic) => { ic.style.animationDelay = `-${now - state.npPop}ms`; ic.classList.add('swap'); });
     // (the tick doesn't redraw again for this item)
     renderNowPlaying.lastItem = it; renderNowPlaying.lastTitle = np.stream_title;
+    renderNowPlaying.lastOutput = JSON.stringify(outputFacts(z));
     if (!one) {
       const tabs = $('.np-sheet-tabs', overlay); const on = tabs && $('.chip.on', tabs);
       if (tabs && on) {
@@ -3905,7 +3911,7 @@
     if (overlay.hidden) return;
     const z = currentZone(); const np = z && z.now_playing; const s = $('#npseek');
     if (!np || !s || s.dataset.dragging) return;
-    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
+    if (np.item.id !== (renderNowPlaying.lastItem || {}).id || np.stream_title !== renderNowPlaying.lastTitle || JSON.stringify(outputFacts(z)) !== renderNowPlaying.lastOutput) { renderNowPlaying.lastTitle = np.stream_title; renderNowPlaying(); }
     if ((z.transport || '') !== (overlay.dataset.transport || '')) {
       overlay.dataset.transport = z.transport || '';
       const playing = z.transport === 'playing';

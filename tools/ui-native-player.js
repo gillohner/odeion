@@ -163,6 +163,31 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
     check(!state.errors.length, `${at}: no page errors (${state.errors.join(' | ')})`);
     await run.context.close();
 
+    // A DAC-refused resume may be reported before or after the command reply. It stays paused
+    // with a Play button and never retries onto the speaker or the WebView.
+    for (const order of ['before', 'after']) {
+      const r = await open(browser, w, { nativePlayer: true, len: 60000 });
+      const p = r.page;
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(500);
+      await p.click('#toggle'); await sleep(200);
+      const loads = (await calls(p, 'native_load')).length;
+      await p.evaluate((order) => {
+        const invoke = window.__TAURI_INTERNALS__.invoke;
+        window.__TAURI_INTERNALS__.invoke = async (cmd, args) => {
+          if (cmd !== 'native_play') return invoke(cmd, args);
+          window.__calls.push([cmd, args || {}]);
+          const pause = () => { Object.assign(window.__app, { transport: 'paused', error: 'FiiO KA17 is no longer where this phone plays: paused', taken: false, broke: false }); window.__send(); };
+          if (order === 'before') pause(); else setTimeout(pause, 30);
+          return null;
+        };
+      }, order);
+      await p.click('#toggle'); await sleep(2200);
+      check((await now(p)).paused && await p.getAttribute('#toggle', 'aria-label') === 'Play', `${at}: refused resume ${order} reply leaves the page paused with Play`);
+      check(await p.evaluate(() => navigator.mediaSession.playbackState === 'paused' && /no longer where/.test(document.querySelector('#np').innerText)), `${at}: refused resume ${order} reply reports the reason and paused media state`);
+      check((await calls(p, 'native_load')).length === loads && await p.evaluate(() => window.__audioPlays.length === 0 && window.__app.transport === 'paused'), `${at}: refused resume ${order} reply never retries on another output`);
+      await r.context.close();
+    }
+
     // Review round 1: a busy node isn't a refusal; a restored position is where it opens; a pause
     // while it opens holds; repeat one goes on without opening the song again
     {
