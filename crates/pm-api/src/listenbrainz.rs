@@ -79,13 +79,47 @@ fn pending(s: &NodeState) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn set_pending(s: &NodeState, list: &[Value]) {
-    let lib = s.library.lock().expect("library poisoned");
+fn set_pending(lib: &pm_library::Library, list: &[Value]) {
     let _ = if list.is_empty() {
         lib.delete_setting(PENDING_KEY).map(|_| ())
     } else {
         lib.set_setting(PENDING_KEY, &Value::from(list.to_vec()).to_string())
     };
+}
+
+/// Every listen waiting to be sent, taken for one sender under the library's lock: two plays
+/// ending together never send the same ones.
+fn take_pending(s: &NodeState) -> Vec<Value> {
+    let lib = s.library.lock().expect("library poisoned");
+    let all: Vec<Value> = lib
+        .get_setting(PENDING_KEY)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    if !all.is_empty() {
+        let _ = lib.delete_setting(PENDING_KEY);
+    }
+    all
+}
+
+/// What a sender couldn't send goes back to wait, before whatever another sender left there
+/// meanwhile; the oldest go when there are more than [`PENDING_MAX`].
+fn give_back(s: &NodeState, left: Vec<Value>) {
+    if left.is_empty() {
+        return;
+    }
+    let lib = s.library.lock().expect("library poisoned");
+    let mut all = left;
+    all.extend(
+        lib.get_setting(PENDING_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<Vec<Value>>(&j).ok())
+            .unwrap_or_default(),
+    );
+    let skip = all.len().saturating_sub(PENDING_MAX);
+    set_pending(&lib, &all[skip..]);
 }
 
 async fn get_json(
@@ -273,9 +307,10 @@ pub(crate) fn track_ended(s: &Arc<NodeState>, zone: &pm_zones::ZoneId, item: &pm
     count_once(s, &key);
 }
 
-/// Send listens with any that are waiting; keep them all when ListenBrainz cannot take them.
-async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
-    let mut all = pending(s);
+/// Send listens with any that are waiting; what ListenBrainz cannot take goes back to wait. The
+/// waiting ones are taken for this sender alone, so two plays ending together send each once.
+pub(crate) async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
+    let mut all = take_pending(s);
     all.extend(new);
     let mut left: Vec<Value> = Vec::new();
     // ListenBrainz takes up to 1000 per import; listens are small
@@ -286,8 +321,7 @@ async fn send_listens(s: &NodeState, token: &str, new: Vec<Value>) {
             left.extend_from_slice(chunk);
         }
     }
-    let skip = left.len().saturating_sub(PENDING_MAX);
-    set_pending(s, &left[skip..]);
+    give_back(s, left);
 }
 
 fn view(s: &NodeState) -> ListenBrainzView {

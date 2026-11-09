@@ -24631,4 +24631,182 @@ exec sleep 300
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert_eq!(s.sources.volume_limit(&group), None);
     }
+
+    /// Two plays ending together, with listens waiting from before: each listen reaches
+    /// ListenBrainz once (the waiting ones are taken by one sender), and when ListenBrainz can't
+    /// take them, every one waits again, none twice, and goes once it is back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_listenbrainz_senders_with_a_backlog_send_each_listen_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let got: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *s.listenbrainz_base.write().unwrap() =
+            format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/1/submit-listens",
+            post({
+                let (got, refuse) = (got.clone(), refuse.clone());
+                move |Json(b): Json<serde_json::Value>| {
+                    let (got, refuse) = (got.clone(), refuse.clone());
+                    async move {
+                        // Slow enough that both senders are in flight at once
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if refuse.load(Ordering::SeqCst) {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        got.lock()
+                            .unwrap()
+                            .extend(b["payload"].as_array().unwrap().iter().cloned());
+                        StatusCode::OK
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let listen = |n: u64| serde_json::json!({"listened_at": n, "track_metadata": {"artist_name": "A", "track_name": format!("T{n}")}});
+        let waiting = serde_json::Value::from((1..=3).map(listen).collect::<Vec<_>>()).to_string();
+        let pending = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("listenbrainz.pending")
+                .unwrap()
+        };
+        let times = |list: &[serde_json::Value]| {
+            let mut t: Vec<u64> = list.iter().map(|l| l["listened_at"].as_u64().unwrap()).collect();
+            t.sort();
+            t
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            listenbrainz::send_listens(&s, "LBT", vec![listen(4)]),
+            listenbrainz::send_listens(&s, "LBT", vec![listen(5)])
+        );
+        assert_eq!(times(&got.lock().unwrap()), [1, 2, 3, 4, 5], "each listen once");
+        assert_eq!(pending(), None);
+        // Refused: everything waits again, nothing twice
+        refuse.store(true, Ordering::SeqCst);
+        got.lock().unwrap().clear();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            listenbrainz::send_listens(&s, "LBT", vec![listen(4)]),
+            listenbrainz::send_listens(&s, "LBT", vec![listen(5)])
+        );
+        let left: Vec<serde_json::Value> = serde_json::from_str(&pending().unwrap()).unwrap();
+        assert_eq!(times(&left), [1, 2, 3, 4, 5], "all wait, none twice");
+        // Once ListenBrainz is back, the next send takes them
+        refuse.store(false, Ordering::SeqCst);
+        listenbrainz::send_listens(&s, "LBT", Vec::new()).await;
+        assert_eq!(times(&got.lock().unwrap()), [1, 2, 3, 4, 5]);
+        assert_eq!(pending(), None);
+    }
+
+    /// The same for Last.fm: two senders with a backlog send each scrobble once; refused ones
+    /// all wait again, none twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_lastfm_senders_with_a_backlog_send_each_scrobble_once() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        const KEY: &str = "0123456789abcdef0123456789abcdef";
+        const SECRET: &str = "fedcba9876543210fedcba9876543210";
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let got: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let refuse = Arc::new(AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/",
+            post({
+                let (got, refuse) = (got.clone(), refuse.clone());
+                move |body: String| {
+                    let (got, refuse) = (got.clone(), refuse.clone());
+                    async move {
+                        let p: std::collections::HashMap<String, String> =
+                            url::form_urlencoded::parse(body.as_bytes())
+                                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                                .collect();
+                        assert_eq!(p.get("method").map(String::as_str), Some("track.scrobble"), "{p:?}");
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        if refuse.load(Ordering::SeqCst) {
+                            return Json(serde_json::json!({"error": 9, "message": "Invalid session key - Please re-authenticate"}));
+                        }
+                        let tracks: Vec<String> = p
+                            .iter()
+                            .filter(|(k, _)| k.starts_with("track["))
+                            .map(|(_, v)| v.clone())
+                            .collect();
+                        let n = tracks.len();
+                        got.lock().unwrap().extend(tracks);
+                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        lastfm::set_api_base(&format!("{base}/"));
+        lastfm::set_config_app(KEY, SECRET);
+        let session =
+            serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.session", &session)
+            .unwrap();
+        let scrobble =
+            |n: u64| serde_json::json!({"artist": "A", "track": format!("T{n}"), "timestamp": n.to_string()});
+        let waiting = serde_json::Value::from((1..=3).map(scrobble).collect::<Vec<_>>()).to_string();
+        let pending = || s.library.lock().unwrap().get_setting("lastfm.pending").unwrap();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            lastfm::send_scrobbles(&s, vec![scrobble(4)]),
+            lastfm::send_scrobbles(&s, vec![scrobble(5)])
+        );
+        assert_eq!(
+            sorted(got.lock().unwrap().clone()),
+            ["T1", "T2", "T3", "T4", "T5"],
+            "each once"
+        );
+        assert_eq!(pending(), None);
+        // Refused (the session is marked as broken): everything waits again, nothing twice
+        refuse.store(true, Ordering::SeqCst);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &waiting)
+            .unwrap();
+        tokio::join!(
+            lastfm::send_scrobbles(&s, vec![scrobble(4)]),
+            lastfm::send_scrobbles(&s, vec![scrobble(5)])
+        );
+        let left: Vec<serde_json::Value> = serde_json::from_str(&pending().unwrap()).unwrap();
+        let left: Vec<String> = left
+            .iter()
+            .map(|x| x["track"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            sorted(left),
+            ["T1", "T2", "T3", "T4", "T5"],
+            "all wait, none twice"
+        );
+    }
 }
