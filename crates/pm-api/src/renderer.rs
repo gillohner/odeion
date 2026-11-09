@@ -140,11 +140,13 @@ impl Host for ZoneRenderers {
                     .await
                     .map_err(|e| e.to_string())?;
                 // What the zone took (its limit applied, the device's own reading), once the
-                // engine published it; the level asked when the zone has no percent level
+                // engine published it, as the output's percent; the level asked when the zone
+                // has none
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(2), z.wait_acked()).await;
                 let took = match z.state().volume.map(|zv| zv.level) {
                     Some(pm_model::VolumeLevel::Percent(p)) => p,
-                    _ => v,
+                    Some(pm_model::VolumeLevel::Db(d)) => z.output().percent_for_db(d),
+                    None => v,
                 };
                 self.levels
                     .lock()

@@ -107,9 +107,21 @@ impl NodeSources {
     }
 
     /// Play `to` with `from`'s settings until [`Self::forget_dsp`], without saving them: a listen-
-    /// along group sounds like the zone it came from (presence.rs).
-    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId) {
-        let cfg = self.dsp_for(from);
+    /// along group sounds like the zone it came from (presence.rs). Its volume limit is the
+    /// strictest among `members` (the speakers it plays on, `from`'s included): every speaker
+    /// keeps its own limit in the group, and the software volume stays under it.
+    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId, members: &[OutputId]) {
+        let mut cfg = self.dsp_for(from);
+        for m in members.iter().chain(std::iter::once(from)) {
+            if let Some(limit) = self.dsp_for(m).max_volume_db {
+                cfg.max_volume_db = Some(cfg.max_volume_db.map_or(limit, |l: f32| l.min(limit)));
+            }
+        }
+        if let (Some(v), Some(max)) = (cfg.volume_db, cfg.max_volume_db) {
+            if v > max {
+                cfg.volume_db = Some(max);
+            }
+        }
         self.dsp.write().expect("dsp lock").insert(to.clone(), cfg);
     }
 

@@ -193,6 +193,10 @@ pub fn cap_volume(v: Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8
     }
 }
 
+/// One step up in percent, for an output that can't report its level (what the UPnP output
+/// steps by).
+const PERCENT_STEP: u8 = 3;
+
 /// The request that brings `level` back to `limit` when it is above it.
 fn back_to_limit(
     level: pm_model::VolumeLevel,
@@ -450,12 +454,39 @@ impl Zone {
     /// Every request is held to the zone's volume limit when the node set one
     /// ([`Zones::set_volume_limit`]): an absolute level above it becomes the limit before it
     /// reaches the output ([`cap_volume`]), and a step up that the device took past it is set
-    /// back to the limit at once. This is the one place every controller's request passes
-    /// (the pages, announcements, UPnP controllers, Subsonic clients).
+    /// back to the limit at once. On an output that can't report its level, a step up becomes
+    /// an absolute request instead (the level last published plus one step, at most the
+    /// limit), and is refused while no level is known. This is the one place every
+    /// controller's request passes (the pages, announcements, UPnP controllers, Subsonic
+    /// clients).
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let _io = self.volume_io.lock().await;
         let limit = self.volume_limit();
-        let v = cap_volume(v, limit, |db| self.output.percent_for_db(db));
+        let mut v = cap_volume(v, limit, |db| self.output.percent_for_db(db));
+        if let (Volume::Up, Some(max)) = (v, limit) {
+            // A device that can't say where it is can't be checked after the step: the step is
+            // made from the level the zone last published, held to the limit
+            if !matches!(self.output.volume().await, Ok(Some(_))) {
+                let Some(was) = self.published().level else {
+                    return Err(SinkError::Device(
+                        "the level isn't known, so a step can't be held to the zone's limit; set a level first".into(),
+                    ));
+                };
+                v = match was.level {
+                    pm_model::VolumeLevel::Db(d) => {
+                        let step = match self.output.caps().hw_volume {
+                            Some(pm_model::VolumeKind::Db { step, .. }) => step.max(0.5),
+                            _ => 1.0,
+                        };
+                        Volume::Db((d + step).min(max))
+                    }
+                    pm_model::VolumeLevel::Percent(p) => Volume::Percent(
+                        p.saturating_add(PERCENT_STEP)
+                            .min(self.output.percent_for_db(max)),
+                    ),
+                };
+            }
+        }
         let seen = self.published().announced;
         let mut next = self.set_and_read(v).await?;
         if let (Volume::Up, Some(max)) = (v, limit) {

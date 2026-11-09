@@ -1925,3 +1925,92 @@ async fn a_zones_volume_limit_holds_for_every_request() {
     set(&pc_zone, Volume::Percent(100)).await;
     assert_eq!(level(&pc_zone), Some((VolumeLevel::Percent(100), false)));
 }
+
+/// An output that takes levels but can't say where it is (ALSA, Cast, AirPlay, groups): its
+/// inner level is what a device would show.
+struct Mute {
+    inner: NullOutput,
+}
+
+#[async_trait::async_trait]
+impl Output for Mute {
+    fn id(&self) -> OutputId {
+        self.inner.id()
+    }
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn caps(&self) -> &OutputCaps {
+        self.inner.caps()
+    }
+    async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        self.inner.open(fmt).await
+    }
+    async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
+        self.inner.set_volume(v).await
+    }
+    async fn volume(&self) -> Result<Option<pm_model::ZoneVolume>, SinkError> {
+        Ok(None)
+    }
+}
+
+/// On an output that can't report its level, a step up with a limit set is made from the level
+/// the zone last published and held to the limit (the device can't be checked after the step);
+/// with no level known it is refused; without a limit it is the device's own step.
+#[tokio::test]
+async fn an_up_step_is_held_to_the_limit_on_an_output_that_cant_report_its_level() {
+    use pm_model::{VolumeKind, VolumeLevel};
+    let zones = Zones::new(Arc::new(Factory {
+        tracks: BTreeMap::new(),
+        gate: Arc::new(Gate::default()),
+        hang: Arc::new(Gate::default()),
+    }));
+    zones.set_volume_limit(Some(Arc::new(|o: &OutputId| match o.0.as_str() {
+        "null:db" => Some(-20.0),
+        "null:percent" => Some(-30.0),
+        _ => None,
+    })));
+    let db = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+    });
+    let pc = Arc::new(Mute {
+        inner: NullOutput::with_volume(VolumeKind::Percent),
+    });
+    let db_zone = zones.create("Amp", db.clone());
+    let pc_zone = zones.create("Speaker", pc.clone());
+    // What the device shows (its own level), which the zone can't ask for
+    let device = |o: &Arc<Mute>| {
+        let o = o.clone();
+        async move { o.inner.volume().await.unwrap().unwrap() }
+    };
+    // No level known yet: a step can't be held to the limit, so it is refused
+    assert!(db_zone.set_volume(Volume::Up).await.is_err());
+    // From -20.5 dB a step of 1 dB would land at -19.5: the device gets -20
+    db_zone.set_volume(Volume::Db(-20.5)).await.unwrap();
+    db_zone.set_volume(Volume::Up).await.unwrap();
+    db_zone.wait_acked().await;
+    assert_eq!(device(&db).await.level, VolumeLevel::Db(-20.0));
+    assert_eq!(
+        db_zone.state().volume.map(|v| v.level),
+        Some(VolumeLevel::Db(-20.0))
+    );
+    // Under the limit the step is a step
+    db_zone.set_volume(Volume::Db(-30.0)).await.unwrap();
+    db_zone.set_volume(Volume::Up).await.unwrap();
+    db_zone.wait_acked().await;
+    assert_eq!(device(&db).await.level, VolumeLevel::Db(-29.0));
+    // Percent: 49 + 3 would pass 50 (-30 dB on a linear output)
+    pc_zone.set_volume(Volume::Percent(49)).await.unwrap();
+    pc_zone.set_volume(Volume::Up).await.unwrap();
+    pc_zone.wait_acked().await;
+    assert_eq!(device(&pc).await.level, VolumeLevel::Percent(50));
+    // Without a limit the device steps by itself
+    zones.set_volume_limit(None);
+    pc_zone.set_volume(Volume::Up).await.unwrap();
+    pc_zone.wait_acked().await;
+    assert_eq!(device(&pc).await.level, VolumeLevel::Percent(53));
+}

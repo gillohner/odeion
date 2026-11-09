@@ -23520,6 +23520,16 @@ exec sleep 300
         assert_eq!(asked(&pc), [Volume::Percent(50)]);
         assert_eq!(r.view(&pz).unwrap().volume, 50, "GetVolume shows the level taken");
         clear(&pc);
+        // ...also on a zone whose level is in dB: the request is held to the output's percent
+        // for -20 dB (66 % of its range), and GetVolume answers in that percent
+        r.act(&dz, Act::Volume(100)).await.unwrap();
+        assert_eq!(asked(&db), [Volume::Percent(66)]);
+        assert_eq!(
+            r.view(&dz).unwrap().volume,
+            66,
+            "GetVolume in the output's percent"
+        );
+        clear(&db);
         // A Subsonic client's jukebox gain 1.0 (0 dB) on a zone limited to -20 dB
         let (st, b) = call(
             &app,
@@ -23549,5 +23559,90 @@ exec sleep 300
         r.act(&pz, Act::Volume(100)).await.unwrap();
         assert_eq!(asked(&pc), [Volume::Percent(100)]);
         assert_eq!(r.view(&pz).unwrap().volume, 100);
+    }
+
+    /// A listen-along group plays on several speakers through the host's settings: its volume
+    /// limit is the strictest among them, so a joiner's limited speaker never goes past its
+    /// own limit in the group, and the software volume stays under it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_group_zone_takes_the_strictest_limit_of_its_speakers() {
+        use pm_model::{Volume, VolumeKind};
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let host = Arc::new(NotedVolume {
+            inner: NullOutput::with_volume(VolumeKind::Db {
+                min: -60.0,
+                max: 0.0,
+                step: 1.0,
+            }),
+            asked: Default::default(),
+        });
+        let joiner = Arc::new(NotedVolume {
+            inner: NullOutput::with_volume(VolumeKind::Percent),
+            asked: Default::default(),
+        });
+        let (host_out, joiner_out): (Arc<dyn Output>, Arc<dyn Output>) = (host.clone(), joiner.clone());
+        s.outputs.register(host_out.clone());
+        s.outputs.register(joiner_out.clone());
+        let (hid, jid) = (host_out.id(), joiner_out.id());
+        // The joiner's speaker is limited to -30 dB; the host's has a software volume and no limit
+        s.sources
+            .set_dsp(
+                &jid,
+                Some(pm_audio::PipelineConfig {
+                    max_volume_db: Some(-30.0),
+                    ..pm_audio::PipelineConfig::default()
+                }),
+            )
+            .unwrap();
+        s.sources
+            .set_dsp(
+                &hid,
+                Some(pm_audio::PipelineConfig {
+                    volume_db: Some(-6.0),
+                    ..pm_audio::PipelineConfig::default()
+                }),
+            )
+            .unwrap();
+        let group = zone_output(&s, "Den + Kitchen", &[hid.0.clone(), jid.0.clone()])
+            .await
+            .unwrap();
+        s.sources
+            .carry_dsp(&hid, &group.id(), &[hid.clone(), jid.clone()]);
+        let carried = s.sources.dsp_for(&group.id());
+        assert_eq!(
+            (carried.max_volume_db, carried.volume_db),
+            (Some(-30.0), Some(-30.0)),
+            "the strictest limit, and the host's software volume held under it"
+        );
+        // Full volume on the group reaches each speaker held to -30 dB
+        let zone = s.create_zone("Den + Kitchen", group);
+        zone.set_volume(Volume::Percent(100)).await.unwrap();
+        zone.wait_acked().await;
+        let asked = |o: &NotedVolume| o.asked.lock().unwrap().clone();
+        assert_eq!(
+            asked(&joiner),
+            [Volume::Percent(50)],
+            "the joiner's own limit holds"
+        );
+        assert_eq!(asked(&host), [Volume::Percent(50)]);
+        // A software volume under the carried limit stays as it is
+        s.sources
+            .set_dsp(
+                &hid,
+                Some(pm_audio::PipelineConfig {
+                    volume_db: Some(-40.0),
+                    ..pm_audio::PipelineConfig::default()
+                }),
+            )
+            .unwrap();
+        s.sources
+            .carry_dsp(&hid, &zone.output().id(), &[hid.clone(), jid.clone()]);
+        assert_eq!(s.sources.dsp_for(&zone.output().id()).volume_db, Some(-40.0));
+        // No limit anywhere: none carried
+        s.sources.set_dsp(&jid, None).unwrap();
+        s.sources
+            .carry_dsp(&hid, &zone.output().id(), &[hid.clone(), jid.clone()]);
+        assert_eq!(s.sources.dsp_for(&zone.output().id()).max_volume_db, None);
     }
 }
