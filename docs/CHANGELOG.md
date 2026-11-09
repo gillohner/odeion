@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- Search shows when it could not finish and offers Retry, keeping the same words and source. Results already received remain available, retry progress appears immediately, and late replies from a failed attempt cannot replace the recovered results.
+
 ### 2026-11-09
 
 - **CI takes about half as long per change, with the same checks.** The node is built once per run and the jobs that only run it download it. The controls audit, the other browser checks and the pages checked against fixtures each run on two or three runners at once, and the controls audit no longer waits a fixed 900 ms after a click that already showed its effect and whose requests have ended (one that shows nothing is still watched for the full 900 ms); a check fails if a control one runner saw was in no runner's share. The image build runs on a pull request only when what the image is made of changes (Dockerfile, Cargo files, `deploy/docker/`, the release tooling, a workflow); always on main. The four Android workflows are one, `android.yml`: one job builds every APK the checks install. On a pull request each Android check runs on Android 15 only, and only when what it covers changed; on main, every night and for a release tag on Android 11, 15 and 17 (the update check on 15 and 17, as before; phone-as-zone on 11 and 15).
