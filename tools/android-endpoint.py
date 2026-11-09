@@ -8,6 +8,13 @@ must become a zone that plays a track in real time, and keep playing with the
 app in the background: the foreground service (PlayerService.kt) keeps the
 process alive.
 
+The in-app player ("This phone" in the page) is the app's own player (crates/pm-app-player,
+src/native.rs): a song started in the page plays through the phone's output, not the WebView's
+<audio>. The app logs what it plays and the path ("the app's own player: playing ..., path ...")
+and where it is every 5 s; it must play in real time, in the background too, while the node's zone
+on the same output stays silent; the node then playing that zone pauses the app's player (one
+stream per output).
+
 The emulator is behind its own NAT, so the node cannot reach the address the
 app registers itself under (the emulator's own, 10.0.2.15). This script makes
 that address reach the phone: it adds it to the runner's loopback and relays it
@@ -195,6 +202,76 @@ def rate_over(zid, seconds):
     rate = (p1 - p0) / 1000 / (t1 - t0)
     log(f"position {p0} -> {p1} ms over {t1 - t0:.1f} s: {rate:.2f}x real time ({tr})")
     return rate, tr
+
+
+# The app's own player in logcat (src/native.rs): a transition, and where it is every 5 s
+NATIVE = re.compile(r"the app's own player: (\w+) (\S*)(.*)")
+NATIVE_AT = re.compile(r"^(\d\d-\d\d \d\d:\d\d:\d\d\.\d+).*the app's own player at position_ms=(\d+)", re.M)
+
+
+def native_pace(after=0):
+    """Real-time rate of the app's own player from its logged positions (logcat's own clock), and
+    how many were logged; only lines past offset `after` of the log."""
+    pts = []
+    for m in NATIVE_AT.finditer(logcat()[after:]):
+        t = time.mktime(time.strptime("2000-" + m.group(1).split(".")[0], "%Y-%m-%d %H:%M:%S")) + float("0." + m.group(1).split(".")[1])
+        pts.append((t, int(m.group(2))))
+    if len(pts) < 3 or pts[-1][0] - pts[0][0] < 9:
+        return None, len(pts)
+    return (pts[-1][1] - pts[0][1]) / 1000 / (pts[-1][0] - pts[0][0]), len(pts)
+
+
+def in_app_player(address, track):
+    """The page's "This phone", played by the app itself (see the module's doc)."""
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    time.sleep(3)
+    start = len(logcat())
+    try:
+        tap(lambda n: "Shuffle my music" in n, "“Shuffle my music”")
+    except RuntimeError:
+        tap(lambda n: 'text="Library"' in n or 'content-desc="Library"' in n, "Library")
+        tap(lambda n: 'text="Songs"' in n or 'content-desc="Songs"' in n, "Songs")
+        tap(lambda n: re.search(r'(text|content-desc)="[Tt]one', n), "the song")
+    def started():
+        for m in NATIVE.finditer(logcat()[start:]):
+            if m.group(1) == "playing":
+                return m
+        return None
+    m = until("the app's own player playing the song", started, timeout=60)
+    log(f"the app's own player: {m.group(0).strip()}")
+    assert m.group(2).startswith("/v1/library/tracks/"), f"it plays the node's file: {m.group(2)}"
+    assert "path " in m.group(3), f"it says the path: {m.group(3)}"
+    assert "token" not in m.group(0), "the log line carries no token"
+    shot("6-in-app-player")
+    rate, n = until("the app's own player's pace", lambda: native_pace(start)[0] and native_pace(start), timeout=60, every=5)
+    log(f"the app's own player: {rate:.2f}x real time over {n} logged positions")
+    assert 0.8 < rate < 1.2, f"in the app: {rate:.2f}x"
+    # Not the WebView: the page's <audio> has no source while the app plays
+    phone = next((z for z in api("GET", "/v1/zones") if z["output"].startswith(f"net:{address}/")), None)
+    assert phone is None or phone.get("transport") != "playing", "the node's zone on the phone plays too"
+    # In the background, the screen off
+    adb("shell", "input", "keyevent", "3")
+    adb("shell", "input", "keyevent", "KEYCODE_SLEEP", check=False)
+    away = len(logcat())
+    time.sleep(25)
+    rate, n = native_pace(away)
+    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+    adb("shell", "wm", "dismiss-keyguard", check=False)
+    assert rate is not None and 0.8 < rate < 1.2, f"in the background, screen off: {rate} over {n} positions"
+    log(f"the app's own player in the background, screen off: {rate:.2f}x real time")
+    # One stream per output: the node plays its zone on the phone, the app's player pauses
+    if phone:
+        mark = len(logcat())
+        api("POST", f"/v1/zones/{phone['id']}/queue", {"track_ids": [track["id"]], "replace": True, "play": True})
+        until("the node's zone playing on the phone", lambda: position(phone["id"])[1], timeout=30)
+        def paused():
+            return next((m for m in NATIVE.finditer(logcat()[mark:]) if m.group(1) == "paused"), None)
+        m = until("the app's own player paused for the node's zone", paused, timeout=30)
+        log(f"handed over: {m.group(0).strip()}")
+        rate, tr = rate_over(phone["id"], 8)
+        assert tr == "playing" and 0.8 < rate < 1.2, f"the node's zone after the handover: {rate:.2f}x ({tr})"
+        api("POST", f"/v1/zones/{phone['id']}/transport", {"action": "stop"})
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
 
 
 # The address the app registers: the emulator's own, on the player's usual port
@@ -457,6 +534,8 @@ def run(node):
                 done, address = until("the player's registration", registered, timeout=90)
                 assert done, f"the node cannot reach the player at {address}"
         log("the phone is a zone, plays in real time, and keeps playing in the background")
+        in_app_player(address, track)
+        log("the in-app player is the app's own: real time, in the background, and it gives the output to the node's zone")
 
         # Started again with the node saved: it reconnects and the service starts again
         adb("shell", "am", "force-stop", PKG)
@@ -504,7 +583,7 @@ def run(node):
             tap(lambda n: 'text="Continue"' in n, "Continue")
             wait_page("the node's page after the report", relaunch=True)
             log("Continue reconnects to the node")
-        log("PASS: the phone is a zone, plays in real time and in the background, survives a restart, and reports a crash")
+        log("PASS: the phone is a zone, plays in real time and in the background, the in-app player is the app's own, survives a restart, and reports a crash")
     finally:
         lc.terminate()
 

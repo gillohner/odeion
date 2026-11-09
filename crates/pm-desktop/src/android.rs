@@ -330,6 +330,69 @@ fn stop_service(env: &mut jni021::JNIEnv, activity: &jni021::objects::JObject) -
     Ok(())
 }
 
+/// The app's own player plays (or stopped): `PlayerService.appPlaying(on)`, which keeps the
+/// service while it plays out of sight (Exclusive USB is no AudioTrack, so Android's "music
+/// active" says nothing of it); playing, the service is started again if it had ended.
+pub fn app_playing(app: &tauri::AppHandle, on: bool) {
+    use tauri::Manager;
+    if on {
+        resume_player_service(app);
+    }
+    let Some(window) = app.get_webview_window(crate::MAIN) else {
+        return;
+    };
+    let scheduled = window.with_webview(move |wv| {
+        wv.jni_handle().exec(move |env, activity, _webview| {
+            let told = crate::crash::guarded("the player service", || tell_app_playing(env, activity, on))
+                .unwrap_or(Err(jni021::errors::Error::NullPtr("panicked")));
+            if let Err(e) = told {
+                if env.exception_check().unwrap_or(false) {
+                    let _ = env.exception_describe();
+                    let _ = env.exception_clear();
+                }
+                tracing::warn!("player service: can't say the app plays ({e})");
+            }
+        });
+    });
+    if let Err(e) = scheduled {
+        tracing::warn!("cannot reach the activity for the player service: {e}");
+    }
+}
+
+fn tell_app_playing(
+    env: &mut jni021::JNIEnv,
+    activity: &jni021::objects::JObject,
+    on: bool,
+) -> jni021::errors::Result<()> {
+    use jni021::objects::{JClass, JValue};
+    let class = env
+        .call_method(activity, "getClass", "()Ljava/lang/Class;", &[])?
+        .l()?;
+    let name = env
+        .call_method(&class, "getName", "()Ljava/lang/String;", &[])?
+        .l()?;
+    let name: String = env.get_string(&name.into())?.into();
+    let service = match name.rsplit_once('.') {
+        Some((pkg, _)) => format!("{pkg}.PlayerService"),
+        None => "PlayerService".into(),
+    };
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let jname = env.new_string(&service)?;
+    let cls = env
+        .call_method(
+            &loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&jname)],
+        )?
+        .l()?;
+    let cls = JClass::from(cls);
+    env.call_static_method(&cls, "appPlaying", "(Z)V", &[JValue::Bool(u8::from(on))])?;
+    Ok(())
+}
+
 /// The share sheet for the crash report (`CrashReport.share`, tools/release/android/CrashReport.kt).
 pub fn share_text(app: &tauri::AppHandle, text: String) -> Result<(), String> {
     use tauri::Manager;

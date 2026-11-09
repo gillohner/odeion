@@ -1470,14 +1470,118 @@
       stop() { clearInterval(tick); if (has('stopVideo')) player.stopVideo(); vid = null; st = -1; },
     };
   })();
+  // The Android app plays the node's streams itself (`window.pmDesktop.nativePlayer`): decoded in
+  // the app and played through the phone's output the way the phone's own zone plays (bit-perfect
+  // or Exclusive USB to a USB DAC), not through Android's mixer. The same surface as <audio>; the
+  // app says where it is in `pmdesktop:native` events. What it can't play (a playlist stream,
+  // another codec) the page plays itself (`nativerefused`).
+  const tauriInvoke = () => (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) || (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) || null;
+  const nativeOk = () => !!(window.pmDesktop && window.pmDesktop.nativePlayer && tauriInvoke());
+  const nat = (() => {
+    const ev = new EventTarget(); const fire = (t, detail) => ev.dispatchEvent(new CustomEvent(t, { detail }));
+    const call = (cmd, args) => { const f = tauriInvoke(); return f ? f(cmd, args || {}) : Promise.reject(new Error('the app’s player is off')); };
+    const abs = (u) => { try { return new URL(u, location.href).href; } catch { return ''; } };
+    // st: the app's last status (when it came); src: what the page set; at: where to start it
+    // (restore, a seek before it plays); live: the app has src; adopt: the app already went on
+    // to the song handed ahead; want: play pressed, the app not there yet; ahead: last handed
+    let st = null; let stAt = 0; let src = ''; let at = 0; let live = false; let adopt = false; let want = false; let done = false; let vol = 1; let ahead = null;
+    const mine = () => live && !!st && st.url === src;
+    const playing = () => mine() && st.transport === 'playing';
+    window.addEventListener('pmdesktop:native', (e) => {
+      const was = st; st = e.detail || null; stAt = Date.now(); if (!st) return;
+      if (!live) return;
+      const ended = was && st.ended > was.ended;
+      if (ended) {
+        // Handed ahead: the app already plays the next one; the page's next src is it
+        adopt = !!st.url && st.url !== src; want = false;
+        if (!adopt) done = true;
+        fire('ended'); return;
+      }
+      if (st.url !== src) return;
+      if (st.refused) { live = false; want = false; fire('nativerefused', st.refused); return; }
+      const before = was && was.url === src ? was.transport : 'stopped';
+      if (st.transport === 'playing' && before !== 'playing') { want = false; done = false; fire('play'); fire('playing'); }
+      else if (st.transport !== 'playing' && before === 'playing') { fire('pause'); if (st.error && !st.taken) fire('error'); }
+      if (was && was.duration_ms !== st.duration_ms) fire('durationchange');
+      if (!was || was.position_ms !== st.position_ms) fire('timeupdate');
+    });
+    return {
+      addEventListener: (t, f, o) => ev.addEventListener(t, f, o),
+      get paused() { return !(want || playing()); },
+      get ended() { return done; },
+      get currentTime() {
+        if (!mine()) return at;
+        const run = st.transport === 'playing' ? Math.min(1000, Date.now() - stAt) : 0;
+        return (st.position_ms + run) / 1000;
+      },
+      set currentTime(v) { const ms = Math.max(0, Math.round((Number(v) || 0) * 1000)); done = false; if (mine()) { st = { ...st, position_ms: ms }; stAt = Date.now(); call('native_seek', { ms }).catch(() => {}); } else at = ms / 1000; },
+      get duration() { return mine() && st.duration_ms ? st.duration_ms / 1000 : NaN; },
+      // Never a gain on the samples here: the level is Android's (or the DAC's own)
+      get volume() { return vol; },
+      set volume(v) { vol = v; },
+      get muted() { return false; },
+      set muted(_) { /* Android's */ },
+      get src() { return src; },
+      set src(v) {
+        const u = abs(v);
+        if (adopt && st && u === st.url) {
+          adopt = false; src = u; live = true; done = false;
+          if (st.transport === 'playing') setTimeout(() => { if (src === u) { fire('play'); fire('playing'); } }, 0);
+          return;
+        }
+        adopt = false; src = u; at = 0; live = false; want = false; done = false;
+        // As <audio> does once it knows the song: the page may seek it now (restore)
+        setTimeout(() => { if (src === u) fire('loadedmetadata'); }, 0);
+      },
+      set preload(_) { /* opened when it plays */ },
+      load() { /* opened when it plays */ },
+      async play() {
+        if (!src) throw new Error('nothing to play');
+        done = false;
+        if (mine()) { if (st.transport !== 'playing') { want = true; await call('native_play'); } return; }
+        // Its first events may come before the answer
+        want = true; live = true; const u = src;
+        try { await call('native_load', { url: u, atMs: Math.round(at * 1000), ahead: ahead || null }); } catch (e) {
+          if (src !== u) return;
+          want = false; live = false;
+          const err = new Error(String((e && e.message) || e)); err.name = 'NativeRefused'; throw err;
+        }
+      },
+      pause() { want = false; if (live) call('native_pause').catch(() => {}); },
+      stop() { want = false; adopt = false; done = false; if (live || src) call('native_stop').catch(() => {}); live = false; src = ''; at = 0; ahead = null; },
+      // What follows what plays now (the page's next song), for a gapless join
+      ahead(u) { const a = u ? abs(u) : null; if (a === ahead) return; ahead = a; if (live) call('native_ahead', { url: a }).catch(() => {}); },
+      status: () => (mine() ? st : null),
+    };
+  })();
   const audio = new Proxy({}, {
     get: (_, k) => {
-      if (k === 'addEventListener') return (t, f, o) => { audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); };
-      const e = state.ytOn ? yt : audioEl; const v = e[k];
+      if (k === 'addEventListener') return (t, f, o) => { audioEl.addEventListener(t, f, o); yt.addEventListener(t, f); nat.addEventListener(t, f, o); };
+      const e = state.ytOn ? yt : state.natOn ? nat : audioEl; const v = e[k];
       return typeof v === 'function' ? v.bind(e) : v;
     },
-    set: (_, k, v) => { if (k === 'volume') { audioEl.volume = v; yt.volume = v; } else (state.ytOn ? yt : audioEl)[k] = v; return true; },
+    set: (_, k, v) => { if (k === 'volume') { audioEl.volume = v; yt.volume = v; nat.volume = v; } else (state.ytOn ? yt : state.natOn ? nat : audioEl)[k] = v; return true; },
   });
+  // The URL the page's player opens for a queue item
+  const itemUrl = (it) => (it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`);
+  // Whether the app plays it itself: in the app, a stream of the node's (this page's origin), not
+  // one it already couldn't play
+  const nativeFor = (it, url) => { if (!nativeOk() || !it || it.nativeNo || ytOf(it.uri)) return false; try { return new URL(url, location.href).origin === location.origin; } catch { return false; } };
+  const useNative = (on) => {
+    if (on === !!state.natOn) return;
+    if (on) { if (audioEl.getAttribute('src')) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); } } else nat.stop();
+    state.natOn = on;
+  };
+  // The page's player on a queue item: its engine, then its URL
+  const browserSrc = (it) => { const u = itemUrl(it); useNative(nativeFor(it, u)); audio.src = u; };
+  // The song after this one as the page will play it (repeat one: the same), handed to the app ahead
+  const nativeAhead = () => {
+    if (!state.natOn) return;
+    const q = state.browserQueue; const r = browserRepeat(); const i = state.browserIndex;
+    const n = r === 'one' ? i : i + 1 < q.length ? i + 1 : r === 'all' && q.length ? 0 : -1;
+    const it = q[n]; const u = it && itemUrl(it);
+    nat.ahead(it && nativeFor(it, u) ? u : null);
+  };
   // The YouTube panel: YouTube's terms want its player visible, so it shows while a YouTube item plays
   const ytPanel = (it) => { const p = $('#ytpanel'); if (!p) return; if (it) { $('#yttitle').textContent = it.title || 'YouTube'; p.hidden = false; } else p.hidden = true; };
   $('#ytmin').onclick = () => { const p = $('#ytpanel'); const small = !p.classList.contains('small'); p.classList.toggle('small', small); $('#ytmin').setAttribute('aria-expanded', String(!small)); $('#ytmin').title = small ? 'Show the video' : 'Make the video smaller'; };
@@ -1489,13 +1593,17 @@
     if (state.browserIndex + 1 < state.browserQueue.length) browserPlay(state.browserIndex + 1);
   });
   const isBrowser = () => state.zone === BROWSER;
+  // What the app's own player says of what plays: the path, as a zone reports it
+  const nativePath = () => { const n = state.natOn && !state.ytOn ? nat.status() : null; const np = n && n.now_playing; return np ? { signal_path: np.signal_path, source_format: np.source_format, output_format: np.output_format, format: np.format || null } : {}; };
   const browserState = () => {
     const it = state.browserQueue[state.browserIndex];
     return {
       id: BROWSER, name: hereName(), output: 'browser',
       transport: audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing',
       queue_index: state.browserIndex,
-      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null } : null,
+      // The node took this phone's output for its own zone: why it paused
+      error: (() => { const n = state.natOn ? nat.status() : null; return n && n.taken ? n.error : null; })(),
+      now_playing: it ? { item: it, position_ms: audio.currentTime * 1000, duration_ms: (it.duration_ms && (!Number.isFinite(audio.duration) || it.stream)) ? it.duration_ms : (audio.duration || 0) * 1000, signal_path: null, ...nativePath() } : null,
     };
   };
   const currentZone = () => (isBrowser() ? browserState() : state.zones[state.zone]);
@@ -1524,7 +1632,10 @@
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
   const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
-  const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
+  // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
+  // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
+  const ownZoneHidden = (z) => nativeOk() && z.id !== state.zone && z.transport !== 'playing' && ((window.pmDesktop && window.pmDesktop.outputs) || []).includes(z.output);
+  const zoneList = () => { const zs = Object.values(state.zones).filter((z) => (state.devOutputs || !devOutput(z.output) || z.id === state.zone) && zoneOpen(z) && !ownZoneHidden(z)); return appPlatform() && zs.length ? [...zs, browserState()] : [browserState(), ...zs]; };
   // The browser's queue survives a reload, every song with where it was (UX review #6): stream
   // links are rebuilt on load (they carry the token), live radio is not kept.
   let lastSavedQueue = '';
@@ -1546,7 +1657,7 @@
     if (!it) return;
     state.browserIndex = at.index;
     audio.preload = 'metadata';
-    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    browserSrc(it);
     if (at.pos > 0) audio.addEventListener('loadedmetadata', () => { try { audio.currentTime = at.pos; } catch { /* not seekable */ } renderBar(); }, { once: true });
     renderBar();
   };
@@ -2095,6 +2206,7 @@
     const yid = ytOf(it.uri);
     if (yid) {
       if (audioEl.getAttribute('src')) { audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); }
+      useNative(false);
       state.ytOn = true; ytPanel(it);
       yt.open(yid).catch((e) => toast(e.message, 'error'));
       mediaSessionUpdate(it); renderBar(); if (state.view === 'queue') render();
@@ -2102,10 +2214,13 @@
     }
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
     if (/^deezer:/.test(it.uri || '') && !state.previewNoted) { state.previewNoted = true; toast('Deezer plays a 30-second preview of each song without a Deezer partner account'); }
-    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    browserSrc(it);
     state.browserRetry = state.browserRetry && state.browserRetry.i === i ? state.browserRetry : { i, n: 0 };
     if (!(state.starting && state.starting.zone === BROWSER)) startWait('play', BROWSER, it.title || '');
+    nativeAhead();
     audio.play().catch(async (e) => {
+      // The app can't play it itself (a playlist stream, another codec): the page plays it
+      if (e.name === 'NativeRefused') { it.nativeNo = true; if (state.browserIndex === i) browserPlay(i); return; }
       if (e.name === 'AbortError') { if (state.starting && state.starting.zone === BROWSER && (audio.paused || state.ytOn)) startDone(); return; }
       startFail(e.message, true);
       if (e.name !== 'NotSupportedError') { toast(`Playback: ${e.message}`, 'error'); return; }
@@ -2157,7 +2272,9 @@
   });
   // For tests (tools/ui-youtube.js): queue items in the current zone, read the browser engine
   window.pmPlayer = { play: (items) => playSourceItems(items, true), now: () => ({ youtube: !!state.ytOn, index: state.browserIndex, paused: audio.paused, time: audio.currentTime, src: audio.src }) };
-  audio.addEventListener('timeupdate', () => { if (isBrowser()) renderBar(); });
+  audio.addEventListener('timeupdate', () => { nativeAhead(); if (isBrowser()) renderBar(); });
+  // Opened, then found unplayable by the app (the song handed ahead): the page plays it itself
+  nat.addEventListener('nativerefused', () => { const i = state.browserIndex; const it = state.browserQueue[i]; if (!it || !state.natOn) return; it.nativeNo = true; browserPlay(i); });
   audio.addEventListener('play', () => renderBar());
   audio.addEventListener('pause', () => renderBar());
   // Back on screen after Android stopped the app's audio in the background (its player service
@@ -2332,7 +2449,11 @@
   // only when the node says the phone confirmed it for what plays now.
   const DAC_MODE = { bit_perfect: 'Bit-perfect', exclusive: 'Exclusive USB', shared: 'Shared' };
   const DAC_HELP = { shared: 'Android plays it through its own mixer, which mixes in other sounds and usually converts the music to 48 kHz.' };
-  const deviceOf = (z) => { const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null; };
+  const deviceOf = (z) => {
+    // The app's own player: the device it plays to, as it says
+    if (z && z.id === BROWSER) { const n = state.natOn ? nat.status() : null; return (n && n.device) || null; }
+    const o = z && (state.outputs || []).find((x) => x.id === z.output); return (o && o.device) || null;
+  };
   // Anything but shared only when confirmed: bit-perfect is said only for mode bit_perfect with
   // confirmed true; an unconfirmed or unknown mode reads as shared
   const dacMode = (d) => (d.confirmed === true && (d.mode === 'bit_perfect' || d.mode === 'exclusive') ? d.mode : 'shared');
@@ -2364,7 +2485,8 @@
     if (!n) {
       // The system's shared output (a phone without a DAC, or one the node no longer knows; a
       // computer's system audio): its mixer is in the path too, so it is never bit-perfect
-      if (!np || !np.signal_path || !/(^|\/)cpal:/.test(String((z && z.output) || ''))) return np;
+      const out = z && z.id === BROWSER ? (nat.status() || {}).output : z && z.output;
+      if (!np || !np.signal_path || !/(^|\/)cpal:/.test(String(out || ''))) return np;
       const of = np.output_format;
       const st = { name: 'system mixer', in_format: of, out_format: of, quality: 'lossless', note: 'shared: the system may convert it and mixes in other sounds' };
       return { ...np, signal_path: { ...np.signal_path, stages: [...np.signal_path.stages, st] } };
@@ -2407,6 +2529,9 @@
     if (!z) return null;
     if (z.id !== BROWSER) { const l = deviceOf(z) ? dacLine(z) : ''; return l ? [l, ''] : null; }
     if (appPlatform() !== 'android') return null;
+    // The app plays it itself: the same words as the phone's own zone
+    if (state.natOn && !state.ytOn && z.now_playing && z.now_playing.signal_path) { const l = deviceOf(z) ? dacLine(z) : ''; return [l || 'Shared · Android mixer', '']; }
+    if (nativeOk()) return ['Android mixer · usually 48 kHz', `Not bit-perfect: the app can’t play this stream itself, so it goes through Android’s mixer.`];
     const id = window.pmDesktop.output;
     const own = id ? Object.values(state.zones || {}).find((x) => x.output === id) : null;
     const dac = appOutput();
@@ -2455,7 +2580,7 @@
     audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
     if (!paused) { it.moved = true; browserPlay(index); return; } // browserPlay says why when it can't play
     state.browserIndex = index;
-    audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
+    browserSrc(it);
     audio.preload = 'metadata'; audio.load();
     mediaSessionUpdate(it); renderBar();
   };
@@ -2499,7 +2624,7 @@
         state.zones[zs.id] = zs;
         if (transport !== 'stopped' && zs.transport === 'stopped' && zs.error) throw new Error(zs.error);
         resume = null;
-        if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } audioEl.removeAttribute('src'); audioEl.load();
+        if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); } useNative(false); audioEl.removeAttribute('src'); audioEl.load();
         state.browserQueue = []; state.browserIndex = -1; try { localStorage.removeItem('pm.browserAt'); } catch { /* storage unavailable */ }
       } else if (target === BROWSER) {
         const z = await api('GET', `/zones/${encodeURIComponent(from)}`);

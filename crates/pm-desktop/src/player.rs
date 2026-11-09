@@ -42,6 +42,12 @@ impl Player {
         })
     }
 
+    /// The endpoint: its outputs and who uses them (the app's own player uses the same).
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub fn endpoint(&self) -> &Arc<pm_endpoint::Endpoint> {
+        &self.endpoint
+    }
+
     /// Listen on `ip`, on the usual endpoint port (another when it is taken); the listener on
     /// another address stops first. `None` when nothing can be bound; the UI's "This browser"
     /// zone still plays then.

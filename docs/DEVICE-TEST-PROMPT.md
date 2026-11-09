@@ -163,6 +163,26 @@ nearly every phone. In a group it is "loosely synced": Android adds latency the 
    and Android version.
 ```
 
+## Native in-app player and offline songs (Android)
+
+"This phone" is the app's own player: the app opens the node's song and plays it through the phone's
+output with the phone zone's path (Auto, bit-perfect, Exclusive USB), at home and through remote
+access. Checked in CI on an emulator (`android-emulator`): a song started in the page plays in the
+app in real time, in the background with the screen off, and the node's zone on the phone takes the
+output over (the app pauses). Not checked there: a USB DAC, remote access, a real phone's battery.
+
+```
+Edge or CI APK of the top PR of the stack. Start with the KA17's volume low (0-5 %).
+1. On mobile data (Wi-Fi off, so the app uses remote access), FiiO KA17 plugged in: play a library
+   16/44.1 FLAC on "This phone". The KA17 shows 44.1k. Now playing > Details > Output says the path
+   ("Bit-perfect · FiiO KA17 · 44.1 kHz / 16 bit", or "Exclusive USB · FiiO KA17 · …", or
+   "Shared · FiiO KA17 · <why>" with Settings > This phone on Shared).
+2. Screen off for 3 minutes while it plays: the next song starts by itself; the lock-screen
+   buttons (pause, next) work.
+3. If anything fails: `adb logcat -s pubky-music` (lines "the app's own player: …" say what it
+   plays and the path), the phone's model and Android version.
+```
+
 ## The Android app's screens (the owner's recording, 2026-11-06)
 
 Checked here with a phone's viewport rules in Chromium (tools/ui-android-first.js at 360, 390 and

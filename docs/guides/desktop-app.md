@@ -53,6 +53,21 @@ connects to it on TCP port 7790: allow that if your firewall asks.
 Away from home the app still controls the node and its speakers, but this device isn't offered as
 a speaker then.
 
+### This phone (Android)
+
+On Android, **This phone** in the zone button plays the music in the app itself: the app opens the
+song from your node (at home, or through remote access away from home) and plays it through the
+phone's output the same way the phone's own zone does. With a USB DAC that means Auto, bit-perfect
+or Exclusive USB as chosen in Settings › This phone, and the DAC gets the song's own rate (a
+44.1 kHz FLAC arrives at 44.1 kHz, not at Android's 48 kHz). Now playing › Details › Output says
+what the DAC gets, as for any zone. It keeps playing with the screen off and goes on to the next
+song by itself.
+
+A few streams the app can't play itself (a radio playlist, a format it doesn't decode) play through
+Android's mixer instead; Details › Output then says "Android mixer". The phone's own zone stays on
+the node for other controllers; while the app plays, the node starting that zone pauses the app
+(one stream at a time on the phone's output), and the app playing again takes it back.
+
 ## Updates
 
 On macOS, Windows and the Linux AppImage, the app checks for a new version when it starts and

@@ -25,6 +25,8 @@ pm-pubky = { path = "../pm-pubky" }
 pm-offline = { path = "../pm-offline" }
 pm-discovery = { path = "../pm-discovery" }
 pm-remote = { path = "../pm-remote" }
+# The page's own player played by the app (src/native.rs; Android uses it)
+pm-app-player = { path = "../pm-app-player" }
 tauri = { version = "=2.12.1", features = [] }
 tauri-plugin-opener = "=2.7.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }

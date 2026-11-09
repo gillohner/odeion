@@ -496,6 +496,7 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-motion.js $GITHUB_WORKSPACE /tmp/pm/motion-shots
           node $GITHUB_WORKSPACE/tools/ui-redesign.js $GITHUB_WORKSPACE /tmp/pm/redesign-shots
           node $GITHUB_WORKSPACE/tools/ui-item-about.js $GITHUB_WORKSPACE /tmp/pm/item-about-shots
+          node $GITHUB_WORKSPACE/tools/ui-native-player.js $GITHUB_WORKSPACE /tmp/pm/native-player-shots
           node $GITHUB_WORKSPACE/tools/ui-usb-dac.js $GITHUB_WORKSPACE /tmp/pm/usb-dac-shots
           printf 'data_dir = "/tmp/tl/data"\n[api]\nlisten = "127.0.0.1:7791"\n[outputs]\ndiscover = false\nupnp = false\ncast = false\nslimproto_port = 0\nairplay = false\n[remote]\nenabled = false\n[tidal]\nclient_id = "ci-project-app"\n[auth]\nreturn_page = "http://127.0.0.1:7811/callback"\n' > /tmp/tl/node.toml
           (cd /tmp/tl && HOME=/tmp/tl PM_TIDAL_AUTH_BASE=http://127.0.0.1:7811 PM_TIDAL_LOGIN_BASE=http://127.0.0.1:7811 PM_TIDAL_API_BASE=http://127.0.0.1:7811 \

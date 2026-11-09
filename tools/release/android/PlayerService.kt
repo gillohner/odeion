@@ -47,9 +47,12 @@ class PlayerService : Service() {
             val seen = me.importance == android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
             // Counted only while out of sight: time on screen with nothing playing (browsing,
             // paused) must not end the service just after the music starts and the app is left
-            idleMs = if (am.isMusicActive || seen) 0L else idleMs + WATCH_MS
+            // The app's own player counts as music too (Exclusive USB is no AudioTrack, so
+            // isMusicActive says nothing of it)
+            val music = am.isMusicActive || appPlays
+            idleMs = if (music || seen) 0L else idleMs + WATCH_MS
             // (debug: what the watch saw, for tools/android-background-probe.py part E2)
-            android.util.Log.d("pubky-music", "player service: watch music=${am.isMusicActive} seen=$seen importance=${me.importance} idle=${idleMs / 1000} s")
+            android.util.Log.d("pubky-music", "player service: watch music=$music app=$appPlays seen=$seen importance=${me.importance} idle=${idleMs / 1000} s")
             if (idleMs >= IDLE_MS) {
                 // Only if no start came since: a start still on its way keeps the service
                 if (stopSelfResult(lastStart)) {
@@ -194,6 +197,14 @@ class PlayerService : Service() {
         @JvmStatic
         fun stop(context: Context) {
             context.stopService(Intent(context, PlayerService::class.java))
+        }
+
+        /// Whether the app's own player plays now (src/native.rs, told on every change).
+        @Volatile private var appPlays = false
+
+        @JvmStatic
+        fun appPlaying(on: Boolean) {
+            appPlays = on
         }
     }
 }

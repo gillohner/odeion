@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-09
+
+- **"This phone" plays in the app itself, bit-perfect to a USB DAC, also away from home** (owner: a TIDAL 16/44.1 FLAC in the app reached the FiiO KA17 at 48 kHz). In the Android app the page's own player no longer goes through the WebView's `<audio>` (always Android's mixer): the app opens the node's song (at home, through remote access, or the offline page), decodes it with the node's own decoders and plays it through the phone's output with the phone zone's path, so Auto, bit-perfect and Exclusive USB apply and the DAC gets the song's own rate. The next song is handed over ahead and joins without a gap; seek, pause, repeat, the sleep timer and the system's media controls work as before; it keeps playing with the screen off. Now playing › Details › Output and the Sound panel say the path, as for the phone's zone. A stream the app can't decode (a playlist stream, another codec) still plays through Android's mixer, and Details says so. One stream per output: the node starting the phone's own zone pauses the app's player with the reason, and playing in the app takes the output back. In the phone's own picker the phone is one entry, "This phone"; the node keeps the phone's zone for other controllers. The node's page may call only the player's commands in the app.
+
 ### 2026-11-07
 
 - **A stream that doesn't answer ends with an error instead of holding the zone.** A radio or web stream whose server accepts the connection but sends nothing now fails after 20 seconds, like one that stops sending mid-song. A live stream still plays for as long as it sends. Stop, Next and Play are taken while such a stream is being skipped, not after every item in the queue was tried, and the next song is opened ahead on its own thread, so a next item slow to answer never holds the zone.

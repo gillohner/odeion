@@ -14,6 +14,9 @@ mod android;
 mod crash;
 mod node;
 mod offline;
+// The page's own player played by the app (Android; built everywhere the player is)
+#[cfg(any(desktop, target_os = "android"))]
+mod native;
 #[cfg(any(desktop, target_os = "android"))]
 mod player;
 mod ring_wait;
@@ -89,6 +92,15 @@ fn init_script(s: Option<&Settings>) -> String {
         v = serde_json::to_string(env!("CARGO_PKG_VERSION")).unwrap_or_default(),
         p = serde_json::to_string(std::env::consts::OS).unwrap_or_default(),
     )
+}
+
+/// Tells the page the app plays its music itself (`window.pmDesktop.nativePlayer`), where it does.
+fn native_init_js() -> &'static str {
+    #[cfg(any(desktop, target_os = "android"))]
+    if native::on() {
+        return "if(window.pmDesktop)window.pmDesktop.nativePlayer=true;";
+    }
+    ""
 }
 
 /// For a node connected after the window was built: the init script holds
@@ -205,6 +217,9 @@ fn connected(app: &AppHandle, state: &AppState, mut s: Settings, info: &node::In
         }
     }
     state.store(Some(s.clone()));
+    // The node's page may use the app's own player (its origin: the node's, or the tunnel's)
+    #[cfg(any(desktop, target_os = "android"))]
+    native::allow_page(app, &s.origin().unwrap_or_default());
     show_node(app, &s)?;
     // Keep this device's downloads in step with the current node (read again at every round)
     if let Some(o) = &state.offline {
@@ -265,6 +280,8 @@ async fn open_offline(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         return Err("Nothing is downloaded to this device yet".into());
     }
     let page = url::Url::parse(&o.page(&node_id).await?).map_err(|e| e.to_string())?;
+    #[cfg(any(desktop, target_os = "android"))]
+    native::allow_page(&app, &page.origin().ascii_serialization());
     app.get_webview_window(MAIN)
         .ok_or("the window is gone")?
         .navigate(page)
@@ -777,7 +794,14 @@ pub fn run() {
             open_offline,
             crash_report,
             crash_dismiss,
-            crash_share
+            crash_share,
+            native::native_load,
+            native::native_ahead,
+            native::native_play,
+            native::native_pause,
+            native::native_seek,
+            native::native_stop,
+            native::native_status
         ])
         .setup(|app| {
             if let Ok(dir) = app.path().app_local_data_dir() {
@@ -793,6 +817,11 @@ pub fn run() {
                 .or_else(|| settings::legacy_path().and_then(|p| settings::load(&p)));
             #[cfg(any(desktop, target_os = "android"))]
             let player = crash::guarded("the in-app player", player::start).flatten();
+            // The page's own player, on the same output and owner as the phone's zone
+            #[cfg(target_os = "android")]
+            if let Some(p) = player.as_ref() {
+                native::start(app.handle(), p.endpoint());
+            }
             let shared = Arc::new(Mutex::new(initial.clone()));
             let offline_origin: Arc<Mutex<Option<String>>> = Arc::default();
             let offline = app
@@ -816,8 +845,14 @@ pub fn run() {
             #[allow(unused_mut)]
             let mut builder = WebviewWindowBuilder::new(app, MAIN, WebviewUrl::App("index.html".into()))
                 .initialization_script(init_script(initial.as_ref()))
+                .initialization_script(native_init_js())
                 .on_navigation(move |u| allow_navigation(&handle, &guard, &offline_origin, u))
                 .on_page_load(move |w, payload| {
+                    // Another page (or the same again): what its player played ends with it
+                    #[cfg(any(desktop, target_os = "android"))]
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                        native::page_changed();
+                    }
                     if !matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                         return;
                     }
