@@ -1560,7 +1560,12 @@
           if (st.transport === 'playing') return;
           // Carry on (it reopens the song when the node took the output, it broke, or it ended):
           // a failure goes to the page's own handlers, as a failed start does
+          // An open under way (a load, or a play that reopens) carries the outcome: this press
+          // only says play
+          if (opening) { want = true; call('native_play').catch(() => {}); return; }
           want = true; const tok = ++seq; const pos = this.currentTime;
+          // (a play can reopen the song: after the node took the output, a break, the end)
+          opening = true;
           try { await call('native_play'); } catch (e) {
             if (tok !== seq) return;
             opening = false; want = false; if (e && e.overtaken) return;
@@ -2422,7 +2427,7 @@
   // for <audio>, then said
   const nativeRetry = (i, why, at = 0) => {
     const it = state.browserQueue[i]; if (!it) return;
-    if (state.natOn && nat.held) return; // paused meanwhile: the next play opens it
+    if (state.natOn && nat.held) { toast(`“${it.title || 'This song'}” did not start: ${why}.`); return; } // paused meanwhile: the next play opens it
     // (counted per song: another song at the same place in a new queue gets its own retry)
     state.nativeRetry = state.nativeRetry && state.nativeRetry.it === it ? state.nativeRetry : { it, n: 0 };
     if (state.nativeRetry.n < 1 && state.browserIndex === i) { state.nativeRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex !== i || (state.natOn && nat.held)) return; browserPlay(i, at); }, 2000); return; }

@@ -1039,6 +1039,28 @@ mod tests {
         assert_eq!((st.transport, st.url), (Transport::Stopped, None));
     }
 
+    /// Play pressed while a song opens leaves the start to the open (nothing else resumes).
+    #[test]
+    fn a_play_during_an_open_leaves_the_start_to_it() {
+        let slow = Mode {
+            delay_ms: 500,
+            ..Mode::default()
+        };
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 3, 1);
+        let (ua, _) = serve(a, "audio/wav", slow);
+        let p = AppPlayer::new(Arc::new(NullOutput::realtime()), OutputOwner::new());
+        let p2 = p.clone();
+        let u2 = ua.clone();
+        let opening = std::thread::spawn(move || p2.load(&u2, 0, None));
+        std::thread::sleep(Duration::from_millis(100));
+        p.pause();
+        assert!(p.play().is_ok(), "answers at once");
+        opening.join().unwrap().unwrap();
+        let st = wait(&p, "the opened song plays", |s| s.transport == Transport::Playing);
+        assert_eq!(st.url.as_deref(), Some(ua.as_str()));
+        p.stop();
+    }
+
     /// Repeat one hands the same song ahead: its end says the zone went on (`advanced`), so the
     /// page keeps it playing instead of opening it again.
     #[test]
