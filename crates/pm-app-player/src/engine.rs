@@ -134,6 +134,9 @@ struct Page {
     heard_at: u64,
     /// It broke here: paused at this position (a play opens it again there; the page's retry).
     broke_at: Option<u64>,
+    /// A play from the pause is under way, from here: if the output doesn't open again, the song
+    /// is parked here (as a break) instead of the zone's stop at 0.
+    resuming: Option<u64>,
 }
 
 /// What the page should hear of a zone event, and whether the zone must stop.
@@ -151,7 +154,11 @@ impl From<bool> for Heard {
 
 impl Page {
     /// What the zone says plays now (its id and position): where the current song is.
-    fn note(&mut self, playing: Option<(u64, u64)>) {
+    fn note(&mut self, playing: Option<(u64, u64)>, transport: Transport) {
+        // Playing again: a play from the pause is over (whatever the order its events came in)
+        if transport == Transport::Playing {
+            self.resuming = None;
+        }
         if let Some((id, at)) = playing {
             if Some(id) == self.current {
                 self.heard_at = at;
@@ -187,6 +194,7 @@ impl Page {
                 self.error = None;
                 self.refused = None;
                 self.breaking = false;
+                self.resuming = None;
                 true.into()
             }
             // The song handed ahead didn't open: something the app can't play is the page's to
@@ -209,6 +217,20 @@ impl Page {
                     return true.into();
                 }
                 self.error = Some(message.clone());
+                // The output didn't open again for a play from the pause (another format now, the
+                // node's session not letting go): parked where it paused
+                if let Some(at) = self.resuming.take() {
+                    if self.current.is_some()
+                        && self.broke_at.is_none()
+                        && !message.contains(crate::source::CANT_PLAY_HERE)
+                    {
+                        self.broke_at = Some(at);
+                        return Heard {
+                            tell: true,
+                            stop: true,
+                        };
+                    }
+                }
                 // The stream broke (the zone says "decode: …" and then ends the song): paused
                 // where it was last heard, at once, and the zone stops there
                 if message.starts_with("decode:") && self.current.is_some() && self.broke_at.is_none() {
@@ -221,15 +243,24 @@ impl Page {
                 }
                 true.into()
             }
-            ZoneEvent::Stopped => true.into(),
+            ZoneEvent::Stopped => {
+                self.resuming = None;
+                true.into()
+            }
             // Playing again: an old reason (a DAC that was unplugged) no longer applies
             ZoneEvent::Resumed => {
+                self.resuming = None;
                 if self.taken_at.is_none() && self.broke_at.is_none() {
                     self.error = None;
                 }
                 true.into()
             }
-            ZoneEvent::Paused { .. } | ZoneEvent::Seeked { .. } => true.into(),
+            // (a device gone pauses before its error: that error stays a pause with its reason)
+            ZoneEvent::Paused { .. } => {
+                self.resuming = None;
+                true.into()
+            }
+            ZoneEvent::Seeked { .. } => true.into(),
             _ => false.into(),
         }
     }
@@ -274,6 +305,8 @@ struct Inner {
     page: Mutex<Page>,
     notify: Mutex<Option<Notify>>,
     last: Mutex<Option<(Status, Instant)>>,
+    /// The USB DAC the player paused on (see [`same_dac`]); a stop or a failed open forgets it.
+    paused_dac: Arc<Mutex<Option<String>>>,
 }
 
 /// The app's own player on one output. Cloning shares it.
@@ -295,6 +328,7 @@ impl AppPlayer {
                 page: Mutex::default(),
                 notify: Mutex::default(),
                 last: Mutex::default(),
+                paused_dac: Arc::default(),
             }),
         }
     }
@@ -342,6 +376,7 @@ impl AppPlayer {
         let weak = Arc::downgrade(&self.inner);
         let owned: Arc<dyn Output> = Arc::new(Owned {
             inner: self.inner.output.clone(),
+            paused_dac: self.inner.paused_dac.clone(),
             owner: self.inner.owner.clone(),
             player: weak.clone(),
         });
@@ -399,6 +434,7 @@ impl AppPlayer {
                 p.taken_at = None;
                 p.broke_at = None;
                 p.breaking = false;
+                *self.inner.paused_dac.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
                     z.stop();
                     z.clear();
@@ -416,6 +452,7 @@ impl AppPlayer {
         p.taken_at = None;
         p.broke_at = None;
         p.breaking = false;
+        p.resuming = None;
         p.heard_at = at_ms;
         zone.clear();
         let ahead = p.want_ahead.clone();
@@ -492,6 +529,11 @@ impl AppPlayer {
         if taken || stopped {
             return self.load(&url, at.unwrap_or(0), ahead.as_deref());
         }
+        if st.as_ref().is_some_and(|s| s.transport == Transport::Paused) {
+            let mut p = self.page();
+            let at = p.heard_at;
+            p.resuming = Some(at);
+        }
         self.zone().play();
         Ok(())
     }
@@ -542,8 +584,10 @@ impl AppPlayer {
             p.ahead = None;
             p.broke_at = None;
             p.breaking = false;
+            p.resuming = None;
             p.taken_at = None;
             p.url = None;
+            *self.inner.paused_dac.lock().unwrap_or_else(|e| e.into_inner()) = None;
             p.current = None;
         }
         if let Some(z) = self.inner.zone.lock().unwrap_or_else(|e| e.into_inner()).clone() {
@@ -632,9 +676,12 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             Ok(ev) => {
                                 let Some(inner) = player.upgrade() else { return };
                                 let p = AppPlayer { inner };
-                                let playing = state.borrow().now_playing.as_ref().map(|np| (np.item.id, np.position_ms));
+                                let (playing, transport) = {
+                                    let z = state.borrow();
+                                    (z.now_playing.as_ref().map(|np| (np.item.id, np.position_ms)), z.transport)
+                                };
                                 let mut pg = p.page();
-                                pg.note(playing);
+                                pg.note(playing, transport);
                                 let heard = pg.on(&ev);
                                 // (under the page's lock: no load comes in between)
                                 if heard.stop {
@@ -655,8 +702,11 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
                             }
                             player.upgrade().map(|inner| {
                                 let p = AppPlayer { inner };
-                                let playing = state.borrow().now_playing.as_ref().map(|np| (np.item.id, np.position_ms));
-                                p.page().note(playing);
+                                let (playing, transport) = {
+                                    let z = state.borrow();
+                                    (z.now_playing.as_ref().map(|np| (np.item.id, np.position_ms)), z.transport)
+                                };
+                                p.page().note(playing, transport);
                                 (p, false)
                             })
                         }
@@ -677,9 +727,13 @@ fn watch(player: Weak<Inner>, zone: &Zone) {
 }
 
 /// The device's output as this player opens it: taken from the node first, and given up when
-/// the node takes it back (the sink's next write says so and the zone stops).
+/// the node takes it back while it plays (the sink's next write says so and the zone stops) or at
+/// any pause (the sink closes; the node's zone may then take the output without stopping anything,
+/// and the next play here takes it back).
 struct Owned {
     inner: Arc<dyn Output>,
+    /// The USB DAC the player paused on, until the next open or resume checks it is still there.
+    paused_dac: Arc<Mutex<Option<String>>>,
     owner: OutputOwner,
     player: Weak<Inner>,
 }
@@ -708,6 +762,9 @@ impl Output for Owned {
         self.inner.device()
     }
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+        // The DAC it paused on gone meanwhile (also after a seek while paused): paused with the
+        // reason, never the phone's speaker; the play after that is the listener's choice
+        same_dac(&self.paused_dac, &*self.inner, &self.id())?;
         let lost = Arc::new(AtomicBool::new(false));
         let stop: Stop = {
             let (lost, player) = (lost.clone(), self.player.clone());
@@ -732,6 +789,8 @@ impl Output for Owned {
             lost,
             claim: Some(claim),
             written: 0,
+            output: self.inner.clone(),
+            paused_dac: self.paused_dac.clone(),
         }))
     }
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
@@ -751,6 +810,24 @@ struct OwnedSink {
     claim: Option<Claim>,
     /// Frames written to the device's sink, kept once it is closed.
     written: u64,
+    output: Arc<dyn Output>,
+    /// The USB DAC it played to when it paused (shared with the output, see [`same_dac`]).
+    paused_dac: Arc<Mutex<Option<String>>>,
+}
+
+/// Before playing again after a pause: the DAC it paused on is still connected. Checked once:
+/// gone, the zone pauses with the reason, and the next play is the listener's choice.
+fn same_dac(paused_dac: &Mutex<Option<String>>, output: &dyn Output, id: &OutputId) -> Result<(), SinkError> {
+    let Some(name) = paused_dac.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return Ok(());
+    };
+    if output.device().is_some_and(|d| d.name == name) {
+        return Ok(());
+    }
+    Err(SinkError::Gone(
+        id.clone(),
+        format!("{name} is no longer where this phone plays"),
+    ))
 }
 
 impl OwnedSink {
@@ -795,18 +872,27 @@ impl AudioSink for OwnedSink {
     /// (`resume` says so), from where it paused.
     fn pause(&mut self) -> Result<bool, SinkError> {
         if let Some(mut s) = self.inner.take() {
-            let _ = s.flush();
             self.written = s.frames_written();
+            // Its DAC went just now: the zone pauses with the reason
+            if let Err(e) = s.flush() {
+                if e.gone_reason().is_some() {
+                    s.gone_reported();
+                    return Err(e);
+                }
+            }
         }
+        *self.paused_dac.lock().unwrap_or_else(|e| e.into_inner()) = self.output.device().map(|d| d.name);
         self.claim = None;
         Ok(true)
     }
     fn resume(&mut self) -> Result<(), SinkError> {
         self.check()?;
+        same_dac(&self.paused_dac, &*self.output, &self.id)?;
         self.open()?.resume()
     }
     fn ready_to_resume(&mut self) -> Result<(), SinkError> {
         self.check()?;
+        same_dac(&self.paused_dac, &*self.output, &self.id)?;
         self.open()?.ready_to_resume()
     }
     fn frames_written(&self) -> u64 {
@@ -1065,6 +1151,140 @@ mod tests {
         p.stop();
     }
 
+    /// A device that names its DAC, which the test unplugs.
+    struct DacOut {
+        inner: NullOutput,
+        dac: Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Output for DacOut {
+        fn id(&self) -> OutputId {
+            self.inner.id()
+        }
+        fn name(&self) -> String {
+            self.inner.name()
+        }
+        fn caps(&self) -> &OutputCaps {
+            self.inner.caps()
+        }
+        fn device(&self) -> Option<OutputDevice> {
+            self.dac.lock().unwrap().clone().map(|name| OutputDevice {
+                name,
+                ..OutputDevice::default()
+            })
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            self.inner.open(fmt).await
+        }
+    }
+
+    /// The DAC unplugged during a pause: play doesn't open the phone's speaker; it stays paused
+    /// with the reason.
+    #[test]
+    fn a_dac_gone_during_a_pause_keeps_it_paused() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 6, 1);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let out = Arc::new(DacOut {
+            inner: NullOutput::realtime(),
+            dac: Mutex::new(Some("FiiO KA17".into())),
+        });
+        let p = AppPlayer::new(out.clone(), OutputOwner::new());
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "playing", |s| {
+            s.transport == Transport::Playing && s.position_ms > 500
+        });
+        p.pause();
+        wait(&p, "paused", |s| s.transport == Transport::Paused);
+        *out.dac.lock().unwrap() = None;
+        p.play().unwrap();
+        let st = wait(&p, "still paused, saying why", |s| {
+            s.error
+                .as_deref()
+                .is_some_and(|e| e.contains("FiiO KA17 is no longer where this phone plays"))
+        });
+        assert_eq!(st.transport, Transport::Paused, "{st:?}");
+        assert!(
+            !st.broke,
+            "a pause with its reason, not a break the page retries: {st:?}"
+        );
+        assert_eq!(p.zone_state().unwrap().transport, Transport::Paused);
+        assert_eq!(out.inner.opens_total(), 1, "nothing opened again");
+        // The play after that is the listener's choice
+        p.play().unwrap();
+        wait(&p, "playing again", |s| s.transport == Transport::Playing);
+        // A seek while paused drops the sink: the DAC is still checked at the next open
+        *out.dac.lock().unwrap() = Some("FiiO KA17".into());
+        p.pause();
+        wait(&p, "paused", |s| s.transport == Transport::Paused);
+        p.seek(200);
+        *out.dac.lock().unwrap() = None;
+        let opens = out.inner.opens_total();
+        p.play().unwrap();
+        wait(&p, "paused after the seek, saying why", |s| {
+            s.transport == Transport::Paused
+                && s.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("no longer where this phone plays"))
+        });
+        assert_eq!(out.inner.opens_total(), opens, "nothing opened");
+        p.stop();
+        // Paused on the DAC, stopped, unplugged: a new song later plays (nothing remembered)
+        *out.dac.lock().unwrap() = Some("FiiO KA17".into());
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "playing", |s| s.transport == Transport::Playing);
+        p.pause();
+        wait(&p, "paused", |s| s.transport == Transport::Paused);
+        p.stop();
+        *out.dac.lock().unwrap() = None;
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "a new song plays", |s| {
+            s.transport == Transport::Playing && s.error.is_none()
+        });
+        p.stop();
+    }
+
+    /// A device that opens once, then refuses.
+    struct OpensOnce(NullOutput);
+
+    #[async_trait::async_trait]
+    impl Output for OpensOnce {
+        fn id(&self) -> OutputId {
+            self.0.id()
+        }
+        fn name(&self) -> String {
+            self.0.name()
+        }
+        fn caps(&self) -> &OutputCaps {
+            self.0.caps()
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            if self.0.opens_total() >= 1 {
+                return Err(SinkError::Unavailable(self.id(), "busy".into()));
+            }
+            self.0.open(fmt).await
+        }
+    }
+
+    /// The output doesn't open again for a play from the pause: the song is parked where it
+    /// paused (the page's retry opens it there), not stopped at 0.
+    #[test]
+    fn a_failed_reopen_parks_the_song_where_it_paused() {
+        let (a, _) = wav_bytes(48_000, 16, 48_000 * 6, 1);
+        let (ua, _) = serve(a, "audio/wav", Mode::default());
+        let p = AppPlayer::new(Arc::new(OpensOnce(NullOutput::realtime())), OutputOwner::new());
+        p.load(&ua, 0, None).unwrap();
+        wait(&p, "playing", |s| {
+            s.transport == Transport::Playing && s.position_ms > 800
+        });
+        p.pause();
+        let at = wait(&p, "paused", |s| s.transport == Transport::Paused).position_ms;
+        p.play().unwrap();
+        let st = wait(&p, "parked", |s| s.broke);
+        assert_eq!((st.transport, st.position_ms), (Transport::Paused, at), "{st:?}");
+        p.stop();
+    }
+
     /// One output, one stream: the node's session takes it from this player (paused here with
     /// the reason, where it was), and a play here takes it back (the node's session is stopped).
     #[test]
@@ -1208,9 +1428,9 @@ mod tests {
             ahead: Some(("b".into(), 2)),
             ..Page::default()
         };
-        pg.note(Some((1, 61_000)));
+        pg.note(Some((1, 61_000)), Transport::Playing);
         // The zone has already published the next song (at 0) when the error is handled
-        pg.note(Some((2, 0)));
+        pg.note(Some((2, 0)), Transport::Playing);
         let h = pg.on(&ZoneEvent::Error {
             message: "decode: the stream broke off".into(),
         });
