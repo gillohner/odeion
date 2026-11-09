@@ -576,6 +576,10 @@ impl NodeState {
         let mut state_rx = zone.watch();
         // Every controller learns about the new zone at once, not on its first change.
         let initial = state_rx.borrow_and_update().clone();
+        // The queue version saved so far, taken before the saving task below starts: the task
+        // may first run only after the engine has published changes (a loaded machine), and
+        // those must still be saved
+        let mut saved_version = initial.queue_version;
         let _ = self.events.send(ApiEvent::Zone { state: initial });
         // The output's level, read back now and every few seconds (a Linn's own remote changes
         // it; the pages show what the device says), for outputs with a hardware volume. The
@@ -633,7 +637,6 @@ impl NodeState {
             });
         }
         tokio::spawn(async move {
-            let mut saved_version = state_rx.borrow().queue_version;
             while state_rx.changed().await.is_ok() {
                 let state = state_rx.borrow_and_update().clone();
                 if state.queue_version != saved_version {
