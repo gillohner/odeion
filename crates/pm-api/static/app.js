@@ -6590,9 +6590,11 @@
           // This render's generation: an answer (or failure) from an older render, or from a page
           // left meanwhile, is dropped (the same page opened again is a newer render)
           const gen = state.pageGen = (state.pageGen || 0) + 1;
-          await pubkyUser();
           const { kind, id } = state.viewArg;
           const live = () => gen === state.pageGen && state.view === 'item' && state.viewArg.id === id;
+          await pubkyUser();
+          // Account discovery can finish after Back has restored another page.
+          if (!live()) return;
           // Retry asks the node to fetch the service's lists again, once
           const refresh = state.viewArg.refresh ? '?refresh=1' : ''; delete state.viewArg.refresh;
           loading();

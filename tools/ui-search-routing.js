@@ -13,9 +13,14 @@ if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
 const QUERY = 'Journey & Time';
 const sources = [{ id: 'tidal', name: 'TIDAL', enabled: true, status: 'signed in', features: ['search'] }];
 const hit = { kind: 'song', id: 'lib-1', title: QUERY, subtitle: 'Sefa', track_id: 1, keys: ['track:1'] };
+const song = { kind: 'song', id: 'lib-1', title: QUERY, target: { track_id: 1 },
+  source: 'library', section: 'tracks', artist: { name: 'Sefa', id: 'lib-11' },
+  plays_from: { service: 'library', label: 'Your library' }, songs: [] };
 
 async function fixture(browser, width) {
-  const run = await fx.create(browser, width, { fixtures: { '/sources': { body: sources } } });
+  const run = await fx.create(browser, width, { fixtures: {
+    '/sources': { body: sources }, '/item/song/lib-1': { body: song },
+  } });
   run.requests = [];
   await run.context.route(url => url.pathname === '/v1/search', async route => {
     const url = new URL(route.request().url());
@@ -75,10 +80,12 @@ async function drawn(page, scope, q = QUERY) {
           await page.press('#search', 'ArrowDown');
           await page.press('#search', 'Enter');
           await page.waitForURL('**/song/lib-1');
+          await page.locator('#iplay').waitFor();
           await page.goBack();
           await drawn(page, nextScope);
           await page.goForward();
           await page.waitForURL('**/song/lib-1');
+          await page.locator('#iplay').waitFor();
           await page.goBack();
           await drawn(page, nextScope);
           assert.equal(requests.length, 1, 'Back/Forward reuses the current search');
@@ -93,6 +100,44 @@ async function drawn(page, scope, q = QUERY) {
           console.log(`PASS ${width} ${savedScope || 'default'}: direct link, reload, source change, Back/Forward, keyboard query, no overflow`);
         } finally { await context.close(); }
       }
+    }
+
+    // Back while the item is still reading the account: a late reply must not replace the
+    // restored search with the old item's loading screen. Hold the response until Back is done.
+    for (const width of [1280, 1024, 768, 360, 412]) {
+      const { page, context, state, requests } = await fixture(browser, width);
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      await context.route(url => url.pathname === '/v1/pubky', async route => {
+        await gate;
+        await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ user: null }) });
+      });
+      try {
+        await fx.go(page, '/search?' + new URLSearchParams({ q: QUERY, in: 'library' }));
+        await drawn(page, 'library');
+        await page.focus('#search');
+        await page.press('#search', 'ArrowDown');
+        const reading = page.waitForRequest(url => new URL(url.url()).pathname === '/v1/pubky');
+        await page.press('#search', 'Enter');
+        await page.waitForURL('**/song/lib-1');
+        await reading;
+        await page.goBack();
+        await drawn(page, 'library');
+        const answered = page.waitForResponse(url => new URL(url.url()).pathname === '/v1/pubky');
+        release();
+        await (await answered).finished();
+        // Watch the restored page through the late response's rendering turn.
+        await page.waitForTimeout(150);
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${process.env.SHOT_PREFIX || 'after'}-search-back-pending-${width}.png`) });
+        assert.equal(await page.locator('#sresults .srow').count(), 1, 'late account reply keeps the restored results');
+        await drawn(page, 'library');
+        assert.deepEqual(requests, [{ q: QUERY, scope: 'library' }], 'Back needs no replacement search');
+        await page.goForward();
+        await page.locator('#iplay').waitFor();
+        assert.equal(await page.locator('#main .hero h1').innerText(), QUERY, 'the item still opens after the account reply');
+        assert.deepEqual(state.errors, []);
+        console.log(`PASS ${width}: Back during account loading keeps results after the late reply; Forward opens the song`);
+      } finally { release(); await context.close(); }
     }
 
     // Startup still goes through the usual query handling, not just the renderer.
