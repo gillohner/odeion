@@ -70,8 +70,9 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
 ];
 /// Settings that belong to this node and are never carried over (its stream key, its id, the
 /// backup schedule with its passphrase, and the hashes of its API token: the one the owner's
-/// browser sessions were made under and the mark of a token an older node record held. A short
-/// token set in the config could be guessed from either offline).
+/// browser sessions were made under, the mark of a token an older node record held and the note
+/// of sign-ins found in saved queues at a start. A short token set in the config could be guessed
+/// from any of them offline).
 /// The owner's browser sessions and device sign-ins (their hashes) are this node's too: a backup
 /// from before Make a new token never brings back a sign-in that ended with it.
 /// Also the files jobs this node is running or keeps for its next start (copies to the
@@ -85,6 +86,8 @@ const NODE_OWN: &[&str] = &[
     crate::accounts::OWNER_SESSIONS,
     crate::accounts::DEVICE_SESSIONS,
     crate::access_token::PUBLISHED_TOKEN_KEY,
+    crate::accounts::API_TOKEN_EXPOSED,
+    crate::accounts::QUEUE_CLEANUP_PENDING,
     crate::copy_jobs::JOBS_KEY,
     crate::files::BRING_RESUME_KEY,
     crate::copy_guard::IN_FLIGHT_KEY,
@@ -703,7 +706,20 @@ pub async fn restore(
     }
     let result = restore_locked(s, &parsed, secrets).await;
     s.end_scan();
+    // The sign-in stores may have been replaced: read again
+    crate::accounts::sign_ins_changed();
     let mut report = result?;
+    // A copy made by an older version may hold sign-ins in its saved queues' links: cleaned as
+    // at a start, and what they were ends
+    match crate::accounts::clean_saved_queues(s) {
+        Ok(c) if c.items > 0 => tracing::warn!(
+            items = c.items,
+            api_token = c.api_token_found,
+            "saved queue links in the restored copy carried a sign-in: removed"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("checking the restored queues failed: {}", e.message),
+    }
     // Covers first (the extracted ones were not carried over), then a rescan that skips every
     // unchanged file and so keeps the matches.
     let present: Vec<PathBuf> = s.all_folders().into_iter().filter(|p| p.is_dir()).collect();

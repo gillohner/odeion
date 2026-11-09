@@ -165,6 +165,8 @@ pub struct Zone {
     /// The level last published, changed only together with the command that publishes it (the
     /// engine's state can lag the commands still queued). Never held across an await.
     volume_published: Arc<std::sync::Mutex<Published>>,
+    /// The zone's volume limit, when the node set one ([`Zones::set_volume_limit`]).
+    volume_limit: Arc<std::sync::RwLock<Option<VolumeLimit>>>,
 }
 
 /// What a zone last said its level was, and how many levels the device announced itself.
@@ -172,6 +174,42 @@ pub struct Zone {
 struct Published {
     level: Option<pm_model::ZoneVolume>,
     announced: u64,
+}
+
+/// A zone's volume limit in dB for an output (the node's DSP settings, `max_volume_db`), given
+/// by the node ([`Zones::set_volume_limit`]): every volume request for the zone, from whichever
+/// controller, is held to it in [`Zone::set_volume`].
+pub type VolumeLimit = Arc<dyn Fn(&OutputId) -> Option<f32> + Send + Sync>;
+
+/// Apply a volume limit (dB) to an absolute request: a dB request is capped at it, a percent
+/// request at the level the output itself sets for that dB (`percent_for`: linear on UPnP and
+/// Snapcast, an amplitude on BluOS, MPD and Cast). Up, down and mute pass as they are (a step
+/// that lands above the limit is brought back after the read-back).
+pub fn cap_volume(v: Volume, limit: Option<f32>, percent_for: impl Fn(f32) -> u8) -> Volume {
+    match (v, limit) {
+        (Volume::Db(db), Some(max)) if db > max => Volume::Db(max),
+        (Volume::Percent(p), Some(max)) => Volume::Percent(p.min(percent_for(max))),
+        (v, _) => v,
+    }
+}
+
+/// One step up in percent, for an output that can't report its level (what the UPnP output
+/// steps by).
+const PERCENT_STEP: u8 = 3;
+
+/// The request that brings `level` back to `limit` when it is above it.
+fn back_to_limit(
+    level: pm_model::VolumeLevel,
+    limit: f32,
+    percent_for: impl Fn(f32) -> u8,
+) -> Option<Volume> {
+    match level {
+        pm_model::VolumeLevel::Db(d) if d > limit => Some(Volume::Db(limit)),
+        pm_model::VolumeLevel::Percent(p) if p > percent_for(limit) => {
+            Some(Volume::Percent(percent_for(limit)))
+        }
+        _ => None,
+    }
 }
 
 impl Zone {
@@ -222,6 +260,7 @@ impl Zone {
             crossfade,
             volume_io: Default::default(),
             volume_published: Default::default(),
+            volume_limit: Default::default(),
         }
     }
 
@@ -411,20 +450,157 @@ impl Zone {
     /// (the poll catches up). Controllers always hear the result, also when it equals what they
     /// had: one that showed the level it asked for learns that the device kept another. A level
     /// the device announced while this ran is newer than this read-back: it stays.
+    ///
+    /// Every request is held to the zone's volume limit when the node set one
+    /// ([`Zones::set_volume_limit`]): an absolute level above it becomes the limit before it
+    /// reaches the output ([`cap_volume`]), and a step up that the device took past it is set
+    /// back to the limit at once. On an output that can't report its level, a step up becomes
+    /// an absolute request instead (the level last published plus one step, at most the
+    /// limit), and is refused while no level is known. Unmuting is held to the limit too: a
+    /// device that reports its level is set back when it came up above the limit; one that
+    /// can't and chooses the level itself ([`Output::unmute_restores_level`] false: AirPlay,
+    /// Squeezebox) is given the level last published, held to the limit, and the limit itself
+    /// before the unmute while none is known; one that keeps its own level through a mute is
+    /// only brought down when the level last published is above the limit, never raised. A
+    /// group whose member refuses the unmute is capped all the same, and the refusal reported.
+    /// This is the one place every controller's request passes (the pages, announcements, UPnP
+    /// controllers, Subsonic clients).
     pub async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         let _io = self.volume_io.lock().await;
+        let limit = self.volume_limit();
+        let mut v = cap_volume(v, limit, |db| self.output.percent_for_db(db));
+        if let (Volume::Up, Some(max)) = (v, limit) {
+            // A device that can't say where it is can't be checked after the step: the step is
+            // made from the level the zone last published, held to the limit
+            if !matches!(self.output.volume().await, Ok(Some(_))) {
+                let Some(was) = self.published().level else {
+                    return Err(SinkError::Device(
+                        "the level isn't known, so a step can't be held to the zone's limit; set a level first".into(),
+                    ));
+                };
+                v = match was.level {
+                    pm_model::VolumeLevel::Db(d) => {
+                        let step = match self.output.caps().hw_volume {
+                            Some(pm_model::VolumeKind::Db { step, .. }) => step.max(0.5),
+                            _ => 1.0,
+                        };
+                        Volume::Db((d + step).min(max))
+                    }
+                    pm_model::VolumeLevel::Percent(p) => Volume::Percent(
+                        p.saturating_add(PERCENT_STEP)
+                            .min(self.output.percent_for_db(max)),
+                    ),
+                };
+            }
+        }
         let seen = self.published().announced;
-        self.output.set_volume(v).await?;
-        let read = self.output.volume().await;
+        let percent_for = |db: f32| self.output.percent_for_db(db);
+        let unmuting = v == Volume::Mute(false);
+        let level_is_chosen = !self.output.unmute_restores_level();
+        // The limit as a level of the output's kind
+        let at_limit = |max: f32| match self.output.caps().hw_volume {
+            Some(pm_model::VolumeKind::Db { .. }) => Volume::Db(max),
+            _ => Volume::Percent(percent_for(max)),
+        };
+        // An output that chooses the level on unmuting (AirPlay, Squeezebox) with nothing to go
+        // back to would come back at full for a moment: the limit goes first, so it comes back
+        // at the limit
+        let mut preset: Option<Option<pm_model::ZoneVolume>> = None;
+        if let (true, true, Some(max)) = (unmuting, level_is_chosen, limit) {
+            if self.published().level.is_none() && !matches!(self.output.volume().await, Ok(Some(_))) {
+                preset = Some(self.set_and_read(at_limit(max)).await?.0);
+            }
+        }
+        // A group whose later member refuses the unmute still has its earlier members unmuted:
+        // the cap below is applied all the same, and the refusal reported after
+        let set = self.output.set_volume(v).await;
+        let partial = match set {
+            Ok(()) => None,
+            Err(e) if unmuting && limit.is_some() => Some(e),
+            Err(e) => return Err(e),
+        };
+        let (mut next, reported) = self.read_after(v).await;
+        // The level set before the unmute is what the device plays at now
+        if let (None, Some(Some(l))) = (next, &preset) {
+            next = Some(pm_model::ZoneVolume {
+                level: l.level,
+                muted: false,
+            });
+        }
+        if let Some(max) = limit {
+            let back = match v {
+                // A step the device took past the limit
+                Volume::Up => next.and_then(|n| back_to_limit(n.level, max, percent_for)),
+                // Unmuting: a device that reports its level is set back when it came up above
+                // the limit, whichever way it unmutes
+                Volume::Mute(false) if reported => {
+                    next.and_then(|n| back_to_limit(n.level, max, percent_for))
+                }
+                _ if preset.is_some() => None,
+                // One that can't report and chooses the level itself is given the level last
+                // published, held to the limit (the limit itself while none is known)
+                Volume::Mute(false) if level_is_chosen => {
+                    Some(match self.published().level.map(|l| l.level) {
+                        Some(pm_model::VolumeLevel::Db(d)) => Volume::Db(d.min(max)),
+                        Some(pm_model::VolumeLevel::Percent(p)) => Volume::Percent(p.min(percent_for(max))),
+                        None => at_limit(max),
+                    })
+                }
+                // One that keeps its own level through a mute is never raised: only a level
+                // last published above the limit (lowered since) is brought down to it
+                Volume::Mute(false) => self
+                    .published()
+                    .level
+                    .and_then(|l| back_to_limit(l.level, max, percent_for)),
+                _ => None,
+            };
+            if let Some(back) = back {
+                let (again, read) = self.set_and_read(back).await?;
+                next = again;
+                // The unmute went through before this level: the state says so
+                if unmuting && !read {
+                    if let Some(n) = next.as_mut() {
+                        n.muted = false;
+                    }
+                }
+            }
+        }
         let mut p = self.published();
         if p.announced != seen {
-            return Ok(());
+            return partial.map_or(Ok(()), Err);
         }
-        let next = match read {
-            Ok(Some(read)) => Some(read),
-            Err(_) => None,
+        if next.is_some() {
+            p.level = next;
+        }
+        self.send(Command::Volume(p.level));
+        partial.map_or(Ok(()), Err)
+    }
+
+    /// The zone's volume limit now: the node's for this zone's output, if any.
+    fn volume_limit(&self) -> Option<f32> {
+        let limit = self
+            .volume_limit
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        limit.and_then(|f| f(&self.output.id()))
+    }
+
+    /// Set `v` on the output and read the level back ([`Self::read_after`]).
+    async fn set_and_read(&self, v: Volume) -> Result<(Option<pm_model::ZoneVolume>, bool), SinkError> {
+        self.output.set_volume(v).await?;
+        Ok(self.read_after(v).await)
+    }
+
+    /// The level after `v` was set: the device's own reading (and `true`), else the level
+    /// implied by `v` over the last one published (`None`: nothing to publish).
+    async fn read_after(&self, v: Volume) -> (Option<pm_model::ZoneVolume>, bool) {
+        let read = self.output.volume().await;
+        match read {
+            Ok(Some(read)) => (Some(read), true),
+            Err(_) => (None, false),
             Ok(None) => {
-                let was = p.level;
+                let was = self.published().level;
                 let level = match v {
                     Volume::Db(d) => Some(pm_model::VolumeLevel::Db(d)),
                     Volume::Percent(p) => Some(pm_model::VolumeLevel::Percent(p.min(100))),
@@ -434,14 +610,9 @@ impl Zone {
                     Volume::Mute(m) => m,
                     _ => was.is_some_and(|w| w.muted),
                 };
-                level.map(|level| pm_model::ZoneVolume { level, muted })
+                (level.map(|level| pm_model::ZoneVolume { level, muted }), false)
             }
-        };
-        if next.is_some() {
-            p.level = next;
         }
-        self.send(Command::Volume(p.level));
-        Ok(())
     }
 
     /// Read the output's level and publish it in the state (the poll). A read that fails, or an
@@ -533,6 +704,12 @@ impl fmt::Debug for Zone {
 pub struct Zones {
     factory: Arc<dyn SourceFactory>,
     inner: RwLock<BTreeMap<ZoneId, Arc<Zone>>>,
+    /// The node's own addresses, for every zone's queue (`Queue::set_node_origins`).
+    node_origins: RwLock<Vec<String>>,
+    /// The node's own sign-ins, for every zone's queue (`Queue::set_token_check`).
+    token_check: RwLock<Option<crate::queue::TokenCheck>>,
+    /// The zones' volume limits, by output (`Zone::set_volume`).
+    volume_limit: RwLock<Option<VolumeLimit>>,
 }
 
 impl Zones {
@@ -540,7 +717,45 @@ impl Zones {
         Self {
             factory,
             inner: RwLock::new(BTreeMap::new()),
+            node_origins: RwLock::new(Vec::new()),
+            token_check: RwLock::new(None),
+            volume_limit: RwLock::new(None),
         }
+    }
+
+    /// How a zone learns its volume limit (dB) from its output: every volume request for a
+    /// zone, from whichever controller, is held to it. For zones made from now on and those
+    /// there are; read at every request, so a changed setting counts at once.
+    pub fn set_volume_limit(&self, limit: Option<VolumeLimit>) {
+        for z in self.inner.read().expect("zones poisoned").values() {
+            *z.volume_limit.write().unwrap_or_else(|e| e.into_inner()) = limit.clone();
+        }
+        *self.volume_limit.write().expect("zones poisoned") = limit;
+    }
+
+    /// How a queue tells the node's own sign-ins (the API token, an owner's session, a listener's
+    /// token): a `/v1/` link on any other host loses those on the way into any zone's queue. For
+    /// zones made from now on and those there are.
+    pub fn set_token_check(&self, check: Option<crate::queue::TokenCheck>) {
+        for z in self.inner.read().expect("zones poisoned").values() {
+            z.queue
+                .lock()
+                .expect("queue poisoned")
+                .set_token_check(check.clone());
+        }
+        *self.token_check.write().expect("zones poisoned") = check;
+    }
+
+    /// The node's own addresses (`http://host:port`): links there are the node's, and lose their
+    /// sign-in on the way into any zone's queue. For zones made from now on and those there are.
+    pub fn set_node_origins(&self, origins: Vec<String>) {
+        for z in self.inner.read().expect("zones poisoned").values() {
+            z.queue
+                .lock()
+                .expect("queue poisoned")
+                .set_node_origins(origins.clone());
+        }
+        *self.node_origins.write().expect("zones poisoned") = origins;
     }
 
     /// Create a zone named `name` on `output`. The id is derived from the
@@ -555,6 +770,15 @@ impl Zones {
             n += 1;
         }
         let zone = Arc::new(Zone::new(id.clone(), name, output, self.factory.clone()));
+        let origins = self.node_origins.read().expect("zones poisoned").clone();
+        let check = self.token_check.read().expect("zones poisoned").clone();
+        {
+            let mut q = zone.queue.lock().expect("queue poisoned");
+            q.set_node_origins(origins);
+            q.set_token_check(check);
+        }
+        *zone.volume_limit.write().unwrap_or_else(|e| e.into_inner()) =
+            self.volume_limit.read().expect("zones poisoned").clone();
         map.insert(id, zone.clone());
         zone
     }

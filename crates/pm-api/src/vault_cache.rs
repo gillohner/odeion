@@ -204,6 +204,10 @@ pub struct Synced {
     /// signed out everywhere since (compared as a value, not against this machine's clock).
     #[serde(default)]
     pub marker: Option<u64>,
+    /// The node's copy was taken from an unsigned vault copy (the migration window): this node
+    /// never signs it as its own, only what it wrote itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub from_unsigned: bool,
 }
 
 fn synced_key(service: &str) -> String {
@@ -289,6 +293,8 @@ pub struct CacheReport {
     pub migrated: Vec<String>,
     /// The node's copy changed: written to the vault.
     pub pushed: Vec<String>,
+    /// Copies from before v2 that equal the node's own: written again, signed by this node.
+    pub signed: Vec<String>,
     /// The vault's copy changed (or was new): the node's settings now hold it.
     pub pulled: Vec<String>,
     /// Removed from the vault elsewhere: moved aside on the node.
@@ -339,7 +345,9 @@ pub struct Detail {
     pub service: String,
     /// `other_account` (two different accounts), `other_app` (made with an app this node doesn't
     /// have), `other_client` (written by a client that isn't a node), `both_changed` (one account,
-    /// two new sign-ins).
+    /// two new sign-ins), `unsigned` (no device of the person's signed it), `signed_out` (a
+    /// sign-in made before the person last signed out everywhere), `stale` (older than a copy
+    /// this node has seen).
     pub reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<CopyInfo>,
@@ -663,6 +671,13 @@ impl Wipe {
     fn predates(&self, m: &Side) -> bool {
         self.at.is_some_and(|w| w >= m.made_at())
     }
+
+    /// A vault copy a node wrote of a sign-in made before the last sign-out everywhere (a copy
+    /// from then, put back): never taken. One without a sign-in id (a node from before ids) can't
+    /// show it was made after, so it counts as from before, as the node's own copies do.
+    fn signed_out(&self, t: &VaultSide) -> bool {
+        t.from_a_node && self.predates(&t.side)
+    }
 }
 
 /// The vault's side, with what the node needs to take it.
@@ -673,6 +688,9 @@ pub struct VaultSide {
     pub from_a_node: bool,
     /// Made with the app this node has (or no app is involved).
     pub our_app: bool,
+    /// Signed by one of the person's devices, or unsigned (from before v2) while this node has
+    /// no copy of its own and has seen no signed one. Anything else is never taken as it is.
+    pub vouched: bool,
 }
 
 /// What to do for one service.
@@ -715,17 +733,17 @@ fn same_sign_in(side: &Side, seen: &Synced) -> bool {
 /// sync; `wipe` what is known about the person signing out everywhere.
 pub fn decide(seen: Option<&Synced>, mine: Option<&Side>, theirs: Option<&VaultSide>, wipe: &Wipe) -> Do {
     let pull = |t: &VaultSide| {
-        if t.from_a_node && t.our_app {
+        if t.vouched && t.from_a_node && t.our_app && !wipe.signed_out(t) {
             Do::Pull
         } else {
             Do::NotUsable
         }
     };
-    // A copy another kind of client wrote, or one made with another app, is written over only by
-    // a new sign-in here, and never for another account
+    // A copy another kind of client wrote, one made with another app, or one nobody vouches for
+    // (unsigned), is written over only by a new sign-in here, and never for another account
     let push = |m: &Side, t: Option<&VaultSide>, new_here: bool| match t {
         Some(t) if !t.from_a_node && t.side.account.is_some() && t.side.account != m.account => Do::Conflict,
-        Some(t) if (!t.from_a_node || !t.our_app) && !new_here => Do::NotUsable,
+        Some(t) if (!t.vouched || !t.from_a_node || !t.our_app) && !new_here => Do::NotUsable,
         _ => Do::Push,
     };
     // Both copies are the same account's and both moved on: the one that lasts longer
@@ -956,8 +974,8 @@ pub(crate) async fn sync_held(
     let client = vault.client_key().to_hex();
     // Whether the person signed out everywhere decides too much to guess: without the device
     // list, nothing is synced this time
-    let marker = match vault.index().await {
-        Ok(ix) => Vault::signed_out_everywhere_at(&ix),
+    let marker = match vault.index().await.and_then(|ix| vault.marker(&ix)) {
+        Ok(m) => m,
         Err(e) => {
             tracing::warn!("vault: the device list can't be read, not synced this time: {e}");
             report.failed = BRIDGES.iter().map(|b| b.service.to_string()).collect();
@@ -966,11 +984,34 @@ pub(crate) async fn sync_held(
     };
     for b in BRIDGES {
         let service = b.service.to_string();
-        let theirs: Option<Opened> = match vault.read(b.service).await {
+        let mut read = vault.read(b.service).await;
+        // The person takes the vault's copy by hand: a copy older than one seen (a sign-in made
+        // anew elsewhere after a sign-out) is read past the node's record, for this pass alone.
+        // The record changes only once the take has gone through (`reset_mark`), so a take
+        // refused or failed, or a crash on the way, leaves the older copy refused as before
+        let mut past_mark = false;
+        if take == Some((b.service, Take::Vault)) && matches!(read, Err(VaultStoreError::Stale { .. })) {
+            read = vault.read_past_mark(b.service).await;
+            past_mark = true;
+        }
+        // A copy signed by nobody the person trusts (an older client, a device signed out since),
+        // or one older than a copy this node has seen (put back, or unsigned after a signed one),
+        // is there but not taken: never as "gone", which would sign the node out
+        let mut untrusted_there = false;
+        let mut stale_there = false;
+        let theirs: Option<Opened> = match read {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
                 report.not_readable.push(service);
                 continue;
+            }
+            Err(VaultStoreError::NotADevice(_)) => {
+                untrusted_there = true;
+                None
+            }
+            Err(VaultStoreError::Stale { .. }) => {
+                stale_there = true;
+                None
             }
             Err(e) => {
                 tracing::warn!(service = b.service, "vault: not synced this time: {e}");
@@ -1021,21 +1062,34 @@ pub(crate) async fn sync_held(
         );
         let app = app_for(b, mine.as_ref(), my_app.clone());
         let my_side = mine.as_ref().map(|m| side_of(b, m, lineage.clone()));
-        let their_side = theirs.as_ref().map(|o| {
-            let from_a_node = node_settings(&o.sign_in);
-            VaultSide {
-                side: match &from_a_node {
-                    Some(m) => side_of(b, m, node_lineage(&o.sign_in)),
-                    None => Side {
-                        hash: vault_hash(&o.sign_in),
-                        account: o.sign_in.user.as_ref().map(|u| u.id.clone()),
-                        lineage: None,
-                        expires_at: o.sign_in.expires_at,
+        let seen_signed = vault.seen_signed(b.service).unwrap_or(true);
+        let untrusted_side = (untrusted_there || stale_there).then(|| VaultSide {
+            side: Side {
+                hash: if stale_there { "stale" } else { "untrusted" }.into(),
+                ..Side::default()
+            },
+            from_a_node: false,
+            our_app: false,
+            vouched: false,
+        });
+        let their_side = untrusted_side.or_else(|| {
+            theirs.as_ref().map(|o| {
+                let from_a_node = node_settings(&o.sign_in);
+                VaultSide {
+                    side: match &from_a_node {
+                        Some(m) => side_of(b, m, node_lineage(&o.sign_in)),
+                        None => Side {
+                            hash: vault_hash(&o.sign_in),
+                            account: o.sign_in.user.as_ref().map(|u| u.id.clone()),
+                            lineage: None,
+                            expires_at: o.sign_in.expires_at,
+                        },
                     },
-                },
-                from_a_node: from_a_node.is_some(),
-                our_app: made_with_our_app(s, b, &o.sign_in),
-            }
+                    from_a_node: from_a_node.is_some(),
+                    our_app: made_with_our_app(s, b, &o.sign_in),
+                    vouched: o.signed_by.is_some() || (mine.is_none() && !seen_signed),
+                }
+            })
         });
         let wipe = Wipe {
             now: wiping,
@@ -1043,6 +1097,18 @@ pub(crate) async fn sync_held(
             since_seen: marker.is_some() && seen.as_ref().is_some_and(|x| x.marker != marker),
         };
         let mut what = decide(seen.as_ref(), my_side.as_ref(), their_side.as_ref(), &wipe);
+        // The node's copy came from an unsigned one (the migration window) and is still that:
+        // the node vouches only for what it held itself, so it never signs this one
+        let took_unsigned = seen
+            .as_ref()
+            .is_some_and(|x| x.from_unsigned && mine.as_ref().is_some_and(|m| x.hash == hash(m)));
+        // A copy nobody the person trusts signed (a device whose grant ended, a stranger), or one
+        // older than a copy this node has seen, is written over by this node's own: sync goes on
+        // instead of stalling on it. Not by a copy the node took unsigned: that write would sign
+        // it, and every other node would take it
+        if what == Do::NotUsable && (untrusted_there || stale_there) && mine.is_some() && !took_unsigned {
+            what = Do::Push;
+        }
         // Lost here because the node's app changed, not signed out: the vault keeps it
         if what == Do::Remove && seen.as_ref().is_some_and(|x| x.app != their_app) {
             what = Do::Forget;
@@ -1056,13 +1122,19 @@ pub(crate) async fn sync_held(
             }
             // Only a node's copy made with this node's app: anything else would swap a working
             // sign-in for one this node can't use
-            if their_side.as_ref().is_some_and(|t| t.from_a_node && t.our_app) {
+            if their_side
+                .as_ref()
+                .is_some_and(|t| t.vouched && t.from_a_node && t.our_app && !wipe.signed_out(t))
+            {
                 v.push("vault");
             }
             v
         };
         let reason = |t: Option<&VaultSide>| -> &'static str {
             match t {
+                Some(t) if t.side.hash == "stale" => "stale",
+                Some(t) if !t.vouched => "unsigned",
+                Some(t) if wipe.signed_out(t) => "signed_out",
                 Some(t) if !t.from_a_node => "other_client",
                 Some(t) if !t.our_app => "other_app",
                 Some(t)
@@ -1092,6 +1164,9 @@ pub(crate) async fn sync_held(
                     let why = match how {
                         Take::Node => "this node has no sign-in for it",
                         Take::Vault => match reason(their_side.as_ref()) {
+                            "unsigned" => "the vault's copy wasn't signed by one of your devices (an older client wrote it); sign in on this node instead",
+                            "stale" => "the vault's copy is older than one this node has seen; sign in on this node instead",
+                            "signed_out" => "the vault's copy is of a sign-in made before you signed out everywhere; sign in on this node instead",
                             "other_client" => "the vault's copy was written by a client that isn't a node",
                             "other_app" => {
                                 "the vault's copy was made with another app; sign in on this node instead"
@@ -1150,7 +1225,8 @@ pub(crate) async fn sync_held(
                       travels: &Map<String, Value>,
                       lineage: Option<String>,
                       conflict: bool,
-                      app: Option<String>| {
+                      app: Option<String>,
+                      from_unsigned: bool| {
             remember(
                 lib,
                 b.service,
@@ -1165,6 +1241,7 @@ pub(crate) async fn sync_held(
                     app,
                     at: pm_library::db::now_unix().max(0) as u64,
                     marker,
+                    from_unsigned,
                 },
             )
         };
@@ -1175,6 +1252,19 @@ pub(crate) async fn sync_held(
             Do::Nothing => {}
             Do::InStep => {
                 if let (Some(m), Some(o)) = (&mine, &theirs) {
+                    // A copy from before v2 that equals this node's own: signed by this node now
+                    // (it vouches only for what it holds itself, never for what it took from an
+                    // unsigned copy), under the blob's lock
+                    if o.signed_by.is_none() && !took_unsigned {
+                        match vault
+                            .resign_if(b.service, &|cur| vault_hash(cur) == vault_hash(&o.sign_in))
+                            .await
+                        {
+                            Ok(true) => report.signed.push(service.clone()),
+                            Ok(false) => {}
+                            Err(e) => tracing::warn!(service = b.service, "vault: not signed this time: {e}"),
+                        }
+                    }
                     let lib = s.library.lock().expect("library poisoned");
                     // A source that changed its sign-in since this pass read it wins: next pass
                     if carried(&lib, b).ok().flatten().map(|x| hash(&x)) != Some(hash(m)) {
@@ -1194,8 +1284,17 @@ pub(crate) async fn sync_held(
                             || x.revision != o.sign_in.revision
                             || x.lineage != lin
                             || x.marker != marker
+                            || x.from_unsigned != took_unsigned
                     }) {
-                        record(&lib, o.sign_in.revision, m, lin, false, my_app.clone());
+                        record(
+                            &lib,
+                            o.sign_in.revision,
+                            m,
+                            lin,
+                            false,
+                            my_app.clone(),
+                            took_unsigned,
+                        );
                     }
                 }
             }
@@ -1215,6 +1314,7 @@ pub(crate) async fn sync_held(
                             lineage.clone(),
                             false,
                             my_app.clone(),
+                            false,
                         );
                         if seen.is_none() && theirs.is_none() {
                             report.migrated.push(service);
@@ -1266,10 +1366,26 @@ pub(crate) async fn sync_held(
                         let _ = lib.delete_setting(&lineage_key(b.service));
                     }
                 }
-                record(&lib, o.sign_in.revision, &travels, lin, false, their_app.clone());
+                record(
+                    &lib,
+                    o.sign_in.revision,
+                    &travels,
+                    lin,
+                    false,
+                    their_app.clone(),
+                    o.signed_by.is_none(),
+                );
                 report.pulled.push(service);
                 if taking.is_some() {
                     report.settled = Some(settled_as("pulled"));
+                    // The take went through: the copy taken is the newest seen from now on
+                    if past_mark {
+                        if let Err(e) =
+                            vault.reset_mark(b.service, o.epoch, o.sign_in.revision, &o.envelope_hash)
+                        {
+                            tracing::warn!(service = b.service, "vault: the node's record wasn't reset: {e}");
+                        }
+                    }
                 }
             }
             Do::MoveAside => {
@@ -1312,7 +1428,15 @@ pub(crate) async fn sync_held(
                         .as_ref()
                         .is_none_or(|x| !x.conflict || x.hash != hash(m) || x.marker != marker)
                     {
-                        record(&lib, o.sign_in.revision, m, lineage.clone(), true, my_app.clone());
+                        record(
+                            &lib,
+                            o.sign_in.revision,
+                            m,
+                            lineage.clone(),
+                            true,
+                            my_app.clone(),
+                            false,
+                        );
                     }
                 }
                 report.details.push(detail());
@@ -1345,9 +1469,11 @@ pub fn start(s: &Arc<NodeState>, sync: Arc<crate::sync::PubkySync>) {
             match crate::vault::client_secret(&s) {
                 Ok(secret) => {
                     let revoked = crate::vault::revoked_file(&s);
+                    let marks = crate::vault::marks_file(&s);
                     let vault = Vault::new(sync.session(), &secret)
                         .device("node")
-                        .remember_revocations(&revoked);
+                        .remember_revocations(&revoked)
+                        .keep_marks(&marks);
                     match pass(&s, &vault, None).await {
                         Ok(r) if r != CacheReport::default() => tracing::info!(?r, "vault: sign-ins synced"),
                         Ok(_) => {}
@@ -1407,6 +1533,7 @@ mod tests {
             side: side(hash, account),
             from_a_node: true,
             our_app: true,
+            vouched: true,
         }
     }
 
@@ -1568,6 +1695,42 @@ mod tests {
         assert_eq!(d(Some(&s), Some(&side("x", "9")), Some(&phone7b)), Do::Conflict);
     }
 
+    /// A copy nobody of the person's devices signed (a client from before v2, after this node
+    /// has seen a signed one, or while it holds a copy of its own) is never taken as it is: only
+    /// a new sign-in here writes over it.
+    #[test]
+    fn a_copy_nobody_vouches_for_is_not_taken() {
+        let d = |seen: Option<&Synced>, m: Option<&Side>, t: Option<&VaultSide>| {
+            decide(seen, m, t, &Wipe::default())
+        };
+        let mut t = vside("h2", "7");
+        t.vouched = false;
+        // Nothing here: not taken (a fresh node that saw nothing signed sets `vouched`)
+        assert_eq!(d(None, None, Some(&t)), Do::NotUsable);
+        // A copy here of the same account, never synced: neither side is taken
+        assert_eq!(d(None, Some(&side("h1", "7")), Some(&t)), Do::NotUsable);
+        // Synced before, changed in the vault only: not taken
+        let s = seen("h1", "7");
+        assert_eq!(d(Some(&s), Some(&side("h1", "7")), Some(&t)), Do::NotUsable);
+        // Changed here only (a refresh of the same sign-in): not written over it
+        assert_eq!(d(Some(&s), Some(&side("h3", "7")), Some(&t)), Do::NotUsable);
+        // A new sign-in here (another id than the one synced) goes out, signed
+        let mut synced_old = seen("h1", "7");
+        synced_old.lineage = Some("old".into());
+        assert_eq!(
+            d(
+                Some(&synced_old),
+                Some(&lin(side("h3", "7"), "new")),
+                Some(&vlin(t.clone(), "old"))
+            ),
+            Do::Push
+        );
+        // The same content on both sides is in step (and gets signed by the node, elsewhere)
+        let mut same = vside("h1", "7");
+        same.vouched = false;
+        assert_eq!(d(Some(&s), Some(&side("h1", "7")), Some(&same)), Do::InStep);
+    }
+
     #[test]
     fn a_new_sign_in_is_told_from_a_refresh_by_its_id() {
         let d = |seen: Option<&Synced>, m: Option<&Side>, t: Option<&VaultSide>| {
@@ -1660,12 +1823,23 @@ mod tests {
             decide(Some(&c), Some(&side("a", "9")), Some(&vside("b", "7")), &w(false)),
             Do::Conflict
         );
-        // First contact, same account, this copy from before the sign-out: the vault's wins
+        // First contact, same account, this copy from before the sign-out: the vault's copy made
+        // after it wins; one that can't show it was made after (no sign-in id) is from before
+        // too, so this copy goes aside and that one isn't taken
         let mut lasting = lin(side("a", "7"), "50-x");
         lasting.expires_at = Some(9_999);
         assert_eq!(
-            decide(None, Some(&lasting), Some(&vside("b", "7")), &w(false)),
+            decide(
+                None,
+                Some(&lasting),
+                Some(&vlin(vside("b", "7"), "150-y")),
+                &w(false)
+            ),
             Do::Pull
+        );
+        assert_eq!(
+            decide(None, Some(&lasting), Some(&vside("b", "7")), &w(false)),
+            Do::MoveAside
         );
         // A sign-in made here before the wipe and not synced, meeting a copy written after it: a
         // phone's (not usable here) puts it aside, another node's is taken; never pushed
@@ -1959,5 +2133,32 @@ mod tests {
                 "{local}"
             );
         }
+    }
+
+    /// A vault copy a node wrote of a sign-in made before the last sign-out everywhere (one from
+    /// then, put back after the vault was emptied) is never taken; one made after it is.
+    #[test]
+    fn a_vault_copy_from_before_a_sign_out_everywhere_is_not_taken() {
+        let w = Wipe {
+            now: false,
+            at: Some(100),
+            since_seen: false,
+        };
+        let before = vlin(vside("h1", "7"), "50-L1");
+        let after = vlin(vside("h2", "7"), "150-L2");
+        assert_eq!(decide(None, None, Some(&before), &w), Do::NotUsable);
+        assert_eq!(decide(None, None, Some(&after), &w), Do::Pull);
+        // Not for this node's own copy either (same account, first contact)
+        let mine = lin(side("h3", "7"), "160-L3");
+        assert_eq!(decide(None, Some(&mine), Some(&before), &w), Do::NotUsable);
+        assert!(w.signed_out(&before) && !w.signed_out(&after));
+        // Without a sign-out everywhere it is taken as before
+        assert_eq!(decide(None, None, Some(&before), &Wipe::default()), Do::Pull);
+        // A node's copy without a sign-in id (from before ids) can't show it was made after the
+        // sign-out: not taken either, as the node's own copies without one go aside
+        let legacy = vside("h0", "7");
+        assert!(w.signed_out(&legacy));
+        assert_eq!(decide(None, None, Some(&legacy), &w), Do::NotUsable);
+        assert_eq!(decide(None, None, Some(&legacy), &Wipe::default()), Do::Pull);
     }
 }
