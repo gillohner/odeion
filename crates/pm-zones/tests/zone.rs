@@ -2271,3 +2271,62 @@ async fn a_groups_unmute_is_capped_when_a_member_refuses_it() {
         "the first member, back at full, is held to the level last published"
     );
 }
+
+/// The playing item's place follows the queue while its track plays on (no new start reads it
+/// again): after shuffle off, `now_playing.index` is where the item went back to, and after an
+/// earlier item is moved after it, one place up; always `queue_index`, the same item.
+#[tokio::test]
+async fn now_playing_index_follows_a_reorder_while_the_track_plays() {
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let tracks: Vec<(&str, u32, u64)> = names.iter().map(|n| (*n, RATE, 100_000)).collect();
+    let r = rig(&tracks);
+    r.zone
+        .enqueue(names.iter().map(|n| QueueItem::new(*n)).collect(), Insert::End);
+    r.zone.set_shuffle(true);
+    let shuffled: Vec<String> = r
+        .zone
+        .wait_acked()
+        .await
+        .queue
+        .iter()
+        .map(|i| i.uri.clone())
+        .collect();
+    assert_ne!(shuffled, names, "eight items shuffled into their own order");
+    // An item the shuffle moved
+    let k = (0..names.len()).find(|k| shuffled[*k] != names[*k]).unwrap();
+    let uri = shuffled[k].clone();
+    r.zone.play_index(k);
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    assert_eq!(
+        st.now_playing.as_ref().map(|n| (n.index, n.item.uri.clone())),
+        Some((k, uri.clone()))
+    );
+    let same_place = |st: &pm_zones::ZoneState| {
+        let n = st.now_playing.as_ref().expect("playing");
+        assert_eq!(Some(n.index), st.queue_index, "{st:?}");
+        assert_eq!(st.queue[n.index].id, n.item.id, "{st:?}");
+        assert_eq!(n.item.uri, uri);
+        n.index
+    };
+    // Shuffle off: back in its original place, still playing
+    r.zone.set_shuffle(false);
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    let at = same_place(&st);
+    assert_eq!(at, names.iter().position(|n| *n == uri).unwrap());
+    // An earlier item moved after it: one place up. (The first item is earlier unless it is
+    // the playing one; then move the last one before it.)
+    let (id, to, want) = if at > 0 {
+        (st.queue[0].id, at, at - 1)
+    } else {
+        (st.queue[st.queue.len() - 1].id, 0, 1)
+    };
+    assert!(r.zone.move_item(id, to));
+    r.gate.allow(1);
+    r.gate.blocked().await;
+    let st = r.zone.wait_acked().await;
+    assert_eq!(same_place(&st), want);
+}
