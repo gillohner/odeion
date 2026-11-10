@@ -3638,3 +3638,59 @@ async fn a_saved_copy_too_big_to_read_is_kept_as_it_is_and_never_parsed() {
         "kept exactly as it was"
     );
 }
+
+#[tokio::test]
+async fn a_public_only_collection_is_found_from_an_empty_shelf_and_edited() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (st, made) = call(
+        &app,
+        &ann,
+        "POST",
+        "/v1/collections",
+        Some(serde_json::json!({"name": "Shared", "uris": [SONG_A, SONG_B], "public": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{made}");
+    let id = made["summary"]["id"].as_str().unwrap().to_string();
+    let published = fake.paths(ANN, &format!("{PUBLISHED}{id}/"));
+    assert_eq!(published.len(), 1);
+    // Another app removed its drafts, and this node has no copy of it (a fresh node)
+    {
+        let drafts = format!("{DRAFTS}{id}/");
+        let mut all = fake.files.lock().unwrap();
+        all.get_mut(ANN).unwrap().retain(|p, _| !p.starts_with(&drafts));
+    }
+    let mut shelf = stored_shelf(&s);
+    shelf["items"] = serde_json::json!([]);
+    store_shelf(&s, &shelf);
+    let (st, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    assert_eq!(names(&list), vec!["Shared"], "its public copy is found: {list}");
+    assert_eq!(list[0]["visibility"], "public", "{list}");
+    let (st, detail) = call(&app, &ann, "GET", &format!("/v1/collections/{id}"), None).await;
+    assert_eq!(st, StatusCode::OK, "{detail}");
+    assert_eq!(item_uris(&detail["playlist"]), vec![SONG_A, SONG_B], "{detail}");
+    // An edit keeps what the public copy holds, and writes a draft again
+    let (st, v) = call(
+        &app,
+        &ann,
+        "PUT",
+        &format!("/v1/collections/{id}"),
+        Some(serde_json::json!({"name": "Shared 2"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["summary"]["synced"], true, "{v}");
+    let (path, content) = newest(&fake, ANN, &id);
+    let edit_of = |p: &str| pm_pubky::v1::parse_version(p).unwrap().1;
+    assert!(
+        edit_of(path.as_str()) > edit_of(published[0].as_str()),
+        "{path} above {}",
+        published[0]
+    );
+    assert_eq!(content["name"], "Shared 2");
+    assert_eq!(item_uris(&content), vec![SONG_A, SONG_B], "{content}");
+}

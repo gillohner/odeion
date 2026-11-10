@@ -10,7 +10,9 @@
 //!   of the collection, not every step. A newer version from their homeserver (written on
 //!   another device) replaces the copy's, and one deleted there goes here too. A change that
 //!   waited is written whole as the node has it, its sharing included: the newest change wins,
-//!   so a rename made here while away unpublishes a share made since on another device.
+//!   so a rename made here while away unpublishes a share made since on another device. This
+//!   holds too for a change that waits because another app wrote a version in the middle of the
+//!   node's request: it is written later on top of that version, which stays in their history.
 //! - **Routes:** `/v1/collections` and `/v1/playlists` answer each caller with their own: the
 //!   owner [`crate::playlists`], a listener this module. What only the owner has stays refused
 //!   (accounts.rs): node-only songs, play orders and pins, imports, Play from.
@@ -281,19 +283,24 @@ fn shelf_key(key: &str) -> String {
 
 fn load(s: &NodeState, key: &str) -> Result<Shelf, ApiError> {
     let lib = s.library.lock().expect("library poisoned");
-    let Some(json) = lib.get_setting(&shelf_key(key))? else {
-        return Ok(Shelf::default());
-    };
-    if json.len() > MAX_SAVED_SHELF_BYTES {
+    let saved = shelf_key(key);
+    // Its size first, from the database: an oversized copy is never read into memory at all
+    if let Some(bytes) = lib
+        .setting_bytes(&saved)?
+        .filter(|n| *n > MAX_SAVED_SHELF_BYTES as u64)
+    {
         return Err(ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
                 "cannot read saved collections: {} MiB, over the {} MiB this node reads (kept as they are)",
-                json.len() >> 20,
+                bytes >> 20,
                 MAX_SAVED_SHELF_BYTES >> 20
             ),
         ));
     }
+    let Some(json) = lib.get_setting(&saved)? else {
+        return Ok(Shelf::default());
+    };
     serde_json::from_str(&json).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -694,9 +701,6 @@ async fn observe(
         }
         return Ok(caught);
     }
-    if old.is_none() && remote.private.is_none() {
-        return Ok(caught);
-    }
     if old.is_none() && sh.items.len() >= MAX_COLLECTIONS {
         return Ok(caught);
     }
@@ -966,7 +970,9 @@ async fn refresh(
         .collect();
     sh.other.retain(|p| heads.contains(p.as_str()));
     sh.too_big.retain(|t| heads.contains(t.path.as_str()));
-    let mut ids: Vec<String> = private.keys().cloned().collect();
+    // A collection with only a public copy left (another app removed its drafts) is found too;
+    // it goes through the same reads, checks and holds as any other version.
+    let mut ids: Vec<String> = private.keys().chain(public.keys()).cloned().collect();
     ids.extend(sh.items.iter().map(|k| k.id.clone()));
     ids.sort();
     ids.dedup();
@@ -995,10 +1001,10 @@ async fn refresh(
                 (None, None) => std::cmp::Ordering::Equal,
             })
             .then_with(|| {
-                private
-                    .get(b)
-                    .map(|h| &h.edit_id)
-                    .cmp(&private.get(a).map(|h| &h.edit_id))
+                // Newest first, by the draft, or the public copy when that is all there is
+                let newer = private.get(b).or_else(|| public.get(b)).map(|h| &h.edit_id);
+                let older = private.get(a).or_else(|| public.get(a)).map(|h| &h.edit_id);
+                newer.cmp(&older)
             })
     });
     let mut caught = Caught::default();

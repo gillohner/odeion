@@ -1689,7 +1689,7 @@ mod listing_tests {
         let asked = AtomicUsize::new(0);
         let l = list(250, usize::MAX, within, &asked).await.unwrap();
         assert_eq!((l.entries.len(), l.complete), (250, true), "exactly at the cap");
-        // One byte less: cut at the page that crosses it, which is dropped
+        // Under the 3,690 bytes of the first two pages: cut at the second, which is dropped
         let asked = AtomicUsize::new(0);
         let over = ListBounds {
             max_bytes: 3_000,
