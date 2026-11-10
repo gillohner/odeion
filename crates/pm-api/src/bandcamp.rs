@@ -797,6 +797,12 @@ pub struct DownloadJob {
     pub at: i64,
 }
 
+/// Forget the download of purchase `id` (tests: the job list is process-wide).
+#[cfg(test)]
+pub(crate) fn forget_job(id: &str) {
+    jobs().lock().expect("bandcamp jobs").remove(id);
+}
+
 fn jobs() -> &'static std::sync::Mutex<HashMap<String, DownloadJob>> {
     static J: std::sync::OnceLock<std::sync::Mutex<HashMap<String, DownloadJob>>> =
         std::sync::OnceLock::new();

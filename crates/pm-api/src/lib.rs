@@ -11234,7 +11234,14 @@ exec sleep 300
         let mut last = serde_json::Value::Null;
         for _ in 0..100 {
             let (_, d) = call(&app, "GET", "/v1/sources/bandcamp/downloads", None).await;
-            last = d[0].clone();
+            // This purchase's job, by its id (the list is process-wide)
+            last = d
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"] == "p5")
+                .cloned()
+                .unwrap_or_default();
             if last["state"] == "done" || last["state"] == "failed" {
                 break;
             }
@@ -24919,6 +24926,8 @@ exec sleep 300
         .await;
         assert!(again.is_err(), "not refused as running: {again:?}");
         gate.add_permits(10);
+        // Its own job only: the list is process-wide, and another test reads its own from it
+        bandcamp::forget_job(id);
     }
 
     /// A scheduled backup whose caller goes away mid-write keeps its lock to its end: a second
@@ -24988,8 +24997,8 @@ exec sleep 300
         assert_eq!(std::fs::read(&a).unwrap(), one);
         assert_eq!(std::fs::read(&b).unwrap(), two);
         assert!(
-            add_music::mirror_locks_held() == 0,
-            "the folder's lock went with its holders"
+            !add_music::mirror_lock_held(&folder),
+            "this folder's lock went with its holders"
         );
     }
 }

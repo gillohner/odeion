@@ -190,10 +190,10 @@ impl Drop for FolderLock {
     }
 }
 
-/// How many folder locks the map holds (tests).
+/// Whether the map holds `folder`'s lock (tests: other tests' folders may be in it meanwhile).
 #[cfg(test)]
-pub(crate) fn mirror_locks_held() -> usize {
-    mirror_locks().lock().expect("mirror locks").len()
+pub(crate) fn mirror_lock_held(folder: &std::path::Path) -> bool {
+    mirror_locks().lock().expect("mirror locks").contains_key(folder)
 }
 
 async fn lock_folder(folder: &std::path::Path) -> FolderLock {
