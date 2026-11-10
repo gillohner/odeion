@@ -259,6 +259,12 @@ struct Writing {
     published: bool,
 }
 
+/// Whether the node knows a draft of `k` (a private version): its private folder is then
+/// expected to list something. One only known by its public copy isn't.
+fn has_drafts(k: &Kept) -> bool {
+    k.versions.iter().any(|p| p.starts_with("/priv/"))
+}
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -856,7 +862,7 @@ async fn catch_up_one(
     work: &mut Work<'_>,
 ) -> Result<(Caught, Remote), ApiError> {
     let expected = sh.items.iter().find(|k| k.id == id).map_or((false, false), |k| {
-        (!k.pending && !k.versions.is_empty(), !k.pending && k.public)
+        (!k.pending && has_drafts(k), !k.pending && k.public)
     });
     let remote = match list_one(b, key, id, expected, work).await? {
         Ok(r) => r,
@@ -933,7 +939,7 @@ async fn refresh(
     editing: bool,
     work: &mut Work<'_>,
 ) -> Result<(Caught, HashMap<String, Remote>), ApiError> {
-    let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
+    let had = sh.items.iter().any(|k| !k.pending && has_drafts(k));
     let had_public = sh.items.iter().any(|k| !k.pending && k.public);
     let private = match work
         .call(b.list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE), had))

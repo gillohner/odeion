@@ -3694,3 +3694,58 @@ async fn a_public_only_collection_is_found_from_an_empty_shelf_and_edited() {
     assert_eq!(content["name"], "Shared 2");
     assert_eq!(item_uris(&content), vec![SONG_A, SONG_B], "{content}");
 }
+
+#[tokio::test]
+async fn a_public_post_that_is_no_collection_is_read_once_then_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (st, made) = create(&app, &ann, "Mine", &[SONG_A]).await;
+    assert_eq!(st, StatusCode::OK, "{made}");
+    // Another app's public note, with no draft beside it
+    let note = pubky_social_specs::PubkySocialPost::new(
+        "A public note from another app".into(),
+        pubky_social_specs::PubkySocialPostKind::Note,
+        None,
+        None,
+        Vec::new(),
+    );
+    let id = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 60_000_000);
+    pm_pubky::v1::validate_social(
+        &note,
+        &id,
+        pm_pubky::v1::Root::Pub,
+        &pm_pubky::v1::PubkyId::try_from(ANN).unwrap(),
+    )
+    .unwrap();
+    let path = format!("{PUBLISHED}{id}/{id}.json");
+    fake.files
+        .lock()
+        .unwrap()
+        .get_mut(ANN)
+        .unwrap()
+        .insert(path.clone(), serde_json::to_vec(&note).unwrap());
+    fake.calls.lock().unwrap().clear();
+    for _ in 0..3 {
+        let (st, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+        assert_eq!(st, StatusCode::OK, "{list}");
+        assert_eq!(names(&list), vec!["Mine"], "the note is no collection: {list}");
+    }
+    let reads = fake
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.ends_with(&format!("read {path}")))
+        .count();
+    assert_eq!(reads, 1, "read once, then skipped");
+    assert!(
+        stored_shelf(&s)["other"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == &path),
+        "remembered as no collection"
+    );
+}
