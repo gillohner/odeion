@@ -49,6 +49,14 @@ def ok(m):
     log(f"ok   {m}")
 
 
+class MAError(RuntimeError):
+    """An API command MA answered with an HTTP error (`code`)."""
+
+    def __init__(self, command, code, detail):
+        super().__init__(f"MA {command}: {code} {detail}")
+        self.code = code
+
+
 def req(url, method="GET", body=None, headers=None, timeout=60):
     h = dict(headers or {})
     data = None
@@ -162,7 +170,36 @@ class MusicAssistant:
                        {"Authorization": f"Bearer {self.token}"}, timeout=120)
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:400]
-            raise RuntimeError(f"MA {command}: {e.code} {detail}") from None
+            raise MAError(command, e.code, detail) from None
+
+    def provider_configs(self, domain):
+        """The configured instances of provider `domain` (`config/providers`), enabled ones only."""
+        configs = self.api("config/providers", provider_domain=domain) or []
+        if not isinstance(configs, list):
+            fail(f"MA's config/providers for {domain} isn't a list: {configs}")
+        return [c for c in configs if isinstance(c, dict) and c.get("domain") == domain
+                and c.get("instance_id") and c.get("enabled", True)]
+
+    def ensure_provider(self, domain, values=None):
+        """Provider `domain` on: the instance MA has already (it starts some, DLNA among them, by
+        itself), else one made through its setup flow. MA checks for an instance and then creates
+        one; its own start-up can create the same single-instance provider in between, and the
+        creation then fails (500, "does not support multiple instances"). Only that case is taken
+        as on: an error after which a matching enabled instance exists that didn't before. Any
+        other error stays an error."""
+        have = self.provider_configs(domain)
+        if have:
+            return {"already": True, "instance_id": have[0]["instance_id"]}
+        try:
+            return self.setup_provider(domain, values)
+        except MAError as e:
+            if e.code != 500:
+                raise
+            appeared = self.provider_configs(domain)
+            if not appeared:
+                raise
+            log(f"MA made its own {domain} instance while this one was being set up ({e}): using it")
+            return {"already": True, "instance_id": appeared[0]["instance_id"]}
 
     def setup_provider(self, domain, values=None):
         """A provider through its setup flow: forms are answered with `values`."""
@@ -233,7 +270,7 @@ def main():
         ok(f"music/search: {track['name']} by {', '.join(a.get('name', '') for a in track.get('artists', []))} ({track['uri']})")
 
         # 2. The zone as a DLNA player
-        r = ma.setup_provider("dlna")
+        r = ma.ensure_provider("dlna")
         ok("DLNA player provider " + ("was already on" if r.get("already") else "added"))
         zone = node("/v1/zones")[0]
 
