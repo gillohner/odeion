@@ -408,8 +408,8 @@ struct Phone {
     /// Why the last one went ("FiiO KA17 was unplugged", or media moved elsewhere).
     gone_why: String,
     /// The DAC (Android's id) whose start level Android's bit-perfect path set since it was
-    /// plugged in: Android's media volume is its level from then on.
-    media_start: Option<i32>,
+    /// plugged in, and when: Android's media volume is its level from then on.
+    media_start: Option<(i32, std::time::Instant)>,
     /// Sinks open for a DAC now, and when the last one closed: an unplug then is one no sink
     /// may have seen yet.
     sinks_open: u32,
@@ -853,7 +853,19 @@ pub fn media_start_level(u: Option<UsbIds>) -> u8 {
 
 /// Whether the start level was set for the DAC Android knows as `dac_id` since it was plugged in.
 pub fn media_start_done(dac_id: i32) -> bool {
-    with_phone(|p| p.media_start == Some(dac_id))
+    with_phone(|p| p.media_start.is_some_and(|(id, _)| id == dac_id))
+}
+
+/// How long after the start level was set a report's media volume is not kept as the DAC's level:
+/// a report built just before the set still carries the old volume.
+const MEDIA_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`media_start_done`], and long enough ago that a report's media volume is the DAC's level.
+fn media_start_settled(dac_id: i32) -> bool {
+    with_phone(|p| {
+        p.media_start
+            .is_some_and(|(id, at)| id == dac_id && at.elapsed() >= MEDIA_SETTLE)
+    })
 }
 
 /// The start level was set for `dac_id` (while Android routed media to it): Android's media volume
@@ -861,7 +873,17 @@ pub fn media_start_done(dac_id: i32) -> bool {
 pub fn media_start_set(dac_id: i32) {
     with_phone(|p| {
         if p.dac.as_ref().is_some_and(|d| d.id == dac_id) {
-            p.media_start = Some(dac_id);
+            p.media_start = Some((dac_id, std::time::Instant::now()));
+        }
+    });
+}
+
+/// Make the start level's set `by` older (tests).
+#[cfg(test)]
+pub(crate) fn age_media_start(by: std::time::Duration) {
+    with_phone(|p| {
+        if let Some((_, at)) = p.media_start.as_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
         }
     });
 }
@@ -1043,9 +1065,10 @@ pub fn apply_report(json: &str) -> bool {
     tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
     let changed = set_dac_because(dac, why);
     // Android's media volume on the DAC it routes media to, once Android's bit-perfect path set
-    // its start level there: the level the listener ends up with, for the next time
+    // its start level there (and not a report from just before that): the level the listener
+    // ends up with, for the next time
     if let (Some(v), Some((id, usb))) = (media, listed_for_level) {
-        if media_start_done(id) {
+        if media_start_settled(id) {
             save_media(usb, v);
         }
     }

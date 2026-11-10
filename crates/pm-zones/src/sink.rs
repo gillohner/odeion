@@ -420,10 +420,9 @@ pub trait AudioSink: Send {
     /// with it) is kept.
     fn gone_reported(&mut self) {}
 
-    /// The sink may not carry on as it is with the next write: a phone's DAC paused in
-    /// bit-perfect mode whose listener turned Android's volume down since (writing would put it
-    /// back at full level without consent). Whoever writes opens the output again in the same
-    /// format first (planned as it is now: shared) and writes there.
+    /// The sink may not carry on as it is with the next write (what it plays through changed
+    /// under it). Whoever writes opens the output again in the same format first (planned as it
+    /// is now) and writes there.
     fn reopen_now(&self) -> bool {
         false
     }

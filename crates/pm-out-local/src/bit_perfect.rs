@@ -13,9 +13,9 @@
 //!   USB DAC's own hardware volume (AOSP's `BitPerfectThread` passes the track's volume to the
 //!   HAL, whose USB `setVolume` sets the card's feature unit). So the zone's volume stays
 //!   Android's media volume at any level: bit-perfect never waits for full volume. Before the
-//!   first bit-perfect track on a DAC the app sets that volume, while Android routes media to that
-//!   DAC only, to the DAC's last level, else [`usb_dac::MEDIA_START_PERCENT`]
-//!   ([`TrackBackend::set_media_volume_on`]). A DAC without a volume of its own has a fixed
+//!   first bit-perfect track on a DAC the app lowers that volume, while Android routes media to
+//!   that DAC alone, to the DAC's last level, else [`usb_dac::MEDIA_START_PERCENT`], never raising
+//!   it ([`TrackBackend::set_media_volume_on`]). A DAC without a volume of its own has a fixed
 //!   zone volume (set on the DAC or amplifier);
 //! * [`live_caps`]: what the phone's output takes then (rates and sizes the DAC lists together),
 //!   so the node stops converting for it;
@@ -41,10 +41,11 @@ pub trait TrackBackend: Send + Sync {
     /// attributes and format, preferring the DAC. What Android said comes back with the track.
     /// `Err`: [`OpenError::RouteLost`] when the DAC is not there (any more), else `Refused`.
     fn open(&self, dac_id: i32, entry: &MixerEntry) -> Result<(Box<dyn Track>, OpenReport), OpenError>;
-    /// Set Android's media volume to `percent`, only while Android routes media to the DAC it
-    /// knows as `dac_id` (`getAudioDevicesForAttributes` names it): true when it was set. Never
-    /// another route's (the speaker's) volume.
-    fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> bool;
+    /// Lower Android's media volume to `percent` (never raise it), only while Android routes
+    /// media to the DAC it knows as `dac_id` and nothing else (`getAudioDevicesForAttributes`):
+    /// the media volume on that DAC now (0 to 100), or `None` when media doesn't go to that DAC
+    /// alone (nothing set). Never another route's (the speaker's) volume.
+    fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> Option<u8>;
 }
 
 /// One `AudioTrack`.
@@ -231,25 +232,25 @@ pub fn choose(dac: &Dac, fmt: AudioFormat) -> Result<MixerChoice, String> {
 }
 
 /// Before the first bit-perfect track on `dac` since it was plugged in: Android's media volume (in
-/// bit-perfect mode the DAC's own volume) to the level the app last played it at, else
-/// [`usb_dac::MEDIA_START_PERCENT`]; set only while Android routes media to that DAC. `Err` (why)
-/// when it could not be set there: nothing plays then (the route isn't the DAC's, or the level
-/// isn't known to be low).
+/// bit-perfect mode the DAC's own volume) down to the level the app last played it at, else
+/// [`usb_dac::MEDIA_START_PERCENT`] (never up: lower already, it stays); set only while Android
+/// routes media to that DAC alone. `Err` (why) when it could not be set there: nothing plays then
+/// (the route isn't the DAC's, or the level isn't known to be low).
 fn media_start(b: &dyn TrackBackend, dac: &Dac) -> Result<(), String> {
     if usb_dac::media_start_done(dac.id) {
         return Ok(());
     }
     let level = usb_dac::media_start_level(dac.device.usb);
-    if !b.set_media_volume_on(dac.id, level) {
+    let Some(now) = b.set_media_volume_on(dac.id, level) else {
         return Err(format!(
             "Android does not play media to {} now: its volume was not set",
             dac.device.name
         ));
-    }
-    tracing::info!(dac = %dac.device.name, level, "bit-perfect: Android's media volume set before the first track");
+    };
+    tracing::info!(dac = %dac.device.name, level, now, "bit-perfect: Android's media volume before the first track");
     usb_dac::media_start_set(dac.id);
     if let Some(u) = dac.device.usb {
-        usb_dac::save_media(u, level);
+        usb_dac::save_media(u, now);
     }
     Ok(())
 }
@@ -951,8 +952,12 @@ mod tests {
         /// Where Android routes media now: its id for that device (the DAC's, 41, unless a test
         /// says otherwise; 2: the speaker)
         route: Mutex<Option<i32>>,
-        /// Every media volume the app set, with the DAC it was for
+        /// Every media volume the app asked for, with the DAC it was for
         media_sets: Mutex<Vec<(i32, u8)>>,
+        /// Android's media volume on the route now (100 unless a test says otherwise)
+        media: Mutex<u8>,
+        /// Setting the media volume finds the DAC unplugged (it goes while it is set)
+        unplug_on_media: Mutex<bool>,
         /// Why the track is no longer bit-perfect (Android's mixer changed under it)
         unconfirmed: Arc<Mutex<Option<String>>>,
         stopped: Arc<std::sync::atomic::AtomicU64>,
@@ -1026,12 +1031,19 @@ mod tests {
                 self.report.lock().unwrap().clone(),
             ))
         }
-        fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> bool {
+        fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> Option<u8> {
+            if std::mem::take(&mut *self.unplug_on_media.lock().unwrap()) {
+                usb_dac::apply_report(r#"{"v":1,"sdk":34,"devices":[]}"#);
+                return None;
+            }
             if *self.route.lock().unwrap() != Some(dac_id) {
-                return false;
+                return None;
             }
             self.media_sets.lock().unwrap().push((dac_id, percent));
-            true
+            // Lowered, never raised
+            let mut m = self.media.lock().unwrap();
+            *m = (*m).min(percent);
+            Some(*m)
         }
     }
 
@@ -1048,6 +1060,7 @@ mod tests {
     fn with_player() -> Arc<Fake> {
         let f = Arc::new(Fake::default());
         *f.route.lock().unwrap() = Some(41);
+        *f.media.lock().unwrap() = 100;
         usb_dac::forget_levels();
         set_backend(f.clone());
         f
@@ -1615,18 +1628,22 @@ mod tests {
             read.into_iter().collect(),
             "BitPerfect.kt writes {written:?}"
         );
-        // The start level is set only while Android routes media to that very DAC (by its id),
-        // checked before anything is set: never the speaker's volume
+        // The start level is set only while Android routes media to that very DAC alone (by its
+        // id), checked before anything is set: never the speaker's volume; and only lowered
         let set = kt
-            .split("fun setMediaVolumeOn(dacId: Int, percent: Int): Boolean {")
+            .split("fun setMediaVolumeOn(dacId: Int, percent: Int): Int {")
             .nth(1)
             .and_then(|r| r.split("\n        }\n").next())
             .expect("setMediaVolumeOn");
         let (route, sets) = (
-            set.find("getAudioDevicesForAttributes(media).any { it.id == dacId }"),
+            set.find("getAudioDevicesForAttributes(media).singleOrNull()?.id != dacId"),
             set.find("setStreamVolume"),
         );
         assert!(route.is_some() && sets.is_some() && route < sets, "{set}");
+        assert!(
+            set.contains("if (now > target) am.setStreamVolume"),
+            "lowered only: {set}"
+        );
         assert!(
             !kt.contains("mediaVolumeDbOnUsb"),
             "no hand-over reading any more"
@@ -2073,9 +2090,10 @@ mod tests {
     }
 
     /// Android's bit-perfect path: before the first track on a DAC, Android's media volume (the
-    /// DAC's own volume then) goes to the DAC's last level, else 20 %, and only while Android
-    /// routes media to that DAC: never the speaker's (nothing plays then). The level the listener
-    /// ends up with is kept for that DAC: plugged in again, it starts there.
+    /// DAC's own volume then) goes down to the DAC's last level, else 20 %, never up, and only
+    /// while Android routes media to that DAC: never the speaker's (nothing plays then). The level
+    /// the listener ends up with is kept for that DAC (not a report from just before the set):
+    /// plugged in again, it starts there.
     #[test]
     fn the_start_level_is_set_only_on_the_dacs_route() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -2115,12 +2133,19 @@ mod tests {
             drop(sink);
         }
         assert_eq!(*player.media_sets.lock().unwrap(), [(41, 20)]);
+        assert_eq!(*player.media.lock().unwrap(), 20, "from 100 % down to 20 %");
+        assert_eq!(usb_dac::saved_level(ids).media, Some(20));
+        // A report built just before the set (Android's old 100 %): not the DAC's level
+        usb_dac::apply_report(&report(100));
+        assert_eq!(usb_dac::saved_level(ids).media, Some(20), "a stale report");
         // The listener turns it to 35 %: kept for this DAC
+        usb_dac::age_media_start(std::time::Duration::from_secs(3));
         usb_dac::apply_report(&report(35));
         assert_eq!(usb_dac::saved_level(ids).media, Some(35));
         // Unplugged and plugged in again (Android's new id 42): it starts at 35 %
         usb_dac::set_dac(None);
-        usb_dac::apply_report(&report(35).replace(r#""id":41"#, r#""id":42"#));
+        *player.media.lock().unwrap() = 60;
+        usb_dac::apply_report(&report(60).replace(r#""id":41"#, r#""id":42"#));
         *player.route.lock().unwrap() = Some(42);
         *player.report.lock().unwrap() = OpenReport {
             routed_id: Some(42),
@@ -2131,8 +2156,45 @@ mod tests {
         };
         drop(sink);
         assert_eq!(player.media_sets.lock().unwrap().last(), Some(&(42, 35)));
+        assert_eq!(*player.media.lock().unwrap(), 35);
+        drop(open_phone(phone(), fmt));
+        // Never raised: Android had the DAC lower than its last level (5 %): it stays at 5 %
+        usb_dac::set_dac(None);
+        *player.media.lock().unwrap() = 5;
+        usb_dac::apply_report(&report(5).replace(r#""id":41"#, r#""id":43"#));
+        *player.route.lock().unwrap() = Some(43);
+        *player.report.lock().unwrap() = OpenReport {
+            routed_id: Some(43),
+            ..confirmed_report(bp(P24, 96_000))
+        };
+        let PhoneOpen::BitPerfect(sink) = open_phone(phone(), fmt) else {
+            panic!("bit-perfect")
+        };
+        drop(sink);
+        assert_eq!(player.media_sets.lock().unwrap().last(), Some(&(43, 35)));
+        assert_eq!(*player.media.lock().unwrap(), 5, "not raised to 35 %");
+        assert_eq!(usb_dac::saved_level(ids).media, Some(5));
         usb_dac::forget_levels();
         usb_dac::set_dac(None);
+    }
+
+    /// The DAC goes while its start level is set (the app sees it unplugged, Android says media
+    /// isn't on it): nothing opens anywhere, the zone pauses; never the phone's speaker.
+    #[test]
+    fn an_unplug_while_the_start_level_is_set_never_opens_the_speaker() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let player = with_player();
+        *player.report.lock().unwrap() = confirmed_report(bp(P24, 96_000));
+        usb_dac::set_dac(None);
+        usb_dac::apply_report(&ka17_report_with(&ka17_mixer()));
+        *player.unplug_on_media.lock().unwrap() = true;
+        match open_phone(OutputId::new("cpal", "phone"), AudioFormat::pcm(96_000, 24, 2)) {
+            PhoneOpen::Gone(why) => assert!(why.contains("FiiO KA17"), "{why}"),
+            PhoneOpen::Shared { opened_for, .. } => panic!("shared, for {opened_for:?}"),
+            _ => panic!("no track expected"),
+        }
+        assert!(player.opened.lock().unwrap().is_empty(), "no track");
+        assert!(player.media_sets.lock().unwrap().is_empty(), "nothing set");
     }
 
     /// A DAC without a volume of its own (no feature unit on its playback path) stays

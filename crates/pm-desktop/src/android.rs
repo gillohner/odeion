@@ -863,19 +863,21 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         Ok((Box::new(track), report))
     }
 
-    fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> bool {
+    fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> Option<u8> {
         use jni021::objects::{JClass, JValue};
-        with_jvm(&self.vm, |env| {
+        let now = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
             env.call_static_method(
                 class,
                 "setMediaVolumeOn",
-                "(II)Z",
+                "(II)I",
                 &[JValue::Int(dac_id), JValue::Int(i32::from(percent))],
             )?
-            .z()
+            .i()
         })
-        .unwrap_or(false)
+        .ok()?;
+        // -1: media doesn't go to that DAC alone, nothing was set
+        u8::try_from(now).ok().filter(|p| *p <= 100)
     }
 }
 

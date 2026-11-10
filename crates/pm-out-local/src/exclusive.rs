@@ -644,14 +644,40 @@ pub fn hw_volume(dac: &Dac) -> Option<VolumeKind> {
     })
 }
 
+/// The DAC has a volume of its own that the app's driver can't set (a UAC1 feature unit: the driver
+/// sets units on UAC2 only), as its descriptors (or the held DAC's) tell: Exclusive USB would play
+/// it at whatever level that unit has, with no start level. Android plays it instead, which sets
+/// that unit itself. A quirk saying the unit doesn't work: no volume, not this.
+fn volume_out_of_reach(dac: &Dac) -> bool {
+    if let Some(u) = dac.device.usb {
+        if quirks::lookup(u.vendor_id, u.product_id).no_hardware_volume {
+            return false;
+        }
+    }
+    let uac1_unit =
+        |d: &UsbAudioDevice| d.uac == Some(Uac::V1) && d.hardware_volume.as_ref().is_some_and(|h| h.volume);
+    let held = with_held(|h| {
+        h.as_ref()
+            .filter(|h| h.dac_id == dac.id)
+            .map(|h| uac1_unit(&h.dev))
+    });
+    match held {
+        Some(out) => out,
+        None => reported(dac).is_some_and(|d| uac1_unit(&d)),
+    }
+}
+
 /// Whether the phone plays this DAC exclusive now: `None` when it isn't offered here (no driver,
-/// no USB ids) or this DAC's Exclusive USB didn't start before (Android plays it, unless the
-/// listener has the zone muted on it); `Some(Ok(()))` when it plays exclusive; `Some(Err(why))`
-/// when Android's permission isn't given. The DAC it holds it keeps (no giving back and taking
-/// again at every format change).
+/// no USB ids, a volume the driver can't set: `volume_out_of_reach`) or this DAC's Exclusive
+/// USB didn't start before (Android plays it, unless the listener has the zone muted on it);
+/// `Some(Ok(()))` when it plays exclusive; `Some(Err(why))` when Android's permission isn't
+/// given. The DAC it holds it keeps (no giving back and taking again at every format change).
 pub fn decide(dac: &Dac) -> Option<Result<(), String>> {
     let b = backend()?;
     offer(dac).ok()?;
+    if volume_out_of_reach(dac) {
+        return None;
+    }
     let held = holds(dac.id);
     let permission = held || b.has_permission(ids(dac)?);
     // This DAC's Exclusive USB didn't start before: Android plays it (never while the listener
@@ -674,7 +700,7 @@ pub fn plays_exclusive(dac: &Dac) -> bool {
 /// asks).
 pub fn auto_fallback(dac: &Dac) -> bool {
     let Some(b) = backend() else { return false };
-    if offer(dac).is_err() {
+    if offer(dac).is_err() || volume_out_of_reach(dac) {
         return false;
     }
     holds(dac.id) || ids(dac).is_some_and(|u| b.has_permission(u))
@@ -1975,12 +2001,12 @@ pub(crate) mod tests {
                 "no bit-perfect player in this test".into(),
             ))
         }
-        fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> bool {
+        fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> Option<u8> {
             self.sets
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push((dac_id, percent));
-            true
+            Some(percent)
         }
     }
 
@@ -3481,5 +3507,63 @@ pub(crate) mod tests {
         let mut s = open_ok(slow);
         s.write(&AudioBlock::pcm_i32(slow, vec![1; 2 * 4_800])).unwrap();
         assert!(!app.dac.state().out.is_empty(), "heard");
+    }
+
+    /// A UAC1 DAC (the KA17's ids): an AudioControl interface, a USB-streaming input terminal 1,
+    /// with `volume` a feature unit 2 (volume and mute) in between, and the speaker output 3.
+    fn uac1_dac(volume: bool) -> Vec<u8> {
+        let mut ac: Vec<u8> = vec![9, 0x24, 1, 0x00, 0x01, 0, 0, 1, 1];
+        ac.extend([12, 0x24, 2, 1, 0x01, 0x01, 0, 2, 3, 0, 0, 0]);
+        if volume {
+            ac.extend([8, 0x24, 6, 2, 1, 1, 0x03, 0]);
+        }
+        ac.extend([9, 0x24, 3, 3, 0x01, 0x03, 0, if volume { 2 } else { 1 }, 0]);
+        let mut cfg: Vec<u8> = vec![9, 4, 0, 0, 0, 1, 1, 0x00, 0];
+        cfg.extend(ac);
+        let total = (9 + cfg.len()) as u16;
+        let mut b = vec![
+            18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x72, 0x29, 0x93, 0x00, 0x00, 0x01, 1, 2, 3, 1,
+        ];
+        b.extend([9, 2]);
+        b.extend(total.to_le_bytes());
+        b.extend([1, 1, 0, 0x80, 50]);
+        b.extend(cfg);
+        b
+    }
+
+    /// A UAC1 DAC with a volume of its own the app's driver can't set is never taken for Exclusive
+    /// USB (it would play at whatever level that unit has, no start level): Android plays it,
+    /// which sets that unit, and nothing claims whether it has a volume. One without any feature
+    /// unit (known to have no volume of its own) may play exclusive, at a fixed volume.
+    #[test]
+    fn a_uac1_dac_whose_volume_the_driver_cant_set_is_left_to_android() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let report = |raw: &[u8]| {
+            let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+            let ka17: String = KA17.iter().map(|b| format!("{b:02x}")).collect();
+            ka17_report(33, "").replace(&ka17, &hex)
+        };
+        let (_p, app) = phone(true);
+        let raw = uac1_dac(true);
+        assert_eq!(pm_usb_audio::parse(&raw).uac, Some(Uac::V1));
+        *app.raw.lock().unwrap() = Some(raw.clone());
+        usb_dac::apply_report(&report(&raw));
+        let dac = usb_dac::current_dac().unwrap();
+        assert!(dac.descriptors.is_some(), "the descriptors were taken");
+        assert_eq!(decide(&dac), None);
+        assert!(!plays_exclusive(&dac) && !auto_fallback(&dac));
+        assert_eq!(own_volume(&dac), None, "nothing claimed");
+        assert!(matches!(
+            open_phone(id(), AudioFormat::pcm(48_000, 16, 2)),
+            PhoneOpen::Shared { .. }
+        ));
+        assert_eq!(*app.opened.lock().unwrap(), 0, "never taken");
+        assert!(app.dac.state().out.is_empty());
+        drop(_p);
+
+        // No feature unit at all: no volume of its own, Exclusive USB may play it
+        let (_p, _app) = phone(true);
+        usb_dac::apply_report(&report(&uac1_dac(false)));
+        assert_eq!(decide(&usb_dac::current_dac().unwrap()), Some(Ok(())));
     }
 }

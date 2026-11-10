@@ -246,8 +246,11 @@ What it does:
   the DAC's own hardware volume (on phones whose USB audio follows Android's reference code). So the
   app's slider, the volume keys and Android's panel stay Android's media volume and the music stays
   bit-perfect at any volume; nothing switches to shared because of the volume. Before the first
-  bit-perfect song on a DAC the app sets that volume, only while Android plays media to that DAC, to
-  the level you last played it at, else 20 %. A DAC without a volume of its own: the app has no
+  bit-perfect song on a DAC the app lowers that volume, only while Android plays media to that DAC
+  alone, to the level you last played it at, else 20 % (it never raises it: lower already, it
+  stays). Android then sets the DAC's own volume from it, so the KA17's knob does not limit the
+  level in this mode. On a phone whose Android doesn't pass the volume to the DAC, it plays at the
+  DAC's own level whatever the media volume. A DAC without a volume of its own: the app has no
   slider for it; set the level on the DAC or the amplifier.
 - **Below Android 14,** without Exclusive USB (below), or when Android refuses, it plays shared as
   before (48 kHz on nearly every phone), and says why.
@@ -257,15 +260,19 @@ What it does:
 ```
 1. Install the edge APK (pubky-music-android-arm64.apk), connect to your node, pick the phone's zone.
    Note the phone's model and Android version (Settings › About phone › Android version).
-2. Turn the KA17's own volume down first. Plug in the FiiO KA17 (USB-C, no adapter). Android asks once
+2. Safety first: no headphones or in-ear monitors on the KA17 for the first play of this section
+   (a speaker or amplifier turned low instead), and the KA17's own volume down: in Android's
+   bit-perfect mode Android sets the DAC's volume from its media volume, and a phone that doesn't
+   may play at the DAC's full level. Plug in the FiiO KA17 (USB-C, no adapter). Android asks once
    whether Odeion may access it: for this section choose Deny (Android's bit-perfect path; Exclusive
    USB is the next section). Within a few seconds:
    - The zone picker (the speaker button) shows under the phone's zone "FiiO KA17 · …".
    - Settings › This device › This phone: "FiiO KA17", what it takes, how it plays, who sets the
      volume ("Volume: the DAC’s own" once Android let the app read the DAC), and an "Allow Exclusive
      USB" button; nothing else to choose. On Android 13 or older a note says why it plays shared.
-3. Android's media volume low (0-5 %). Play in turn a 44.1/16, a 96/24 and a 192/24 FLAC file. For
-   each, report:
+3. Android's media volume low (0-5 %): the app lowers it before the first song (to 20 % the first
+   time) but never raises it, so it stays where you put it. Play in turn a 44.1/16, a 96/24 and a
+   192/24 FLAC file. For each, report:
    - what the KA17's own display shows (expected on Android 14+: 44.1, 96, 192; below Android 14:
      48 each time);
    - what the app's Sound panel says under "Playing on" (expected: "Bit-perfect · FiiO KA17 ·
@@ -277,7 +284,8 @@ What it does:
    low). It stays bit-perfect (the panel keeps saying "Bit-perfect · FiiO KA17 · …", no gap), and the
    KA17's own level (its display) follows the buttons: Android hands its volume to the DAC. If the
    display doesn't change, note it: that phone's Android doesn't pass the volume to the DAC. Pause,
-   change the volume, press Play: still bit-perfect. It must never get louder than you set.
+   change the volume, press Play: still bit-perfect. Only your keys and the slider change the level;
+   report anything louder than you set.
 5. Unplug the KA17 mid-song: the zone must pause (the bar says "FiiO KA17 was unplugged: paused"),
    and nothing must play from the phone's speaker. Also try at the end of a song, just as the next one
    (in another format) starts: it must pause too. Plug it in again: the DAC shows again; press Play:
@@ -404,8 +412,9 @@ What it does:
 Checked without the DAC: one behaviour whatever Android's media volume is (40 %, 0 %, unknown: never
 shared because of it); Exclusive USB's start level (the level last played on that DAC, kept by its
 USB ids, else -40 dB within the DAC's range, never from Android's media volume, which it never sets);
-Android's bit-perfect start level (the last level, else 20 %, set only while Android routes media to
-that DAC); a DAC without a volume of its own staying bit-perfect with a fixed volume and a plain note;
+Android's bit-perfect start level (lowered to the last level, else 20 %, never raised, set only while
+Android routes media to that DAC alone); a UAC1 DAC whose volume the app's driver can't set left to
+Android's paths; a DAC without a volume of its own staying bit-perfect with a fixed volume and a plain note;
 earlier settings (a mode, the agreement to full level) reading as the one behaviour; the system's
 session volume per path (crates/pm-out-local, crates/pm-usb-audio/src/volume.rs,
 crates/pm-desktop/src/media.rs); the page (tools/ui-usb-dac.js, tools/ui-android-media.js).
@@ -419,9 +428,10 @@ the volume keys and Android's panel set the DAC's own volume; in Android's bit-p
 Android's media volume, which Android hands to the DAC's own volume. Nothing is forced to 100 %.
 
 ```
-1. Safety first: turn the KA17's own volume all the way down, or unplug the headphones from it,
-   before the first play, and keep every volume (the KA17, Android's media volume, the zone) at
-   0-5 % throughout.
+1. Safety first: no headphones or in-ear monitors on the KA17 for the first play of each step (a
+   speaker or amplifier turned low instead), the KA17's own volume all the way down, and every
+   volume (the KA17, Android's media volume, the zone) at 0-5 % throughout. In step 5 Android sets
+   the KA17's volume itself, so its knob is no limit there.
 2. Plug in the KA17 with the app on screen; when Android asks whether Odeion may access it, Allow.
    Play a 44.1/16 file, then a 96/24 file, on This phone. Expected: the KA17's display shows 44.1,
    then 96; Now playing › Details › Output says "Exclusive USB · FiiO KA17 · 44.1 kHz / 16 bit",
@@ -435,8 +445,9 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
 5. Deny the permission (or clear it in Android's app settings) and replug: Details › Output says
    "Bit-perfect · FiiO KA17 · …" (Android 14+), the KA17 shows the file's rate, and the volume keys
    move the volume. If the KA17's display level doesn't change with the keys, note it: that phone's
-   Android doesn't pass the volume to the DAC. The first sound is at the level you last played it
-   at, or at 20 % of Android's media volume the first time.
+   Android doesn't pass the volume to the DAC: it then plays at the KA17's own level whatever the
+   media volume (report it). The app lowers Android's media volume before the first song to the
+   level you last played it at, or 20 % the first time, never raising it: at 0-5 % it stays there.
 6. A DAC or dongle without a volume of its own, if one is at hand: it plays bit-perfect, the app has
    no volume slider for it, and Settings › This phone says "Volume: set it on the DAC" (the note:
    "This DAC has no volume of its own: set the volume on the DAC or amplifier.").
