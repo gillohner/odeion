@@ -2687,10 +2687,11 @@
   };
   // "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit"
   const dacExLine = (n) => `Exclusive USB · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
-  // Who sets a USB DAC's level, as its descriptors tell (`own_volume`; nothing said while that
-  // is unknown): its own volume, which the slider, the volume keys and Android's panel move; or,
-  // without one, the DAC or amplifier itself (the slider is gone then)
-  const dacVolumeWords = (d) => (d.own_volume === true ? 'Volume: the DAC’s own' : d.own_volume === false ? 'Volume: set it on the DAC' : '');
+  // Who sets a USB DAC's level on its bit-perfect paths, as its descriptors tell (`own_volume`;
+  // nothing said while that is unknown): its own volume, which the slider, the volume keys and
+  // Android's panel move; or, without one, the DAC or amplifier itself (the slider is gone then).
+  // Nothing once it played shared: Android's mixer applies the volume there
+  const dacVolumeWords = (d) => (d.mode === 'shared' && d.format ? '' : d.own_volume === true ? 'Volume: the DAC’s own' : d.own_volume === false ? 'Volume: set it on the DAC' : '');
   // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
   const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? (n.ex ? 'exclusive USB' : 'bit-perfect') : 'shared'}` : ''; };
   // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"

@@ -12,8 +12,9 @@
 //!   [`recover`] gives back what was left without Android's driver.
 //! * The first sound is quiet: before the first sample the DAC's feature unit on the playback path
 //!   is set to the level the app last played this DAC at (kept by its USB ids,
-//!   [`usb_dac::saved_level`]), else [`vol::START_DB`], within the unit's range
-//!   ([`vol::start_level`]); nothing plays until the DAC read that back
+//!   [`usb_dac::saved_level`]), else [`vol::START_DB`], within the unit's range and never louder
+//!   than the unit was before the take ([`vol::start_level_below`]; muted before: its minimum,
+//!   heard); nothing plays until the DAC read that back
 //!   ([`driver::apply_level`]). Android's media volume plays no part (Android routes media to the
 //!   phone's speaker meanwhile) and is never touched. The zone's volume, the volume keys and
 //!   Android's panel set the unit; it goes back to Android no louder than it was. A DAC without a
@@ -1137,10 +1138,11 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
             let t = h.t.clone();
             let st = h.state(uid).expect("filtered on a known unit");
             let u = st.unit.clone();
-            // Whichever path plays: its own level (the listener's on it, else the start level:
-            // the listener's level on any path, else the last one kept, else low), no louder than
-            // the listener's level chosen on any path, muted with the listener's mute
-            let own = own_level(st, listener_db.or(saved_db));
+            // Whichever path plays: its own level (the listener's on it, else the listener's level
+            // on any path, else the start level: the last one kept, else low, never louder than
+            // the unit was), no louder than the listener's level chosen on any path, muted with
+            // the listener's mute
+            let own = own_level(st, listener_db, saved_db);
             let level = path_level(own, listener_db, listener_muted, &u.range);
             st.level = Some(level);
             // Touched before it is set: given back as it was even if this fails half-way
@@ -1242,12 +1244,15 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
     })
 }
 
-/// A unit's own level, apart from the listener's mute and caps: the level the listener set on it,
-/// else the start level (`last_db`, the level the app last played this DAC at, else low).
-fn own_level(st: &UnitState, last_db: Option<f32>) -> Level {
-    match st.chosen {
-        Some(cur) => Level { cur, mute: false },
-        None => vol::start_level(last_db, &st.unit.range),
+/// A unit's own level, apart from the listener's mute and caps: the level the listener set on it;
+/// else the listener's level in this zone (`listener_db`, set on another path); else the start
+/// level (`saved_db`, the level the app last played this DAC at, else low), never louder than the
+/// unit was before the take (muted before: its minimum, heard).
+fn own_level(st: &UnitState, listener_db: Option<f32>, saved_db: Option<f32>) -> Level {
+    match (st.chosen, listener_db) {
+        (Some(cur), _) => Level { cur, mute: false },
+        (None, Some(db)) => vol::start_level(Some(db), &st.unit.range),
+        (None, None) => vol::start_level_below(saved_db, st.before, &st.unit.range),
     }
 }
 
@@ -1363,7 +1368,7 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
                         cur: now.cur,
                         mute: false,
                     },
-                    _ => own_level(st, listener_db.or(saved_db)),
+                    _ => own_level(st, listener_db, saved_db),
                 };
                 let mute = path_level(own, listener_db, m, &u.range).mute;
                 if heard && !mute && st.chosen.is_none() {
@@ -2029,12 +2034,16 @@ pub(crate) mod tests {
                 "no bit-perfect player in this test".into(),
             ))
         }
-        fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> Option<u8> {
+        fn set_media_volume_on(
+            &self,
+            dac_id: i32,
+            percent: u8,
+        ) -> Result<u8, crate::bit_perfect::MediaRefused> {
             self.sets
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push((dac_id, percent));
-            Some(percent)
+            Ok(percent)
         }
     }
 
@@ -2430,7 +2439,7 @@ pub(crate) mod tests {
     }
 
     /// The first sound is quiet: before the first sample the DAC's unit is at -40 dB (nothing kept
-    /// for this DAC yet), whatever its level before; the slider shows the DAC's read-back. The
+    /// for this DAC yet; it was at 0 dB); the slider shows the DAC's read-back. The
     /// level the listener ends up with (also by the DAC's own buttons) is kept by its USB ids and
     /// is the start level of the next take, also after the app started again. Android's media
     /// volume plays no part: never read for it, never set.
@@ -2485,17 +2494,54 @@ pub(crate) mod tests {
         assert!(!note.contains("muted"), "{note}");
     }
 
-    /// A DAC muted while Android played it starts heard at its start level (a known, low level),
-    /// and goes back muted, as it was.
+    /// A DAC muted while Android played it starts heard at its quietest (the lower of the start
+    /// level and its minimum: muted before means turned all the way down), and goes back muted, as
+    /// it was. The listener raises it from there.
     #[test]
     fn a_dac_muted_before_starts_heard_and_goes_back_muted() {
         let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (_p, app) = phone(true);
         app.dac.state().muted = Some(true);
         drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        assert_eq!(
+            volume_of(&app),
+            (Some(-127 * 256), Some(false)),
+            "its minimum, heard"
+        );
+        set_volume(Volume::Db(-40.0)).unwrap();
         assert_eq!(volume_of(&app), (Some(-40 * 256), Some(false)));
         release();
-        assert_eq!(volume_of(&app), (Some(0), Some(true)), "given back muted");
+        assert_eq!(volume_of(&app).1, Some(true), "given back muted");
+    }
+
+    /// The first sound in Exclusive USB is never louder than the DAC was before the take: turned
+    /// down to -60 dB on its own buttons, with -5 dB kept from last time, it starts at -60 dB, not
+    /// -5 dB; the listener's own level in this zone still applies (it is theirs).
+    #[test]
+    fn the_first_sound_is_never_louder_than_the_dac_was() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true);
+        let ka17 = UsbIds {
+            vendor_id: 0x2972,
+            product_id: 0x0093,
+        };
+        usb_dac::save_exclusive_db(ka17, -5.0);
+        app.dac.state().volume = Some(-60 * 256);
+        let fmt = AudioFormat::pcm(48_000, 16, 2);
+        let log_from = app.dac.state().log.len();
+        drop(open_ok(fmt));
+        assert_eq!(volume_of(&app), (Some(-60 * 256), Some(false)));
+        let log = app.dac.state().log[log_from..].to_vec();
+        assert!(
+            !log.iter().any(|l| l == "volume -1280"),
+            "never at the kept -5 dB, not even for a moment: {log:?}"
+        );
+        // At 0 dB before, the kept -5 dB is the start
+        drop(_p);
+        let (_p, app) = phone(true);
+        usb_dac::save_exclusive_db(ka17, -5.0);
+        drop(open_ok(fmt));
+        assert_eq!(volume_of(&app), (Some(-5 * 256), Some(false)));
     }
 
     /// Codex H1 (round 1 of #306): a level the DAC refuses or ignores plays nothing, and the DAC

@@ -388,8 +388,8 @@ class BitPerfect private constructor() {
         /// (the DAC's last level, else a low one), never up, and only while Android routes media
         /// to that very DAC and nothing else (getAudioDevicesForAttributes, by its id: with
         /// several devices the index may be another's, the speaker's). Answers the media volume on
-        /// that DAC as read back, 0 to 100, or -1 when no start level is in place (another route,
-        /// a fixed volume, a set Android didn't take). In bit-perfect mode Android passes
+        /// that DAC as read back, 0 to 100; -1 when media isn't on that DAC alone (nothing set);
+        /// -2 when Android keeps the volume fixed or didn't take the set (no start level). In bit-perfect mode Android passes
         /// the media volume to the DAC's own volume (BitPerfectThread, then the USB HAL's
         /// setVolume sets its feature unit); the samples stay untouched. Never forced to 100 %.
         @JvmStatic
@@ -399,7 +399,7 @@ class BitPerfect private constructor() {
             return runCatching {
                 if (am.getAudioDevicesForAttributes(media).singleOrNull()?.id != dacId) return@runCatching -1
                 // A device whose volume Android keeps fixed: no level can be set
-                if (am.isVolumeFixed) return@runCatching -1
+                if (am.isVolumeFixed) return@runCatching -2
                 val max = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                 if (max <= 0) return@runCatching -1
                 // The nearest index, the top one only for 100 % (media_volume.rs index_for)
@@ -410,7 +410,7 @@ class BitPerfect private constructor() {
                 if (now > target) am.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
                 // Read back: Android ignoring the set (a vendor quirk) is no start level
                 val v = am.getStreamVolume(AudioManager.STREAM_MUSIC)
-                if (v > target) return@runCatching -1
+                if (v > target) return@runCatching -2
                 if (v >= max) 100 else minOf(99, (v * 100 + max / 2) / max)
             }.getOrDefault(-1)
         }

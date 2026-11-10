@@ -863,8 +863,13 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         Ok((Box::new(track), report))
     }
 
-    fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> Option<u8> {
+    fn set_media_volume_on(
+        &self,
+        dac_id: i32,
+        percent: u8,
+    ) -> Result<u8, pm_out_local::bit_perfect::MediaRefused> {
         use jni021::objects::{JClass, JValue};
+        use pm_out_local::bit_perfect::MediaRefused;
         let now = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
             env.call_static_method(
@@ -875,9 +880,14 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
             )?
             .i()
         })
-        .ok()?;
-        // -1: media doesn't go to that DAC alone, nothing was set
-        u8::try_from(now).ok().filter(|p| *p <= 100)
+        .map_err(|_| MediaRefused::Route)?;
+        // -1: media doesn't go to that DAC alone (nothing set); -2: the volume is fixed, or the
+        // set didn't take
+        match now {
+            0..=100 => Ok(now as u8),
+            -2 => Err(MediaRefused::Level),
+            _ => Err(MediaRefused::Route),
+        }
     }
 }
 

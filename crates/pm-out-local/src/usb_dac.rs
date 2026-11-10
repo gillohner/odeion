@@ -657,6 +657,11 @@ pub fn current() -> Option<OutputDevice> {
 /// The note for a DAC that plays bit-perfect without a volume of its own.
 pub const NO_OWN_VOLUME: &str = "This DAC has no volume of its own: set the volume on the DAC or amplifier.";
 
+/// The note for a DAC Android plays bit-perfect while whether it has a volume of its own is not
+/// known (no descriptors yet): Android hands its media volume to the DAC's own volume, which a DAC
+/// without one, or a phone that doesn't pass it, doesn't follow.
+pub const FOLLOW_VOLUME: &str = "If the DAC's own level doesn't follow the volume, set it on the DAC.";
+
 /// `first` then `then`, as sentences.
 pub(crate) fn sentences(first: &str, then: &str) -> String {
     format!("{}. {then}", first.trim_end_matches('.'))
@@ -677,13 +682,14 @@ fn view(p: &Phone) -> Option<OutputDevice> {
     dev.own_volume = crate::exclusive::own_volume(d);
     // What Exclusive USB or bit-perfect plays now, exactly (none when it plays shared)
     dev.formats = crate::bit_perfect::view_extras(d);
-    let bit_perfect_path = match p.last.as_ref().filter(|l| l.dac_id == d.id) {
+    // (bit-perfect or Exclusive USB, Android's bit-perfect path)
+    let (bit_perfect_path, android_path) = match p.last.as_ref().filter(|l| l.dac_id == d.id) {
         Some(l) => {
             dev.mode = l.mode;
             dev.confirmed = l.confirmed && l.mode != DeviceMode::Shared;
             dev.note = l.note.clone();
             dev.format = Some(l.format);
-            l.mode != DeviceMode::Shared
+            (l.mode != DeviceMode::Shared, l.mode == DeviceMode::BitPerfect)
         }
         // Nothing played on it yet: why it can't be bit-perfect, when it can't (and Exclusive
         // USB doesn't play it instead: then why not that either)
@@ -697,14 +703,21 @@ fn view(p: &Phone) -> Option<OutputDevice> {
                     });
                 }
             }
-            !dev.formats.is_empty()
+            let unchanged = !dev.formats.is_empty();
+            (unchanged, unchanged && !crate::exclusive::plays_exclusive(d))
         }
     };
-    // Bit-perfect on a DAC without a volume of its own: said plainly (the zone's volume is fixed)
-    if bit_perfect_path && dev.own_volume == Some(false) {
+    // Bit-perfect on a DAC without a volume of its own: said plainly (the zone's volume is fixed).
+    // Android's bit-perfect path while that isn't known: what to do if the volume doesn't reach it
+    let add = match dev.own_volume {
+        Some(false) if bit_perfect_path => Some(NO_OWN_VOLUME),
+        None if android_path => Some(FOLLOW_VOLUME),
+        _ => None,
+    };
+    if let Some(add) = add {
         dev.note = Some(match dev.note.take() {
-            Some(n) => sentences(&n, NO_OWN_VOLUME),
-            None => NO_OWN_VOLUME.into(),
+            Some(n) => sentences(&n, add),
+            None => add.into(),
         });
     }
     Some(dev)

@@ -266,6 +266,19 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       check(/Volume: the DAC’s own/.test(t) && /volume keys/.test(t), `${at}: "Volume: the DAC’s own" (${(t.match(/Volume:[^\n]*/) || [''])[0]})`);
       check(!(await page.evaluate(() => !!document.querySelector('#dvallow'))), `${at}: the permission given: no Allow button`);
     }
+    // Android's bit-perfect path, whether the DAC has a volume of its own not known (no
+    // descriptors): the note says what to do if its level doesn't follow; no volume words
+    const FOLLOW = 'If the DAC\'s own level doesn\'t follow the volume, set it on the DAC.';
+    await nodePlug(run, { ...KA17, usb_permission: false, mode: 'bit_perfect', modes: ['shared', 'bit_perfect', 'exclusive'], confirmed: true, format: src, note: FOLLOW });
+    await page.waitForFunction((f) => ((document.querySelector('#set-dac') || {}).innerText || '').includes(f), FOLLOW).catch(() => {});
+    {
+      const t = await dacTab(page);
+      check(t.includes(FOLLOW) && !/Volume: /.test(t), `${at}: Android bit-perfect, own volume unknown: "${FOLLOW}", no volume words`);
+    }
+    // Played shared (Android's mixer applies the volume): no words about the DAC's own volume
+    await nodePlug(run, { ...KA17, own_volume: true, usb_permission: true, mode: 'shared', confirmed: false, format: src, note: 'Android refused bit-perfect for this format' });
+    await page.waitForFunction(() => /Android refused/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
+    check(!/Volume: |stays bit-perfect|stays untouched/.test(await dacTab(page)), `${at}: shared: no bit-perfect volume words`);
     // What an earlier app reports (a mode chosen, the agreement to full level, its media volume):
     // still no selector, no warning
     await nodePlug(run, { ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true, format: src, media_volume: 40, settings: { mode: 'bit_perfect', dac_volume: true, full_level_ok: true } });

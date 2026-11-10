@@ -301,7 +301,8 @@ What it does:
 
 Checked without the DAC: the playback setting for each format, the clock and volume requests (the
 bytes on the wire), the packet sizes at 44.1/48/96/192 kHz on full and high speed, the DAC's feedback
-and the packet sizes it gives, the start level (the last one, else -40 dB) and the give-back, the quirks
+and the packet sizes it gives, the start level (the last one or -40 dB, never louder than the DAC
+was) and the give-back, the quirks
 table, and the driver's steps (open, play, rate change, unplug) against a fake DAC
 (crates/pm-usb-audio, crates/pm-out-local/src/exclusive.rs); the page's words (tools/ui-usb-dac.js).
 Not checked: anything on a real phone. The usbfs calls follow Linux's headers and libusb's Android
@@ -312,12 +313,16 @@ What it does: on any Android (also below 14), the app takes the DAC from Android
 clock to the song's rate, reads the rate back, and sends the samples itself. The app says "Exclusive
 USB · FiiO KA17 · 96 kHz / 24 bit" only when the DAC read back exactly that rate and the stream runs.
 The KA17's own volume becomes the zone's volume (the slider, the keys and Android's panel set it);
-before the first sound it is set to the level you last played this DAC at, else -40 dB, never from
-Android's media volume (which stays where it was). Meanwhile other apps' sounds go to the phone's
-speaker.
+before the first sound the app sets it itself to the level you last played this DAC at or -40 dB,
+never louder than the DAC was (turned down or muted on its own buttons, it stays down: muted, it
+starts at its quietest), never from Android's media volume (which stays where it was). So the
+KA17's knob is no protection here: the app sets the level. Meanwhile other apps' sounds go to the
+phone's speaker.
 
 ```
-1. Same phone and files as above, the KA17 turned down. Settings › This phone › Allow Exclusive USB
+1. Same phone and files as above. Protection: no headphones or in-ear monitors on the KA17 for the
+   first play, an amplifier or speaker turned low (the app sets the KA17's own level itself: -40 dB
+   the first time). Settings › This phone › Allow Exclusive USB
    (Android asks by itself once per DAC, the first time it is plugged in with the app on screen; the
    button asks again). Android asks whether Odeion may access the FiiO KA17: allow it. Report whether
    the dialog appeared, and its words.
@@ -325,7 +330,8 @@ speaker.
    - the KA17's display (expected: 44.1, 96, 192 on any Android version);
    - the Sound panel's "Playing on" line (expected: "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit",
      and so on) and the signal path (no resample stage);
-   - whether the first second was quiet (-40 dB the first time, else the level you last played it at);
+   - whether the first second was quiet (the last level or -40 dB, never louder than the KA17 was:
+     turn it down to its lowest before one play and check it starts there);
    - any clicks, dropouts or a pitch that drifts over a few minutes (the DAC's feedback paces it).
    If the panel says "not confirmed", or the zone stops with a reason, report the exact words.
 3. Volume: move the zone's volume in the app. The KA17's volume (its display) must follow, and the
@@ -411,10 +417,12 @@ What it does:
 
 Checked without the DAC: one behaviour whatever Android's media volume is (40 %, 0 %, unknown: never
 shared because of it); Exclusive USB's start level (the level last played on that DAC, kept by its
-USB ids, else -40 dB within the DAC's range, never from Android's media volume, which it never sets);
+USB ids, else -40 dB within the DAC's range, never louder than the DAC was before the take, never
+from Android's media volume, which it never sets);
 Android's bit-perfect start level (lowered to the last level, else 20 %, never raised, set only while
 Android routes media to that DAC alone); a UAC1 DAC whose volume the app's driver can't set left to
-Android's paths; a DAC without a volume of its own staying bit-perfect with a fixed volume and a plain note;
+Android's paths; a DAC without a volume of its own staying bit-perfect with a fixed volume and a
+plain note;
 earlier settings (a mode, the agreement to full level) reading as the one behaviour; the system's
 session volume per path (crates/pm-out-local, crates/pm-usb-audio/src/volume.rs,
 crates/pm-desktop/src/media.rs); the page (tools/ui-usb-dac.js, tools/ui-android-media.js).
@@ -428,16 +436,17 @@ the volume keys and Android's panel set the DAC's own volume; in Android's bit-p
 Android's media volume, which Android hands to the DAC's own volume. Nothing is forced to 100 %.
 
 ```
-1. Safety first: no headphones or in-ear monitors on the KA17 for the first play of each step (a
-   speaker or amplifier turned low instead), the KA17's own volume all the way down, and every
-   volume (the KA17, Android's media volume, the zone) at 0-5 % throughout. In step 5 Android sets
-   the KA17's volume itself, so its knob is no limit there.
+1. Safety first: no headphones or in-ear monitors on the KA17 for the first play of each step; a
+   speaker or amplifier turned low instead. Android's media volume at 0-5 % throughout. The KA17's
+   own level is set by the app in Exclusive USB (the last level or -40 dB, never louder than the
+   KA17 was) and by Android in step 5, so its knob is no limit: the protection is no headphones and
+   a low amplifier.
 2. Plug in the KA17 with the app on screen; when Android asks whether Odeion may access it, Allow
    (if it doesn't ask, because it was denied earlier: Settings › This phone › Allow Exclusive USB).
    Play a 44.1/16 file, then a 96/24 file, on This phone. Expected: the KA17's display shows 44.1,
    then 96; Now playing › Details › Output says "Exclusive USB · FiiO KA17 · 44.1 kHz / 16 bit",
-   then "… 96 kHz / 24 bit"; the first sound is quiet (the KA17 at -40 dB the first time, else the
-   level you last played it at; report the level its display shows at the start).
+   then "… 96 kHz / 24 bit"; the first sound is quiet (the KA17 at the last level or -40 dB, never
+   louder than it was before; report the level its display shows at the start).
 3. Move the app's slider, press the volume keys (screen on, then screen off) and use Android's
    volume panel: each moves the KA17's own volume (its display). Android's media volume stays where
    it was (check it in Android's sound settings afterwards). Report the steps you saw.

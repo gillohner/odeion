@@ -1,5 +1,5 @@
 //! The DAC's own volume (its UAC2 feature unit), the start level when the exclusive driver takes
-//! the DAC over from Android, and the never-louder give-back.
+//! the DAC over from Android (never louder than the DAC was), and the never-louder give-back.
 //!
 //! The exclusive driver sends the samples untouched, so the level is the DAC's feature unit. Before
 //! the first sample the driver sets it to a known start level ([`start_level`]): the level the app
@@ -109,6 +109,19 @@ pub fn start_level(saved_db: Option<f32>, range: &VolumeRange) -> Level {
     }
 }
 
+/// [`start_level`], never louder than the unit was before the take (`before`, when known): the
+/// lower of the two; a unit muted before starts at the lower of the start level and its minimum,
+/// unmuted, so it is heard, quietly. A DAC turned down (or muted) on its own buttons stays down.
+pub fn start_level_below(saved_db: Option<f32>, before: Option<Level>, range: &VolumeRange) -> Level {
+    let start = start_level(saved_db, range);
+    let cur = match before {
+        Some(b) if b.mute => start.cur.min(range.min()),
+        Some(b) => start.cur.min(b.cur),
+        None => start.cur,
+    };
+    Level { cur, mute: false }
+}
+
 /// The unit's level when the driver gives the DAC back to Android: exactly its own level and mute
 /// from before the take (Android's volume applies on top again, as it did); unknown: as now.
 pub fn giveback(before: Option<Level>, now: Level) -> Level {
@@ -207,6 +220,27 @@ mod tests {
             }
         );
         assert_eq!(start_level(Some(-90.0), &shallow).cur, -20 * 256);
+    }
+
+    /// Never louder than the DAC was before the take: the lower of the start level and the level
+    /// before; muted before: its minimum, heard; unknown before: the start level.
+    #[test]
+    fn the_start_level_is_never_louder_than_before() {
+        let r = ka17();
+        let at = |db: i16, mute: bool| Some(Level { cur: db * 256, mute });
+        let heard = |db: i16| Level {
+            cur: db * 256,
+            mute: false,
+        };
+        // Turned down to -60 dB on its own buttons, -5 dB kept from last time: -60 dB
+        assert_eq!(start_level_below(Some(-5.0), at(-60, false), &r), heard(-60));
+        // At 0 dB before: the start level (-40, or the one kept)
+        assert_eq!(start_level_below(None, at(0, false), &r), heard(-40));
+        assert_eq!(start_level_below(Some(-23.0), at(0, false), &r), heard(-23));
+        // Muted before: its minimum, unmuted
+        assert_eq!(start_level_below(Some(-5.0), at(0, true), &r), heard(-127));
+        // Not known before: the start level
+        assert_eq!(start_level_below(None, None, &r), heard(-40));
     }
 
     /// Claude M4 (round 2 of #306): the give-back is the unit's own level and mute from before
