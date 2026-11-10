@@ -165,6 +165,8 @@ project's old name. **Edge** is built from every change to the code.
 - Quicker song identification, and reviewing its matches is optional.
 - Copying library folders to your homeserver in the background.
 - Tags in the top card of song, album and artist pages, drawn as in pubky.app.
+- **?** in the top bar: **Report a problem…** sends the node's owner a problem, an idea or a
+  question, and **My reports** shows what became of yours.
 
 **In progress**
 
@@ -175,7 +177,6 @@ project's old name. **Edge** is built from every change to the code.
 - A redesigned phone layout: a simpler mini player, Now playing and list rows, with more swipes.
 - Simpler sign-in pages for streaming services.
 - People you invite keep their own bookmarks and playlists on their own homeserver.
-- Reporting a problem from the app to the node's owner.
 - Usage insights for the owner (off by default; the node's part is on edge, the recording part is
   not, so nothing is recorded yet). [How it works](docs/guides/usage-insights.md).
 - Release images under the name `ghcr.io/gillohner/odeion` (until then releases are
@@ -263,6 +264,8 @@ Every release has a `SHA256SUMS` file to check downloads against.
 ## Help and feedback
 
 - Something not working: [Troubleshooting](docs/guides/troubleshooting.md).
+- Using someone else's node: tell its owner with **?** › **Report a problem…** in the top bar
+  (newest build).
 - Questions, bug reports and ideas: [GitHub issues](https://github.com/gillohner/odeion/issues).
   Include how you installed it, the version (**Settings › About and updates**) and the node's log
   ([where to find it](docs/guides/troubleshooting.md)).
