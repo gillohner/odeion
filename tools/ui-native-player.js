@@ -91,6 +91,40 @@ async function open(browser, w, app) {
 }
 const calls = (page, cmd) => page.evaluate((c) => window.__calls.filter((x) => !c || x[0] === c), cmd);
 const now = (page) => page.evaluate(() => window.pmPlayer.now());
+// Until no command reached the app for `quiet` ms, at most `ms`: an earlier step's retry (2 s after
+// its failure) or pause has landed before the next step starts (a slow runner runs them late)
+const settled = async (page, quiet = 2500, ms = 12000) => {
+  const end = Date.now() + ms; let n = -1; let since = Date.now();
+  for (;;) {
+    const m = (await calls(page)).length;
+    if (m !== n) { n = m; since = Date.now(); }
+    if (Date.now() - since >= quiet || Date.now() > end) return;
+    await sleep(100);
+  }
+};
+// Until fn() is true, at most `ms` (polled: the page's CSP rules out waitForFunction)
+const waitFor = async (fn, ms = 8000) => {
+  const end = Date.now() + ms;
+  for (;;) { if (await fn()) return true; if (Date.now() > end) return false; await sleep(100); }
+};
+// Every toast the page shows from now on: a toast already gone when the check looks is still seen
+// (a slow runner can take longer than a toast's 3.8 s between the failure and the check)
+const watchToasts = (page) => page.evaluate(() => {
+  window.__toastsSeen = []; const t = document.querySelector('#toast');
+  if (window.__toastObs) window.__toastObs.disconnect();
+  window.__toastObs = new MutationObserver(() => { const x = t.textContent; if (x && window.__toastsSeen[window.__toastsSeen.length - 1] !== x) window.__toastsSeen.push(x); });
+  window.__toastObs.observe(t, { childList: true, characterData: true, subtree: true });
+});
+// Until a toast since watchToasts said `re` and the page's player is paused, at most `ms` (polled:
+// the page's CSP rules out waitForFunction)
+const saidAndPaused = async (page, re, ms = 8000) => {
+  const end = Date.now() + ms; let seen = ''; let paused = false;
+  for (;;) {
+    seen = (await page.evaluate(() => window.__toastsSeen || [])).join(' | '); paused = (await now(page)).paused;
+    if ((re.test(seen) && paused) || Date.now() > end) return { ok: re.test(seen) && paused, seen, paused };
+    await sleep(100);
+  }
+};
 const queue = (n) => tracks.slice(0, n).map((t) => ({ uri: `track:${t.id}`, track_id: t.id, title: t.title, artist: 'Sefa', album: 'Journey', duration_ms: 240000 }));
 // Now playing › Details › Output (the Details tab on wide screens; always there on phones)
 const detailsOutput = async (page) => {
@@ -296,12 +330,13 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       // bar doesn't stay "playing"
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(700);
+      await watchToasts(p);
       await p.evaluate(() => { window.__failLoad = true; });
       await p.evaluate((q) => window.pmPlayer.play(q), queue(1)); await sleep(60);
       await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(120);
-      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(900);
-      const fl = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
-      check(/the node did not answer/.test(fl) && (await now(p)).paused, `${at}: a reopen that fails after pause and play is said, not left "playing" (${fl}; ${JSON.stringify(await now(p))}; ${JSON.stringify((await calls(p)).slice(-6).map((c) => c[0]))}; ${JSON.stringify(r.state.errors)})`);
+      await p.evaluate(() => document.querySelector('#toggle').click());
+      const said1 = await saidAndPaused(p, /the node did not answer/); const fl = said1.seen;
+      check(said1.ok, `${at}: a reopen that fails after pause and play is said, not left "playing" (${fl}; ${JSON.stringify(await now(p))}; ${JSON.stringify((await calls(p)).slice(-6).map((c) => c[0]))}; ${JSON.stringify(r.state.errors)})`);
       await p.evaluate(() => { window.__failLoad = false; }); await sleep(2500);
 
       await p.evaluate(() => localStorage.setItem('pm.repeat', 'off'));
@@ -329,13 +364,21 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       check((await calls(p, 'native_load')).length > before, `${at}: and tried once more`);
       // A mid-song break whose retry fails after pause and play: said too (not only browserPlay's)
       await p.evaluate(() => { window.__failLoad = false; });
-      await p.evaluate((q) => window.pmPlayer.play(q), queue(2)); await sleep(100); await p.evaluate(() => document.querySelector('#next').click()); await sleep(800);
+      await settled(p);
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(2)); await sleep(100); await p.evaluate(() => document.querySelector('#next').click());
+      // The second song playing, the page not holding it paused, before its break
+      const second = await waitFor(async () => {
+        const c = await calls(p); const i = c.map((x) => x[0] === 'native_load' && /\/tracks\/2\//.test(x[1].url || '')).lastIndexOf(true);
+        return i >= 0 && !c.slice(i + 1).some((x) => x[0] === 'native_pause') && (await p.evaluate(() => window.__app.transport)) === 'playing' && !(await now(p)).paused;
+      });
+      await settled(p, 500);
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'playing', position_ms: 900 }); window.__send(); }); await sleep(150);
+      await watchToasts(p);
       await p.evaluate(() => { window.__failLoad = true; Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 900, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(1700);
       await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(120);
-      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(1500);
-      const fl2 = await p.evaluate(() => [...document.querySelectorAll('.toast')].map((x) => x.textContent).join(' | '));
-      check(/the node did not answer/.test(fl2) && (await now(p)).paused, `${at}: a failed mid-song retry after pause and play is said, not left "playing" (${fl2})`);
+      await p.evaluate(() => document.querySelector('#toggle').click());
+      const said2 = await saidAndPaused(p, /the node did not answer/);
+      check(second && said2.ok, `${at}: a failed mid-song retry after pause and play is said, not left "playing" (${second ? '' : 'the second song never played; '}${said2.seen}; paused ${said2.paused})`);
       await p.evaluate(() => { window.__failLoad = false; Object.assign(window.__app, { broke: false, error: null }); }); await sleep(2500);
       check(!r.state.errors.length, `${at}: review checks: no page errors (${r.state.errors.join(' | ')})`);
       await r.context.close();
