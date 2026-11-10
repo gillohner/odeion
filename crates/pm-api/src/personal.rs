@@ -38,6 +38,24 @@ const CALL_LIMIT: Duration = Duration::from_secs(8);
 /// How long a Ring approval for the grant may wait.
 const CONNECT_TTL: Duration = Duration::from_secs(600);
 
+tokio::task_local! {
+    /// Captured before token authentication, including time spent waiting before a handler.
+    pub(crate) static AUTHENTICATED_ACCESS: u64;
+}
+
+fn request_started(s: &NodeState) -> u64 {
+    AUTHENTICATED_ACCESS.try_with(|revision| *revision)
+        .unwrap_or_else(|_| crate::people::access_started(s))
+}
+
+fn require_access(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
+    crate::people::access_current(s, key.trim_start_matches("pubky"), started)?;
+    if !crate::people::may_use_music(s, key) {
+        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "music access has ended"));
+    }
+    Ok(())
+}
+
 /// Why a listener's homeserver didn't do what the node asked.
 #[derive(Debug, Clone)]
 pub enum PersonalError {
@@ -437,6 +455,18 @@ fn save(s: &NodeState, key: &str, c: &Copy) -> Result<(), ApiError> {
 }
 
 impl Copy {
+    fn merge_remote(&mut self, list: Vec<(String, i64)>) {
+        // Absence still means deleted remotely. A returned older heart cannot erase a newer
+        // known heart or undo a newer clear; the latter has no item to preserve here.
+        self.items = list.into_iter().filter_map(|(uri, at)| {
+            if self.outdated(&uri, true, at) {
+                self.items.iter().find(|item| item.uri == uri).cloned()
+            } else {
+                Some(Item { uri, at })
+            }
+        }).collect();
+    }
+
     fn apply(&mut self, uri: &str, on: bool, at: i64) {
         self.items.retain(|i| i.uri != uri);
         self.cleared.retain(|i| i.uri != uri);
@@ -494,9 +524,11 @@ pub(crate) async fn bookmark_uris(
     s: &NodeState,
     key: &str,
 ) -> Result<(Vec<String>, PersonalState), ApiError> {
+    let started = request_started(s);
     let b = backend(s);
     let lock = person_lock(key);
     let _one = lock.lock().await;
+    require_access(s, key, started)?;
     let connected = b.connected(key);
     // Not connected (or disconnected): theirs aren't known here; the copy waits for a reconnect
     if !connected {
@@ -535,7 +567,7 @@ pub(crate) async fn bookmark_uris(
             let known: Vec<(String, i64)> = c.items.iter().map(|i| (i.uri.clone(), i.at)).collect();
             match b.bookmarks(key, &known).await {
                 Ok(list) => {
-                    c.items = list.into_iter().map(|(uri, at)| Item { uri, at }).collect();
+                    c.merge_remote(list);
                 }
                 Err(PersonalError::Refused(m)) => {
                     tracing::info!(%key, "a listener's homeserver refused the node: {m}");
@@ -568,9 +600,11 @@ pub(crate) async fn set_bookmark(
     on: bool,
     at: Option<i64>,
 ) -> Result<Response, ApiError> {
+    let started = request_started(s);
     let b = backend(s);
     let lock = person_lock(key);
     let _one = lock.lock().await;
+    require_access(s, key, started)?;
     if !b.connected(key) {
         return Ok(needs_connect(false));
     }
@@ -676,6 +710,8 @@ struct Connect {
     started: Instant,
     /// The listener who started it: only they may read its answer.
     who: String,
+    /// The authenticated request's access generation, retained across the relay task.
+    revision: u64,
     /// `None` while it waits; then `{state: ok|denied|expired|error, reason?}`.
     answer: Option<serde_json::Value>,
 }
@@ -693,13 +729,21 @@ async fn still_asked(id: &str) -> bool {
     connects().lock().await.contains_key(id)
 }
 
-/// Under `key`'s lock, `keep` runs only while approval `id` is still asked for. A Disconnect ends
-/// it under the same lock, so a grant is never kept after a Disconnect has answered.
-async fn keep_if_current(id: &str, key: &str, keep: impl FnOnce() -> serde_json::Value) -> serde_json::Value {
+/// Under `key`'s operation lock and the roster lock, `keep` runs only while the approval and
+/// its authenticated access generation still stand. Disconnect serializes on the operation
+/// lock; removal and restore cannot cross the final check and synchronous grant write.
+async fn keep_if_current(s: &NodeState, id: &str, key: &str, keep: impl FnOnce() -> serde_json::Value) -> serde_json::Value {
     let lock = person_lock(key);
     let _one = lock.lock().await;
-    if !still_asked(id).await {
+    // Restore/revocation cannot cross the final generation check and synchronous grant write.
+    let _roster = s.roster.lock().await;
+    let revision = connects().lock().await.get(id)
+        .filter(|c| c.who == key).map(|c| c.revision);
+    let Some(revision) = revision else {
         return serde_json::json!({"state": "expired"});
+    };
+    if let Err(e) = require_access(s, key, revision) {
+        return serde_json::json!({"state":"denied", "reason":e.message});
     }
     keep()
 }
@@ -766,11 +810,7 @@ async fn keep_grant(s: Arc<NodeState>, id: String, key: String, session: PubkySe
     };
     // They disconnected (or started another approval) while this one was exchanged: nothing is
     // kept, so a Disconnect that has answered stays done
-    keep_if_current(&id, &key, || {
-        // Their music access went meanwhile: nothing is kept
-        if !crate::people::may_use_music(&s, &key) {
-            return serde_json::json!({"state": "denied", "reason": "you have no music access on this node any more"});
-        }
+    keep_if_current(&s, &id, &key, || {
         let Some(file) = grant_file(&grants_dir(&s), &key) else {
             return serde_json::json!({"state": "denied", "reason": "not a Pubky key"});
         };
@@ -824,8 +864,10 @@ pub(crate) async fn disconnect(
     axum::Extension(c): axum::Extension<crate::accounts::Caller>,
 ) -> Result<Json<PersonalState>, ApiError> {
     let key = listener_key(&c)?;
+    let started = request_started(&s);
     let lock = person_lock(&key);
     let _one = lock.lock().await;
+    require_access(&s, &key, started)?;
     // An approval still on its way would bring the grant back after this answer
     end_approvals_of(&key).await;
     // Still there (it couldn't be deleted): not answered as disconnected
@@ -877,12 +919,11 @@ pub(crate) async fn connect_start(
 }
 
 async fn begin_approval(s: &NodeState, id: &str, key: &str) -> Result<(), ApiError> {
+    let started = request_started(s);
     let lock = membership_lock(key);
     let _membership = lock.lock().await;
-    // A request admitted before Remove must not start a new approval during its cleanup.
-    if !crate::people::may_use_music(s, key) {
-        return Err(ApiError::new(StatusCode::UNAUTHORIZED, "music access has ended"));
-    }
+    // A request admitted before Remove must not inherit the membership of a later re-add.
+    require_access(s, key, started)?;
     let mut all = connects().lock().await;
     all.retain(|_, c| c.started.elapsed() < CONNECT_TTL && c.who != key);
     all.insert(
@@ -890,6 +931,7 @@ async fn begin_approval(s: &NodeState, id: &str, key: &str) -> Result<(), ApiErr
         Connect {
             started: Instant::now(),
             who: key.to_string(),
+            revision: started,
             answer: None,
         },
     );
@@ -964,29 +1006,39 @@ async fn forget_with(b: &dyn PersonalHomeserver, dir: &std::path::Path, key: &st
 }
 
 /// Whether anything of `key`'s is still on the node: their grant, their sessions, or their copies
-/// (a removal that failed part way). Removing them again finishes it.
-pub(crate) fn leftover(s: &NodeState, key: &str) -> bool {
+/// (a removal that failed part way). Read uncertainty blocks re-add; Remove still attempts
+/// cleanup and reports it. Removing them again finishes what remains.
+pub(crate) fn leftover(s: &NodeState, key: &str) -> Result<bool, ApiError> {
     let key = key.trim_start_matches("pubky");
     if backend(s).connected(key)
-        || grant_file(&grants_dir(s), key).is_some_and(|f| f.exists())
-        || crate::accounts::sessions_of(s, key) > 0
+        || match grant_file(&grants_dir(s), key) {
+            Some(file) => file.try_exists().map_err(|e| ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR, format!("cannot check retained approval: {e}")))?,
+            None => false,
+        }
+        || crate::accounts::sessions_of_checked(s, key)? > 0
     {
-        return true;
+        return Ok(true);
     }
     let lib = s.library.lock().expect("library poisoned");
-    [
+    for k in [
         crate::prefs::storage_key_of(key),
         crate::presence::visible_key(key),
-    ]
-    .iter()
-    .any(|k| lib.get_setting(k).is_ok_and(|v| v.is_some()))
-        || [
+    ] {
+        if lib.get_setting(&k)?.is_some() {
+            return Ok(true);
+        }
+    }
+    for prefix in [
             format!("{}{key}.", crate::accounts::PERSON_PREFIX),
             crate::discover::contents_prefix_of(key),
             crate::discover::contents_prefix_of(&crate::accounts::Who::ListenerOnNode(key.to_string()).tag()),
-        ]
-        .iter()
-        .any(|prefix| lib.settings_with_prefix(prefix).is_ok_and(|all| !all.is_empty()))
+    ] {
+        if !lib.settings_with_prefix(&prefix)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -1075,6 +1127,7 @@ mod tests {
             Connect {
                 started: Instant::now(),
                 who: who.into(),
+                revision: 0,
                 answer: None,
             },
         );
@@ -1303,23 +1356,27 @@ mod tests {
 
     #[tokio::test]
     async fn a_grant_is_kept_only_while_its_approval_is_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = listener_state(dir.path(), "keep-ann").await;
         waiting("t-keep", "keep-ann").await;
         let ok = || serde_json::json!({"state": "ok"});
-        assert_eq!(keep_if_current("t-keep", "keep-ann", ok).await["state"], "ok");
+        assert_eq!(keep_if_current(&s, "t-keep", "keep-ann", ok).await["state"], "ok");
         // A Disconnect holds her lock while it ends her approvals: an approval past the relay that
         // waits on that lock keeps nothing after
         waiting("t-keep-late", "keep-ann").await;
         let lock = person_lock("keep-ann");
         let disconnecting = lock.lock().await;
-        let keeping = tokio::spawn(keep_if_current(
+        let keeping = keep_if_current(
+            &s,
             "t-keep-late",
             "keep-ann",
             || -> serde_json::Value { panic!("a grant kept after her Disconnect") },
-        ));
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        );
+        tokio::pin!(keeping);
+        assert!(futures_util::poll!(&mut keeping).is_pending());
         end_approvals_of("keep-ann").await;
         drop(disconnecting);
-        assert_eq!(keeping.await.unwrap()["state"], "expired");
+        assert_eq!(keeping.await["state"], "expired");
     }
 
     #[tokio::test]
@@ -1369,6 +1426,7 @@ mod tests {
             Connect {
                 started: Instant::now(),
                 who: "old-ann".into(),
+                revision: 0,
                 answer: Some(serde_json::json!({"state": "ok"})),
             },
         );
@@ -1446,17 +1504,18 @@ mod tests {
 
     #[tokio::test]
     async fn an_approval_waiting_behind_a_removal_keeps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = listener_state(dir.path(), "rm-ann").await;
         waiting("t-rm-old", "rm-ann").await;
         // People › Remove holds her lock: an approval past the relay waits for it
         let lock = person_lock("rm-ann");
         let removal = lock.lock().await;
-        let keeping = keep_if_current("t-rm-old", "rm-ann", || -> serde_json::Value {
+        let keeping = keep_if_current(&s, "t-rm-old", "rm-ann", || -> serde_json::Value {
             panic!("a grant kept after her removal")
         });
         tokio::pin!(keeping);
         assert!(futures_util::poll!(&mut keeping).is_pending());
         let store = Forgets::default();
-        let dir = tempfile::tempdir().unwrap();
         forget_with(&store, dir.path(), "rm-ann").await.unwrap();
         drop(removal);
         assert_eq!(keeping.await["state"], "expired");
@@ -1500,7 +1559,7 @@ mod tests {
         let file = grant_file(&grants_dir(&s), key).unwrap();
         begin_approval(&s, "rm-kept", key).await.unwrap();
         assert_eq!(
-            keep_if_current("rm-kept", key, || {
+            keep_if_current(&s, "rm-kept", key, || {
                 crate::imports::write_private(&file, b"old-fixture-grant").unwrap();
                 serde_json::json!({"state": "ok"})
             })
@@ -1513,7 +1572,7 @@ mod tests {
         begin_approval(&s, "rm-waiting", key).await.unwrap();
         let operation = person_lock(key);
         let held = operation.lock().await;
-        let old = keep_if_current("rm-waiting", key, || {
+        let old = keep_if_current(&s, "rm-waiting", key, || {
             assert!(!crate::people::may_use_music(&s, key));
             serde_json::json!({"state": "denied"})
         });
@@ -1548,11 +1607,11 @@ mod tests {
         re_add.await.unwrap();
         begin_approval(&s, "rm-fresh", key).await.unwrap();
         assert_eq!(
-            keep_if_current("rm-waiting", key, || panic!("old approval revived")).await["state"],
+            keep_if_current(&s, "rm-waiting", key, || panic!("old approval revived")).await["state"],
             "expired"
         );
         assert_eq!(
-            keep_if_current("rm-fresh", key, || {
+            keep_if_current(&s, "rm-fresh", key, || {
                 crate::imports::write_private(&file, b"fresh-fixture-grant").unwrap();
                 serde_json::json!({"state": "ok"})
             })
@@ -1561,6 +1620,81 @@ mod tests {
         );
         assert_eq!(std::fs::read(&file).unwrap(), b"fresh-fixture-grant");
         assert!(still_asked("rm-fresh").await);
+        end_approvals_of(key).await;
+    }
+
+    #[tokio::test]
+    async fn requests_authenticated_before_removal_cannot_touch_a_fresh_readd() {
+        use axum::extract::{Path, State};
+        let dir = tempfile::tempdir().unwrap();
+        let key = "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh";
+        let s = listener_state(dir.path(), key).await;
+        let token = crate::accounts::mint(&s, key).unwrap();
+        // The middleware captures this before authenticating. The gates deliberately keep
+        // both handlers from even reaching their locks until cleanup AND fresh approval finish.
+        let revision = crate::people::access_started(&s);
+        let caller = crate::accounts::caller(&s, Some(&token)).unwrap();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+        let (disconnect_tx, disconnect_rx) = tokio::sync::oneshot::channel::<()>();
+        let old_start = AUTHENTICATED_ACCESS.scope(revision, async {
+            start_rx.await.unwrap();
+            begin_approval(&s, "delayed-old-start", key).await
+        });
+        let old_disconnect = AUTHENTICATED_ACCESS.scope(revision, async {
+            disconnect_rx.await.unwrap();
+            disconnect(State(s.clone()), axum::Extension(caller)).await
+        });
+        tokio::pin!(old_start, old_disconnect);
+        assert!(futures_util::poll!(&mut old_start).is_pending());
+        assert!(futures_util::poll!(&mut old_disconnect).is_pending());
+        crate::people::remove(State(s.clone()), Path(key.into())).await.unwrap();
+        crate::people::invite(State(s.clone()), Json(crate::people::NewInvite {
+            access: crate::people::Access::Music,
+            key: Some(key.into()), name: None, storage_quota_mb: None,
+        })).await.unwrap();
+        let fresh = Arc::new(Forgets::default());
+        s.set_personal_homeserver(fresh.clone());
+        let file = grant_file(&grants_dir(&s), key).unwrap();
+        begin_approval(&s, "delayed-fresh", key).await.unwrap();
+        assert_eq!(keep_if_current(&s, "delayed-fresh", key, || {
+            crate::imports::write_private(&file, b"fresh-grant").unwrap();
+            serde_json::json!({"state":"ok"})
+        }).await["state"], "ok");
+        start_tx.send(()).unwrap();
+        disconnect_tx.send(()).unwrap();
+        assert_eq!(old_start.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert_eq!(old_disconnect.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert!(still_asked("delayed-fresh").await);
+        assert!(!still_asked("delayed-old-start").await);
+        assert!(fresh.connected(key), "an old disconnect cannot delete the fresh grant");
+        assert_eq!(std::fs::read(&file).unwrap(), b"fresh-grant");
+        // Read-triggered replay and direct writes carry the same authenticated generation.
+        assert_eq!(AUTHENTICATED_ACCESS.scope(revision, bookmark_uris(&s, key))
+            .await.unwrap_err().status, StatusCode::CONFLICT);
+        let stale_write = AUTHENTICATED_ACCESS.scope(revision,
+            set_bookmark(&s, key, "https://example.com/song".into(), true, None)).await;
+        assert_eq!(stale_write.unwrap_err().status, StatusCode::CONFLICT);
+        end_approvals_of(key).await;
+    }
+
+    #[tokio::test]
+    async fn a_restored_generation_denies_an_old_connect_before_its_grant_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii";
+        let s = listener_state(dir.path(), key).await;
+        begin_approval(&s, "restore-old-connect", key).await.unwrap();
+        let roster = s.roster.lock().await;
+        let keeping = keep_if_current(&s, "restore-old-connect", key, || {
+            panic!("a pre-restore approval must not persist its grant")
+        });
+        tokio::pin!(keeping);
+        assert!(futures_util::poll!(&mut keeping).is_pending());
+        crate::people::restored_access(&s);
+        drop(roster);
+        assert_eq!(keeping.await["state"], "denied");
+        begin_approval(&s, "restore-fresh-connect", key).await.unwrap();
+        assert_eq!(keep_if_current(&s, "restore-fresh-connect", key,
+            || serde_json::json!({"state":"ok"})).await["state"], "ok");
         end_approvals_of(key).await;
     }
 
@@ -1601,7 +1735,7 @@ mod tests {
         assert!(crate::people::remove(State(s.clone()), Path(key.into()))
             .await
             .is_err());
-        assert!(leftover(&s, key));
+        assert!(leftover(&s, key).unwrap());
         store.1.store(false, SeqCst);
 
         // An admitted old operation holds up cleanup retried by the re-add.

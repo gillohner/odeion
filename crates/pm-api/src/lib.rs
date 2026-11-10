@@ -1012,6 +1012,9 @@ async fn auth(
         .get::<axum::extract::MatchedPath>()
         .map(|m| m.as_str().to_string());
     let token = bearer_for(&headers, &query, req.method(), route.as_deref());
+    // Stamp before authenticating: work delayed after admission must not inherit a later
+    // removal/re-add or restore merely because music is enabled again when it resumes.
+    let access_started = people::access_started(&state);
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
         // (the page keeps it), it works again once the identity is. Log out still ends it, so the
@@ -1061,7 +1064,9 @@ async fn auth(
     };
     req.extensions_mut().insert(caller);
     // Catalogue reads (search, item pages) use the asking person's sign-in, or the app's
-    let resp = accounts::ASKING.scope(asking, next.run(req)).await;
+    let resp = personal::AUTHENTICATED_ACCESS
+        .scope(access_started, accounts::ASKING.scope(asking, next.run(req)))
+        .await;
     if let Some((zone, caller)) = played.filter(|_| resp.status().is_success()) {
         presence::played(&state, &zone, &caller);
     }

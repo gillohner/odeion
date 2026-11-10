@@ -208,11 +208,11 @@ pub(crate) struct AccessRevisions {
     revoked: std::collections::HashMap<String, u64>,
 }
 
-fn access_started(s: &NodeState) -> u64 {
+pub(crate) fn access_started(s: &NodeState) -> u64 {
     s.people_access.lock().expect("people access").serial
 }
 
-fn access_current(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
+pub(crate) fn access_current(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
     let revisions = s.people_access.lock().expect("people access");
     if revisions.restored > started || revisions.revoked.get(key).is_some_and(|r| *r > started) {
         return Err(ApiError::new(
@@ -252,7 +252,7 @@ async fn finish_previous_removal(s: &NodeState, key: &str, started: u64) -> Resu
     let (cleanup, _) = update(s, |r| {
         access_current(s, key, started)?;
         let removed = !r.people.iter().any(|p| p.key == key && p.access.music());
-        Ok((removed && crate::personal::leftover(s, key)).then(|| Removing::new(s, key)))
+        Ok((removed && crate::personal::leftover(s, key)?).then(|| Removing::new(s, key)))
     })
     .await?;
     if let Some(_removing) = cleanup {
@@ -724,8 +724,13 @@ pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<Stri
 }
 
 async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
-    if !load(&s).people.iter().any(|p| p.key == key) && !crate::personal::leftover(&s, &key) {
-        reconcile(&s).await?;
+    let mut discovery_problems = Vec::new();
+    if !load(&s).people.iter().any(|p| p.key == key) {
+        match crate::personal::leftover(&s, &key) {
+            Ok(false) => reconcile(&s).await?,
+            Ok(true) => {}
+            Err(e) => discovery_problems.push(e.message),
+        }
     }
     let membership = crate::personal::membership_lock(&key);
     let _membership = membership.lock().await;
@@ -740,8 +745,15 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
             } else {
                 r.people.remove(i);
             }
-        } else if !crate::personal::leftover(&s, &key) {
-            return Err(ApiError::not_found("no such person"));
+        } else {
+            match crate::personal::leftover(&s, &key) {
+                Ok(false) if discovery_problems.is_empty() => return Err(ApiError::not_found("no such person")),
+                Ok(false) => {}
+                Ok(true) => {}
+                // Uncertainty must not skip removal. Attempt every cleanup below and
+                // report this read failure as well; re-add instead refuses uncertainty.
+                Err(e) => discovery_problems.push(e.message),
+            }
         }
         revoke_access(&s, &key);
         Ok(Removing::new(&s, &key))
@@ -753,7 +765,12 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
     crate::devices::forget_all_of(&s, &key);
     let lock = crate::personal::person_lock(&key);
     let _one = lock.lock().await;
-    crate::accounts::forget_person_locked(&s, &key).await?;
+    if let Err(e) = crate::accounts::forget_person_locked(&s, &key).await {
+        discovery_problems.insert(0, e.message);
+    }
+    if !discovery_problems.is_empty() {
+        return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, discovery_problems.join("; ")));
+    }
     Ok(Json(r))
 }
 

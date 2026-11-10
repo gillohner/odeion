@@ -403,6 +403,16 @@ fn load(s: &NodeState, setting: &str) -> Vec<PersonToken> {
         .unwrap_or_default()
 }
 
+/// Cleanup and token mutations must distinguish an empty store from an unreadable one.
+fn load_checked(lib: &pm_library::Library, setting: &str) -> Result<Vec<PersonToken>, ApiError> {
+    let Some(json) = lib.get_setting(setting)? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot read sign-in store: {e}"))
+    })
+}
+
 /// Changes a token list in place: read and saved under one hold of the library, so two changes
 /// at once (a log in while Make a new token ends every session) can't bring ended ones back.
 fn update<R>(
@@ -419,12 +429,7 @@ fn update_in<R>(
     setting: &str,
     f: impl FnOnce(&mut Vec<PersonToken>) -> R,
 ) -> Result<R, ApiError> {
-    let mut all: Vec<PersonToken> = lib
-        .get_setting(setting)
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
+    let mut all = load_checked(lib, setting)?;
     let r = f(&mut all);
     lib.set_setting(setting, &serde_json::to_string(&all).expect("serializes"))?;
     if [TOKENS, OWNER_SESSIONS, DEVICE_SESSIONS].contains(&setting) {
@@ -1017,6 +1022,13 @@ pub(crate) async fn set_zones(
 /// Signed-in devices per person, for People.
 pub fn sessions_of(s: &NodeState, key: &str) -> usize {
     load_tokens(s).iter().filter(|t| t.key == key).count()
+}
+
+pub(crate) fn sessions_of_checked(s: &NodeState, key: &str) -> Result<usize, ApiError> {
+    Ok(load_checked(&s.library.lock().expect("library poisoned"), TOKENS)?
+        .iter()
+        .filter(|t| t.key == key)
+        .count())
 }
 
 /// Forgets every token of `key` (People › remove).
