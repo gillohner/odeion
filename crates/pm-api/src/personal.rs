@@ -1733,6 +1733,84 @@ mod tests {
     #[tokio::test]
     #[allow(deprecated)] // A local legacy cookie session avoids a remote grant exchange.
     async fn the_grants_adapter_refreshes_a_known_hearts_timestamp_before_an_offline_clear() {
+        // Pubky's builder cannot disable reqwest's inherited proxies. Run only this test
+        // in a fresh process with a proxy-free transport environment, never mutating the
+        // process-wide environment of the concurrently running parent suite. The first
+        // child deliberately inherits unusable loopback proxies, so the next boundary
+        // must remove both cases rather than relying on the developer/CI configuration.
+        const CHILD: &str = "ODEION_BOOKMARK_SDK_TEST_PROCESS";
+        const TEST: &str =
+            "personal::tests::the_grants_adapter_refreshes_a_known_hearts_timestamp_before_an_offline_clear";
+        const PROXIES: [&str; 6] = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ];
+        const INJECTED: &str = "http://127.0.0.1:1";
+        const FINISHED: &str = "isolated bookmark SDK assertions completed";
+        async fn child(command: &mut tokio::process::Command, seconds: u64) {
+            let output = tokio::time::timeout(
+                Duration::from_secs(seconds),
+                command
+                    .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                    .stdin(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("isolated SDK child timed out")
+            .expect("start isolated SDK test process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "SDK child failed:\n{stdout}\n{stderr}");
+            // A mistyped exact filter must not count a zero-test success as coverage.
+            assert!(
+                stdout.contains(FINISHED),
+                "SDK child did not run its assertions:\n{stdout}\n{stderr}"
+            );
+            println!("{stdout}");
+        }
+        match std::env::var(CHILD).ok().as_deref() {
+            None => {
+                let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+                command.env(CHILD, "injected-proxy-parent");
+                for name in PROXIES {
+                    command.env(name, INJECTED);
+                }
+                command.env_remove("NO_PROXY").env_remove("no_proxy");
+                child(&mut command, 45).await;
+                return;
+            }
+            Some("injected-proxy-parent") => {
+                for name in PROXIES {
+                    assert!(
+                        std::env::var(name).is_ok_and(|v| v == INJECTED),
+                        "proxy injection missing: {name}"
+                    );
+                }
+                assert!(std::env::var_os("NO_PROXY").is_none());
+                assert!(std::env::var_os("no_proxy").is_none());
+                let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+                command.env(CHILD, "isolated-sdk");
+                for name in PROXIES {
+                    command.env_remove(name);
+                }
+                command.env("NO_PROXY", "*").env("no_proxy", "*");
+                child(&mut command, 30).await;
+                return;
+            }
+            Some("isolated-sdk") => {
+                for name in PROXIES {
+                    assert!(std::env::var_os(name).is_none(), "SDK inherited proxy: {name}");
+                }
+                assert!(std::env::var("NO_PROXY").is_ok_and(|v| v == "*"));
+                assert!(std::env::var("no_proxy").is_ok_and(|v| v == "*"));
+            }
+            Some(_) => panic!("unknown SDK test process role"),
+        }
         use axum::extract::{Request, State};
         use axum::http::Method;
         use http_body_util::BodyExt;
@@ -1885,6 +1963,7 @@ mod tests {
         );
         assert!(requests.iter().all(|(method, _)| *method != Method::DELETE));
         sessions().lock().unwrap().remove(&key);
+        println!("{FINISHED}");
     }
 
     async fn revoked(s: &NodeState, key: &str) {
