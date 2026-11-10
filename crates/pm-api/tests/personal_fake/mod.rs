@@ -71,8 +71,11 @@ pub struct Fake {
     /// Another app of theirs writes these files at the first call of this kind (`read`,
     /// `write` or `remove`), once: a version that appears after the node's listing, before or
     /// while it changes the collection.
-    pub meanwhile: Mutex<Option<(&'static str, Vec<(String, Vec<u8>)>)>>,
+    pub meanwhile: Mutex<Meanwhile>,
 }
+
+/// Files another app writes at the first call of one kind ([`Fake::meanwhile`]).
+pub type Meanwhile = Option<(&'static str, Vec<(String, Vec<u8>)>)>;
 
 impl Fake {
     /// A homeserver takes a moment: requests made at once overlap, as they do for real.

@@ -179,7 +179,7 @@ pub struct ListBounds {
     /// listing stops, cut, at a longer one.
     pub max_entry_bytes: usize,
     /// At most this many bytes of entries (their cursors) in the whole listing; past it the
-    /// listing stops, cut, like one past [`Self::max_entries`]. When this is bounded the node
+    /// listing stops, cut, like one past [`ListBounds::max_entries`]. When this is bounded the node
     /// sends each LIST itself and reads its body to at most this, and to at most
     /// `LIST_LIMIT × (max_entry_bytes + 128)`, before parsing it (the SDK reads a page whole); a
     /// bigger page is [`HomeserverError::TooLarge`]. A legacy cookie session's private listings

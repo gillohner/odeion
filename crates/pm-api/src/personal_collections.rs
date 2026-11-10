@@ -340,6 +340,14 @@ pub(crate) fn behind(s: &NodeState, key: &str) -> Result<bool, ApiError> {
     Ok(load(s, key)?.behind)
 }
 
+/// Why their homeserver didn't take a change, as the listener reads it.
+fn why_not(e: &PersonalError) -> &str {
+    match e {
+        PersonalError::NoGrant => "this node has no approval from you to write there",
+        PersonalError::Refused(m) | PersonalError::Unreachable(m) | PersonalError::Rejected(m) => m,
+    }
+}
+
 fn rejected(e: impl std::fmt::Display) -> PersonalError {
     PersonalError::Rejected(e.to_string())
 }
@@ -360,7 +368,7 @@ fn compact_versions(paths: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut roots = BTreeMap::new();
     for path in paths {
         let root = if path.starts_with("/pub/") { "pub" } else { "priv" };
-        let entry = roots.entry(root).or_insert_with(String::new);
+        let entry = roots.entry(root).or_default();
         if path > *entry {
             *entry = path;
         }
@@ -515,7 +523,6 @@ fn prepare(key: &str, k: &mut Kept) -> Result<Prepared, PersonalError> {
 /// Durable intent precedes I/O. Each returned success is checkpointed before the next await;
 /// a cancelled/expired write is retried at its reserved path, and removals are idempotent.
 async fn push(
-    s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
@@ -524,6 +531,7 @@ async fn push(
     held: Option<Held>,
     work: &mut Work<'_>,
 ) -> Result<Pushed, ApiError> {
+    let s = work.state;
     let mut k = sh
         .items
         .iter()
@@ -687,7 +695,6 @@ fn hold(sh: &mut Shelf, id: &str, head: &v1::Head, why: Held, bytes: usize, caug
 /// head: older releases may have cached a lossy display projection. Pending intent is retained
 /// while all newly seen original posts are checked, including a newer public copy.
 async fn observe(
-    s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
@@ -696,6 +703,7 @@ async fn observe(
     force: bool,
     work: &mut Work<'_>,
 ) -> Result<Caught, ApiError> {
+    let s = work.state;
     let mut caught = Caught::default();
     let old = sh.items.iter().find(|k| k.id == id).cloned();
     if old.as_ref().is_some_and(|k| k.deleted) {
@@ -873,7 +881,7 @@ async fn catch_up_one(
             ))
         }
     };
-    let caught = observe(s, b, key, sh, id, &remote, true, work).await?;
+    let caught = observe(b, key, sh, id, &remote, true, work).await?;
     save(s, key, sh, work.started).await?;
     Ok((caught, remote))
 }
@@ -894,7 +902,6 @@ fn discard_rejected(sh: &mut Shelf, id: &str) {
 }
 
 async fn replay(
-    s: &NodeState,
     b: &dyn PersonalHomeserver,
     key: &str,
     sh: &mut Shelf,
@@ -903,11 +910,12 @@ async fn replay(
     caught: &mut Caught,
     work: &mut Work<'_>,
 ) -> Result<(), ApiError> {
+    let s = work.state;
     if !sh.items.iter().any(|k| k.id == id && k.pending) {
         return Ok(());
     }
     save(s, key, sh, work.started).await?;
-    match push(s, b, key, sh, id, remote, caught.held_back.get(id).copied(), work).await? {
+    match push(b, key, sh, id, remote, caught.held_back.get(id).copied(), work).await? {
         Pushed::Done | Pushed::Held => {}
         Pushed::Full => {
             caught.held_back.insert(id.to_string(), Held::Size);
@@ -918,7 +926,7 @@ async fn replay(
                 return Ok(());
             }
             discard_rejected(sh, id);
-            let read = observe(s, b, key, sh, id, remote, true, work).await?;
+            let read = observe(b, key, sh, id, remote, true, work).await?;
             caught.stale |= read.stale;
             caught.held_back.extend(read.held_back);
             save(s, key, sh, work.started).await?;
@@ -1029,9 +1037,9 @@ async fn refresh(
         }
         // Work::read charges actual downloads. Known held heads cost no read allowance,
         // so unrelated or unrepresentable posts cannot starve older valid collections.
-        let mut one = observe(s, b, key, sh, &id, &remote, Some(id.as_str()) == first, work).await?;
+        let mut one = observe(b, key, sh, &id, &remote, Some(id.as_str()) == first, work).await?;
         if !editing && !one.stale && !personal::is_lost(s, key)? {
-            replay(s, b, key, sh, &id, &remote, &mut one, work).await?;
+            replay(b, key, sh, &id, &remote, &mut one, work).await?;
         }
         let stopped = one.stale || personal::is_lost(s, key)?;
         caught.stale |= one.stale;
@@ -1086,7 +1094,7 @@ async fn drain_one_by_one(
         if caught.stale || personal::is_lost(s, key)? {
             break;
         }
-        replay(s, b, key, sh, &id, &remote, &mut caught, work).await?;
+        replay(b, key, sh, &id, &remote, &mut caught, work).await?;
         if caught.stale || personal::is_lost(s, key)? {
             break;
         }
@@ -1284,7 +1292,7 @@ async fn change(
         prepare(key, &mut k).map_err(|e| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("Your homeserver won't keep this collection: {e}"),
+                format!("Your homeserver won't keep this collection: {}", why_not(&e)),
             )
         })?;
     }
@@ -1313,7 +1321,7 @@ async fn change(
     // An existing collection waits if it couldn't be listed/read first. A new collection has
     // no unseen head to overwrite. All remaining work uses the SAME deadline/call allowance.
     if !recovering && (!caught.stale || id.is_none()) {
-        match push(s, b.as_ref(), key, &mut sh, &k.id, &remote, held, &mut work).await? {
+        match push(b.as_ref(), key, &mut sh, &k.id, &remote, held, &mut work).await? {
             Pushed::Done | Pushed::Held => {}
             Pushed::Full if k.unshare => {} // The privacy intent remains durable for the next batch.
             Pushed::Full => return Err(shelf_full()),
