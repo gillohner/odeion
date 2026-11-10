@@ -2046,6 +2046,22 @@ pub(crate) mod tests {
                 && again.contains("if (attachedAt > resumedAt) return false"),
             "{again}"
         );
+        // Auto's one ask too: on screen, not on top of the attach dialog, and counted only once
+        // Android was asked (so the resume after the attach dialog still asks)
+        let once = kt
+            .split("fun requestPermissionOnce(vendor: Int, product: Int) {")
+            .nth(1)
+            .and_then(|r| r.split("\n        }\n").next())
+            .expect("requestPermissionOnce");
+        let guard = once.find("if (attachedAt > resumedAt) return\n");
+        let counted = once.find("if (ask(vendor, product)) p.edit().putBoolean(key, true)");
+        assert!(
+            once.contains("IMPORTANCE_FOREGROUND) return")
+                && guard.is_some()
+                && counted.is_some()
+                && guard < counted,
+            "{once}"
+        );
         assert!(kt.contains("UsbManager.ACTION_USB_DEVICE_ATTACHED -> {"));
         let audio = include_str!("../../../tools/release/android/UsbAudio.kt");
         assert!(audio.contains("override fun onActivityResumed(a: Activity) = UsbExclusive.resumed()"));

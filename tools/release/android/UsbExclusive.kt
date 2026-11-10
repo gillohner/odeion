@@ -135,8 +135,9 @@ class UsbExclusive private constructor() {
         }
 
         /// Auto's own ask (Exclusive USB is its first path): Android's dialog for this DAC once, and
-        /// only while the app is on screen (Android shows it over the app). Someone who said no is
-        /// not asked again; choosing Exclusive USB in Settings asks again (requestPermission).
+        /// only while the app is on screen (Android shows it over the app), never while Android's own
+        /// attach dialog may be up (only once the app resumed after the attach). Someone who said no
+        /// is not asked again; choosing Exclusive USB in Settings asks again (requestPermission).
         @JvmStatic
         fun requestPermissionOnce(vendor: Int, product: Int) {
             val me = android.app.ActivityManager.RunningAppProcessInfo()
@@ -145,6 +146,9 @@ class UsbExclusive private constructor() {
             val p = prefs() ?: return
             val key = "auto-asked-$vendor:$product"
             if (p.getBoolean(key, false)) return
+            // Not on top of Android's own attach dialog ("Open Odeion?"): the app's resume after it
+            // asks (the Rust side's ask on resume; the ask is not counted until then)
+            if (attachedAt > resumedAt) return
             // Counted only once Android was really asked (the DAC listed, the app ready)
             if (ask(vendor, product)) p.edit().putBoolean(key, true).apply()
         }

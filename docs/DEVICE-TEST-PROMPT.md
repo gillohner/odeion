@@ -410,10 +410,13 @@ What it does:
    the zone's name and level. Then the app in the background (home screen), keys again: report your
    Android version and whether they still changed the zone (expected from Android 16 on; Android 17
    on your phone).
-7. KA17 at its lowest volume, plugged in with the app on screen: Android asks once whether Odeion may
-   access it (allow). Play on the phone's zone: the Sound panel and Now playing › Details say
-   "Exclusive USB · FiiO KA17 · …"; the KA17's display shows the file's rate. Volume keys: the KA17's
-   own volume (its display) moves, one step per press; it never jumps up. Report the steps.
+7. KA17 at its lowest volume, plugged in with the app on screen: Android may first ask "Open Odeion
+   to handle FiiO KA17?" (Cancel is fine; after OK there Android gives Odeion the KA17 without asking
+   again, also fine); once that is gone, it asks once whether Odeion may access it (allow). Never two
+   dialogs on top of each other: report it if they are. Play on the phone's zone: the Sound panel and
+   Now playing › Details say "Exclusive USB · FiiO KA17 · …"; the KA17's display shows the file's
+   rate. Volume keys: the KA17's own volume (its display) moves, one step per press; it never jumps
+   up. Report the steps.
 8. Unplug the KA17 mid-song: the zone pauses, nothing from the speaker; Android's media volume is
    now at most a quarter. Plug it in again: with "always" ticked, no permission question; without,
    Android asks once again on this plug-in (only while the app is on screen). Either way it plays
@@ -480,7 +483,9 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
 7. A USB-C audio adapter or headset that is not the KA17 (a USB-C to 3.5 mm dongle, a USB headset),
    with Odeion not running, then with it on screen: plug it in and report the dialog Android shows
    (expected, because Odeion takes USB audio devices: "Open Odeion to handle …?"; Cancel is fine)
-   and whether ticking "always" makes Odeion open at every plug-in of it.
+   and whether ticking "always" makes Odeion open at every plug-in of it. With the app on screen,
+   after Cancel there, Android may then ask whether Odeion may access it: only after the first
+   dialog is gone, never on top of it (after OK there, no second question).
 8. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB", "bit-perfect" and
    "USB audio devices changed".
 ```
