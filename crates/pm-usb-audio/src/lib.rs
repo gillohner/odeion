@@ -9,8 +9,8 @@
 //!
 //! The exclusive driver (step 3) is here too: [`stream`] picks the playback setting for a format,
 //! [`requests`] builds the clock and volume requests, [`schedule`] sizes the isochronous packets
-//! from the DAC's feedback, [`volume`] keeps the hand-over never louder, [`quirks`] lists what some
-//! DACs need, and [`driver`] runs it all on a [`driver::Transport`]. Only [`usbfs`] (Linux and
+//! from the DAC's feedback, [`volume`] sets a low start level and keeps the give-back never louder,
+//! [`quirks`] lists what some DACs need, and [`driver`] runs it all on a [`driver::Transport`]. Only [`usbfs`] (Linux and
 //! Android) does I/O; everything else runs and is tested on any machine, against a fake DAC.
 //!
 //! Hostile input is expected: every length is checked, unknown descriptors are skipped, and a

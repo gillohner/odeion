@@ -179,7 +179,7 @@ impl Output for CpalOutput {
         }
     }
 
-    /// The phone's DAC settings (bit-perfect or shared, the DAC's volume), kept by the app.
+    /// What a UI sent for the phone's DAC: "Allow Exclusive USB" asks Android's permission again.
     async fn configure_device(&self, settings: pm_zones::DeviceSettings) -> Result<(), SinkError> {
         #[cfg(target_os = "android")]
         {
@@ -234,12 +234,11 @@ impl Output for CpalOutput {
         Ok(Box::new(sink))
     }
 
-    /// On Android, one volume (`media_volume`): in Exclusive USB with "Use the DAC's volume" on,
-    /// the DAC's own (its feature unit), the samples untouched; otherwise Android's media volume,
-    /// which the phone's volume keys move too (bit-perfect plays only at its full level: turning
-    /// it down plays shared). None in bit-perfect at full level by the listener's agreement (the
-    /// DAC or amplifier sets it). Elsewhere none of its own: the zone's software volume (DSP)
-    /// still works, and the signal path then says it changes the samples.
+    /// On Android, one volume (`media_volume`): in Exclusive USB the DAC's own (its feature unit),
+    /// the samples untouched; otherwise Android's media volume, which the phone's volume keys move
+    /// too (in bit-perfect mode Android hands it to the DAC's own volume). None on a DAC without a
+    /// volume of its own (the DAC or amplifier sets it). Elsewhere none of its own: the zone's
+    /// software volume (DSP) still works, and the signal path then says it changes the samples.
     async fn set_volume(&self, v: Volume) -> Result<(), SinkError> {
         #[cfg(target_os = "android")]
         {
@@ -290,7 +289,7 @@ pub struct CpalSink {
     /// DAC isn't Android's route any more, the sink stops (the zone pauses) instead of playing on
     /// from the phone's speaker.
     gate: crate::usb_dac::DacGate,
-    /// The phone's settings-or-DAC generation at open (a change closes it at the next song).
+    /// The phone's DAC generation at open (a change closes it at the next song).
     generation: u64,
 }
 
@@ -521,7 +520,8 @@ impl AudioSink for CpalSink {
         self.written
     }
 
-    /// A phone's DAC settings or its DAC changed since it opened: the next song opens afresh.
+    /// A phone's DAC changed (or Android's permission for it came) since it opened: the next song
+    /// opens afresh.
     fn reopen_at_track(&self) -> bool {
         crate::usb_dac::generation() != self.generation
     }

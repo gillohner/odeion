@@ -863,32 +863,25 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         Ok((Box::new(track), report))
     }
 
-    fn media_volume(&self) -> Option<u8> {
-        use jni021::objects::JClass;
-        let p = with_jvm(&self.vm, |env| {
+    fn set_media_volume_on(&self, dac_id: i32, percent: u8) -> bool {
+        use jni021::objects::{JClass, JValue};
+        with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "mediaVolume", "()I", &[])?.i()
+            env.call_static_method(
+                class,
+                "setMediaVolumeOn",
+                "(II)Z",
+                &[JValue::Int(dac_id), JValue::Int(i32::from(percent))],
+            )?
+            .z()
         })
-        .ok()?;
-        u8::try_from(p).ok().filter(|p| *p <= 100)
-    }
-
-    fn media_db_on_dac(&self) -> Option<f32> {
-        use jni021::objects::JClass;
-        let db = with_jvm(&self.vm, |env| {
-            let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "mediaVolumeDbOnUsb", "()F", &[])?
-                .f()
-        })
-        .ok()?;
-        // NaN: Android can't say for the DAC; -inf: silent (both: the hand-over mutes)
-        (!db.is_nan()).then_some(db)
+        .unwrap_or(false)
     }
 }
 
 /// Exclusive USB's app side (`UsbExclusive.kt`) for pm-out-local's `exclusive`: Android's
-/// permission for the DAC (asked only when the listener chose Exclusive USB), and the open device's
-/// file descriptor, on which the app's driver speaks usbfs.
+/// permission for the DAC (asked once per DAC by Auto, and by Settings' "Allow Exclusive USB"), and
+/// the open device's file descriptor, on which the app's driver speaks usbfs.
 struct JniUsbExclusive {
     vm: std::sync::Arc<jni021::JavaVM>,
     class: jni021::objects::GlobalRef,

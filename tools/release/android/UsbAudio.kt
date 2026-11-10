@@ -249,8 +249,8 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
                 if (um != null) usbFor(d, usb)?.let { o.put("usb", usbJson(um, it)) }
                 devices.put(o)
             }
-            // Android's media volume: bit-perfect plays at full level, so the Rust side ends Auto's
-            // bit-perfect the moment it is turned down (reported again at every change)
+            // Android's media volume (reported again at every change): on a DAC Android plays
+            // bit-perfect it is the DAC's own volume, kept by the Rust side as that DAC's level
             val o = JSONObject()
                 .put("v", 1)
                 .put("sdk", Build.VERSION.SDK_INT)

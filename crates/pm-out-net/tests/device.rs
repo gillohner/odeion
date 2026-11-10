@@ -465,14 +465,13 @@ async fn what_the_phone_takes_now_reaches_the_zone_and_settings_reach_the_phone(
         assert!(held.live_caps().accepts(&fmt), "{fmt} goes to the DAC as it is");
         drop(held.open(fmt).await.expect("opens"));
     }
-    // Settings from the node reach the phone, and the node sees them at once; a sink open then
-    // opens afresh at the next song, so the change applies there
+    // Settings from the node ("Allow Exclusive USB") reach the phone, and the node sees them at
+    // once; a sink open then opens afresh at the next song, so a change applies there
     let sink = held.open(AudioFormat::pcm(96_000, 24, 2)).await.unwrap();
     assert!(!sink.reopen_at_track());
     let s = pm_zones::DeviceSettings {
-        mode: pm_zones::PreferredMode::Shared,
-        dac_volume: false,
-        full_level_ok: false,
+        mode: pm_zones::PreferredMode::Exclusive,
+        ..pm_zones::DeviceSettings::default()
     };
     held.configure_device(s).await.unwrap();
     assert_eq!(held.device().unwrap().settings, Some(s));

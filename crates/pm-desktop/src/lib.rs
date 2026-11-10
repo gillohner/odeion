@@ -943,7 +943,7 @@ pub fn run() {
             // A USB DAC plugged in or out: the player registers again, so the node and its page learn it
             #[cfg(target_os = "android")]
             {
-                // The DAC settings (bit-perfect or shared, the DAC's volume) live with the app
+                // The level each USB DAC last played at lives with the app, next to its settings
                 if let Ok(dir) = app.path().app_local_data_dir() {
                     let _ = std::fs::create_dir_all(&dir);
                     pm_out_local::usb_dac::keep_settings_in(dir.join("usb-dac.json"));

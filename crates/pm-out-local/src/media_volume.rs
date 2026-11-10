@@ -1,13 +1,17 @@
 //! The phone's media volume (Android's `STREAM_MUSIC`) as the volume of the phone's own zone: one
 //! volume for the app's slider, the phone's volume keys and Android's volume panel. Nothing is
-//! scaled in the samples: Android applies its media volume itself (in shared mode), and in
-//! bit-perfect mode Auto plays only at full media volume (`bit_perfect::volume_handover`), so
-//! turning it down switches to shared at once. In Exclusive USB with a feature unit the zone's
-//! volume is the DAC's own instead ([`phone_set`], [`phone_read`]).
+//! scaled in the samples. Which volume it is follows the path ([`phone_kind`]):
+//! * Exclusive USB on a DAC with a feature unit: the DAC's own unit, in dB (a remote session
+//!   volume); Android's media volume isn't in the path and isn't touched;
+//! * Android's bit-perfect path: Android's media volume (a local session), which Android hands to
+//!   the DAC's own hardware volume (no gain in the samples); shared: the same media volume, applied
+//!   by Android's mixer;
+//! * a DAC without a volume of its own: none (a fixed session volume; set it on the DAC or the
+//!   amplifier).
 //!
 //! The app's side (`MediaControl.kt`, over JNI) reads and sets the stream's index; this module
 //! maps it to the zone's percent and back, so it is tested on every host:
-//! * 100 % only at the top index (bit-perfect's "full level" is exactly that);
+//! * 100 % only at the top index;
 //! * a percent lands on the index nearest to it, never on the top one below 100 %;
 //! * a set to the percent already shown changes nothing (on a phone with more steps than 100,
 //!   several indexes share a percent: the one Android has stays);
@@ -115,7 +119,7 @@ pub fn set(v: Volume) -> Result<(), String> {
 }
 
 /// Which volume the phone's output has now, by its live caps: the DAC's feature unit (dB) in
-/// Exclusive USB, Android's media volume (percent), or none.
+/// Exclusive USB, Android's media volume (percent), or none (a DAC without a volume of its own).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhoneVolume {
     Dac,
@@ -134,8 +138,7 @@ pub fn phone_volume(hw: Option<VolumeKind>) -> PhoneVolume {
 /// Why the phone's output took no volume command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetError {
-    /// It has no volume now (bit-perfect below full level with the listener's agreement: the DAC
-    /// or amplifier sets it).
+    /// It has no volume now (a DAC without a volume of its own: the DAC or amplifier sets it).
     NoVolume,
     Failed(String),
 }
@@ -157,7 +160,8 @@ pub fn phone_set(hw: Option<VolumeKind>, v: Volume) -> Result<(), SetError> {
 }
 
 /// The phone output's volume now (its live caps): the DAC's unit (dB) in Exclusive USB, Android's
-/// media volume (percent), or none (bit-perfect at full level by the listener's agreement).
+/// media volume (percent) in Android's bit-perfect or shared path, or none (a DAC without a volume
+/// of its own).
 pub fn phone_kind() -> Option<VolumeKind> {
     let shared = pm_model::OutputCaps {
         pcm_rates: vec![44_100, 48_000],
@@ -305,7 +309,7 @@ mod tests {
         );
         phone_set(pct, Volume::Mute(true)).unwrap();
         assert!(phone_read(pct).unwrap().muted);
-        // No volume of its own now (bit-perfect at full level by agreement): nothing is set
+        // No volume of its own now (a DAC without one): nothing is set
         assert_eq!(phone_set(None, Volume::Percent(50)), Err(SetError::NoVolume));
         assert_eq!(phone_read(None), None);
         assert_eq!(fake.s.lock().unwrap().index, 3);
