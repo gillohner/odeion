@@ -649,13 +649,18 @@ impl NodeHomeserver {
         // A listing with a byte budget (a listener's homeserver) is read by the node itself, each
         // page's body capped before it is held or parsed: the SDK reads a page whole. A legacy
         // cookie session keeps the SDK's request (its credential is the SDK's own).
-        let capped = (bounds.max_bytes < usize::MAX
-            && (visibility == Visibility::Public || session.is_some_and(|s| s.as_grant().is_some())))
-        .then(|| {
-            bounds.max_bytes.min(
-                (LIST_LIMIT as usize).saturating_mul(bounds.max_entry_bytes.saturating_add(LIST_LINE_SLACK)),
+        let capped = if bounds.max_bytes < usize::MAX
+            && (visibility == Visibility::Public || session.is_some_and(|s| s.as_grant().is_some()))
+        {
+            let page = LIST_LIMIT as usize;
+            Some(
+                bounds
+                    .max_bytes
+                    .min(page.saturating_mul(bounds.max_entry_bytes.saturating_add(LIST_LINE_SLACK))),
             )
-        });
+        } else {
+            None
+        };
         list_within(bounds, dir, |cursor| async move {
             if let Some(max) = capped {
                 return within(OBJECT_TIMEOUT, async {
