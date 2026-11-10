@@ -133,6 +133,17 @@ class UsbExclusive private constructor() {
             if (ask(vendor, product)) p.edit().putBoolean(key, true).apply()
         }
 
+        /// Auto's ask again on a re-attach of a DAC whose permission was given before (a grant
+        /// without "always" ends at the unplug): Android's dialog, only while the app is on screen.
+        /// The Rust side asks once per attach. Whether Android was asked.
+        @JvmStatic
+        fun requestPermissionAgain(vendor: Int, product: Int): Boolean {
+            val me = android.app.ActivityManager.RunningAppProcessInfo()
+            android.app.ActivityManager.getMyMemoryState(me)
+            if (me.importance != android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) return false
+            return ask(vendor, product)
+        }
+
         /// Android's dialog for the DAC: when the listener chose Exclusive USB, or Auto's one ask.
         @JvmStatic
         fun requestPermission(vendor: Int, product: Int) {

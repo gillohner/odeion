@@ -324,8 +324,10 @@ phone's speaker.
    first play, an amplifier or speaker turned low (the app sets the KA17's own level itself: -40 dB
    the first time). Settings › This phone › Allow Exclusive USB
    (Android asks by itself once per DAC, the first time it is plugged in with the app on screen; the
-   button asks again). Android asks whether Odeion may access the FiiO KA17: allow it. Report whether
-   the dialog appeared, and its words.
+   button asks again). Android asks whether Odeion may access the FiiO KA17: tick "always open"
+   (or similar) if the dialog offers it, then allow. Report whether the dialog appeared, its words,
+   and whether it offered "always". With "always", Android may also open Odeion when the KA17 is
+   plugged in (report it).
 2. Play the 44.1/16, 96/24 and 192/24 files in turn. For each, report:
    - the KA17's display (expected: 44.1, 96, 192 on any Android version);
    - the Sound panel's "Playing on" line (expected: "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit",
@@ -337,7 +339,10 @@ phone's speaker.
 3. Volume: move the zone's volume in the app. The KA17's volume (its display) must follow, and the
    signal path must not show a volume stage. Report the steps you saw on the display.
 4. Unplug the KA17 mid-song: the zone pauses ("FiiO KA17 was unplugged: paused"), nothing from the
-   speaker. Plug it in again and press Play.
+   speaker. Plug it in again (app on screen) and press Play: Exclusive USB again, at the same level
+   or lower, never higher. If "always" wasn't ticked, Android asks again once on this plug-in
+   (allow it); a "no" holds until the next plug-in, and it plays bit-perfect through Android
+   meanwhile. Report whether it asked.
 5. Close the app (swipe it away) while paused: within a few seconds Android plays notification sounds
    from the DAC again, and the KA17's volume is where it was before step 1 or lower (never higher).
    Report if it needs a replug.
@@ -407,7 +412,9 @@ What it does:
    "Exclusive USB · FiiO KA17 · …"; the KA17's display shows the file's rate. Volume keys: the KA17's
    own volume (its display) moves, one step per press; it never jumps up. Report the steps.
 8. Unplug the KA17 mid-song: the zone pauses, nothing from the speaker; Android's media volume is
-   now at most a quarter. Plug it in again: no second permission question.
+   now at most a quarter. Plug it in again: with "always" ticked, no permission question; without,
+   Android asks once again on this plug-in (only while the app is on screen). Either way it plays
+   Exclusive USB again once allowed.
 9. A phone call (or an alarm) while the phone's zone plays: it pauses and plays on after the call.
 10. On problems: `adb logcat -s pubky-music`, lines with "media controls", "audio focus" and
     "Exclusive USB".
@@ -441,8 +448,9 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
    own level is set by the app in Exclusive USB (the last level or -40 dB, never louder than the
    KA17 was) and by Android in step 5, so its knob is no limit: the protection is no headphones and
    a low amplifier.
-2. Plug in the KA17 with the app on screen; when Android asks whether Odeion may access it, Allow
-   (if it doesn't ask, because it was denied earlier: Settings › This phone › Allow Exclusive USB).
+2. Plug in the KA17 with the app on screen; when Android asks whether Odeion may access it, tick
+   "always" if offered and Allow (if it doesn't ask, because it was denied earlier: Settings › This
+   phone › Allow Exclusive USB).
    Play a 44.1/16 file, then a 96/24 file, on This phone. Expected: the KA17's display shows 44.1,
    then 96; Now playing › Details › Output says "Exclusive USB · FiiO KA17 · 44.1 kHz / 16 bit",
    then "… 96 kHz / 24 bit"; the first sound is quiet (the KA17 at the last level or -40 dB, never
@@ -451,7 +459,9 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
    volume panel: each moves the KA17's own volume (its display). Android's media volume stays where
    it was (check it in Android's sound settings afterwards). Report the steps you saw.
 4. Unplug the KA17 mid-song: the zone pauses ("FiiO KA17 was unplugged: paused") and nothing plays
-   from the phone's speaker. Plug it back: the same level as before on its display.
+   from the phone's speaker. Plug it back (app on screen): Exclusive USB again, at the same level or
+   lower, never higher, on its display. If Android asks again (no "always" ticked in step 2), allow
+   it; it asks once per plug-in, never in the background.
 5. Deny the permission (or clear it in Android's app settings) and replug: Details › Output says
    "Bit-perfect · FiiO KA17 · …" (Android 14+), the KA17 shows the file's rate, and the volume keys
    move the volume. If the KA17's display level doesn't change with the keys, note it: that phone's

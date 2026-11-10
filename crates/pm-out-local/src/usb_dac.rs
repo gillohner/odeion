@@ -772,6 +772,10 @@ pub struct DacLevel {
     /// passes it to the DAC's own volume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<u8>,
+    /// Android's permission for Exclusive USB was given for these USB ids before: Auto asks again
+    /// when a replug ended it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub granted: bool,
 }
 
 impl DacLevel {
@@ -782,6 +786,7 @@ impl DacLevel {
                 .exclusive_db
                 .filter(|d| d.is_finite() && (-200.0..=50.0).contains(d)),
             media: self.media.filter(|p| *p <= 100),
+            granted: self.granted,
         }
     }
 }
@@ -839,6 +844,11 @@ fn save_level(u: UsbIds, f: impl FnOnce(&mut DacLevel)) {
 /// Keep `db` as the level Exclusive USB last played this DAC at.
 pub fn save_exclusive_db(u: UsbIds, db: f32) {
     save_level(u, |l| l.exclusive_db = Some(db));
+}
+
+/// Keep that Android's permission for Exclusive USB was given for these USB ids.
+pub fn save_granted(u: UsbIds) {
+    save_level(u, |l| l.granted = true);
 }
 
 /// Keep `percent` as Android's media volume Android's bit-perfect path last played this DAC at.
@@ -1415,7 +1425,8 @@ mod tests {
             saved_level(ka17),
             DacLevel {
                 exclusive_db: Some(-23.5),
-                media: Some(35)
+                media: Some(35),
+                granted: false,
             }
         );
         assert_eq!(media_start_level(Some(ka17)), 35);

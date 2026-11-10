@@ -63,6 +63,12 @@ pub trait UsbBackend: Send + Sync {
     fn ask_once(&self, usb: UsbIds) {
         let _ = usb;
     }
+    /// Auto's ask again on a re-attach of a DAC whose permission was given before ([`auto_ask`]):
+    /// Android's dialog, only while the app is on screen. Whether Android was asked.
+    fn ask_again(&self, usb: UsbIds) -> bool {
+        let _ = usb;
+        false
+    }
     /// Open the DAC with its audio interfaces taken from Android's driver.
     fn open(&self, usb: UsbIds) -> Result<Opened, OpenRefused>;
     /// Close the connection (the driver gave the interfaces back first).
@@ -478,10 +484,23 @@ pub fn offer(dac: &Dac) -> Result<(), String> {
     Ok(())
 }
 
+/// The attach (Android's id for the DAC) Auto asked Android's permission again on.
+static ASKED_AGAIN: Mutex<Option<i32>> = Mutex::new(None);
+
+/// Whether Auto asks Android's permission again for the DAC attached as `attach` (Android's id
+/// for it, new at every plug-in): only when it was given before for these USB ids
+/// (`granted_before`: Android ended it at an unplug), and not already on this attach (`asked_on`:
+/// a "no" there stands until the next plug-in). Never in a loop: once per attach.
+pub fn ask_again(attach: i32, granted_before: bool, asked_on: Option<i32>) -> bool {
+    granted_before && asked_on != Some(attach)
+}
+
 /// Auto's first path is Exclusive USB, which needs Android's permission for the DAC: asked once
 /// per DAC by Auto itself, without the listener picking anything (the app's side asks only while
 /// it is on screen, and remembers it asked: someone who said no isn't asked again; Settings'
-/// "Allow Exclusive USB" asks again). Called when a DAC appears and when the app comes back.
+/// "Allow Exclusive USB" asks again). A DAC whose permission was given before is asked again on
+/// a re-attach, once per attach ([`ask_again`]): a grant that doesn't last (no "always" ticked)
+/// ends at the unplug. Called when a DAC appears and when the app comes back.
 pub fn auto_ask() {
     let (Some(b), Some(dac)) = (backend(), usb_dac::current_dac()) else {
         return;
@@ -489,10 +508,19 @@ pub fn auto_ask() {
     if offer(&dac).is_err() || holding() {
         return;
     }
-    if let Some(usb) = ids(&dac) {
-        if !b.has_permission(usb) {
-            b.ask_once(usb);
+    let Some(usb) = ids(&dac) else { return };
+    if b.has_permission(usb) {
+        usb_dac::save_granted(usb);
+        return;
+    }
+    let asked_on = *ASKED_AGAIN.lock().unwrap_or_else(|e| e.into_inner());
+    if ask_again(dac.id, usb_dac::saved_level(usb).granted, asked_on) {
+        // Counted only once Android was really asked (on screen): else at the next return to it
+        if b.ask_again(usb) {
+            *ASKED_AGAIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(dac.id);
         }
+    } else {
+        b.ask_once(usb);
     }
 }
 
@@ -929,6 +957,7 @@ fn acquire(dac: &Dac) -> Result<(), ExclusiveError> {
     if !b.has_permission(usb) {
         return Err(ExclusiveError::Refused(NO_PERMISSION.into()));
     }
+    usb_dac::save_granted(usb);
     let (t, raw) = match b.open(usb) {
         Ok(o) => o,
         Err(OpenRefused { why, partial }) => {
@@ -1037,6 +1066,16 @@ fn acquire(dac: &Dac) -> Result<(), ExclusiveError> {
     forget_detached(&*b);
     let identity = b.held_identity();
     let (listener_muted, listener_db) = remembered_listener(identity.as_ref());
+    // Never louder than the DAC was: a level remembered from an earlier take is bounded by the
+    // shown unit's level before this one (its minimum when it was muted), when known
+    let listener_db = match (listener_db, units.first()) {
+        (Some(db), Some(u)) => Some(match u.before {
+            Some(b) if b.mute => db.min(vol::cur_to_db(u.unit.range.min())),
+            Some(b) => db.min(vol::cur_to_db(b.cur)),
+            None => db,
+        }),
+        (db, _) => db,
+    };
     with_held(|h| {
         *h = Some(Held {
             dac_id: dac.id,
@@ -1696,6 +1735,9 @@ pub(crate) mod tests {
         pub asked: Mutex<u32>,
         /// Auto's own asks ([`auto_ask`])
         pub asked_once: Mutex<u32>,
+        /// Auto's asks again on a re-attach, and whether the app is on screen for them
+        pub asked_again: Mutex<u32>,
+        pub on_screen: Mutex<bool>,
         pub released: Mutex<u32>,
         pub opened: Mutex<u32>,
         /// Every media volume Android's bit-perfect path set (none in Exclusive USB)
@@ -1762,6 +1804,8 @@ pub(crate) mod tests {
                 permission: Mutex::new(permission),
                 asked: Mutex::new(0),
                 asked_once: Mutex::new(0),
+                asked_again: Mutex::new(0),
+                on_screen: Mutex::new(true),
                 released: Mutex::new(0),
                 opened: Mutex::new(0),
                 media_sets: Arc::default(),
@@ -1789,6 +1833,13 @@ pub(crate) mod tests {
         }
         fn ask_once(&self, _usb: UsbIds) {
             *self.asked_once.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        }
+        fn ask_again(&self, _usb: UsbIds) -> bool {
+            if !*self.on_screen.lock().unwrap_or_else(|e| e.into_inner()) {
+                return false;
+            }
+            *self.asked_again.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            true
         }
         fn open(&self, _usb: UsbIds) -> Result<Opened, OpenRefused> {
             *self.opened.lock().unwrap_or_else(|e| e.into_inner()) += 1;
@@ -1968,6 +2019,7 @@ pub(crate) mod tests {
             "fun hasPermission(vendor: Int, product: Int): Boolean",
             "fun requestPermission(vendor: Int, product: Int)",
             "fun requestPermissionOnce(vendor: Int, product: Int)",
+            "fun requestPermissionAgain(vendor: Int, product: Int): Boolean",
             "fun open(vendor: Int, product: Int): String",
             "fun openDetached(name: String): String",
             "fun release()",
@@ -1979,7 +2031,7 @@ pub(crate) mod tests {
         ] {
             assert!(kt.contains(f), "{f}");
         }
-        assert_eq!(kt.matches("@JvmStatic").count(), 11);
+        assert_eq!(kt.matches("@JvmStatic").count(), 12);
         // openDetached selects nothing itself: a lookup by the name the Rust side chose
         let od = kt
             .split("fun openDetached(name: String): String {")
@@ -2059,6 +2111,7 @@ pub(crate) mod tests {
             usb_dac::set_dac(None);
             usb_dac::forget_levels();
             forget_auto_failed();
+            *ASKED_AGAIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
     }
 
@@ -2080,6 +2133,7 @@ pub(crate) mod tests {
         LISTENERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         usb_dac::forget_levels();
         forget_auto_failed();
+        *ASKED_AGAIN.lock().unwrap_or_else(|e| e.into_inner()) = None;
         usb_dac::set_dac(None);
         let app = FakeApp::new(permission);
         set_backend(app.clone());
@@ -2345,13 +2399,74 @@ pub(crate) mod tests {
         drop(open_ok(fmt));
         allow(PreferredMode::Exclusive);
         assert_eq!(*app.asked.lock().unwrap(), 1, "held: not asked");
-        // Withdrawn in Android's settings and the DAC given back: Auto asks (the app's side keeps
-        // it to once per DAC)
+        // Withdrawn in Android's settings and the DAC given back: granted before, so Auto asks
+        // again (once on this attach)
         *app.permission.lock().unwrap() = false;
         release();
         assert!(!holding());
         auto_ask();
-        assert_eq!(*app.asked_once.lock().unwrap(), 2);
+        auto_ask();
+        assert_eq!(*app.asked_again.lock().unwrap(), 1);
+    }
+
+    /// A DAC whose permission was given before (kept by its USB ids) is asked again when it is
+    /// plugged in again and the grant is gone (Android ends one without "always" at the unplug):
+    /// once per attach, only while the app is on screen (else when it comes back to it), never
+    /// in a loop; a "no" stands until the next plug-in. One never granted: Auto's one ask only.
+    #[test]
+    fn a_dac_granted_before_is_asked_again_once_per_attach() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // The decision
+        assert!(!ask_again(41, false, None), "never granted: no ask again");
+        assert!(ask_again(41, true, None));
+        assert!(
+            !ask_again(41, true, Some(41)),
+            "asked on this attach: a no stands"
+        );
+        assert!(ask_again(42, true, Some(41)), "a new attach");
+        // On the phone
+        let (_p, app) = phone(true);
+        let ka17 = UsbIds {
+            vendor_id: 0x2972,
+            product_id: 0x0093,
+        };
+        assert!(
+            usb_dac::saved_level(ka17).granted,
+            "seen granted when it appeared"
+        );
+        let attach = |id: u32| {
+            usb_dac::set_dac(None);
+            usb_dac::apply_report(&ka17_report(33, "").replace("\"id\":41", &format!("\"id\":{id}")));
+        };
+        // Replugged, the grant gone: asked again, once
+        *app.permission.lock().unwrap() = false;
+        attach(42);
+        assert_eq!(*app.asked_again.lock().unwrap(), 1);
+        auto_ask();
+        auto_ask();
+        assert_eq!(
+            *app.asked_again.lock().unwrap(),
+            1,
+            "once per attach (a no stands)"
+        );
+        // Plugged in again with the app in the background: not asked; back on screen: asked
+        *app.on_screen.lock().unwrap() = false;
+        attach(43);
+        assert_eq!(*app.asked_again.lock().unwrap(), 1, "never in the background");
+        *app.on_screen.lock().unwrap() = true;
+        auto_ask();
+        assert_eq!(*app.asked_again.lock().unwrap(), 2, "when the app comes back");
+        // Allowed (with "always" or not): Exclusive USB first again
+        *app.permission.lock().unwrap() = true;
+        drop(open_ok(AudioFormat::pcm(48_000, 16, 2)));
+        drop(_p);
+
+        // Never granted: only Auto's one ask
+        let (_p, app) = phone(false);
+        let once = *app.asked_once.lock().unwrap();
+        attach(44);
+        assert_eq!(*app.asked_again.lock().unwrap(), 0);
+        assert_eq!(*app.asked_once.lock().unwrap(), once + 1);
     }
 
     /// The order is Exclusive USB, then bit-perfect, then shared: an Exclusive USB that won't open
@@ -3699,5 +3814,27 @@ pub(crate) mod tests {
             assert!(matches!(open_phone(id(), fmt), PhoneOpen::Shared { .. }));
             assert_eq!(*app.opened.lock().unwrap(), 1, "uac1 {uac1}: taken once");
         }
+    }
+
+    /// A level remembered from an earlier take of this DAC (the listener's -10 dB) is never louder
+    /// than the DAC was before this take: turned down to -50 dB meanwhile (Android's path, its own
+    /// buttons), it starts at -50 dB.
+    #[test]
+    fn a_remembered_level_is_never_louder_than_the_dac_was() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_p, app) = phone(true);
+        let fmt = AudioFormat::pcm(48_000, 16, 2);
+        drop(open_ok(fmt));
+        set_volume(Volume::Db(-10.0)).unwrap();
+        release();
+        assert!(!holding());
+        assert_eq!(
+            remembered_listener(app.identity.lock().unwrap().as_ref()).1,
+            Some(-10.0)
+        );
+        app.dac.state().volume = Some(-50 * 256);
+        usb_dac::apply_report(&ka17_report(33, ""));
+        drop(open_ok(fmt));
+        assert_eq!(volume_of(&app), (Some(-50 * 256), Some(false)));
     }
 }

@@ -957,6 +957,21 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         }
     }
 
+    /// Auto's ask again on a re-attach (`UsbExclusive.requestPermissionAgain`: on screen only):
+    /// whether Android was asked.
+    fn ask_again(&self, usb: pm_out_local::exclusive::UsbIds) -> bool {
+        use jni021::objects::JClass;
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "requestPermissionAgain", "(II)Z", &Self::ids(usb))?
+                .z()
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!("Exclusive USB: cannot ask Android's permission again: {e}");
+            false
+        })
+    }
+
     fn open(
         &self,
         usb: pm_out_local::exclusive::UsbIds,

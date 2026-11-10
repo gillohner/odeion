@@ -6,7 +6,8 @@
 - the launcher label and the activity title are Odeion;
 - the application id (`to.synonym.pubkymusic`) and the Kotlin package stay, so an installed app
   updates in place, keeping its sign-ins and downloads;
-- the player notification says Odeion; the Application class keeps its name.
+- the player notification says Odeion; the Application class keeps its name;
+- MainActivity takes USB_DEVICE_ATTACHED for audio-class devices (a USB DAC's permission lasts).
 
 No Android SDK needed; a real build is release.yml's android job.
 
@@ -43,14 +44,25 @@ try:
     (app / "build.gradle.kts").write_text(
         'android {\n    defaultConfig {\n        applicationId = "to.synonym.pubkymusic"\n'
         '        manifestPlaceholders["usesCleartextTraffic"] = "false"\n    }\n}\n'
+        'dependencies {\n    implementation("androidx.webkit:webkit:1.12.1")\n}\n'
     )
     (app / "src" / "main" / "AndroidManifest.xml").write_text(
         '<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n'
         '    <uses-permission android:name="android.permission.INTERNET" />\n'
         '    <application\n        android:label="@string/app_name"\n'
         '        android:usesCleartextTraffic="${usesCleartextTraffic}">\n'
-        '        <activity android:name=".MainActivity" android:label="@string/main_activity_title" />\n'
+        '        <activity\n            android:launchMode="singleTask"\n'
+        '            android:label="@string/main_activity_title"\n'
+        '            android:name=".MainActivity"\n            android:exported="true">\n'
+        "            <intent-filter>\n"
+        '                <action android:name="android.intent.action.MAIN" />\n'
+        '                <category android:name="android.intent.category.LAUNCHER" />\n'
+        "            </intent-filter>\n        </activity>\n"
         "    </application>\n</manifest>\n"
+    )
+    (values / "themes.xml").write_text(
+        '<resources>\n    <style name="Theme.pubky_music" parent="Theme.MaterialComponents.DayNight.NoActionBar">\n'
+        "    </style>\n</resources>\n"
     )
     (java / "MainActivity.kt").write_text(
         "package to.synonym.pubkymusic\n\nclass MainActivity : TauriActivity() {\n"
@@ -74,10 +86,22 @@ try:
     check('.setContentTitle("Odeion")' in service, "the player notification says Odeion")
     crash = (java / "CrashReport.kt").read_text()
     check('"Odeion crash report"' in crash, "the crash report says Odeion")
-    check('android:name=".PubkyMusicApp"' in (app / "src" / "main" / "AndroidManifest.xml").read_text(),
-          "the Application class keeps its name")
+    manifest = (app / "src" / "main" / "AndroidManifest.xml").read_text()
+    check('android:name=".PubkyMusicApp"' in manifest, "the Application class keeps its name")
+    activity = manifest[manifest.index('android:name=".MainActivity"'):]
+    activity = activity[: activity.index("</activity>")]
+    usb = "android.hardware.usb.action.USB_DEVICE_ATTACHED"
+    check(f'<action android:name="{usb}" />' in activity
+          and 'android:resource="@xml/usb_audio_devices"' in activity
+          and "android.intent.category.LAUNCHER" in activity,
+          "MainActivity takes USB_DEVICE_ATTACHED (with its device filter), and stays the launcher")
+    devices = app / "src" / "main" / "res" / "xml" / "usb_audio_devices.xml"
+    check(devices.exists() and '<usb-device class="1" />' in devices.read_text(),
+          "the device filter is audio class (1)")
+    check(manifest.count(usb) == 2, "the filter and its meta-data, once")
     again = subprocess.run([sys.executable, "-I", str(HERE / "android-patch.py"), str(root)], capture_output=True, text=True)
     check(again.returncode == 0 and "already patched" in again.stdout, "a second run changes nothing")
+    check((app / "src" / "main" / "AndroidManifest.xml").read_text() == manifest, "the manifest unchanged by it")
 finally:
     shutil.rmtree(base, ignore_errors=True)
 
