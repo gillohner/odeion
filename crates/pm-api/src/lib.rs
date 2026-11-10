@@ -24768,7 +24768,7 @@ exec sleep 300
                 "GET",
                 "/v1/sources/spotify/login",
                 "/spotify/callback",
-                "Use your own app",
+                "Use your own app with its secret in node.toml",
             ),
             (
                 "POST",
@@ -24780,7 +24780,7 @@ exec sleep 300
                 "POST",
                 "/v1/library/drives/onedrive/login",
                 "/drives/onedrive/callback",
-                "Use your own app",
+                "Use a return page of your own",
             ),
         ];
         let notes = |v: &serde_json::Value| -> Vec<String> {

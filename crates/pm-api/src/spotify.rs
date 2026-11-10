@@ -861,7 +861,7 @@ pub(crate) async fn login(
         crate::project_apps::check_return_page(
             &s,
             &callback_uri(&s, &headers),
-            "Use your own app with its secret.",
+            "Use your own app with its secret in node.toml ([spotify] client_secret).",
         )?;
     }
     use sha2::Digest;

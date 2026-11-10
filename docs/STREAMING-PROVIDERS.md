@@ -40,7 +40,8 @@ verifier, which never leaves it. This works for a node on a LAN with no port for
 local address: `localhost` and `*.localhost`, `.local` and `.home.arpa` names, and loopback, private, link-local and
 `100.64.0.0/10` IP addresses. A node on any other address can't sign in through it: the sign-in answers 412 and
 Settings › This node › Service apps says so. Such a node uses TIDAL's code sign-in, or an app of its own with its
-secret (OneDrive and Spotify have no code sign-in). A node's own `[auth] return_page` is not checked. An app with its
+secret (Spotify's secret goes in node.toml). A OneDrive app has no secret, so OneDrive there needs a return page of the
+node's own. A node's own `[auth] return_page` is not checked. An app with its
 secret in the node config keeps the direct redirect. CI runs `tools/secret-scan.py` over the repository and the built binary.
 
 **Modes.** A service can have an Official mode (its public API) and an Unofficial mode (its private API, may break, off
