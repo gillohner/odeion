@@ -993,11 +993,43 @@ mod tests {
 
     #[test]
     fn the_bridge_script_offers_exactly_the_two_methods() {
-        assert!(BRIDGE_JS.contains("controlling:function(z)"));
-        assert!(BRIDGE_JS.contains("setMediaVolume:function(p)"));
-        assert!(BRIDGE_JS.contains("Object.freeze"));
+        // The whole frozen object, so a third method or a changed message fails here:
+        // `controlling(zoneId)`, and `setMediaVolume(value, kind?)`, which without a kind posts the
+        // WebView player's `{t:'volume',percent}` as before, and with one (the native player's
+        // slider: 'percent', 'db' or 'mute') `native:true` and that kind's field, a boolean for
+        // 'mute' and a number otherwise.
+        const OBJECT: &str = "window.OdeionAndroid=Object.freeze({\
+            controlling:function(z){post({t:'controlling',zone:String(z==null?'':z)});},\
+            setMediaVolume:function(p,k){var m={t:'volume'};\
+            if(k){m.native=true;m[k]=k==='mute'?!!p:Number(p);}else m.percent=Number(p);post(m);}});";
+        assert!(BRIDGE_JS.contains(OBJECT));
+        assert_eq!(BRIDGE_JS.matches("Object.freeze(").count(), 1);
+        assert_eq!(BRIDGE_JS.matches("window.OdeionAndroid=").count(), 1);
         assert!(!BRIDGE_JS.contains("addJavascriptInterface"));
         assert!(!BRIDGE_JS.contains("eval("));
+        // What those calls post (JSON.stringify of the objects above) is what the app's side reads
+        // `setMediaVolume(35)`
+        assert_eq!(
+            parse_page(r#"{"t":"volume","percent":35}"#),
+            Some(PageMsg::SetMediaVolume(35))
+        );
+        // `setMediaVolume(35, 'percent')`, `(-24, 'db')`, `(1, 'mute')`, `(0, 'mute')`
+        assert_eq!(
+            parse_page(r#"{"t":"volume","native":true,"percent":35}"#),
+            Some(PageMsg::SetPhoneVolume(pm_model::Volume::Percent(35)))
+        );
+        assert_eq!(
+            parse_page(r#"{"t":"volume","native":true,"db":-24}"#),
+            Some(PageMsg::SetPhoneVolume(pm_model::Volume::Db(-24.0)))
+        );
+        assert_eq!(
+            parse_page(r#"{"t":"volume","native":true,"mute":true}"#),
+            Some(PageMsg::SetPhoneVolume(pm_model::Volume::Mute(true)))
+        );
+        assert_eq!(
+            parse_page(r#"{"t":"volume","native":true,"mute":false}"#),
+            Some(PageMsg::SetPhoneVolume(pm_model::Volume::Mute(false)))
+        );
     }
 
     #[test]
