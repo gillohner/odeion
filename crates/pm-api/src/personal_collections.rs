@@ -50,6 +50,10 @@ const CALLS_PER_REQUEST: usize = 32;
 /// own work (reading and saving a large copy) doesn't count: on slow hardware it could otherwise
 /// use the whole allowance before the first write, and every request would leave it waiting.
 const REQUEST_TIME: Duration = Duration::from_secs(8);
+/// The time one request may take in all, its own work included: how long it can hold their
+/// person operation lock. Generous next to [`REQUEST_TIME`], so a large copy on slow hardware
+/// still gets its writes done, but a request can't work through every collection for minutes.
+const REQUEST_WORK_TIME: Duration = Duration::from_secs(60);
 
 struct Work<'a> {
     state: &'a NodeState,
@@ -60,6 +64,8 @@ struct Work<'a> {
     reads: usize,
     /// Time spent waiting on their homeserver so far in this request.
     waited: Duration,
+    /// When the request's work began ([`REQUEST_WORK_TIME`]).
+    begun: tokio::time::Instant,
 }
 
 impl<'a> Work<'a> {
@@ -71,11 +77,12 @@ impl<'a> Work<'a> {
             left: CALLS_PER_REQUEST,
             reads: READS_PER_REQUEST,
             waited: Duration::ZERO,
+            begun: tokio::time::Instant::now(),
         }
     }
 
     fn available(&self) -> bool {
-        self.left > 0 && self.waited < REQUEST_TIME
+        self.left > 0 && self.waited < REQUEST_TIME && self.begun.elapsed() < REQUEST_WORK_TIME
     }
 
     /// Access failures escape the operation; backend failures retain their offline/retry
@@ -91,16 +98,16 @@ impl<'a> Work<'a> {
             )));
         }
         self.left -= 1;
-        let begun = tokio::time::Instant::now();
+        let asked = tokio::time::Instant::now();
         let result = tokio::time::timeout(REQUEST_TIME.saturating_sub(self.waited), f)
             .await
             .unwrap_or_else(|_| {
                 self.left = 0;
                 Err(PersonalError::Unreachable(
-                    "collection request deadline reached".into(),
+                    "the collection request's time for their homeserver is used up".into(),
                 ))
             });
-        self.waited += begun.elapsed();
+        self.waited += asked.elapsed();
         // A completed call cannot be undone. Reject its stale result before any further
         // remote call, error handling that writes a grant flag, or local checkpoint.
         personal::require_access(self.state, self.key, self.started)?;
@@ -1325,7 +1332,8 @@ async fn change(
     save(s, key, &sh, work.started).await?;
     let remote = remotes.remove(&k.id).unwrap_or_default();
     // An existing collection waits if it couldn't be listed/read first. A new collection has
-    // no unseen head to overwrite. All remaining work uses the SAME deadline/call allowance.
+    // no unseen head to overwrite. All remaining work uses the SAME waiting, time and call
+    // allowances.
     if !recovering && (!caught.stale || id.is_none()) {
         match push(b.as_ref(), key, &mut sh, &k.id, &remote, held, &mut work).await? {
             Pushed::Done | Pushed::Held => {}

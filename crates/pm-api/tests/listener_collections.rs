@@ -3221,8 +3221,9 @@ async fn a_held_replay_deadline_releases_cleanup_without_waiting_for_its_backlog
         call(&app, &ann, "GET", "/v1/me", None).await.0,
         StatusCode::UNAUTHORIZED
     );
-    // Keep the gate closed. The shared eight-second deadline, not the homeserver/test,
-    // releases the operation lock and allows removal's cleanup to finish.
+    // Keep the gate closed. The request's eight seconds for waiting on the homeserver (its
+    // overall time limit is longer), not the homeserver/test, releases the operation lock and
+    // allows removal's cleanup to finish.
     let (st, v) = tokio::time::timeout(std::time::Duration::from_secs(12), removal)
         .await
         .expect("cleanup must not await the entire pending backlog")
