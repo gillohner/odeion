@@ -11,6 +11,11 @@
 //     `OdeionAndroid.setMediaVolume(percent)` without touching `audio.volume`;
 //   * a network zone's slider stays the zone's own (POST /zones/{id}/volume), untouched by it;
 //   * a USB DAC on the phone's output: "this phone" plays through the phone's own zone, once;
+//   * that zone's volume follows the DAC's path: in Exclusive USB the DAC's own (a dB slider that
+//     sets the zone, never Android's media volume); on a DAC without a volume of its own none (no
+//     slider); Settings › This phone says who sets the level ("Volume: the DAC’s own" / "Volume:
+//     set it on the DAC") and has nothing to choose and no question, also for an earlier app's
+//     settings (its mode, its agreement to full level);
 //   * the web UI (no app): the page's player keeps its own dB slider (no regression).
 // At 1280 px. Screenshots go to the shots folder.
 //   node tools/ui-android-media.js [repo] [shots]
@@ -36,7 +41,10 @@ const appOutput = (ids) => `(function(o){if(!window.pmDesktop)return;window.pmDe
 
 async function open(browser, inApp) {
   const run = await fx.create(browser, 1280, { zone: 'browser', fixtures: { '/zones': { body: [phoneZone, linn] }, '/outputs': { body: outputs(null) } } });
-  await run.context.routeWebSocket(/\/v1\/events/, (ws) => { ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [phoneZone, linn] })); });
+  // The node's event stream: kept, so a test can send what the node sends (numbered per socket)
+  run.sockets = [];
+  await run.context.routeWebSocket(/\/v1\/events/, (ws) => { const sock = { ws, seq: 0 }; run.sockets.push(sock); ws.onMessage((m) => { let j; try { j = JSON.parse(m); } catch { return; } if (j.type === 'ping') ws.send(JSON.stringify({ type: 'pong', id: j.id })); }); ws.send(JSON.stringify({ type: 'snapshot', seq: 0, boot: 'fixture-boot', library_rev: 0, zones: [phoneZone, linn] })); });
+  run.nodeEvent = (ev) => { for (const s of run.sockets) { try { s.seq += 1; s.ws.send(JSON.stringify({ ...ev, seq: s.seq })); } catch { /* closed */ } } };
   await run.context.route('**/v1/zones/*/volume', (route) => { run.state.hits.push({ v: new URL(route.request().url()).pathname, m: 'POST', body: route.request().postData() }); return route.fulfill({ status: 204, body: '' }); });
   await run.context.addInitScript((app) => {
     if (!app) return;
@@ -103,6 +111,49 @@ const pick = async (page, id) => { await page.click('#zonebtn'); await sleep(300
     await page.evaluate(appOutput([OUT])); await sleep(600);
     check(await page.evaluate(() => localStorage.getItem('pm.zone')) === 'browser', 'chosen again by hand, This phone stays (once per DAC)');
     await page.screenshot({ path: path.join(SHOTS, 'dac-phone-zone.png') });
+    // The phone's own zone on the DAC, one volume per path (pm-out-local's phone_kind). Exclusive
+    // USB: the DAC's own volume, in dB; the slider sets the zone (the node sets the DAC's unit),
+    // never Android's media volume. Settings › This phone: read-only, nothing to choose, no question
+    let asked = 0; const onDialog = (d) => { asked++; d.dismiss(); };
+    page.on('dialog', onDialog);
+    const unit = { kind: 'db', min: -127, max: 0, step: 0.5 };
+    const dacOuts = (device, hw) => [{ ...outputs(device)[0], caps: { ...caps, hw_volume: hw } }, outputs(null)[1]];
+    const toPhone = async (device, hw, volume) => {
+      run.state.fixtures['/outputs'] = { body: dacOuts(device, hw) };
+      run.nodeEvent({ type: 'zone', state: { ...phoneZone, volume } });
+      run.nodeEvent({ type: 'outputs_changed', output: OUT }); await sleep(700);
+    };
+    const thisPhone = async () => { await fx.go(page, '/settings/dac'); await page.evaluate(appOutput([OUT])); await page.waitForSelector('#set-dac'); await sleep(400); return page.evaluate(() => document.querySelector('#set-dac').innerText); };
+    const choices = () => page.evaluate(() => ({ mode: !!document.querySelector('#dvmode'), vol: !!document.querySelector('#dvvol'), selects: document.querySelectorAll('#set-dac select').length }));
+    await toPhone({ ...KA17, own_volume: true, usb_permission: true, confirmed: true, settings: { mode: 'exclusive', dac_volume: true } }, unit, { db: -40, muted: false });
+    await pick(page, 'pixel-8-net');
+    const ds = await slider(page);
+    check(ds && ds.min === -127 && ds.max === 0 && ds.value === -40, `Exclusive USB: the phone's zone slider is the DAC's own volume, in dB (${JSON.stringify(ds)})`);
+    const nb = (await calls(page)).length; const hb = state.hits.length;
+    await setSlider(page, -30); await sleep(300);
+    check(state.hits.slice(hb).some((h) => h.v === '/v1/zones/pixel-8-net/volume' && /"db":-30/.test(h.body || '')), 'moving it sets the zone (the node sets the DAC\'s unit)');
+    check(!(await calls(page)).slice(nb).some(([k]) => k === 'volume'), 'and never Android\'s media volume');
+    let t = await thisPhone();
+    check(/Volume: the DAC’s own/.test(t), `Settings › This phone: "Volume: the DAC’s own" (${(t.match(/Volume:[^\n]*/) || [''])[0]})`);
+    let ch = await choices();
+    check(!ch.mode && !ch.vol && ch.selects === 0, `nothing to choose: no Preferred mode, no DAC-volume switch (${JSON.stringify(ch)})`);
+    // A DAC without a volume of its own (and an earlier app's agreement to full level): bit-perfect,
+    // no slider for the phone's zone, the volume set on the DAC; no warning, no question
+    const NOVOL = 'This DAC has no volume of its own: set the volume on the DAC or amplifier.';
+    await toPhone({ ...KA17, own_volume: false, usb_permission: true, mode: 'bit_perfect', confirmed: true, note: NOVOL, media_volume: 40, settings: { mode: 'bit_perfect', dac_volume: true, full_level_ok: true } }, null, null);
+    await page.waitForFunction(() => /Volume: set it on the DAC/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
+    t = await page.evaluate(() => document.querySelector('#set-dac').innerText);
+    check(/Volume: set it on the DAC/.test(t) && t.includes(NOVOL), `no volume of its own: "Volume: set it on the DAC", said plainly (${(t.match(/Volume:[^\n]*/) || [''])[0]})`);
+    check(!/full level|does not apply/.test(t), 'no full-level warning, also for an earlier app\'s agreement');
+    ch = await choices();
+    check(!ch.mode && !ch.vol && ch.selects === 0, `still nothing to choose (${JSON.stringify(ch)})`);
+    await page.screenshot({ path: path.join(SHOTS, 'dac-no-volume-settings.png'), fullPage: true });
+    await fx.go(page, '/'); await page.evaluate(appOutput([OUT])); await sleep(500);
+    run.nodeEvent({ type: 'zone', state: { ...phoneZone, volume: null } }); await sleep(500);
+    const novol = await page.evaluate(() => ({ zone: localStorage.getItem('pm.zone'), novol: document.querySelector('.player').classList.contains('novol') }));
+    check(novol.zone === 'pixel-8-net' && novol.novol, `the phone's zone has no slider: its level is the DAC's (${JSON.stringify(novol)})`);
+    page.off('dialog', onDialog);
+    check(asked === 0, `no question asked (${asked} dialogs)`);
     await fx.cleanCopy(page).then(() => check(true, 'no "undefined", no overflow'), (e) => check(false, e.message));
     check(state.errors.length === 0, `no page errors (${state.errors.join('; ')})`);
     await run.context.close();

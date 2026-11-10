@@ -2687,16 +2687,11 @@
   };
   // "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit"
   const dacExLine = (n) => `Exclusive USB · ${n.d.name} · ${kHz(n.f.rate_hz)} kHz / ${n.f.bits} bit`;
-  // Bit-perfect (or Exclusive USB on a DAC without a volume of its own) at full level below
-  // Android's full volume (the listener agreed): said wherever it plays, for as long as it applies
-  const fullLevelText = (d, ex) => (ex
-    ? `Exclusive USB plays at full level: this DAC has no volume of its own, and Android’s volume (${d.media_volume}%) does not apply. Set the level on the amplifier.`
-    : `Bit-perfect plays at full level: Android’s volume (${d.media_volume}%) does not apply. Set the level on the DAC or amplifier.`);
-  const fullLevelNote = (z) => {
-    const n = deviceOf(z) && dacNow(z); const d = n && n.d;
-    return n && n.bp && d.settings && d.settings.full_level_ok && d.media_volume != null && d.media_volume < 100 && !(n.ex && d.hardware_volume)
-      ? fullLevelText(d, n.ex) : '';
-  };
+  // Who sets a USB DAC's level on its bit-perfect paths, as its descriptors tell (`own_volume`;
+  // nothing said while that is unknown): its own volume, which the slider, the volume keys and
+  // Android's panel move; or, without one, the DAC or amplifier itself (the slider is gone then).
+  // Nothing once it played shared: Android's mixer applies the volume there
+  const dacVolumeWords = (d) => (d.mode === 'shared' && d.format ? '' : d.own_volume === true ? 'Volume: the DAC’s own' : d.own_volume === false ? 'Volume: set it on the DAC' : '');
   // "FiiO KA17 · bit-perfect" or "· shared", for the picker and the pill
   const dacWordsFor = (z) => { const n = dacNow(z); return n ? `${n.d.name} · ${n.bp ? (n.ex ? 'exclusive USB' : 'bit-perfect') : 'shared'}` : ''; };
   // "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit", or "Shared · FiiO KA17 · why"
@@ -3435,7 +3430,7 @@
   let qPanelKey = null;
   let qOpener = '#quality'; // the button that opened the Sound panel gets the focus back
   const closeQPanel = (fromBack) => { if (qPanel.hidden) return; qPanel.hidden = true; $('#scrim').hidden = true; $('#quality').setAttribute('aria-expanded', 'false'); $('#volbtn').setAttribute('aria-expanded', 'false'); if (qPanel.contains(document.activeElement) || document.activeElement === document.body) $(qOpener).focus(); qOpener = '#quality'; if (fromBack !== true) popTransient(); };
-  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) + fullLevelNote(z) : ''}`; };
+  const qpKey = () => { const z = currentZone(); const np = z && z.now_playing; const cfg = state.dspCfg && state.dspCfg[state.zone]; return `${state.zone}|${z ? z.transport : ''}|${np ? np.item.id : ''}|${np && np.signal_path ? np.signal_path.stages.length : ''}|${cfg ? JSON.stringify(cfg) : ''}|${state.outputs ? 1 : 0}|${z ? dacLine(z) : ''}`; };
   // Re-render the open panel only when what it says changed (renderBar runs often while playing)
   const syncQPanel = () => { if (qPanel.hidden) return; const k = qpKey(); if (k !== qPanelKey) renderQPanel(); };
   const loadDsp = async () => { if (isBrowser()) return; const zone = state.zone; try { const cfg = await api('GET', `/zones/${encodeURIComponent(zone)}/dsp`); (state.dspCfg = state.dspCfg || {})[zone] = cfg; } catch (e) { (state.dspCfg = state.dspCfg || {})[zone] = { error: e.message }; } syncQPanel(); };
@@ -3486,7 +3481,7 @@
     }
     const srcLabel = np ? (svc === 'library' ? 'Your library' : svc ? srcName(svc) : (np.stream_title ? 'Live stream' : 'Unknown source')) : 'Nothing playing';
     qPanel.innerHTML = `<div class="pop-title">Playing on</div>
-      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span>${fullLevelNote(z) ? `<span class="sub warn-text" role="status">${esc(fullLevelNote(z))}</span>` : ''}</span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
+      <div class="qp-zone">${icon('zone')}<span class="grow"><span class="name">${esc(z.name)}</span><span class="sub" title="${esc(z.id === BROWSER ? '' : z.output)}">${esc(deviceOf(z) ? dacLine(z) : deviceWords(z))}</span></span><span class="state">${z.transport === 'playing' ? 'playing' : z.transport === 'paused' ? 'paused' : ''}</span></div>
       <div class="pop-title">Source</div>
       <div class="qp-src">${svc ? `<span class="src-badge ico" aria-hidden="true">${svcIcon(svc)}</span>` : ''}<span class="grow"><span class="name">${esc(srcLabel)}</span>${np ? `<span class="sub">${esc(streamLabel(np, true) || (isBrowser() ? decodedBy() : ''))}</span>` : ''}</span></div>
       <div class="pop-title">Signal path</div>
@@ -7675,7 +7670,8 @@
             + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
-          // This phone: the USB DAC this app plays through, what it takes and how it is played (no choices yet)
+          // This phone: the USB DAC this app plays through, what it takes, how it is played and who
+          // sets its level (read-only: one behaviour)
           // The zone on this output: what its DAC does with what plays now
           const dz = myOut ? zoneList().find((z) => z.output === myOut.id) : null;
           const dline = dz && dz.now_playing ? dacLine(dz) : '';
@@ -7683,33 +7679,15 @@
             + (dacUnconfirmed(dv) ? `<div class="notice" role="status">${esc(dacUnconfirmed(dv))}</div>` : '')
             + (dacCaps(dv) ? row('What it takes', esc(dacCaps(dv)), '') : '')
             + (dv.note ? `<div class="notice" role="status">${esc(dv.note)}</div>` : '')
-            + (dv.settings && (dv.settings.mode === 'bit_perfect' || (dv.settings.mode === 'exclusive' && !dv.hardware_volume)) && dv.settings.full_level_ok && dv.media_volume != null && dv.media_volume < 100 ? `<div class="notice warn" role="status">${esc(fullLevelText(dv, dv.settings.mode === 'exclusive'))}</div>` : ''))
-            // The choices, from apps that take them (they report `settings`)
-            + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Exclusive USB: this app drives the DAC itself with its own USB driver, on any Android; Android asks you once to allow it, and other apps’ sounds go to the phone’s speaker meanwhile. It starts the DAC’s own volume no louder than Android played. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['exclusive', 'Exclusive USB'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${(v === 'bit_perfect' || v === 'exclusive') && !(dv.modes || []).includes(v) ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)
-              // Exclusive USB on a DAC with its own volume: the zone's volume moves it
-              + (dv.settings.mode === 'exclusive' && dv.hardware_volume ? row('Use the DAC’s volume', 'The zone’s volume sets the DAC’s own volume; the music stays untouched. Off: the DAC stays where it started, and the zone’s volume changes the samples.', `<input type="checkbox" id="dvvol" aria-label="Use the DAC’s volume" ${dv.settings.dac_volume !== false ? 'checked' : ''}>`) : '')) : '');
+            // Who sets the level, read-only: one behaviour, nothing to choose
+            + (dacVolumeWords(dv) ? row(esc(dacVolumeWords(dv)), dv.own_volume ? 'The app’s slider, the volume keys and Android’s volume panel set the DAC’s own volume; the music itself stays untouched. The first sound is quiet: the level you last played this DAC at, else a low one.' : 'This DAC has no volume of its own, so the app has no slider for it: set the level on the DAC or the amplifier. The music stays bit-perfect.', '') : '')
+            // Android's permission for Exclusive USB (the app's own USB driver) was not given: ask again
+            + (dv.usb_permission === false ? row('Exclusive USB', 'This app can drive the DAC itself with its own USB driver: bit-perfect on any Android, at the DAC’s own volume. Android asks you once to allow it.', '<button class="btn ghost sm" id="dvallow">Allow Exclusive USB</button>') : ''));
           main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
-          // This phone: the choices go to the node, which passes them to the app's player
-          const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
-          // Bit-perfect plays at full level: below Android's full volume only with the listener's OK
-          // (asked here; Cancel keeps the mode as it was)
-          const dvm = $('#dvmode', main); if (dvm) { const was = dvm.value; dvm.onchange = () => {
-            const mv = dv.media_volume;
-            if (dvm.value === 'bit_perfect' && mv !== 100) {
-              const at = mv != null ? ` (${mv}%)` : '';
-              if (!confirm(`Bit-perfect plays at full level; Android’s volume${at} no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?`)) { dvm.value = was; return; }
-              return putDev({ mode: 'bit_perfect', full_level_ok: true }, 'Mode saved');
-            }
-            // Exclusive USB on a DAC without a volume of its own plays at full level too
-            if (dvm.value === 'exclusive' && !dv.hardware_volume && mv !== 100) {
-              const at = mv != null ? ` (${mv}%)` : '';
-              if (!confirm(`Exclusive USB plays at full level on this DAC (it has no volume of its own); Android’s volume${at} no longer applies. Set the level on the amplifier first.\n\nUse Exclusive USB?`)) { dvm.value = was; return; }
-              return putDev({ mode: 'exclusive', full_level_ok: true }, 'Mode saved (allow the DAC when Android asks)');
-            }
-            return putDev({ mode: dvm.value }, dvm.value === 'exclusive' ? 'Mode saved (allow the DAC when Android asks)' : 'Mode saved');
-          }; }
-          const dvv = $('#dvvol', main); if (dvv) dvv.onchange = () => putDev({ dac_volume: dvv.checked }, dvv.checked ? 'The zone’s volume sets the DAC' : 'The DAC’s volume stays put');
+          // This phone: "Allow Exclusive USB" goes to the node, which passes it to the app's player,
+          // and Android shows its dialog
+          const dva = $('#dvallow', main); if (dva) dva.onclick = async () => { dva.disabled = true; try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, { mode: 'exclusive' }); toast('Allow the DAC when Android asks: Exclusive USB from the next song'); refreshOutputs(); } catch (e) { dva.disabled = false; toast(e.message, 'error'); } };
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
           $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
