@@ -1077,7 +1077,7 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 /// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
 /// Their problem reports go in People › Remove before this (people.rs).
 pub async fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
-    let lock = crate::personal::person_lock(key);
+    let lock = crate::personal::person_lock(s, key);
     let _one = lock.lock().await;
     forget_person_locked(s, key).await
 }

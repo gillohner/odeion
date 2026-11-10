@@ -245,7 +245,7 @@ pub(crate) async fn roster_for_restore(s: &NodeState) -> tokio::sync::MutexGuard
             .next()
             .cloned();
         let Some(key) = pending else { return roster };
-        let lock = crate::personal::membership_lock(&key);
+        let lock = crate::personal::membership_lock(s, &key);
         drop(roster);
         drop(lock.lock().await);
     }
@@ -403,7 +403,7 @@ async fn reconcile(s: &NodeState) -> Result<Roster, ApiError> {
     }
     let used = used_tokens(s).await?;
     for pair in &used {
-        let lock = crate::personal::membership_lock(&pair.1);
+        let lock = crate::personal::membership_lock(s, &pair.1);
         let _membership = lock.lock().await;
         // Only an invite still present can add them; do not clean a removed person merely
         // because the homeserver still lists an old used token.
@@ -606,7 +606,7 @@ pub(crate) async fn invite(State(s): State<Arc<NodeState>>, Json(b): Json<NewInv
     if !b.access.on_homeserver() {
         let key = valid_key(b.key.as_deref().unwrap_or(""))?;
         let started = access_started(&s);
-        let lock = crate::personal::membership_lock(&key);
+        let lock = crate::personal::membership_lock(&s, &key);
         let _membership = lock.lock().await;
         finish_previous_removal(&s, &key, started).await?;
         update(&s, |r| {
@@ -752,7 +752,7 @@ pub(crate) async fn change(
     }
     // The homeserver calls are done; the change goes to the roster as it is now.
     // Only Music on joins the membership queue. Music off never waits on personal I/O.
-    let lock = crate::personal::membership_lock(&key);
+    let lock = crate::personal::membership_lock(&s, &key);
     let _membership = if b.music == Some(true) {
         let guard = lock.lock().await;
         finish_previous_removal(&s, &key, started).await?;
@@ -823,7 +823,7 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
             Err(e) => discovery_problems.push(format!("cannot check retained personal data: {}", e.message)),
         }
     }
-    let membership = crate::personal::membership_lock(&key);
+    let membership = crate::personal::membership_lock(&s, &key);
     let _membership = membership.lock().await;
     let (_removing, r) = update(&s, |r| {
         if let Some(i) = r.people.iter().position(|p| p.key == key) {
@@ -873,7 +873,7 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
     // that write and reports a persistent failure after doing everything else.
     let _ = crate::accounts::sign_out_everywhere(&s, &key);
     crate::devices::forget_all_of(&s, &key);
-    let lock = crate::personal::person_lock(&key);
+    let lock = crate::personal::person_lock(&s, &key);
     let _one = lock.lock().await;
     if let Err(e) = crate::accounts::forget_person_locked(&s, &key).await {
         discovery_problems.insert(0, e.message);
