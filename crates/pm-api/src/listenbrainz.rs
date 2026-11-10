@@ -418,6 +418,8 @@ pub(crate) async fn connect(
                 (ACCOUNT_KEY, Some(&account)),
                 ("vault.lineage.listenbrainz", Some(&lineage)),
             ])?;
+            // A new connection: what waited in memory was the old one's
+            crate::send_queue::forget_held(&s.node_id, "listenbrainz");
         } else {
             lib.set_setting(ACCOUNT_KEY, &account)?;
         }
@@ -438,6 +440,8 @@ pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<Lis
             (ACCOUNT_KEY, None),
             (PENDING_KEY, None),
         ])?;
+        // What waited in memory goes too (kept for the old connection only, never sent again)
+        crate::send_queue::forget_held(&s.node_id, "listenbrainz");
     }
     Ok(Json(view(&s)))
 }

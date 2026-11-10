@@ -3,7 +3,7 @@
 //!
 //! A new listen is added to the list first ([`enqueue`]), under the library's lock. One sender at a
 //! time per node and service ([`sender`], an async lock of its own, never the library's) reads
-//! the list, sends it, and removes only what the service acknowledged ([`remove_sent`]): a send cut
+//! the list, sends it, and removes only what the service acknowledged ([`settle`]): a send cut
 //! short (the node stopping, the app killed) leaves every listen on disk for the next one, a
 //! listen added meanwhile stays, and the count of waiting listens is right throughout. Two plays
 //! ending together never send the same listens: the second sender waits, then finds only what
@@ -124,6 +124,15 @@ pub(crate) fn hold(node: &str, service: &'static str, owner: &str, items: Vec<Va
     mine.drain(..skip);
 }
 
+/// Forget everything waiting in memory for `service` on node `node`, every account's (the account
+/// was disconnected or replaced: what waited goes with it, as the list on disk does).
+pub(crate) fn forget_held(node: &str, service: &'static str) {
+    held()
+        .lock()
+        .expect("send queue held")
+        .retain(|(n, s, _), _| !(n == node && *s == service));
+}
+
 fn take_held(node: &str, service: &'static str, owner: &str) -> Vec<Value> {
     held()
         .lock()
@@ -191,6 +200,8 @@ pub(crate) fn settle(
 ) {
     let mut sent = sent.to_vec();
     let mut failed = Vec::new();
+    // The list read before the send comes first on disk; what was added meanwhile follows it
+    let mut tried = batch.durable.len();
     for m in batch.memory {
         match sent.iter().position(|v| *v == m) {
             Some(i) => {
@@ -210,6 +221,7 @@ pub(crate) fn settle(
     for s in &sent {
         if let Some(i) = left.iter().position(|v| v == s) {
             left.remove(i);
+            tried = tried.saturating_sub(1);
         }
     }
     let added = if owns {
@@ -218,7 +230,10 @@ pub(crate) fn settle(
         Vec::new()
     };
     hold(node, service, owner, failed, max);
-    left.extend(added.iter().cloned());
+    // Tried with the rest: after what is left of the list that was read, before what was added
+    // meanwhile (not tried yet), so the cap takes tried ones first
+    let at = tried.min(left.len());
+    left.splice(at..at, added.iter().cloned());
     if owns {
         let skip = left.len().saturating_sub(max);
         left.drain(..skip);
@@ -328,6 +343,43 @@ mod tests {
             (b.durable, b.memory),
             (vec![l(5)], Vec::new()),
             "stored once it could be"
+        );
+    }
+
+    /// A failed listen from memory was tried: it goes before what was added during the send, so
+    /// the cap drops tried listens first, never one not tried yet.
+    #[test]
+    fn the_cap_takes_tried_listens_before_ones_added_meanwhile() {
+        let lib = pm_library::Library::open_in_memory().unwrap();
+        const WHO: (&str, &str, &str) = ("node-order", "test", "owner");
+        enqueue(&lib, "k", vec![l(1)], 1).unwrap();
+        let b = Batch {
+            durable: vec![l(1)],
+            memory: vec![l(2)],
+        };
+        // Added while the send ran
+        enqueue(&lib, "k", vec![l(3)], 1).unwrap();
+        settle(&lib, "k", 1, WHO, true, b, &[]);
+        assert_eq!(read(&lib, "k").unwrap(), [l(3)], "the one not tried yet stays");
+    }
+
+    /// A disconnect forgets what waited in memory for the service on the node, every account's.
+    #[test]
+    fn a_disconnect_forgets_what_waited_in_memory() {
+        let lib = pm_library::Library::open_in_memory().unwrap();
+        hold("node-forget", "test", "a", vec![l(1)], 10);
+        hold("node-forget", "test", "b", vec![l(2)], 10);
+        hold("node-forget", "other", "a", vec![l(3)], 10);
+        forget_held("node-forget", "test");
+        assert!(batch(&lib, "k", 10, ("node-forget", "test", "a"), Vec::new())
+            .memory
+            .is_empty());
+        assert!(batch(&lib, "k", 10, ("node-forget", "test", "b"), Vec::new())
+            .all()
+            .is_empty());
+        assert_eq!(
+            batch(&lib, "k2", 10, ("node-forget", "other", "a"), Vec::new()).all(),
+            [l(3)]
         );
     }
 

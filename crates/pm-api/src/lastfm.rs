@@ -712,6 +712,8 @@ pub(crate) async fn disconnect(State(s): State<Arc<NodeState>>) -> ApiResult<Las
     let lib = s.library.lock().expect("library poisoned");
     save_session(&lib, None);
     set_pending(&lib, &[]);
+    // What waited in memory goes too: a later sign-in to the same account doesn't send it
+    crate::send_queue::forget_held(&s.node_id, "lastfm");
     drop(lib);
     Ok(Json(view(&s)))
 }
