@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-10
+
+- **AirPlay and BluOS speakers switched on after the node started get their zones by themselves** (seen on the owner's node: a Bluesound PULSE FLEX that was off at a restart stayed missing until "look for devices"). The node now looks for AirPlay receivers and BluOS players 20 seconds after it starts and then every minute, as it already did for UPnP renderers. A speaker that comes on gets its zones within a minute, with the queue it had, under the same names (no "-2" zone). One it already has is left as it is.
+
 ### 2026-11-09
 
 - **Problem reports to a private inbox on the node, from a "?" in the top bar** (owner's ask). The owner and listeners can send a problem, an idea or a question (`POST /v1/feedback`), and see their own reports and where each is (`GET /v1/feedback/mine`: saved, received, reviewed). A report carries only what its sender wrote, and the technical details they ticked (app version, page, phone/tablet/desktop, browser); nothing is collected on its own.

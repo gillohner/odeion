@@ -290,6 +290,10 @@ const UPNP_ADDRESSES_KEY: &str = "outputs.upnp_addresses";
 /// search misses it (a lost datagram, a device slow to answer) still finds it.
 const UPNP_KNOWN_KEY: &str = "outputs.upnp_known";
 
+/// One mDNS look for AirPlay receivers and BluOS players ([`NodeState::spawn_mdns_passes`]). Blocking.
+pub(crate) type MdnsBrowse =
+    Arc<dyn Fn() -> (Vec<pm_out_airplay::Device>, Vec<pm_out_bluos::Player>) + Send + Sync>;
+
 /// Where a UPnP renderer that had a zone was described, and when (Unix seconds) it was last seen.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KnownRenderer {
@@ -1535,6 +1539,63 @@ impl NodeState {
         });
     }
 
+    /// AirPlay receivers and BluOS players switched on after the start (asleep, unplugged) get their
+    /// zones without a rescan: an mDNS pass `first` after the start and one every `every`, each a
+    /// short browse of the services that are on. What is new is registered as a rescan does it (saved
+    /// queue restored; one already there is left as it is). Call from inside the runtime.
+    pub fn spawn_mdns_watch(self: &Arc<Self>, first: std::time::Duration, every: std::time::Duration) {
+        let st = Arc::downgrade(self);
+        let browse: MdnsBrowse = Arc::new(move || {
+            let Some(st) = st.upgrade() else {
+                return (Vec::new(), Vec::new());
+            };
+            let on = |f: &std::sync::atomic::AtomicBool| f.load(std::sync::atomic::Ordering::Relaxed);
+            let wait = std::time::Duration::from_millis(1500);
+            let airplay = if on(&st.airplay) {
+                pm_out_airplay::discover(wait)
+            } else {
+                Vec::new()
+            };
+            let bluos = if on(&st.bluos) {
+                pm_out_bluos::discover(wait)
+            } else {
+                Vec::new()
+            };
+            (airplay, bluos)
+        });
+        self.spawn_mdns_passes(first, every, browse);
+    }
+
+    /// [`Self::spawn_mdns_watch`] with its browse given (tests pass what the network "answers").
+    pub(crate) fn spawn_mdns_passes(
+        self: &Arc<Self>,
+        first: std::time::Duration,
+        every: std::time::Duration,
+        browse: MdnsBrowse,
+    ) {
+        // (the watch holds the state weakly: a node that is shut down, or a test's, isn't kept alive)
+        let st = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(first).await;
+            loop {
+                let Some(s) = st.upgrade() else { return };
+                let browse = browse.clone();
+                let new = tokio::task::spawn_blocking(move || {
+                    let (airplay, bluos) = browse();
+                    let mut new = s.register_airplay(airplay);
+                    new.extend(s.register_bluos(bluos));
+                    new
+                })
+                .await
+                .unwrap_or_default();
+                if !new.is_empty() {
+                    tracing::info!(count = new.len(), "AirPlay/BluOS speakers found after the start");
+                }
+                tokio::time::sleep(every).await;
+            }
+        });
+    }
+
     /// Renderers the owner added by address (another subnet, VLAN, or a
     /// device that ignores multicast); kept in the library settings.
     pub fn upnp_addresses(&self) -> Vec<String> {
@@ -1908,8 +1969,14 @@ impl NodeState {
         if !self.bluos.load(std::sync::atomic::Ordering::Relaxed) {
             return Vec::new();
         }
+        self.register_bluos(pm_out_bluos::discover(timeout))
+    }
+
+    /// BluOS players found (by the start, a rescan or the watch): each one not registered yet becomes
+    /// an output with a zone (its saved queue restored); one already there is left as it is.
+    pub(crate) fn register_bluos(self: &Arc<Self>, players: Vec<pm_out_bluos::Player>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for p in pm_out_bluos::discover(timeout) {
+        for p in players {
             let name = format!(
                 "bluos-{}",
                 p.id.chars()
@@ -1952,10 +2019,27 @@ impl NodeState {
         if !self.airplay.load(std::sync::atomic::Ordering::Relaxed) {
             return Vec::new();
         }
+        self.register_airplay(pm_out_airplay::discover(timeout))
+    }
+
+    /// AirPlay receivers found (by the start, a rescan or the watch): each one the node can play to and
+    /// hasn't registered yet becomes an output with a zone (its saved queue restored).
+    pub(crate) fn register_airplay(self: &Arc<Self>, devices: Vec<pm_out_airplay::Device>) -> Vec<OutputId> {
         let mut new = Vec::new();
-        for d in pm_out_airplay::discover(timeout) {
+        for d in devices {
             if let Some(why) = d.unsupported() {
-                tracing::info!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                // (said once per receiver: the watch finds it again every minute)
+                static SAID: Mutex<std::collections::BTreeSet<String>> =
+                    Mutex::new(std::collections::BTreeSet::new());
+                if SAID
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(d.id.clone())
+                {
+                    tracing::info!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                } else {
+                    tracing::debug!(receiver = %d.name, "AirPlay receiver skipped: {why}");
+                }
                 continue;
             }
             let out = Arc::new(
