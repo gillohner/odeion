@@ -2108,13 +2108,19 @@ impl NodeState {
         // Usage insights (usage.rs) end and nothing let in before changes anything: whichever
         // identity, also none, and whatever the cleanup below does. Swapped under their lock; the
         // old handle is dropped after
-        let old = self
-            .usage
-            .revoke_all_across(|| std::mem::replace(&mut *self.sync.lock().expect("sync lock"), sync));
+        let old = self.usage.revoke_all_across(|| {
+            let mut current = self.sync.lock().expect("sync lock");
+            // No reader or overlapping swap can observe the replacement while its
+            // predecessor still passes retirement checks.
+            if let Some(old) = current.as_ref() {
+                old.retire();
+            }
+            std::mem::replace(&mut *current, sync)
+        });
         // A pass of the old session still running writes nothing more, to the library or to its
         // homeserver, and its background loops stop (sync.rs, vault_cache.rs)
         if let Some(old) = &old {
-            old.retire();
+            crate::test_hooks::pause_blocking(|| format!("sync.after_swap:{}", old.id()));
             // What the replaced session's first sync left running is the new one's to start: reset,
             // or the page shows a sync forever and storage saves wait on it (they skip while running)
             let mut a = self.sync_activity.lock().expect("sync activity");

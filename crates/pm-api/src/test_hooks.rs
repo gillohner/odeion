@@ -35,12 +35,25 @@ mod imp {
             let _ = release.await;
         }
     }
+
+    /// A synchronous boundary, armed only by a test running the caller on a blocking thread.
+    pub fn pause_blocking(key: impl FnOnce() -> String) {
+        let entry = armed().lock().expect("test hooks").remove(&key());
+        if let Some((reached, release)) = entry {
+            let _ = reached.send(());
+            let _ = release.blocking_recv();
+        }
+    }
 }
 
 #[cfg(feature = "test-hooks")]
-pub use imp::{arm, pause};
+pub use imp::{arm, pause, pause_blocking};
 
 /// A pause point (see the module): nothing without the `test-hooks` feature.
 #[cfg(not(feature = "test-hooks"))]
 #[inline(always)]
 pub async fn pause(_key: impl FnOnce() -> String) {}
+
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+pub fn pause_blocking(_key: impl FnOnce() -> String) {}

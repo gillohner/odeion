@@ -130,7 +130,38 @@ async fn save_now(s: &Arc<NodeState>) -> Result<(), String> {
     if s.sync_activity.lock().expect("sync activity").running {
         return Ok(());
     }
-    match sync.sync(&s.library).await {
+    let result = sync.sync(&s.library).await;
+    complete_save(s, &sync, result)
+}
+
+/// Commit a captured sender's result while replacement is excluded. Library comes before
+/// identity, and neither guard spans network work. Quota writes use the captured owner.
+fn complete_save(
+    s: &Arc<NodeState>,
+    sync: &Arc<crate::sync::PubkySync>,
+    result: Result<crate::types::SyncReport, crate::sync::SyncError>,
+) -> Result<(), String> {
+    let lib = s.library.lock().expect("library poisoned");
+    let identity = s.sync.lock().expect("sync lock");
+    if sync.is_retired()
+        || !identity
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, sync))
+    {
+        return Ok(());
+    }
+    let error = |msg: String| {
+        if msg.contains("507 Insufficient Storage") {
+            let _ = lib.set_setting(
+                FULL_KEY,
+                &format!("{}:{}", sync.z32(), pm_library::db::now_unix()),
+            );
+            crate::add_music::FULL.to_string()
+        } else {
+            msg
+        }
+    };
+    match result {
         Ok(report) => {
             if report.pulled > 0 {
                 s.notify_library();
@@ -138,17 +169,26 @@ async fn save_now(s: &Arc<NodeState>) -> Result<(), String> {
             sync.carry_on(s, &report);
             let mut st = s.storage_save.lock().expect("save");
             st.last_saved_at = Some(now());
-            st.error = report.errors.first().cloned().map(|e| plain_error(s, e));
+            st.error = report.errors.first().cloned().map(error);
             Ok(())
         }
         // Another sign-in replaced this session: its own sync saves; nothing went wrong
         Err(crate::sync::SyncError::Replaced) => Ok(()),
         Err(e) => {
-            let msg = plain_error(s, e.to_string());
+            let msg = error(e.to_string());
             s.storage_save.lock().expect("save").error = Some(msg.clone());
             Err(msg)
         }
     }
+}
+
+#[cfg(feature = "test-hooks")]
+pub fn complete_save_for_test(
+    s: &Arc<NodeState>,
+    sync: &Arc<crate::sync::PubkySync>,
+    result: Result<crate::types::SyncReport, crate::sync::SyncError>,
+) -> Result<(), String> {
+    complete_save(s, sync, result)
 }
 
 /// Saves changes to the homeserver by itself: once the pending count has not moved for

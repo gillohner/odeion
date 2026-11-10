@@ -1560,3 +1560,133 @@ async fn failed_wipe_marker_persistence_keeps_local_clear_intent() {
     assert!(lib.get_setting("vault.pending_local_clear").unwrap().is_some());
     assert!(lib.get_setting("listenbrainz.account").unwrap().is_some());
 }
+
+/// Suspend A-to-B after publication, then complete B-to-C before A-to-B's trailing cleanup.
+/// Every predecessor must already be retired when its replacement can be observed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overlapping_identity_swaps_retire_before_publication() {
+    let Some(mut ids) = identities_with_sessions(3, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let make = |session| {
+        Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        ))
+    };
+    let c = make(ids.pop().unwrap().pop().unwrap());
+    let b = make(ids.pop().unwrap().pop().unwrap());
+    let a = make(ids.pop().unwrap().pop().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path());
+    n.set_sync(Some(a.clone()));
+    let (reached, release) = pm_api::test_hooks::arm(&format!("sync.after_swap:{}", a.id()));
+    let first = {
+        let n = n.clone();
+        let b = b.clone();
+        tokio::task::spawn_blocking(move || n.set_sync(Some(b)))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), reached)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(a.is_retired(), "A must retire before B becomes visible");
+    assert!(Arc::ptr_eq(&n.sync_handle().unwrap(), &b));
+    n.set_sync(Some(c.clone()));
+    assert!(a.is_retired() && b.is_retired() && !c.is_retired());
+    {
+        let mut activity = n.sync_activity.lock().unwrap();
+        activity.owner = Some(c.id());
+        activity.running = true;
+        activity.step = Some("C owns this activity".into());
+    }
+    let _ = release.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(10), first)
+        .await
+        .unwrap()
+        .unwrap();
+    let activity = n.sync_activity.lock().unwrap();
+    assert_eq!(activity.owner, Some(c.id()));
+    assert!(activity.running);
+    assert_eq!(activity.step.as_deref(), Some("C owns this activity"));
+}
+
+/// Exercise the actual synchronous completion boundary with success, ordinary failure and
+/// 507 outcomes held until a different identity has replaced the captured sender.
+#[tokio::test]
+async fn stale_storage_completions_preserve_replacement_status_and_quota() {
+    let Some(mut ids) = identities_with_sessions(2, &["node.pubky.music"]).await else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let make = |session| {
+        Arc::new(PubkySync::from_session(
+            NodeHomeserver::new(network()).unwrap(),
+            session,
+        ))
+    };
+    let b = make(ids.pop().unwrap().pop().unwrap());
+    let a = make(ids.pop().unwrap().pop().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path());
+    n.set_sync(Some(a.clone()));
+    n.set_sync(Some(b.clone()));
+    let full = format!("{}:123", b.z32());
+    n.library
+        .lock()
+        .unwrap()
+        .set_setting("storage.full_at", &full)
+        .unwrap();
+    {
+        let mut st = n.storage_save.lock().unwrap();
+        st.error = Some("B's existing failure".into());
+        st.last_saved_at = Some(123);
+    }
+    let outcomes = || {
+        [
+            Ok(pm_api::types::SyncReport::default()),
+            Ok(pm_api::types::SyncReport {
+                errors: vec!["507 Insufficient Storage".into()],
+                ..Default::default()
+            }),
+            Err(pm_api::sync::SyncError::Store("ordinary read failure".into())),
+            Err(pm_api::sync::SyncError::Store("507 Insufficient Storage".into())),
+        ]
+    };
+    for result in outcomes() {
+        assert!(pm_api::storage::complete_save_for_test(&n, &a, result).is_ok());
+        let st = n.storage_save.lock().unwrap();
+        assert_eq!(st.error.as_deref(), Some("B's existing failure"));
+        assert_eq!(st.last_saved_at, Some(123));
+        drop(st);
+        assert_eq!(
+            n.library
+                .lock()
+                .unwrap()
+                .get_setting("storage.full_at")
+                .unwrap()
+                .as_deref(),
+            Some(full.as_str())
+        );
+    }
+    // A current owner still receives its own ordinary error and its own quota attribution.
+    assert!(pm_api::storage::complete_save_for_test(
+        &n,
+        &b,
+        Err(pm_api::sync::SyncError::Store("507 Insufficient Storage".into()))
+    )
+    .is_err());
+    assert!(n
+        .library
+        .lock()
+        .unwrap()
+        .get_setting("storage.full_at")
+        .unwrap()
+        .unwrap()
+        .starts_with(&format!("{}:", b.z32())));
+    assert!(pm_api::storage::complete_save_for_test(&n, &b, Ok(Default::default())).is_ok());
+    let st = n.storage_save.lock().unwrap();
+    assert!(st.error.is_none());
+    assert!(st.last_saved_at.is_some());
+}
