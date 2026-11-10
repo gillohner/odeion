@@ -38,6 +38,8 @@ pub struct Fake {
     pub rejects: Mutex<HashSet<String>>,
     /// Writes under /pub/ refused (a grant that lost its public folder).
     pub refuse_pub: AtomicBool,
+    /// Listings/reads succeed, but the next private draft loses approval before landing.
+    pub refuse_draft_once: AtomicBool,
     /// The node can't delete its copy of the grant.
     pub disconnect_fails: AtomicBool,
     /// Held (written) by a test: a bookmark write waits on it, keeping her person lock meanwhile.
@@ -189,6 +191,9 @@ impl PersonalHomeserver for Fake {
         self.check(key, "write", path)?;
         if self.rejects.lock().unwrap().contains(key) {
             return Err(PersonalError::Rejected("413 Payload Too Large".into()));
+        }
+        if path.starts_with("/priv/") && self.refuse_draft_once.swap(false, Ordering::SeqCst) {
+            return Err(PersonalError::Refused("403 Forbidden".into()));
         }
         if path.starts_with("/pub/") && self.refuse_pub.load(Ordering::SeqCst) {
             return Err(PersonalError::Refused("403 Forbidden".into()));

@@ -156,7 +156,7 @@ fn fits_now(sh: &Shelf, path: &str, was: usize) -> bool {
     sh.too_big
         .iter()
         .find(|t| t.path == path)
-        .is_some_and(|t| bytes_of(sh).saturating_sub(was).saturating_add(t.bytes) <= MAX_SHELF_BYTES)
+        .is_some_and(|t| reserved_size(sh).saturating_sub(was).saturating_add(t.bytes) <= MAX_SHELF_BYTES)
 }
 
 /// What a refresh found: whether the node couldn't read what is there, and the collections
@@ -223,7 +223,7 @@ struct Kept {
     deleted: bool,
     /// An explicit make-private intent may remove published copies even while an unfamiliar
     /// private head prevents rewriting the collection.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     unshare: bool,
     /// The exact version being sent. Retrying an interrupted write uses the same path/body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +235,24 @@ struct Writing {
     edit: String,
     drafted: bool,
     published: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Reserve the largest checkpoint, not just today's encoding. A first draft fills the head;
+/// after an uncertain response, observation can fill it before `drafted` becomes true. Keep
+/// the full head growth available without claiming that a planned write has landed. Clearing
+/// `behind` can also grow the shelf by one byte; completion removes the larger Writing record.
+fn reserved_size(sh: &Shelf) -> usize {
+    bytes_of(sh)
+        + usize::from(sh.behind)
+        + sh.items
+            .iter()
+            .filter_map(|k| k.writing.as_ref().map(|w| (k, w)))
+            .map(|(k, w)| bytes_of(&w.edit).saturating_sub(bytes_of(&k.head)))
+            .sum::<usize>()
 }
 
 fn shelf_key(key: &str) -> String {
@@ -313,7 +331,7 @@ fn bound_existing(sh: &mut Shelf, keep: Option<&str>) -> Result<(), ApiError> {
     for k in &mut sh.items {
         k.versions = compact_versions(std::mem::take(&mut k.versions));
     }
-    while bytes_of(sh) > MAX_SHELF_BYTES {
+    while reserved_size(sh) > MAX_SHELF_BYTES {
         sh.behind = true;
         if sh.other.pop().is_some() || sh.too_big.pop().is_some() {
             continue;
@@ -337,7 +355,7 @@ fn replace(sh: &mut Shelf, k: Kept) -> Result<(), ApiError> {
     } else {
         candidate.items.push(k);
     }
-    if bytes_of(&candidate) > MAX_SHELF_BYTES {
+    if reserved_size(&candidate) > MAX_SHELF_BYTES {
         return Err(shelf_full());
     }
     *sh = candidate;
@@ -545,7 +563,7 @@ fn hold(sh: &mut Shelf, id: &str, head: &v1::Head, why: Held, bytes: usize, caug
             bytes,
         }),
     }
-    if bytes_of(&candidate) <= MAX_SHELF_BYTES {
+    if reserved_size(&candidate) <= MAX_SHELF_BYTES {
         *sh = candidate;
     } else {
         // No space even for a marker: don't write or advance the head. The next request must
@@ -828,7 +846,6 @@ async fn refresh(
     });
     let mut caught = Caught::default();
     let mut remotes = HashMap::new();
-    let mut downloads = 0;
     for id in ids {
         if !work.available() {
             caught.stale = true;
@@ -838,14 +855,8 @@ async fn refresh(
             private: private.get(&id).cloned(),
             public: public.get(&id).cloned(),
         };
-        let known = sh.items.iter().any(|k| k.id == id);
-        if !known && downloads >= READS_PER_REQUEST {
-            caught.stale = true;
-            continue;
-        }
-        if !known {
-            downloads += 1;
-        }
+        // Work::read charges actual downloads. Known held heads cost no read allowance,
+        // so unrelated or unrepresentable posts cannot starve older valid collections.
         let mut one = observe(s, b, key, sh, &id, &remote, Some(id.as_str()) == first, work).await?;
         if !editing && !one.stale && !personal::is_lost(s, key) {
             replay(s, b, key, sh, &id, &remote, &mut one, work).await?;
@@ -882,6 +893,13 @@ async fn drain_one_by_one(
             sh.behind = true;
             break;
         }
+        // The stored order is a round-robin queue (the UI sorts by playlist timestamps).
+        // Move an attempted entry before awaiting: budget exhaustion or cancellation must
+        // leave the next request a new starting point. Reordering adds no shelf metadata.
+        let i = sh.items.iter().position(|k| k.id == id).expect("pending item");
+        let k = sh.items.remove(i);
+        sh.items.push(k);
+        save(s, key, sh)?;
         let (mut caught, remote) = catch_up_one(s, b, key, sh, &id, work).await?;
         if caught.stale || personal::is_lost(s, key) {
             break;
@@ -994,21 +1012,34 @@ async fn change(
         return Ok(personal::needs_connect(true));
     }
     let mut sh = load(s, key);
-    bound_existing(&mut sh, id)?;
+    let mut bounded = sh.clone();
+    let recovering = bound_existing(&mut bounded, id).is_err();
+    if !recovering {
+        sh = bounded;
+    }
     let mut work = Work::new();
     // The target's old queued publication must never precede this request's newer intent.
     // Refresh validates it but replays nothing until the new edit has been saved durably.
-    let (mut caught, mut remotes) = refresh(s, b.as_ref(), key, &mut sh, id, true, &mut work).await?;
+    // Protected legacy intent may itself exceed today's budget. Let an explicit reducing
+    // edit build a bounded candidate first, without losing other intent or held markers.
+    // No remote operation starts until a later request can validate that saved candidate.
+    let (mut caught, mut remotes) = if recovering {
+        (Caught::stale(true), HashMap::new())
+    } else {
+        refresh(s, b.as_ref(), key, &mut sh, id, true, &mut work).await?
+    };
     sh.behind = caught.stale;
     if let (true, Some(id)) = (caught.stale, id) {
-        if !personal::is_lost(s, key) && work.available() {
+        if !recovering && !personal::is_lost(s, key) && work.available() {
             let (one, remote) = catch_up_one(s, b.as_ref(), key, &mut sh, id, &mut work).await?;
             caught.stale = one.stale;
             caught.held_back.extend(one.held_back);
             remotes.insert(id.to_string(), remote);
         }
     }
-    save(s, key, &sh)?;
+    if !recovering {
+        save(s, key, &sh)?;
+    }
     if personal::is_lost(s, key) {
         return Ok(personal::needs_connect(true));
     }
@@ -1096,12 +1127,19 @@ async fn change(
     let remote = remotes.remove(&k.id).unwrap_or_default();
     // An existing collection waits if it couldn't be listed/read first. A new collection has
     // no unseen head to overwrite. All remaining work uses the SAME deadline/call allowance.
-    if !caught.stale || id.is_none() {
+    if !recovering && (!caught.stale || id.is_none()) {
         match push(s, b.as_ref(), key, &mut sh, &k.id, &remote, held, &mut work).await? {
             Pushed::Done | Pushed::Held => {}
             Pushed::Full if k.unshare => {} // The privacy intent remains durable for the next batch.
             Pushed::Full => return Err(shelf_full()),
-            Pushed::Waiting(PersonalError::NoGrant) => return Ok(personal::needs_connect(false)),
+            Pushed::Waiting(PersonalError::NoGrant) => {
+                if id.is_some() {
+                    return Ok(personal::needs_connect(false));
+                }
+                // A create was already accepted durably. Return its identity below, so
+                // approval/retry cannot turn one action into a second pending collection.
+                sh.behind = true;
+            }
             Pushed::Waiting(PersonalError::Refused(m)) => {
                 personal::mark_lost(s, key, &m)?;
                 let landed = sh
@@ -1110,7 +1148,7 @@ async fn change(
                     .find(|x| x.id == k.id)
                     .and_then(|x| x.writing.as_ref())
                     .is_some_and(|w| w.drafted);
-                if !landed {
+                if id.is_some() && !landed {
                     return Ok(personal::needs_connect(true));
                 }
             }
@@ -1129,7 +1167,7 @@ async fn change(
             }
         }
     }
-    if work.available() && !personal::is_lost(s, key) {
+    if !recovering && work.available() && !personal::is_lost(s, key) {
         drain_one_by_one(s, b.as_ref(), key, &mut sh, Some(&k.id), &mut work).await?;
     }
     save(s, key, &sh)?;
