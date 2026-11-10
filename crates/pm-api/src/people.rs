@@ -747,7 +747,9 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
             }
         } else {
             match crate::personal::leftover(&s, &key) {
-                Ok(false) if discovery_problems.is_empty() => return Err(ApiError::not_found("no such person")),
+                Ok(false) if discovery_problems.is_empty() => {
+                    return Err(ApiError::not_found("no such person"))
+                }
                 Ok(false) => {}
                 Ok(true) => {}
                 // Uncertainty must not skip removal. Attempt every cleanup below and
@@ -769,7 +771,10 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
         discovery_problems.insert(0, e.message);
     }
     if !discovery_problems.is_empty() {
-        return Err(ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, discovery_problems.join("; ")));
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            discovery_problems.join("; "),
+        ));
     }
     Ok(Json(r))
 }

@@ -44,7 +44,8 @@ tokio::task_local! {
 }
 
 fn request_started(s: &NodeState) -> u64 {
-    AUTHENTICATED_ACCESS.try_with(|revision| *revision)
+    AUTHENTICATED_ACCESS
+        .try_with(|revision| *revision)
         .unwrap_or_else(|_| crate::people::access_started(s))
 }
 
@@ -458,13 +459,16 @@ impl Copy {
     fn merge_remote(&mut self, list: Vec<(String, i64)>) {
         // Absence still means deleted remotely. A returned older heart cannot erase a newer
         // known heart or undo a newer clear; the latter has no item to preserve here.
-        self.items = list.into_iter().filter_map(|(uri, at)| {
-            if self.outdated(&uri, true, at) {
-                self.items.iter().find(|item| item.uri == uri).cloned()
-            } else {
-                Some(Item { uri, at })
-            }
-        }).collect();
+        self.items = list
+            .into_iter()
+            .filter_map(|(uri, at)| {
+                if self.outdated(&uri, true, at) {
+                    self.items.iter().find(|item| item.uri == uri).cloned()
+                } else {
+                    Some(Item { uri, at })
+                }
+            })
+            .collect();
     }
 
     fn apply(&mut self, uri: &str, on: bool, at: i64) {
@@ -732,13 +736,22 @@ async fn still_asked(id: &str) -> bool {
 /// Under `key`'s operation lock and the roster lock, `keep` runs only while the approval and
 /// its authenticated access generation still stand. Disconnect serializes on the operation
 /// lock; removal and restore cannot cross the final check and synchronous grant write.
-async fn keep_if_current(s: &NodeState, id: &str, key: &str, keep: impl FnOnce() -> serde_json::Value) -> serde_json::Value {
+async fn keep_if_current(
+    s: &NodeState,
+    id: &str,
+    key: &str,
+    keep: impl FnOnce() -> serde_json::Value,
+) -> serde_json::Value {
     let lock = person_lock(key);
     let _one = lock.lock().await;
     // Restore/revocation cannot cross the final generation check and synchronous grant write.
     let _roster = s.roster.lock().await;
-    let revision = connects().lock().await.get(id)
-        .filter(|c| c.who == key).map(|c| c.revision);
+    let revision = connects()
+        .lock()
+        .await
+        .get(id)
+        .filter(|c| c.who == key)
+        .map(|c| c.revision);
     let Some(revision) = revision else {
         return serde_json::json!({"state": "expired"});
     };
@@ -1012,8 +1025,12 @@ pub(crate) fn leftover(s: &NodeState, key: &str) -> Result<bool, ApiError> {
     let key = key.trim_start_matches("pubky");
     if backend(s).connected(key)
         || match grant_file(&grants_dir(s), key) {
-            Some(file) => file.try_exists().map_err(|e| ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR, format!("cannot check retained approval: {e}")))?,
+            Some(file) => file.try_exists().map_err(|e| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot check retained approval: {e}"),
+                )
+            })?,
             None => false,
         }
         || crate::accounts::sessions_of_checked(s, key)? > 0
@@ -1030,9 +1047,9 @@ pub(crate) fn leftover(s: &NodeState, key: &str) -> Result<bool, ApiError> {
         }
     }
     for prefix in [
-            format!("{}{key}.", crate::accounts::PERSON_PREFIX),
-            crate::discover::contents_prefix_of(key),
-            crate::discover::contents_prefix_of(&crate::accounts::Who::ListenerOnNode(key.to_string()).tag()),
+        format!("{}{key}.", crate::accounts::PERSON_PREFIX),
+        crate::discover::contents_prefix_of(key),
+        crate::discover::contents_prefix_of(&crate::accounts::Who::ListenerOnNode(key.to_string()).tag()),
     ] {
         if !lib.settings_with_prefix(&prefix)?.is_empty() {
             return Ok(true);
@@ -1366,12 +1383,9 @@ mod tests {
         waiting("t-keep-late", "keep-ann").await;
         let lock = person_lock("keep-ann");
         let disconnecting = lock.lock().await;
-        let keeping = keep_if_current(
-            &s,
-            "t-keep-late",
-            "keep-ann",
-            || -> serde_json::Value { panic!("a grant kept after her Disconnect") },
-        );
+        let keeping = keep_if_current(&s, "t-keep-late", "keep-ann", || -> serde_json::Value {
+            panic!("a grant kept after her Disconnect")
+        });
         tokio::pin!(keeping);
         assert!(futures_util::poll!(&mut keeping).is_pending());
         end_approvals_of("keep-ann").await;
@@ -1647,32 +1661,58 @@ mod tests {
         tokio::pin!(old_start, old_disconnect);
         assert!(futures_util::poll!(&mut old_start).is_pending());
         assert!(futures_util::poll!(&mut old_disconnect).is_pending());
-        crate::people::remove(State(s.clone()), Path(key.into())).await.unwrap();
-        crate::people::invite(State(s.clone()), Json(crate::people::NewInvite {
-            access: crate::people::Access::Music,
-            key: Some(key.into()), name: None, storage_quota_mb: None,
-        })).await.unwrap();
+        crate::people::remove(State(s.clone()), Path(key.into()))
+            .await
+            .unwrap();
+        crate::people::invite(
+            State(s.clone()),
+            Json(crate::people::NewInvite {
+                access: crate::people::Access::Music,
+                key: Some(key.into()),
+                name: None,
+                storage_quota_mb: None,
+            }),
+        )
+        .await
+        .unwrap();
         let fresh = Arc::new(Forgets::default());
         s.set_personal_homeserver(fresh.clone());
         let file = grant_file(&grants_dir(&s), key).unwrap();
         begin_approval(&s, "delayed-fresh", key).await.unwrap();
-        assert_eq!(keep_if_current(&s, "delayed-fresh", key, || {
-            crate::imports::write_private(&file, b"fresh-grant").unwrap();
-            serde_json::json!({"state":"ok"})
-        }).await["state"], "ok");
+        assert_eq!(
+            keep_if_current(&s, "delayed-fresh", key, || {
+                crate::imports::write_private(&file, b"fresh-grant").unwrap();
+                serde_json::json!({"state":"ok"})
+            })
+            .await["state"],
+            "ok"
+        );
         start_tx.send(()).unwrap();
         disconnect_tx.send(()).unwrap();
         assert_eq!(old_start.await.unwrap_err().status, StatusCode::CONFLICT);
         assert_eq!(old_disconnect.await.unwrap_err().status, StatusCode::CONFLICT);
         assert!(still_asked("delayed-fresh").await);
         assert!(!still_asked("delayed-old-start").await);
-        assert!(fresh.connected(key), "an old disconnect cannot delete the fresh grant");
+        assert!(
+            fresh.connected(key),
+            "an old disconnect cannot delete the fresh grant"
+        );
         assert_eq!(std::fs::read(&file).unwrap(), b"fresh-grant");
         // Read-triggered replay and direct writes carry the same authenticated generation.
-        assert_eq!(AUTHENTICATED_ACCESS.scope(revision, bookmark_uris(&s, key))
-            .await.unwrap_err().status, StatusCode::CONFLICT);
-        let stale_write = AUTHENTICATED_ACCESS.scope(revision,
-            set_bookmark(&s, key, "https://example.com/song".into(), true, None)).await;
+        assert_eq!(
+            AUTHENTICATED_ACCESS
+                .scope(revision, bookmark_uris(&s, key))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        let stale_write = AUTHENTICATED_ACCESS
+            .scope(
+                revision,
+                set_bookmark(&s, key, "https://example.com/song".into(), true, None),
+            )
+            .await;
         assert_eq!(stale_write.unwrap_err().status, StatusCode::CONFLICT);
         end_approvals_of(key).await;
     }
@@ -1693,8 +1733,16 @@ mod tests {
         drop(roster);
         assert_eq!(keeping.await["state"], "denied");
         begin_approval(&s, "restore-fresh-connect", key).await.unwrap();
-        assert_eq!(keep_if_current(&s, "restore-fresh-connect", key,
-            || serde_json::json!({"state":"ok"})).await["state"], "ok");
+        assert_eq!(
+            keep_if_current(
+                &s,
+                "restore-fresh-connect",
+                key,
+                || serde_json::json!({"state":"ok"})
+            )
+            .await["state"],
+            "ok"
+        );
         end_approvals_of(key).await;
     }
 

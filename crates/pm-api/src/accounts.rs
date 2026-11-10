@@ -409,7 +409,10 @@ fn load_checked(lib: &pm_library::Library, setting: &str) -> Result<Vec<PersonTo
         return Ok(Vec::new());
     };
     serde_json::from_str(&json).map_err(|e| {
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, format!("cannot read sign-in store: {e}"))
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read sign-in store: {e}"),
+        )
     })
 }
 
@@ -1025,10 +1028,12 @@ pub fn sessions_of(s: &NodeState, key: &str) -> usize {
 }
 
 pub(crate) fn sessions_of_checked(s: &NodeState, key: &str) -> Result<usize, ApiError> {
-    Ok(load_checked(&s.library.lock().expect("library poisoned"), TOKENS)?
-        .iter()
-        .filter(|t| t.key == key)
-        .count())
+    Ok(
+        load_checked(&s.library.lock().expect("library poisoned"), TOKENS)?
+            .iter()
+            .filter(|t| t.key == key)
+            .count(),
+    )
 }
 
 /// Forgets every token of `key` (People › remove).
