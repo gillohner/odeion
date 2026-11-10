@@ -1,10 +1,10 @@
+# Odeion
+
 <p align="center">
   <img src="docs/brand/odeion/odeion-app-icon.svg" alt="Odeion logo: an O cut into three sound grooves" width="96">
 </p>
 
-<h1 align="center">Odeion</h1>
-
-<p align="center">Your own music server for the whole home.</p>
+**Your own music server for the whole home.**
 
 Odeion runs on a computer at home that stays on, such as a NAS, a mini PC or a Raspberry Pi. It
 plays your own music files and the streaming services you use (TIDAL, Qobuz, Spotify, internet
@@ -20,23 +20,22 @@ don't need to be a developer.
 
 From the newest build (November 2026), on a real library.
 
-| | |
-| :-- | :-- |
-| ![Home on a desktop: recently played and recently added albums as cover tiles](docs/images/readme/desktop-home.webp) | ![An album page on a desktop: cover, Play and Shuffle, a short Wikipedia text and the song list](docs/images/readme/desktop-album.webp) |
-| **Home:** what you played and added lately | **An album:** play it, read about it, see where else it is |
-| ![Now playing on a desktop: large cover, the song paused, and the queue with the next songs](docs/images/readme/desktop-now-playing.webp) | ![Sources on a desktop: your library, TIDAL, Internet Archive, podcasts, Spotify, Qobuz and more, each with an on/off switch](docs/images/readme/desktop-sources.webp) |
-| **Now playing**, with the queue | **Sources:** your files and the services you connect |
+<table>
+  <tr>
+    <td><img src="docs/images/readme/desktop-home.webp" alt="Home on a desktop: recently played and recently added albums as cover tiles" width="420"><br><b>Home:</b> what you played and added lately</td>
+    <td><img src="docs/images/readme/desktop-album.webp" alt="An album page on a desktop: cover, Play and Shuffle, a short Wikipedia text and the song list" width="420"><br><b>An album:</b> play it, read about it, see where else it is</td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/readme/desktop-now-playing.webp" alt="Now playing on a desktop: large cover, the song paused, and the queue with the next songs" width="420"><br><b>Now playing</b>, with the queue</td>
+    <td><img src="docs/images/readme/desktop-sources.webp" alt="Sources on a desktop: your library, TIDAL, Internet Archive, podcasts, Spotify, Qobuz and more, each with an on/off switch" width="420"><br><b>Sources:</b> your files and the services you connect</td>
+  </tr>
+</table>
 
 <table>
   <tr>
-    <td><img src="docs/images/readme/phone-album.webp" alt="An album page on a phone: cover, title, Play and Shuffle" width="240"></td>
-    <td><img src="docs/images/readme/phone-now-playing.webp" alt="Now playing on a phone: cover, seek bar, play controls and volume" width="240"></td>
-    <td><img src="docs/images/readme/phone-play-to.webp" alt="The Play to sheet on a phone: This browser, an Apple TV and a Linn streamer to choose from" width="240"></td>
-  </tr>
-  <tr>
-    <td>An album on a phone</td>
-    <td>Now playing on a phone</td>
-    <td><b>Play to:</b> pick a speaker</td>
+    <td><img src="docs/images/readme/phone-album.webp" alt="An album page on a phone: cover, title, Play and Shuffle" width="240"><br>An album on a phone</td>
+    <td><img src="docs/images/readme/phone-now-playing.webp" alt="Now playing on a phone: cover, seek bar, play controls and volume" width="240"><br>Now playing on a phone</td>
+    <td><img src="docs/images/readme/phone-play-to.webp" alt="The Play to sheet on a phone: This browser, an Apple TV and a Linn streamer to choose from" width="240"><br><b>Play to:</b> pick a speaker</td>
   </tr>
 </table>
 
@@ -47,10 +46,11 @@ From the newest build (November 2026), on a real library.
 - **To control it** you use the web page (it installs as an app on phones and computers), the
   Odeion app for macOS, Windows, Linux and Android, any OpenSubsonic app (Symfonium, Feishin,
   Amperfy), or Home Assistant.
-- **Speakers** are found on your network by themselves: UPnP and DLNA streamers and TVs (Linn,
-  WiiM, Naim and others), Sonos, HEOS, Bluesound, Chromecast, AirPlay, Squeezebox and squeezelite,
-  Snapcast, MPD, a DAC on the node's own machine, the Odeion app and the browser. Each speaker is a
-  zone with its own queue, and zones can be grouped. Full list: [Speakers](docs/guides/speakers.md).
+- **Speakers:** most are found on your network by themselves: UPnP and DLNA streamers and TVs
+  (Linn, WiiM, Naim and others), Sonos, HEOS, Bluesound, Chromecast, AirPlay and a DAC on the
+  node's own machine. Squeezebox and squeezelite players are pointed at the node, and Snapcast and
+  MPD are added in its config. The Odeion app and the browser can play too. Each speaker is a zone
+  with its own queue, and zones can be grouped. Full list: [Speakers](docs/guides/speakers.md).
 - **Sources** are your files (a local disk, a USB drive, a network share, Google Drive or
   OneDrive), files on your Pubky homeserver, internet radio and podcasts, and streaming services:
   TIDAL, Qobuz, Spotify, Deezer, the Internet Archive, Audius, Jamendo, SoundCloud, Bandcamp,
@@ -88,7 +88,7 @@ lives on a homeserver you choose. For Odeion you need:
   - **The node's own homeserver.** The USB-stick installer sets one up by default, and with Docker
     the bundle in [`deploy/bundle/`](deploy/bundle/) runs one next to the node. Your account, your
     playlists and any music files you copy there stay on your own machine. On the first start,
-    **Settings › My accounts** offers **Create your Pubky account on this node's homeserver**.
+    **Settings › My accounts** offers **Create your Pubky account on this node’s homeserver**.
   - **An existing homeserver**, the one your Pubky account already uses. Sign the node in with
     **Settings › My accounts › Sign in with Pubky** and approve in Pubky Ring.
 
@@ -104,9 +104,9 @@ for access away from home you use Tailscale or a Cloudflare Tunnel
 
 ### Pinakes (optional)
 
-Pinakes is the music index Odeion reads for the social side. By default the node uses the
-project's public Pinakes instance, `https://8092--main--pinakes--gil.coder.riginode.xyz`. It is
-read-only and needs no account.
+Pinakes is the music index Odeion reads for the social side. It is public, read-only and needs
+no account. By default the node uses `https://8092--main--pinakes--gil.coder.riginode.xyz`, a
+development instance run by the project's maintainer, so it can be slow or away at times.
 
 These parts come from Pinakes:
 
@@ -114,17 +114,20 @@ These parts come from Pinakes:
 - The **Pubky** results in search.
 - **In collections** on song, album and artist pages: public collections that hold them.
 - **Tagged alike on Pubky** under Similar.
-- Part of the **Also on** links (the rest come from MusicBrainz).
+- Part of the **Also on** links (the rest come from MusicBrainz), which also tell a playlist
+  where else a song can play from.
 - Titles and covers for web links kept in a playlist.
+- Podcast search (when Pinakes has nothing, the node asks Apple's podcast directory).
 
 Pinakes, MusicBrainz and Wikipedia each ask every app for a way to reach whoever runs it. So the
-node asks for nothing from them until you add an email address or a website, either on Home's
-**Get started** card or in **Settings › Discover**. That also turns on Discover. It goes only to
-those services.
+node asks for nothing from them until it has one: an email address or a website you add on Home's
+**Get started** card or in **Settings › Discover**, or, when you sign the node in to Pubky and
+gave none, your Pubky profile link. That also turns on Discover. It goes only to those services.
 
-If Pinakes doesn't answer, everything else works; the status chip in the top bar lists it under
-**External resources**. To use another Pinakes instance, add this to the node's config file
-(`/data/node.toml` in Docker, `/etc/pubky-music/node.toml` on Linux) and restart the node:
+If Pinakes doesn't answer, everything else works; the app lists it under **External resources**
+below the node's status. To use another Pinakes instance, add this to the node's config file
+(`/data/node.toml` inside the Docker container, `/etc/pubky-music/node.toml` on Linux) and
+restart the node:
 
 ```toml
 [pubky]
@@ -137,7 +140,7 @@ Names and pictures of people, comments and who tagged what come from Nexus, Pubk
 ## Where it stands
 
 As of November 2026. The last numbered release is **0.2.2** (30 October 2026), still under the
-old name Pubky Music. **Edge** is built from every change and is what the guides install.
+project's old name. **Edge** is built from every change to the code.
 
 **Live in release 0.2.2**
 
@@ -167,8 +170,9 @@ old name Pubky Music. **Edge** is built from every change and is what the guides
 
 - Android: the phone plays in the app itself, also away from home, with the phone's media
   controls and volume keys.
-- Android: downloading songs, albums and playlists to the phone and playing them with no network.
-- A simpler phone layout: mini player, Now playing and lists, with swipes.
+- Android: picking songs, albums and playlists to keep on the phone from their ⋯ menu, a storage
+  screen, and playing them through the app's own player with no network.
+- A redesigned phone layout: a simpler mini player, Now playing and list rows, with more swipes.
 - Simpler sign-in pages for streaming services.
 - People you invite keep their own bookmarks and playlists on their own homeserver.
 - Reporting a problem from the app to the node's owner.
@@ -176,7 +180,7 @@ old name Pubky Music. **Edge** is built from every change and is what the guides
   not, so nothing is recorded yet). [How it works](docs/guides/usage-insights.md).
 - Release images under the name `ghcr.io/gillohner/odeion` (until then releases are
   `ghcr.io/gillohner/pubky-music-node` and edge is `ghcr.io/gillohner/odeion:edge`), and the
-  desktop app's installed name, which still says Pubky Music.
+  desktop app's installed name, which is still the old one.
 
 What changed and when: [CHANGELOG](docs/CHANGELOG.md).
 
@@ -202,6 +206,7 @@ connect them to it. Umbrel isn't supported right now.
 2. **Log in.** With Pubky Ring, once the node is signed in to Pubky (step 5). Before that, open
    **Use the node’s API token instead**, paste the token and press **Log in with the token**. The
    token is:
+   - Odeion box: on its console, `sudo grep PM_TOKEN /opt/odeion/.env`.
    - Docker: the output of `docker exec pubky-music cat /data/api-token` (or `PM_TOKEN` if you set
      one; with the bundle, `PM_TOKEN` in `.env`).
    - Linux without Docker: the token the install printed, also in `/etc/pubky-music/node.toml`.
@@ -259,7 +264,7 @@ Every release has a `SHA256SUMS` file to check downloads against.
 - Something not working: [Troubleshooting](docs/guides/troubleshooting.md).
 - Questions, bug reports and ideas: [GitHub issues](https://github.com/gillohner/odeion/issues).
   Include how you installed it, the version (**Settings › About and updates**) and the node's log
-  (`docker logs pubky-music`, or `journalctl -u odeiond`).
+  ([where to find it](docs/guides/troubleshooting.md)).
 
 ## For developers
 
@@ -270,7 +275,7 @@ Every release has a `SHA256SUMS` file to check downloads against.
 - Design decisions: [docs/adr/](docs/adr/). Releases: [docs/RELEASING.md](docs/RELEASING.md).
   The app: [crates/pm-desktop/README.md](crates/pm-desktop/README.md).
 - Pinakes and Odeion: [docs/PINAKES-CONTEXT.md](docs/PINAKES-CONTEXT.md).
-- Odeion was called Pubky Music before; what kept the old name and why:
+- Odeion had another name before; what kept the old name and why:
   [docs/branding-compatibility.md](docs/branding-compatibility.md).
 
 ```sh
