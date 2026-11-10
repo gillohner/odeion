@@ -267,16 +267,6 @@ pub(crate) fn note_full(s: &NodeState, full: bool) {
     };
 }
 
-/// A homeserver error as people read it: a full homeserver (507) in plain words, and noted.
-pub(crate) fn plain_error(s: &NodeState, msg: String) -> String {
-    if msg.contains("507 Insufficient Storage") {
-        note_full(s, true);
-        crate::add_music::FULL.to_string()
-    } else {
-        msg
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Saving {
     /// `saved`, `saving`, `error` or `signed_out`.
