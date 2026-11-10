@@ -1195,7 +1195,7 @@ async fn change(
 ) -> Result<Response, ApiError> {
     let started = personal::request_started(s);
     let b = personal::backend(s);
-    let lock = personal::person_lock(key);
+    let lock = personal::person_lock(s, key);
     let _one = lock.lock().await;
     personal::require_access(s, key, started)?;
     if !b.connected(key) {
@@ -1395,7 +1395,7 @@ pub(crate) async fn list(
         return playlists::list(State(s)).await;
     };
     let started = personal::request_started(&s);
-    let lock = personal::person_lock(&key);
+    let lock = personal::person_lock(&s, &key);
     let _one = lock.lock().await;
     let Some(sh) = read(&s, &key, started).await? else {
         return Ok(Json(Vec::new()));
@@ -1421,7 +1421,7 @@ pub(crate) async fn get(
         return playlists::get(State(s), Path(id)).await;
     };
     let started = personal::request_started(&s);
-    let lock = personal::person_lock(&key);
+    let lock = personal::person_lock(&s, &key);
     let _one = lock.lock().await;
     let sh = read(&s, &key, started).await?.ok_or_else(|| not_found(&id))?;
     let k = sh
@@ -1744,7 +1744,7 @@ mod tests {
                     .to_string(),
                 )
                 .unwrap();
-            let lock = personal::person_lock(&key);
+            let lock = personal::person_lock(&s, &key);
             let held = lock.lock().await;
             let calling = async {
                 let caller = Caller {
