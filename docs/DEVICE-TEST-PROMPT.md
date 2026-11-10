@@ -263,9 +263,12 @@ What it does:
 2. Safety first: no headphones or in-ear monitors on the KA17 for the first play of this section
    (a speaker or amplifier turned low instead), and the KA17's own volume down: in Android's
    bit-perfect mode Android sets the DAC's volume from its media volume, and a phone that doesn't
-   may play at the DAC's full level. Plug in the FiiO KA17 (USB-C, no adapter). Android asks once
-   whether Odeion may access it: for this section choose Deny (Android's bit-perfect path; Exclusive
-   USB is the next section). Within a few seconds:
+   may play at the DAC's full level. If Odeion was allowed the KA17 with "always" before, clear it
+   first: Settings › Apps › Odeion › Open by default › Clear defaults (wording varies by phone).
+   Plug in the FiiO KA17 (USB-C, no adapter), app on screen. Android may ask "Open Odeion to handle
+   FiiO KA17?" and/or whether Odeion may access it: for this section answer Cancel / Deny to each,
+   without "always" (Android's bit-perfect path; Exclusive USB is the next section). Within a few
+   seconds:
    - The zone picker (the speaker button) shows under the phone's zone "FiiO KA17 · …".
    - Settings › This device › This phone: "FiiO KA17", what it takes, how it plays, who sets the
      volume ("Volume: the DAC’s own" once Android let the app read the DAC), and an "Allow Exclusive
@@ -462,7 +465,10 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
    from the phone's speaker. Plug it back (app on screen): Exclusive USB again, at the same level or
    lower, never higher, on its display. If Android asks again (no "always" ticked in step 2), allow
    it; it asks once per plug-in, never in the background.
-5. Deny the permission (or clear it in Android's app settings) and replug: Details › Output says
+5. Back to Android's path: clear Odeion's "Open by default" for the KA17 (Settings › Apps › Odeion ›
+   Open by default › Clear defaults), replug with the app on screen, and answer Cancel / Deny to
+   Android's dialogs ("Open Odeion?", then whether Odeion may access the KA17; each at most once on
+   this plug-in, never two at once). Details › Output says
    "Bit-perfect · FiiO KA17 · …" (Android 14+), the KA17 shows the file's rate, and the volume keys
    move the volume. If the KA17's display level doesn't change with the keys, note it: that phone's
    Android doesn't pass the volume to the DAC: it then plays at the KA17's own level whatever the
@@ -471,7 +477,11 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
 6. A DAC or dongle without a volume of its own, if one is at hand: it plays bit-perfect, the app has
    no volume slider for it, and Settings › This phone says "Volume: set it on the DAC" (the note:
    "This DAC has no volume of its own: set the volume on the DAC or amplifier.").
-7. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB", "bit-perfect" and
+7. A USB-C audio adapter or headset that is not the KA17 (a USB-C to 3.5 mm dongle, a USB headset),
+   with Odeion not running, then with it on screen: plug it in and report the dialog Android shows
+   (expected, because Odeion takes USB audio devices: "Open Odeion to handle …?"; Cancel is fine)
+   and whether ticking "always" makes Odeion open at every plug-in of it.
+8. On problems: `adb logcat -s pubky-music`, lines with "Exclusive USB", "bit-perfect" and
    "USB audio devices changed".
 ```
 

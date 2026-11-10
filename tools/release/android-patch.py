@@ -52,7 +52,9 @@ silently cannot connect.
 14. A USB DAC's permission that lasts: MainActivity takes USB_DEVICE_ATTACHED for audio-class devices
    (res/xml/usb_audio_devices.xml, class 1), so Android's dialog offers to always open the DAC with
    Odeion and the grant survives replugs (without it, a permission from requestPermission ends at
-   the unplug and Exclusive USB is first only once).
+   the unplug and Exclusive USB is first only once). Side effects: Android asks "Open Odeion?" at
+   every plug-in of any USB audio device (dongles and headsets too), even with Odeion not running,
+   and with "always" opens Odeion at each one.
 
 Usage: android-patch.py <crates/pm-desktop> [--without-updater]
 """

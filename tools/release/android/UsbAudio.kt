@@ -107,7 +107,8 @@ class UsbAudio private constructor(private val context: Context) : AudioDeviceCa
                 }
                 override fun onActivityCreated(a: Activity, b: android.os.Bundle?) {}
                 override fun onActivityStarted(a: Activity) {}
-                override fun onActivityResumed(a: Activity) {}
+                // Auto's ask again for a DAC waits for this after Android's attach dialog
+                override fun onActivityResumed(a: Activity) = UsbExclusive.resumed()
                 override fun onActivityPaused(a: Activity) {}
                 override fun onActivityStopped(a: Activity) {}
                 override fun onActivitySaveInstanceState(a: Activity, b: android.os.Bundle) {}

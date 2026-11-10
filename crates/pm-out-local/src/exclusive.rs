@@ -288,6 +288,9 @@ struct Held {
     /// The level the listener chose (dB), on whichever path played then: every path plays at it
     /// (muted when it is below what that path's unit goes), and it goes back no louder.
     listener_db: Option<f32>,
+    /// `listener_db` was remembered from an earlier take of this DAC, not chosen while the app
+    /// holds it now: each playing unit caps it at its own level before this take.
+    listener_remembered: bool,
     /// The level the app last played this DAC at (dB), read when it was taken: the start level of
     /// a path the listener hasn't set yet (`None`: [`vol::START_DB`]).
     saved_db: Option<f32>,
@@ -514,12 +517,15 @@ pub fn auto_ask() {
         return;
     }
     let asked_on = *ASKED_AGAIN.lock().unwrap_or_else(|e| e.into_inner());
-    if ask_again(dac.id, usb_dac::saved_level(usb).granted, asked_on) {
-        // Counted only once Android was really asked (on screen): else at the next return to it
+    let granted_before = usb_dac::saved_level(usb).granted;
+    if ask_again(dac.id, granted_before, asked_on) {
+        // Counted only once Android was really asked (on screen, no attach dialog of Android's
+        // own pending): else at the next return to it
         if b.ask_again(usb) {
             *ASKED_AGAIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(dac.id);
         }
-    } else {
+    } else if !granted_before {
+        // Never given: Auto's one ask (granted before and asked on this attach: a "no" stands)
         b.ask_once(usb);
     }
 }
@@ -1066,16 +1072,6 @@ fn acquire(dac: &Dac) -> Result<(), ExclusiveError> {
     forget_detached(&*b);
     let identity = b.held_identity();
     let (listener_muted, listener_db) = remembered_listener(identity.as_ref());
-    // Never louder than the DAC was: a level remembered from an earlier take is bounded by the
-    // shown unit's level before this one (its minimum when it was muted), when known
-    let listener_db = match (listener_db, units.first()) {
-        (Some(db), Some(u)) => Some(match u.before {
-            Some(b) if b.mute => db.min(vol::cur_to_db(u.unit.range.min())),
-            Some(b) => db.min(vol::cur_to_db(b.cur)),
-            None => db,
-        }),
-        (db, _) => db,
-    };
     with_held(|h| {
         *h = Some(Held {
             dac_id: dac.id,
@@ -1091,6 +1087,8 @@ fn acquire(dac: &Dac) -> Result<(), ExclusiveError> {
             opened: false,
             listener_muted,
             listener_db,
+            // Never louder than the DAC was: each unit caps it at its level before this take
+            listener_remembered: listener_db.is_some(),
             saved_db,
             driver: None,
             in_use: false,
@@ -1173,7 +1171,8 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
         // listener's; in place only once the DAC read it back
         h.active = unit_id;
         if let Some(uid) = unit_id {
-            let (saved_db, listener_db, listener_muted) = (h.saved_db, h.listener_db, h.listener_muted);
+            let (saved_db, listener_db, listener_muted, remembered) =
+                (h.saved_db, h.listener_db, h.listener_muted, h.listener_remembered);
             let t = h.t.clone();
             let st = h.state(uid).expect("filtered on a known unit");
             let u = st.unit.clone();
@@ -1181,7 +1180,7 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
             // on any path, else the start level: the last one kept, else low, never louder than
             // the unit was), no louder than the listener's level chosen on any path, muted with
             // the listener's mute
-            let own = own_level(st, listener_db, saved_db);
+            let own = own_level(st, listener_db, remembered, saved_db);
             let level = path_level(own, listener_db, listener_muted, &u.range);
             st.level = Some(level);
             // Touched before it is set: given back as it was even if this fails half-way
@@ -1284,12 +1283,14 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
 }
 
 /// A unit's own level, apart from the listener's mute and caps: the level the listener set on it;
-/// else the listener's level in this zone (`listener_db`, set on another path); else the start
-/// level (`saved_db`, the level the app last played this DAC at, else low), never louder than the
-/// unit was before the take (muted before: its minimum, heard).
-fn own_level(st: &UnitState, listener_db: Option<f32>, saved_db: Option<f32>) -> Level {
+/// else the listener's level in this zone (`listener_db`, set on another path; `remembered`: from
+/// an earlier take, so never louder than this unit was before this one); else the start level
+/// (`saved_db`, the level the app last played this DAC at, else low), never louder than the unit
+/// was before the take (muted before: its minimum, heard).
+fn own_level(st: &UnitState, listener_db: Option<f32>, remembered: bool, saved_db: Option<f32>) -> Level {
     match (st.chosen, listener_db) {
         (Some(cur), _) => Level { cur, mute: false },
+        (None, Some(db)) if remembered => vol::start_level_below(Some(db), st.before, &st.unit.range),
         (None, Some(db)) => vol::start_level(Some(db), &st.unit.range),
         (None, None) => vol::start_level_below(saved_db, st.before, &st.unit.range),
     }
@@ -1381,6 +1382,7 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
             .ok_or("the DAC has no volume of its own")?;
         let usb = held_ids(h);
         let (listener_muted, listener_db, saved_db) = (h.listener_muted, h.listener_db, h.saved_db);
+        let remembered = h.listener_remembered;
         let t = h.t.clone();
         let st = h.state(uid).expect("shown");
         let u = st.unit.clone();
@@ -1407,7 +1409,7 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
                         cur: now.cur,
                         mute: false,
                     },
-                    _ => own_level(st, listener_db, saved_db),
+                    _ => own_level(st, listener_db, remembered, saved_db),
                 };
                 let mute = path_level(own, listener_db, m, &u.range).mute;
                 if heard && !mute && st.chosen.is_none() {
@@ -1435,7 +1437,8 @@ pub fn set_volume(v: Volume) -> Result<(), String> {
         }
         st.level = Some(Level { cur, mute });
         st.chosen = Some(cur);
-        // The listener's level, for every path (below this unit's minimum: as asked)
+        // The listener's level, for every path (below this unit's minimum: as asked), chosen now
+        h.listener_remembered = false;
         h.listener_db = Some(match v {
             Volume::Db(db) => db.min(vol::cur_to_db(cur)),
             _ => vol::cur_to_db(cur),
@@ -2032,6 +2035,20 @@ pub(crate) mod tests {
             assert!(kt.contains(f), "{f}");
         }
         assert_eq!(kt.matches("@JvmStatic").count(), 12);
+        // Auto's ask again: on screen, and never on top of Android's own attach dialog
+        let again = kt
+            .split("fun requestPermissionAgain(vendor: Int, product: Int): Boolean {")
+            .nth(1)
+            .and_then(|r| r.split("\n        }\n").next())
+            .expect("requestPermissionAgain");
+        assert!(
+            again.contains("IMPORTANCE_FOREGROUND) return false")
+                && again.contains("if (attachedAt > resumedAt) return false"),
+            "{again}"
+        );
+        assert!(kt.contains("UsbManager.ACTION_USB_DEVICE_ATTACHED -> {"));
+        let audio = include_str!("../../../tools/release/android/UsbAudio.kt");
+        assert!(audio.contains("override fun onActivityResumed(a: Activity) = UsbExclusive.resumed()"));
         // openDetached selects nothing itself: a lookup by the name the Rust side chose
         let od = kt
             .split("fun openDetached(name: String): String {")
@@ -2404,9 +2421,15 @@ pub(crate) mod tests {
         *app.permission.lock().unwrap() = false;
         release();
         assert!(!holding());
+        let once = *app.asked_once.lock().unwrap();
         auto_ask();
         auto_ask();
         assert_eq!(*app.asked_again.lock().unwrap(), 1);
+        assert_eq!(
+            *app.asked_once.lock().unwrap(),
+            once,
+            "no second ask on this attach"
+        );
     }
 
     /// A DAC whose permission was given before (kept by its USB ids) is asked again when it is
@@ -2448,6 +2471,11 @@ pub(crate) mod tests {
             *app.asked_again.lock().unwrap(),
             1,
             "once per attach (a no stands)"
+        );
+        assert_eq!(
+            *app.asked_once.lock().unwrap(),
+            0,
+            "nor Auto's first ask: a no on this plug-in stands"
         );
         // Plugged in again with the app in the background: not asked; back on screen: asked
         *app.on_screen.lock().unwrap() = false;
@@ -3836,5 +3864,32 @@ pub(crate) mod tests {
         usb_dac::apply_report(&ka17_report(33, ""));
         drop(open_ok(fmt));
         assert_eq!(volume_of(&app), (Some(-50 * 256), Some(false)));
+    }
+
+    /// A level remembered from an earlier take is capped by each playing unit's own level before
+    /// this take: the 32-bit path's unit, at -50 dB on its own, starts at -50 dB, not at the -10
+    /// dB the listener left on the 16-bit path; that path starts at its -10 dB. A level chosen
+    /// while the app holds the DAC is the listener's for every path (no cap).
+    #[test]
+    fn a_remembered_level_is_capped_by_each_units_own_level() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (fast, slow) = (AudioFormat::pcm(192_000, 24, 2), AudioFormat::pcm(48_000, 16, 2));
+        let (_p, app) = phone(true);
+        *app.raw.lock().unwrap() = Some(two_path_dac());
+        own_units(&app, &[(0x0b, -50, false, -127), (5, 0, false, -127)]);
+        drop(open_ok(slow));
+        set_volume(Volume::Db(-10.0)).unwrap();
+        release();
+        assert_eq!(unit(&app, 5), (-10 * 256, false));
+        assert_eq!(unit(&app, 0x0b), (-50 * 256, false), "untouched");
+        usb_dac::apply_report(&ka17_report(33, ""));
+        drop(open_ok(fast));
+        assert_eq!(unit(&app, 0x0b), (-50 * 256, false), "its own -50 dB, not -10 dB");
+        drop(open_ok(slow));
+        assert_eq!(unit(&app, 5), (-10 * 256, false));
+        // Chosen now: every path at the listener's level
+        set_volume(Volume::Db(-20.0)).unwrap();
+        drop(open_ok(fast));
+        assert_eq!(unit(&app, 0x0b), (-20 * 256, false));
     }
 }
