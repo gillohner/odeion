@@ -128,6 +128,11 @@ const MAX_COLLECTION_BYTES: usize = pm_pubky::homeserver::OBJECT_MAX;
 /// At most this big, the node's whole copy of one listener's collections, as stored.
 const MAX_SHELF_BYTES: usize = 32 * 1024 * 1024;
 
+/// Older releases could save a bigger copy; up to twice [`MAX_SHELF_BYTES`] is read and then
+/// bounded ([`bound_existing`]). A bigger one is never parsed: it stays saved exactly as it is,
+/// and every request says it can't be read, as for a copy that doesn't parse.
+const MAX_SAVED_SHELF_BYTES: usize = 2 * MAX_SHELF_BYTES;
+
 fn bytes_of<T: Serialize>(x: &T) -> usize {
     serde_json::to_vec(x).map_or(usize::MAX, |v| v.len())
 }
@@ -279,6 +284,16 @@ fn load(s: &NodeState, key: &str) -> Result<Shelf, ApiError> {
     let Some(json) = lib.get_setting(&shelf_key(key))? else {
         return Ok(Shelf::default());
     };
+    if json.len() > MAX_SAVED_SHELF_BYTES {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "cannot read saved collections: {} MiB, over the {} MiB this node reads (kept as they are)",
+                json.len() >> 20,
+                MAX_SAVED_SHELF_BYTES >> 20
+            ),
+        ));
+    }
     serde_json::from_str(&json).map_err(|e| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -398,6 +413,30 @@ impl Remote {
     }
 }
 
+/// Whether two listings of one collection have the same current versions. Another app's
+/// change is a new version, a new path: equal head paths mean nobody wrote one in between.
+fn same_heads(a: &Remote, b: &Remote) -> bool {
+    let path = |h: &Option<v1::Head>| h.as_ref().map(|h| h.path.clone());
+    path(&a.private) == path(&b.private) && path(&a.public) == path(&b.public)
+}
+
+/// A listing that failed around a change: the change waits. Never a refusal of the change
+/// itself, which would drop an accepted edit as one the homeserver won't keep.
+fn unlisted(e: PersonalError) -> PersonalError {
+    match e {
+        PersonalError::Rejected(m) => PersonalError::Unreachable(m),
+        e => e,
+    }
+}
+
+/// Another app wrote the collection between the node's listing and its change.
+fn changed_meanwhile() -> PersonalError {
+    PersonalError::Unreachable(
+        "the collection changed on their homeserver meanwhile: the change is written at the next request"
+            .into(),
+    )
+}
+
 enum Pushed {
     Done,
     Held,
@@ -481,6 +520,8 @@ async fn push(
     if !crate::people::may_use_music(s, key) {
         return Ok(Pushed::Waiting(PersonalError::NoGrant));
     }
+    // A collection never written has no version another app could have changed meanwhile.
+    let fresh = k.head.is_empty() && remote.heads().next().is_none();
     let prepared = if !k.deleted && held.is_none() {
         let prepared = match prepare(key, &mut k) {
             Ok(p) => p,
@@ -496,24 +537,52 @@ async fn push(
     } else {
         None
     };
-    if k.deleted || k.unshare || (held.is_none() && !k.public) {
-        for path in remote
+    let removals: Vec<String> = if k.deleted || k.unshare || (held.is_none() && !k.public) {
+        remote
             .versions()
             .into_iter()
             .filter(|p| k.deleted || p.starts_with("/pub/"))
-        {
-            if !crate::people::may_use_music(s, key) {
-                return Ok(Pushed::Waiting(PersonalError::NoGrant));
-            }
-            if let Err(e) = work.call(b.remove(key, &path)).await? {
-                return Ok(Pushed::Waiting(e));
-            }
-            k.versions.retain(|p| p != &path);
-            replace(sh, k.clone())?;
-            save(s, key, sh, work.started).await?;
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let writes = prepared.as_ref().is_some_and(|(_, _, publication)| {
+        k.writing
+            .as_ref()
+            .is_some_and(|w| !w.drafted || (publication.is_some() && !w.published))
+    });
+    // The homeserver has no conditional writes (a lock covers one file; another app's version is
+    // a new file), so the collection is listed again right before the first change. A version
+    // written since the listing this push was planned on leaves the intent pending: the next
+    // request classifies that version first, then replays.
+    if !fresh && (!removals.is_empty() || writes) {
+        let expected = (remote.private.is_some(), remote.public.is_some());
+        match list_one(b, key, id, expected, work).await? {
+            Ok(now) if same_heads(&now, remote) => {}
+            Ok(_) => return Ok(Pushed::Waiting(changed_meanwhile())),
+            Err(e) => return Ok(Pushed::Waiting(unlisted(e))),
         }
     }
+    for path in removals {
+        if !crate::people::may_use_music(s, key) {
+            return Ok(Pushed::Waiting(PersonalError::NoGrant));
+        }
+        if let Err(e) = work.call(b.remove(key, &path)).await? {
+            return Ok(Pushed::Waiting(e));
+        }
+        k.versions.retain(|p| p != &path);
+        replace(sh, k.clone())?;
+        save(s, key, sh, work.started).await?;
+    }
     if k.deleted {
+        // Gone only when listing it again finds no version: one written meanwhile goes next time.
+        if !fresh {
+            match list_one(b, key, id, (false, false), work).await? {
+                Ok(now) if now.heads().next().is_none() => {}
+                Ok(_) => return Ok(Pushed::Waiting(changed_meanwhile())),
+                Err(e) => return Ok(Pushed::Waiting(unlisted(e))),
+            }
+        }
         sh.items.retain(|x| x.id != id);
         save(s, key, sh, work.started).await?;
         return Ok(Pushed::Done);
@@ -546,6 +615,19 @@ async fn push(
             k.writing.as_mut().expect("prepared write").published = true;
             replace(sh, k.clone())?;
             save(s, key, sh, work.started).await?;
+        }
+    }
+    // Synced only when its own version is still the newest, and a private one has no public
+    // copy left. Otherwise the intent stays pending with its progress for the next request.
+    if !fresh {
+        let ours = &writing.edit;
+        match list_one(b, key, id, (true, k.public), work).await? {
+            Ok(now)
+                if now.private.as_ref().is_some_and(|h| &h.edit_id == ours)
+                    && !now.heads().any(|h| &h.edit_id > ours)
+                    && (k.public || now.public.is_none()) => {}
+            Ok(_) => return Ok(Pushed::Waiting(changed_meanwhile())),
+            Err(e) => return Ok(Pushed::Waiting(unlisted(e))),
         }
     }
     k.pending = false;
@@ -647,6 +729,8 @@ async fn observe(
         return Ok(caught);
     }
     let mut candidate = old.clone();
+    // The edit id of the version `candidate` was read from here, if it was
+    let mut taken: Option<String> = None;
     for head in remote.heads() {
         if !needs_read(head) {
             continue;
@@ -692,9 +776,11 @@ async fn observe(
             continue;
         }
         sh.too_big.retain(|t| t.path != head.path);
-        // Drafts are authoritative for display. A public head is checked for safe rewriting,
-        // but cannot replace the private collection's content.
-        if root == v1::Root::Priv && !old.as_ref().is_some_and(|k| k.pending) {
+        // The collection is its newest valid version: the draft, or a newer public copy (or the
+        // only one left) from another app; the draft when they are the same version. Pending
+        // intent stays the node's own, written above every version seen.
+        if !old.as_ref().is_some_and(|k| k.pending) && taken.as_ref().is_none_or(|t| head.edit_id > *t) {
+            taken = Some(head.edit_id.clone());
             candidate = Some(remote_k);
         }
     }
@@ -710,7 +796,9 @@ async fn observe(
             if k.writing.as_ref().is_some_and(|w| newest > &w.edit) {
                 k.writing = None;
             }
-            if newest > &k.head {
+            // Only pending intent moves past a version it didn't take; a kept collection's head
+            // is the version its content came from, never a newer one with older content.
+            if k.pending && newest > &k.head {
                 k.head = newest.clone();
             }
         }

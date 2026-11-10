@@ -41,13 +41,16 @@ pub const PERSONAL_CAPABILITIES: &str =
 const CALL_LIMIT: Duration = Duration::from_secs(8);
 /// How far a listing of a listener's folder goes: whole or not at all (a cut listing is an
 /// error, so nothing the node holds is read as deleted there), at most 10,000 entries in 100
-/// pages within [`CALL_LIMIT`]. Their homeserver can't make the node hold more.
+/// pages within [`CALL_LIMIT`], each entry at most 2 KiB and 4 MiB of them in all (the paths
+/// the node writes there are under 200 bytes). Their homeserver can't make the node hold more.
 const PERSONAL_LIST: pm_pubky::homeserver::ListBounds = pm_pubky::homeserver::ListBounds {
     max_entries: 10_000,
     max_pages: 100,
     deadline: CALL_LIMIT,
     newest_first: false,
     whole: true,
+    max_entry_bytes: 2 * 1024,
+    max_bytes: 4 * 1024 * 1024,
 };
 /// How long a Ring approval for the grant may wait.
 const CONNECT_TTL: Duration = Duration::from_secs(600);

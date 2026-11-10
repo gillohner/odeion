@@ -175,6 +175,13 @@ pub struct ListBounds {
     /// The listing must end within the bounds: a cut one is [`HomeserverError::Cut`] (a sync
     /// must never take a partial listing for the whole; it would read the rest as deleted).
     pub whole: bool,
+    /// At most this long, one entry as listed (its cursor: the pubky URL holding its path). The
+    /// listing stops, cut, at a longer one. The SDK parses each page whole before the node sees
+    /// it; this bounds what the node keeps and asks for after a page with long paths.
+    pub max_entry_bytes: usize,
+    /// At most this many bytes of entries (their cursors) in the whole listing; past it the
+    /// listing stops, cut, like one past [`Self::max_entries`].
+    pub max_bytes: usize,
 }
 
 impl ListBounds {
@@ -187,6 +194,8 @@ impl ListBounds {
         deadline: std::time::Duration::from_secs(20),
         newest_first: true,
         whole: false,
+        max_entry_bytes: usize::MAX,
+        max_bytes: usize::MAX,
     };
     /// The owner's own homeserver: complete, but finite (200,000 entries, 2,000 pages, 10 min).
     /// A listing that reaches a limit is an error, never a partial listing taken as complete.
@@ -196,6 +205,8 @@ impl ListBounds {
         deadline: std::time::Duration::from_secs(600),
         newest_first: false,
         whole: true,
+        max_entry_bytes: usize::MAX,
+        max_bytes: usize::MAX,
     };
 }
 
@@ -238,8 +249,9 @@ where
 
 /// A listing within `bounds`, page by page from `page(cursor)`, which answers `Ok(None)` for a
 /// directory that isn't there (it lists as empty). The listing stops, incomplete, at the entry
-/// cap (entries past it are dropped, from the page that crosses it too), the page cap, the
-/// deadline, or a cursor that doesn't move on (one seen before); with `bounds.whole` that is
+/// cap (entries past it are dropped, from the page that crosses it too), the byte caps (the page
+/// with an entry past them is dropped whole), the page cap, the deadline, or a cursor that
+/// doesn't move on (one seen before); with `bounds.whole` that is
 /// [`HomeserverError::Cut`] instead. A page shorter than [`LIST_LIMIT`] is the end only when its
 /// cursor moved on: a short page that ends on a cursor seen before is a homeserver going round,
 /// not a whole listing.
@@ -258,6 +270,7 @@ where
     let mut seen = std::collections::HashSet::new();
     let mut complete = false;
     let mut answered = false;
+    let mut bytes = 0usize;
     for _ in 0..bounds.max_pages {
         let left = bounds.deadline.saturating_sub(started.elapsed());
         let Ok(got) = tokio::time::timeout(left, page(cursor.clone())).await else {
@@ -272,6 +285,14 @@ where
             complete = true;
             break;
         };
+        // Long paths count as well as many entries: past a byte cap the listing is cut there
+        let over = got.iter().any(|(_, c)| {
+            bytes = bytes.saturating_add(c.len());
+            c.len() > bounds.max_entry_bytes || bytes > bounds.max_bytes
+        });
+        if over {
+            break;
+        }
         let n = got.len();
         let next = got.last().map(|(_, c)| c.clone());
         let moved_on = next.as_ref().is_none_or(|c| !seen.contains(c));
@@ -1412,6 +1433,8 @@ mod listing_tests {
             deadline: std::time::Duration::from_millis(deadline_ms),
             newest_first: false,
             whole: false,
+            max_entry_bytes: usize::MAX,
+            max_bytes: usize::MAX,
         }
     }
 
@@ -1653,6 +1676,66 @@ mod listing_tests {
         let asked = AtomicUsize::new(0);
         let l = list(120, usize::MAX, whole, &asked).await.unwrap();
         assert_eq!((l.entries.len(), l.complete), (120, true));
+    }
+
+    #[tokio::test]
+    async fn long_paths_cut_a_listing_like_too_many_entries() {
+        // The pages' cursors ("pubky://u/pub/x/<i>"): 1,790 bytes for the first hundred, 1,900
+        // for the second, 950 for the last fifty; 4,640 in all
+        let within = ListBounds {
+            max_bytes: 4_640,
+            ..bounds(10_000, 100, 5_000)
+        };
+        let asked = AtomicUsize::new(0);
+        let l = list(250, usize::MAX, within, &asked).await.unwrap();
+        assert_eq!((l.entries.len(), l.complete), (250, true), "exactly at the cap");
+        // One byte less: cut at the page that crosses it, which is dropped
+        let asked = AtomicUsize::new(0);
+        let over = ListBounds {
+            max_bytes: 3_000,
+            ..bounds(10_000, 100, 5_000)
+        };
+        let l = list(250, usize::MAX, over, &asked).await.unwrap();
+        assert_eq!((l.entries.len(), l.complete), (100, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 2, "no page asked for after the cut");
+        let asked = AtomicUsize::new(0);
+        let e = list(250, usize::MAX, ListBounds { whole: true, ..over }, &asked)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, HomeserverError::Cut { .. }), "{e}");
+        // One entry longer than an entry may be
+        let asked = AtomicUsize::new(0);
+        let long = ListBounds {
+            max_entry_bytes: 17,
+            ..bounds(10_000, 100, 5_000)
+        };
+        let l = list(250, usize::MAX, long, &asked).await.unwrap();
+        assert_eq!(
+            (l.entries.len(), l.complete),
+            (0, false),
+            "the first page's cursors from 10 on are 18 bytes"
+        );
+        let asked = AtomicUsize::new(0);
+        let e = list(250, usize::MAX, ListBounds { whole: true, ..long }, &asked)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, HomeserverError::Cut { .. }), "{e}");
+        // A hostile homeserver's one page of huge paths: cut, nothing kept
+        let huge = format!("/pub/x/{}", "a".repeat(64 * 1024));
+        let l = list_within(
+            ListBounds {
+                max_entry_bytes: 2 * 1024,
+                ..bounds(10_000, 100, 5_000)
+            },
+            "/pub/x/",
+            |_| {
+                let huge = huge.clone();
+                async move { Ok(Some(vec![(huge.clone(), format!("pubky://u{huge}"))])) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (0, false));
     }
 }
 

@@ -68,6 +68,10 @@ pub struct Fake {
     pub unreadable: Mutex<HashSet<String>>,
     /// Their files (collections), by key and path.
     pub files: Mutex<HashMap<String, BTreeMap<String, Vec<u8>>>>,
+    /// Another app of theirs writes these files at the first call of this kind (`read`,
+    /// `write` or `remove`), once: a version that appears after the node's listing, before or
+    /// while it changes the collection.
+    pub meanwhile: Mutex<Option<(&'static str, Vec<(String, Vec<u8>)>)>>,
 }
 
 impl Fake {
@@ -77,6 +81,22 @@ impl Fake {
     }
     fn check(&self, key: &str, op: &str, uri: &str) -> Result<(), PersonalError> {
         self.calls.lock().unwrap().push(format!("{key} {op} {uri}"));
+        let meanwhile = {
+            let mut m = self.meanwhile.lock().unwrap();
+            if m.as_ref().is_some_and(|(on, _)| *on == op) {
+                m.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, files)) = meanwhile {
+            self.files
+                .lock()
+                .unwrap()
+                .entry(key.to_string())
+                .or_default()
+                .extend(files);
+        }
         if !self.connected.lock().unwrap().contains(key) {
             return Err(PersonalError::NoGrant);
         }

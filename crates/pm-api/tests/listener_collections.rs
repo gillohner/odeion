@@ -2735,9 +2735,10 @@ async fn accepted_item_commands_are_not_repeated_after_grant_loss() {
             }
             let (st, first) = call(&app, &ann, method, &path, body.clone()).await;
             let calls = fake.calls.lock().unwrap().clone();
+            // The refresh's two listings, and the collection's own two right before its draft
             assert_eq!(
                 calls.iter().filter(|c| c.contains(" list ")).count(),
-                2,
+                4,
                 "{calls:?}"
             );
             assert_eq!(
@@ -3430,4 +3431,210 @@ async fn a_budget_boundary_between_draft_and_publication_keeps_the_completed_dra
         "resume publication without duplicating the draft: {calls:?}"
     );
     assert_eq!(fake.paths(ANN, &format!("{PUBLISHED}{id}/")).len(), 1);
+}
+
+/// What another app of hers writes for `id`: a version newer than any the node writes now (its
+/// newest draft, edited) at each of `roots`. Its draft path, and the files, not written yet.
+fn another_apps_version(
+    fake: &Fake,
+    id: &str,
+    roots: &[&str],
+    edit: impl FnOnce(&mut serde_json::Value),
+) -> (String, Vec<(String, Vec<u8>)>) {
+    let (draft, mut content) = newest(fake, ANN, id);
+    edit(&mut content);
+    let mut post = fake.json(ANN, &draft);
+    post["content"] = content.to_string().into();
+    let later = pm_pubky::v1::id_of(pm_pubky::ids::now_micros() + 5_000_000);
+    let files = roots
+        .iter()
+        .map(|root| {
+            (
+                format!("{root}{id}/{later}.json"),
+                serde_json::to_vec(&post).unwrap(),
+            )
+        })
+        .collect();
+    (format!("{DRAFTS}{id}/{later}.json"), files)
+}
+
+#[tokio::test]
+async fn her_other_apps_newer_or_only_public_version_is_shown_and_edited() {
+    for drafts_gone in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let (st, made) = call(
+            &app,
+            &ann,
+            "POST",
+            "/v1/collections",
+            Some(serde_json::json!({"name": "Mix", "uris": [SONG_A], "public": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{made}");
+        let id = made["summary"]["id"].as_str().unwrap().to_string();
+        // Her phone publishes a newer version with a second song and writes no newer draft;
+        // or it removes its drafts as well, leaving only that public copy
+        let (theirs, files) = another_apps_version(&fake, &id, &[PUBLISHED], |c| {
+            c["name"] = "Phone".into();
+            let mut it = c["items"][0].clone();
+            it["uri"] = SONG_B.into();
+            c["items"].as_array_mut().unwrap().push(it);
+        });
+        {
+            let mut all = fake.files.lock().unwrap();
+            let mine = all.get_mut(ANN).unwrap();
+            if drafts_gone {
+                let drafts = format!("{DRAFTS}{id}/");
+                mine.retain(|p, _| !p.starts_with(&drafts));
+            }
+            mine.extend(files);
+        }
+        let (st, detail) = call(&app, &ann, "GET", &format!("/v1/collections/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "drafts_gone={drafts_gone}: {detail}");
+        assert_eq!(
+            detail["playlist"]["name"], "Phone",
+            "the newest version shows: {detail}"
+        );
+        assert_eq!(item_uris(&detail["playlist"]), vec![SONG_A, SONG_B], "{detail}");
+        // An edit here starts from it: her phone's song stays
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("/v1/collections/{id}"),
+            Some(serde_json::json!({"name": "Mix 2"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "drafts_gone={drafts_gone}: {v}");
+        assert_eq!(v["summary"]["synced"], true, "{v}");
+        let (path, content) = newest(&fake, ANN, &id);
+        assert!(path > theirs, "{path} above her phone's {theirs}");
+        assert_eq!(content["name"], "Mix 2");
+        assert_eq!(item_uris(&content), vec![SONG_A, SONG_B], "{content}");
+    }
+}
+
+#[tokio::test]
+async fn a_version_her_other_app_writes_meanwhile_keeps_the_change_waiting() {
+    for op in ["edit", "unshare", "delete"] {
+        for during in [false, true] {
+            let case = format!("{op}, during={during}");
+            let dir = tempfile::tempdir().unwrap();
+            let (s, fake, ann, _) = node(dir.path());
+            fake.connected.lock().unwrap().insert(ANN.to_string());
+            let app = router(s.clone());
+            let shared = op == "unshare";
+            let (st, made) = call(
+                &app,
+                &ann,
+                "POST",
+                "/v1/collections",
+                Some(serde_json::json!({"name": "Mix", "uris": [SONG_A], "public": shared})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{case}: {made}");
+            let id = made["summary"]["id"].as_str().unwrap().to_string();
+            let at = format!("/v1/collections/{id}");
+            let roots: &[&str] = if shared { &[DRAFTS, PUBLISHED] } else { &[DRAFTS] };
+            let (theirs, files) = another_apps_version(&fake, &id, roots, |c| c["name"] = "Phone".into());
+            // Before: after the node listed it, while it reads it first. During: at the node's
+            // first change of it (a write, or the removal of a version)
+            let on = match (during, op) {
+                (false, _) => "read",
+                (true, "edit") => "write",
+                (true, _) => "remove",
+            };
+            *fake.meanwhile.lock().unwrap() = Some((on, files));
+            let (st, v) = match op {
+                "edit" => call(&app, &ann, "PUT", &at, Some(serde_json::json!({"name": "Mix 2"}))).await,
+                "unshare" => {
+                    call(
+                        &app,
+                        &ann,
+                        "PUT",
+                        &format!("{at}/visibility"),
+                        Some(serde_json::json!({"public": false})),
+                    )
+                    .await
+                }
+                _ => call(&app, &ann, "DELETE", &at, None).await,
+            };
+            assert!(
+                fake.meanwhile.lock().unwrap().is_none(),
+                "{case}: her other app wrote meanwhile"
+            );
+            if op == "delete" {
+                assert_eq!(st, StatusCode::NO_CONTENT, "{case}: {v}");
+            } else {
+                assert_eq!(st, StatusCode::OK, "{case}: {v}");
+                assert_eq!(
+                    v["summary"]["synced"], false,
+                    "{case}: never synced over a version it hasn't seen: {v}"
+                );
+            }
+            assert!(
+                fake.paths(ANN, DRAFTS).contains(&theirs),
+                "{case}: her other app's version stays"
+            );
+            assert_eq!(pending_count(&s), 1, "{case}: the change waits");
+            // The next request sees that version first, then makes the change
+            let (st, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+            assert_eq!(st, StatusCode::OK, "{case}: {list}");
+            assert_eq!(pending_count(&s), 0, "{case}");
+            match op {
+                "delete" => {
+                    assert_eq!(list, serde_json::json!([]), "{case}: nothing comes back");
+                    assert!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).is_empty(), "{case}");
+                }
+                "unshare" => {
+                    assert!(
+                        fake.paths(ANN, &format!("{PUBLISHED}{id}/")).is_empty(),
+                        "{case}: no public copy is left"
+                    );
+                    assert_eq!(list[0]["visibility"], "private", "{case}: {list}");
+                }
+                _ => {
+                    let (path, content) = newest(&fake, ANN, &id);
+                    assert!(path > theirs, "{case}: {path} above {theirs}");
+                    assert_eq!(content["name"], "Mix 2", "{case}");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_saved_copy_too_big_to_read_is_kept_as_it_is_and_never_parsed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let (st, made) = create(&app, &ann, "Kept", &[SONG_A]).await;
+    assert_eq!(st, StatusCode::OK, "{made}");
+    let key = format!("person.{ANN}.collections");
+    let saved = s.library.lock().unwrap().get_setting(&key).unwrap().unwrap();
+    // Valid JSON (trailing whitespace) past the size the node reads, as an older release's
+    // copy with a long history could be: refused before parsing, not parsed then bounded
+    let big = format!("{saved}{}", " ".repeat(64 * 1024 * 1024));
+    s.library.lock().unwrap().set_setting(&key, &big).unwrap();
+    fake.calls.lock().unwrap().clear();
+    for path in ["/v1/collections", "/v1/me/homeserver"] {
+        let (st, v) = call(&app, &ann, "GET", path, None).await;
+        assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{path}: {v}");
+        assert!(
+            v["error"].as_str().unwrap().contains("over the 64 MiB"),
+            "{path}: {v}"
+        );
+    }
+    assert!(
+        fake.calls.lock().unwrap().is_empty(),
+        "no homeserver work from a copy it can't read"
+    );
+    assert!(
+        s.library.lock().unwrap().get_setting(&key).unwrap().as_deref() == Some(big.as_str()),
+        "kept exactly as it was"
+    );
 }
