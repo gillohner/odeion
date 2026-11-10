@@ -80,9 +80,10 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-  # pm-node/odeiond and the big-library generator, built once for every job below that only runs
-  # them (slimproto, plex, webdav, connection, web-ui, speed, ui-controls, ui-screens). Line tables
-  # only: the same code, a smaller download.
+  # pm-node/odeiond and the big-library generator, built once for the jobs below that run them
+  # (slimproto, plex, audiobookshelf, bundle, webdav, connection, web-ui, speed, ui-controls,
+  # ui-screens). Default features and line tables, as in .cargo/config.toml. Jobs with additional
+  # Rust integration tests keep their own test builds; ALSA keeps its feature-specific node build.
   node:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -309,8 +310,7 @@ jobs:
     # release (tag and commit), run without Docker (tools/abs-source.py).
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    needs: node
     env:
       ABS_TAG: v2.37.1
       ABS_COMMIT: 3563d49424d50170324de9236a24c591b6d965e9
@@ -329,7 +329,11 @@ jobs:
           git clone -q --depth 1 -b "$ABS_TAG" https://github.com/advplyr/audiobookshelf.git /tmp/abs-src
           test "$(git -C /tmp/abs-src rev-parse HEAD)" = "$ABS_COMMIT"
           cd /tmp/abs-src && npm ci --no-audit --no-fund && npm run build:server
-      - run: cargo build -p pm-node
+      # Same-run default-feature daemon; the real-ffmpeg integration test still builds below.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - run: python3 -I tools/abs-source.py target/debug/pm-node /tmp/abs-src "$(command -v ffmpeg)" /tmp/abs
       # Downloads with the real ffmpeg (the other download tests use a stand-in)
       - run: PM_REAL_FFMPEG=1 cargo test -p pm-api --test downloads real_ffmpeg
@@ -341,15 +345,18 @@ jobs:
     # node manages it, what listens where, and that no generated password reaches a log.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    needs: node
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo build -p pm-node
+      # Same-run default-feature daemon; homeserver/vault test builds remain independent below.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: node-debug
+      - run: mkdir -p target/debug && tar -xzf node-debug.tgz -C target/debug && rm node-debug.tgz
       - name: the node's CI image
         run: |
           cp target/debug/odeiond deploy/docker/entrypoint.sh deploy/bundle/ci/
