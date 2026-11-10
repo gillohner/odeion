@@ -2760,3 +2760,57 @@ async fn a_level_announced_during_the_unmute_is_what_the_correction_goes_by() {
     assert_eq!(d.level, VolumeLevel::Db(-45.0), "not raised to the limit");
     assert_eq!(level_of(&zone), Some((VolumeLevel::Db(-45.0), false)));
 }
+
+/// A member already heard above a lowered limit (never muted here) that refuses to be brought
+/// down: the zone doesn't show the limit its peer took, but the level it had (the member still
+/// plays there), and the refusal is said. The muted case stays as it was
+/// (`a_member_refusing_the_correction_still_leaves_the_zone_shown_unmuted`).
+#[tokio::test]
+async fn an_audible_member_that_refuses_its_correction_is_not_hidden() {
+    use pm_model::VolumeLevel;
+    let limit: Arc<Mutex<Option<f32>>> = Arc::new(Mutex::new(None));
+    let zones = zones_with_limit(limit.clone());
+    let chooses = Arc::new(ChoosesOnUnmute::new());
+    let stuck = Arc::new(Stuck {
+        inner: NullOutput::with_volume(pm_model::VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        }),
+        stuck: Default::default(),
+    });
+    let members: Vec<Arc<dyn Output>> = vec![chooses.clone(), stuck.clone()];
+    let group = Arc::new(pm_zones::outputs::GroupOutput::new("Pair", members).unwrap());
+    let zone = zones.create("Pair", group);
+    zone.set_volume(Volume::Db(-10.0)).await.unwrap();
+    zone.wait_acked().await;
+    let k = stuck.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (k.level, k.muted),
+        (VolumeLevel::Db(-10.0), false),
+        "heard at -10"
+    );
+    // The limit comes down; the member then refuses level changes
+    *limit.lock().unwrap() = Some(-20.0);
+    stuck.stuck.store(true, Ordering::SeqCst);
+    assert!(
+        zone.set_volume(Volume::Mute(false)).await.is_err(),
+        "the refusal is said"
+    );
+    zone.wait_acked().await;
+    let k = stuck.inner.volume().await.unwrap().unwrap();
+    assert_eq!(
+        (k.level, k.muted),
+        (VolumeLevel::Db(-10.0), false),
+        "still heard at -10"
+    );
+    assert_eq!(
+        level_of(&zone),
+        Some((VolumeLevel::Db(-10.0), false)),
+        "shown at the level a member still plays at, not the limit"
+    );
+    assert_eq!(
+        chooses.inner.volume().await.unwrap().unwrap().level,
+        VolumeLevel::Db(-20.0)
+    );
+}

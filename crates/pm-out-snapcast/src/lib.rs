@@ -321,10 +321,10 @@ impl Output for SnapcastOutput {
         let clients: Vec<String> = self.group.clients.iter().map(|(id, _)| id.clone()).collect();
         let limit = self.percent_for_db(max);
         match tokio::task::spawn_blocking(move || unmute_clients(&server, &clients, limit)).await {
-            Ok(Ok((back, refused))) => pm_zones::Unmuted {
-                any: back > 0,
-                error: refused.map(snap_err),
-                held: true,
+            Ok(Ok(o)) => pm_zones::Unmuted {
+                any: o.back > 0,
+                error: o.refused.map(snap_err),
+                held: o.held,
             },
             Ok(Err(e)) => pm_zones::Unmuted::nothing(snap_err(e)),
             Err(_) => pm_zones::Unmuted::nothing(SinkError::Device("snapcast unmute panicked".into())),
@@ -391,17 +391,25 @@ fn client_volumes(status: &Value) -> std::collections::HashMap<String, (u8, bool
         .collect()
 }
 
+/// What [`unmute_clients`] did: how many clients play now, the first refusal, and whether every
+/// one that plays is known at or under the limit.
+struct ClientsUnmuted {
+    back: usize,
+    refused: Option<SnapError>,
+    held: bool,
+}
+
 /// Unmute `clients` under `limit` (percent), each by its own level: one above the limit is set to
 /// it in the same call (a Snapcast level write unmutes), the others are only unmuted. A client the
-/// server doesn't report stays muted and is the refusal.
-fn unmute_clients(
-    server: &str,
-    clients: &[String],
-    limit: u8,
-) -> Result<(usize, Option<SnapError>), SnapError> {
+/// server doesn't report stays muted and is the refusal. A write whose answer was lost (the
+/// connection broke: the server may have applied it) is checked against a fresh status, never
+/// taken as done because it was sent; a client the server refused but already played counts as
+/// playing, not held when above the limit. The first error is kept either way.
+fn unmute_clients(server: &str, clients: &[String], limit: u8) -> Result<ClientsUnmuted, SnapError> {
     let mut c = Control::connect(server)?;
     let levels = client_volumes(&c.call("Server.GetStatus", Value::Null)?);
-    let (mut back, mut refused) = (0, None);
+    let (mut back, mut refused, mut held) = (0, None, true);
+    let mut unsure: Vec<&String> = Vec::new();
     for id in clients {
         let volume = match levels.get(id) {
             Some((p, _)) if *p > limit => json!({"percent": limit, "muted": false}),
@@ -419,11 +427,46 @@ fn unmute_clients(
         match c.call("Client.SetVolume", json!({"id": id, "volume": volume})) {
             Ok(_) => back += 1,
             Err(e) => {
+                match &e {
+                    SnapError::Io(..) => unsure.push(id),
+                    // Refused: as it was. Playing already, it still plays
+                    _ => {
+                        if let Some((p, false)) = levels.get(id) {
+                            back += 1;
+                            held &= *p <= limit;
+                        }
+                    }
+                }
                 refused.get_or_insert(e);
             }
         }
     }
-    Ok((back, refused))
+    if !unsure.is_empty() {
+        // The answers were lost, maybe after the server applied them: what it says now decides
+        let now = Control::connect(server)
+            .and_then(|mut c| c.call("Server.GetStatus", Value::Null))
+            .map(|status| client_volumes(&status));
+        match now {
+            Ok(now) => {
+                for id in unsure {
+                    if let Some((p, false)) = now.get(id) {
+                        back += 1;
+                        held &= *p <= limit;
+                    }
+                }
+            }
+            // Not known: those it played before still play
+            Err(_) => {
+                for id in unsure {
+                    if let Some((p, false)) = levels.get(id) {
+                        back += 1;
+                        held &= *p <= limit;
+                    }
+                }
+            }
+        }
+    }
+    Ok(ClientsUnmuted { back, refused, held })
 }
 
 /// Add our stream, wait for snapserver to connect, route the group to it.
@@ -616,7 +659,18 @@ mod tests {
         fake_server_refusing(status, None)
     }
 
-    fn fake_server_refusing(mut status: Value, refuses: Option<String>) -> (String, Taken) {
+    fn fake_server_refusing(status: Value, refuses: Option<String>) -> (String, Taken) {
+        fake_server_with(status, refuses, None)
+    }
+
+    /// [`fake_server`] that refuses `Client.SetVolume` for `refuses`, and for `loses_reply` applies
+    /// it and then closes the connection without answering (the answer is lost; the server keeps
+    /// the change and answers new connections).
+    fn fake_server_with(
+        mut status: Value,
+        refuses: Option<String>,
+        loses_reply: Option<String>,
+    ) -> (String, Taken) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let set = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -632,6 +686,7 @@ mod tests {
                         Some("Server.GetStatus") => status.clone(),
                         Some("Client.SetVolume") => {
                             let p = &req["params"];
+                            let lose = p["id"].as_str() == loses_reply.as_deref();
                             if p["id"].as_str() == refuses.as_deref() {
                                 let response = json!({"id": req["id"], "jsonrpc": "2.0",
                                     "error": {"code": -1, "message": "fixture refusal"}});
@@ -650,6 +705,10 @@ mod tests {
                             seen.lock()
                                 .unwrap()
                                 .push((p["id"].as_str().unwrap().to_string(), p["volume"].clone()));
+                            if lose {
+                                // Applied; the answer never goes out
+                                break;
+                            }
                             json!({})
                         }
                         _ => json!({}),
@@ -670,6 +729,60 @@ mod tests {
     /// Unmuting under a limit goes per client: the louder client comes down to the limit, the
     /// quieter one is only unmuted (never raised to the limit); a client the server doesn't
     /// report stays muted and is the refusal.
+    fn one_client(percent: u8, muted: bool) -> (Value, Group) {
+        let status = json!({"server": {"groups": [{"id": "g", "clients": [
+            {"id": "only", "config": {"volume": {"percent": percent, "muted": muted}}}
+        ]}]}});
+        let group = Group {
+            id: "g".into(),
+            name: String::new(),
+            stream_id: "default".into(),
+            clients: vec![("only".into(), "Only".into())],
+        };
+        (status, group)
+    }
+
+    async fn unmute(out: &SnapcastOutput, max: f32) -> pm_zones::Unmuted {
+        out.unmute_held(
+            Volume::Percent(out.percent_for_db(max)),
+            max,
+            None,
+            true,
+            &pm_zones::UnmuteSafety::default(),
+        )
+        .await
+    }
+
+    /// The server applies the unmute and the connection breaks before its answer: the fresh
+    /// status says the client plays, so the output came back (the error is still said). A
+    /// refusal that changed nothing leaves it muted; a client that already played and refused
+    /// to come down to the limit plays, not held.
+    #[tokio::test]
+    async fn an_unmute_whose_answer_was_lost_is_checked_with_the_server() {
+        let max = -30.0;
+        // Applied, answer lost
+        let (status, group) = one_client(20, true);
+        let (addr, set) = fake_server_with(status, None, Some("only".into()));
+        let out = SnapcastOutput::new(&addr, group);
+        let r = unmute(&out, max).await;
+        assert!(r.any && r.held, "it plays, at its own lower level: {r:?}");
+        assert!(r.error.is_some(), "the lost answer is still said: {r:?}");
+        assert_eq!(
+            set.lock().unwrap().clone(),
+            vec![("only".to_string(), json!({"muted": false}))]
+        );
+        // Refused, nothing applied: still muted
+        let (status, group) = one_client(20, true);
+        let (addr, _) = fake_server_refusing(status, Some("only".into()));
+        let r = unmute(&SnapcastOutput::new(&addr, group), max).await;
+        assert!(!r.any && r.error.is_some(), "{r:?}");
+        // Already playing above the limit and refused: playing, not held
+        let (status, group) = one_client(80, false);
+        let (addr, _) = fake_server_refusing(status, Some("only".into()));
+        let r = unmute(&SnapcastOutput::new(&addr, group), max).await;
+        assert!(r.any && !r.held && r.error.is_some(), "{r:?}");
+    }
+
     #[tokio::test]
     async fn an_unmute_under_a_limit_never_raises_a_quieter_client() {
         let status = json!({"server": {"groups": [{"id": "g", "clients": [

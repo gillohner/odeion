@@ -655,7 +655,14 @@ pub trait Output: Send + Sync {
                 if let Some(b) = back(v.level) {
                     if let Err(e) = self.set_volume(b).await {
                         safety.record(self.id(), true);
-                        return Unmuted::nothing(e);
+                        // Already heard above the limit (its mute had failed, or it was never
+                        // muted): it is playing and not held, which is said, never hidden behind a
+                        // peer that took the limit. A muted one stays muted: nothing came back
+                        return Unmuted {
+                            any: !v.muted,
+                            held: v.muted,
+                            error: Some(e),
+                        };
                     }
                 }
                 safety.record(self.id(), false);
