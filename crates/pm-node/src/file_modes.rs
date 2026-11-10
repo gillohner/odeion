@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 /// The files [`tighten`] makes the node's alone: the library database and its journal files,
 /// the config (it may hold the API token and service secrets), the made API token, the Pubky session secret, the
-/// remote-access key, the app players' keys and a config a restore brought back. Only those that
-/// are in the data folder are changed ([`tighten`]).
+/// remote-access key, the app players' keys, a config a restore brought back, usage insights and
+/// problem reports. Only those that are in the data folder are changed ([`tighten`]).
 pub fn private_files(
     data_dir: &Path,
     db: &Path,
@@ -33,6 +33,11 @@ pub fn private_files(
         "usage.sqlite-journal",
         "usage.sqlite-wal",
         "usage.sqlite-shm",
+        // Problem reports (the inbox makes the file 0600) and their journal files
+        "feedback.sqlite",
+        "feedback.sqlite-journal",
+        "feedback.sqlite-wal",
+        "feedback.sqlite-shm",
     ] {
         v.push(data_dir.join(name));
     }
@@ -172,6 +177,30 @@ mod tests {
         // Already tight: nothing changes, nothing is logged; a missing file is skipped
         let again = tighten(&data, &private_files(&data, &db, Some(&conf), &secret));
         assert!(again.changed.is_empty() && again.left.is_empty(), "{again:?}");
+    }
+
+    /// Problem reports and usage insights hold what people wrote and did: a copy made by hand, or
+    /// a journal SQLite left behind, is the node's alone too.
+    #[test]
+    fn reports_and_usage_insights_become_the_nodes_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let mut files = Vec::new();
+        for base in ["feedback.sqlite", "usage.sqlite"] {
+            for ext in ["", "-journal", "-wal", "-shm"] {
+                let f = data.join(format!("{base}{ext}"));
+                std::fs::write(&f, "x").unwrap();
+                std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+                files.push(f);
+            }
+        }
+        let db = data.join("library.sqlite");
+        let secret = data.join("pubky-session.secret");
+        tighten(&data, &private_files(&data, &db, None, &secret));
+        let open: Vec<_> = files.iter().filter(|f| mode(f) != 0o600).collect();
+        assert!(open.is_empty(), "still readable by others: {open:?}");
     }
 
     /// A file the node can't look at or change is reported, never passed over in silence.

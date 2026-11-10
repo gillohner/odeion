@@ -2802,3 +2802,60 @@ async fn a_large_private_folder_lists_within_the_pages_deadline() {
         2_000
     );
 }
+
+/// A listing with a listener's byte bounds is read by the node itself (each page capped before it
+/// is parsed), with a grant session's own bearer for the private root: it lists exactly what the
+/// SDK lists, over two pages, private and public.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_listing_lists_what_the_sdk_lists() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pm_pubky::homeserver::ListBounds;
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, _z32, raw) = identity(&pubky, "pm-api-capped-list").await;
+    assert!(
+        session.as_grant().is_some(),
+        "a grant session: the node's own bearer request is the one tested"
+    );
+    let roots = [
+        ("/priv/social/v1/posts/", Visibility::Private),
+        ("/pub/social/v1/posts/", Visibility::Public),
+    ];
+    for (root, _) in roots {
+        let puts = (0..130).map(|i| {
+            let session = &session;
+            async move {
+                session
+                    .storage()
+                    .put(format!("{root}{i:04}/{i:04}.json").as_str(), b"{}".to_vec())
+                    .await
+                    .unwrap();
+            }
+        });
+        futures_util::StreamExt::collect::<Vec<()>>(futures_util::StreamExt::buffer_unordered(
+            futures_util::stream::iter(puts),
+            8,
+        ))
+        .await;
+    }
+    let capped = ListBounds {
+        max_entry_bytes: 2 * 1024,
+        max_bytes: 4 * 1024 * 1024,
+        ..ListBounds::OWNER
+    };
+    for (root, visibility) in roots {
+        let sdk = homeserver
+            .list_tree(&raw, root, visibility, Some(&session), ListBounds::OWNER)
+            .await
+            .unwrap();
+        let ours = homeserver
+            .list_tree(&raw, root, visibility, Some(&session), capped)
+            .await
+            .unwrap();
+        assert_eq!(ours.entries.len(), 130, "{root}");
+        assert_eq!(ours, sdk, "{root}");
+    }
+}

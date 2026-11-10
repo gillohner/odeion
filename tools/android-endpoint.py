@@ -38,7 +38,9 @@ the node's set moves it back to 0); a network zone (the node's null output with 
 chosen in the page gets the volume keys as its own volume, Android's media volume untouched.
 Screenshots of the media notification and the lock screen; the lock screen's is taken only once the
 keyguard is showing (`dumpsys window policy`, the screen awake) with the track on it (the screen's
-uiautomator dump), else the run fails. Volumes stay at 0-5 %.
+uiautomator dump; where uiautomator cannot dump the lock screen because the playing track's progress
+never lets System UI go idle, System UI's lock-screen window holding the focus and the app's media
+session playing that track), else the run fails. Volumes stay at 0-5 %.
 
 Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
        android-endpoint.py --self-test   (the lock-screen decision on synthetic dumps; no adb)
@@ -287,14 +289,27 @@ def percent_of(index, top):
     return 100 if index >= top else min(99, (index * 100 + top // 2) // top)
 
 
+def session_block(text, pkg=PKG):
+    """The app's own block in `dumpsys media_session` (from its `package=` line up to the next
+    session's header, at most 30 lines), or "": never a line of another app's session."""
+    at = text.find(f"package={pkg}")
+    if at < 0:
+        return ""
+    lines = text[text.rfind("\n", 0, at) + 1:].splitlines()
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    block = [lines[0]]
+    for line in lines[1:30]:
+        if line.strip() and len(line) - len(line.lstrip()) < indent:
+            break
+        block.append(line)
+    return "\n".join(block)
+
+
 def our_session():
     """The app's block in `dumpsys media_session` (kept in the artifact), or ""."""
     text = adb("shell", "dumpsys", "media_session")
     (out / "media_session.txt").write_text(text)
-    at = text.find(f"package={PKG}")
-    if at < 0:
-        return ""
-    return "\n".join(text[at:].splitlines()[:30])
+    return session_block(text)
 
 
 def zone_percent(zid):
@@ -472,8 +487,50 @@ def media_on_lock_screen(xml, title, pkg=PKG):
     return False, f"the track's title {title!r} is not on the screen in System UI's nodes"
 
 
-def lock_screen_verdict(policy, power, xml, title, pkg=PKG):
-    """(True, why) only for an awake screen whose keyguard shows, uncovered, with the track on it."""
+# `uiautomator dump` waits for the screen to go idle and gives up ("ERROR: could not get idle
+# state.", AOSP DumpCommand) while System UI keeps sending accessibility events: on the lock screen
+# the playing track's progress bar does so all the time, so the dump of a lock screen with music on
+# it can be empty on some images (API 35's). Only then the lock screen is read from what Android
+# says instead: the focused window is System UI's lock-screen window (from Android 11 the keyguard
+# is drawn in NotificationShade, which takes the focus while the keyguard shows), and the app's media
+# session, active and playing with the track's title, is what that window's media player shows.
+DUMP_UNAVAILABLE = re.compile(r"could not get idle state|null root node", re.I)
+LOCK_WINDOW = re.compile(r"Window\{[^}\n]*\sNotificationShade\}")
+
+
+def lock_window(focus, pkg=PKG):
+    """(True, why) when `dumpsys window`'s mCurrentFocus is System UI's lock-screen window. Every
+    mCurrentFocus line must be (one per display): one on the app, or on anything else, is not."""
+    said = [s.strip() for s in re.findall(r"\bmCurrentFocus=([^\n]*)", focus)]
+    if not said:
+        return False, "no mCurrentFocus in dumpsys window"
+    for s in said:
+        if pkg in s:
+            return False, f"the app holds the focus ({s})"
+        if not LOCK_WINDOW.fullmatch(s):
+            return False, f"the focus is not System UI's lock-screen window ({s})"
+    return True, f"System UI's lock-screen window has the focus ({said[0]})"
+
+
+def media_session_playing(session, title):
+    """(True, why) when the app's block in `dumpsys media_session` is active and playing the track."""
+    if not session:
+        return False, "the app has no media session"
+    if not title:
+        return False, "no track title to look for in the media session"
+    if "active=true" not in session:
+        return False, "the app's media session is not active"
+    if not re.search(r"state=PlaybackState \{state=(?:3\b|PLAYING)", session):
+        return False, "the app's media session is not playing"
+    if title.casefold() not in session.casefold():
+        return False, f"the track's title {title!r} is not in the app's media session"
+    return True, f"the app's media session is active and playing {title!r}"
+
+
+def lock_screen_verdict(policy, power, xml, title, pkg=PKG, dump_said="", focus="", session=""):
+    """(True, why) only for an awake screen whose keyguard shows, uncovered, with the track on it:
+    in the uiautomator dump, or, only when uiautomator says it could not dump the screen, with
+    System UI's lock-screen window focused and the app's session playing the track."""
     awake, why_awake = screen_awake(power)
     if not awake:
         return False, f"the screen is not awake ({why_awake})"
@@ -481,24 +538,46 @@ def lock_screen_verdict(policy, power, xml, title, pkg=PKG):
     if state != "showing":
         return False, why_kg
     media, why_media = media_on_lock_screen(xml, title, pkg)
-    if not media:
-        return False, f"{why_kg}, but {why_media}"
-    return True, f"{why_awake}; {why_kg}; {why_media}"
+    if media:
+        return True, f"{why_awake}; {why_kg}; {why_media}"
+    if re.search(r"<node ", xml) or not DUMP_UNAVAILABLE.search(dump_said):
+        return False, f"{why_kg}, but {why_media}" + (f" (uiautomator: {dump_said.strip()})" if dump_said.strip() else "")
+    window, why_window = lock_window(focus, pkg)
+    if not window:
+        return False, f"{why_kg}, uiautomator could not dump the screen ({dump_said.strip()}), and {why_window}"
+    playing, why_playing = media_session_playing(session, title)
+    if not playing:
+        return False, f"{why_kg}, uiautomator could not dump the screen ({dump_said.strip()}), and {why_playing}"
+    return True, f"{why_awake}; {why_kg}; uiautomator could not dump the screen ({dump_said.strip()}); {why_window}; {why_playing}"
 
 
 def screen_dumps():
-    """`dumpsys window policy`, `dumpsys power` and the screen's uiautomator dump, kept in the
-    artifact (keyguard-policy.txt, keyguard-power.txt, ui-lock-screen.xml)."""
+    """`dumpsys window policy`, `dumpsys power`, the screen's uiautomator dump and what uiautomator
+    said, the focused window and the app's media session, kept in the artifact (keyguard-policy.txt,
+    keyguard-power.txt, ui-lock-screen.xml.txt, ui-lock-screen-dump.txt, window-focus.txt,
+    media_session.txt). A dump from an earlier try is removed first, never read again."""
     policy = adb("shell", "dumpsys", "window", "policy")
     power = adb("shell", "dumpsys", "power")
     (out / "keyguard-policy.txt").write_text(policy)
     (out / "keyguard-power.txt").write_text(power)
-    xml = ""
+    xml, dump_said, focus, session = "", "", "", ""
     if screen_awake(power)[0]:
-        adb("shell", "uiautomator", "dump", "/sdcard/lock.xml", check=False)
+        adb("shell", "rm", "-f", "/sdcard/lock.xml", check=False)
+        r = subprocess.run(["adb", "shell", "uiautomator", "dump", "/sdcard/lock.xml"], capture_output=True, text=True, timeout=120)
+        dump_said = f"{r.stdout}{r.stderr}".strip() or f"exit {r.returncode}, nothing said"
         xml = adb("exec-out", "cat", "/sdcard/lock.xml", check=False)
-        (out / "ui-lock-screen.xml").write_text(xml)
-    return policy, power, xml
+        (out / "ui-lock-screen.xml.txt").write_text(xml)
+        (out / "ui-lock-screen-dump.txt").write_text(dump_said + "\n")
+        focus = "\n".join(l.strip() for l in adb("shell", "dumpsys", "window").splitlines() if "mCurrentFocus=" in l or "mFocusedApp=" in l)
+        (out / "window-focus.txt").write_text(focus + "\n")
+        session = our_session()
+    return policy, power, xml, dump_said, focus, session
+
+
+def lock_screen_now(title):
+    """The lock-screen verdict on the screen as it is now (see lock_screen_verdict)."""
+    policy, power, xml, dump_said, focus, session = screen_dumps()
+    return lock_screen_verdict(policy, power, xml, title, dump_said=dump_said, focus=focus, session=session)
 
 
 def lock_screen(title):
@@ -526,7 +605,7 @@ def lock_screen(title):
 
             def ready():
                 nonlocal last
-                ok, last = lock_screen_verdict(*screen_dumps(), title)
+                ok, last = lock_screen_now(title)
                 return ok
 
             try:
@@ -536,9 +615,10 @@ def lock_screen(title):
                 log(f"no lock screen with the track (try {attempt}): {last}")
         else:
             raise AssertionError(f"no lock screen with the track on it after sleep and wake (locksettings get-disabled: "
-                                 f"{said!r}): {last}; see keyguard-policy.txt, keyguard-power.txt, ui-lock-screen.xml")
+                                 f"{said!r}): {last}; see keyguard-policy.txt, keyguard-power.txt, ui-lock-screen.xml.txt, "
+                                 f"ui-lock-screen-dump.txt, window-focus.txt, media_session.txt")
         shot("7-lock-screen")
-        ok, why = lock_screen_verdict(*screen_dumps(), title)
+        ok, why = lock_screen_now(title)
         assert ok, f"the lock screen went while its screenshot was taken: {why}"
         log(f"lock screen: {why}")
         done = True
@@ -1092,6 +1172,47 @@ def self_test():
     check(keyguard_state(unlocked)[0] == "hidden", "unlock: no keyguard is seen as hidden")
     check(keyguard_state(locked)[0] == "showing", "unlock: the keyguard is seen as showing")
     check(keyguard_state("")[0] == "unknown", "unlock: nothing known is not hidden")
+    # uiautomator unable to dump the lock screen (the playing track's progress never lets it idle):
+    # read from the focused window and the app's media session, only then
+    idle = "ERROR: could not get idle state."
+    shade = f"mCurrentFocus=Window{{4f1c2a7 u0 NotificationShade}}\nmFocusedApp=ActivityRecord{{91d3 u0 {PKG}/.MainActivity t9}}"
+    app_focus = f"mCurrentFocus=Window{{8e2b11 u0 {PKG}/{PKG}.MainActivity}}\nmFocusedApp=ActivityRecord{{91d3 u0 {PKG}/.MainActivity t9}}"
+    playing = (f"    {PKG} {PKG}/MediaControl (userId=0)\n      package={PKG}\n      active=true\n"
+               "      state=PlaybackState {state=PLAYING(3), position=10962, speed=1.0, actions=823}\n"
+               "      metadata: size=5, description=Tone, This phone, null\n")
+    paused = playing.replace("state=PLAYING(3)", "state=PAUSED(2)")
+
+    def fallback(policy=locked, power=SAMPLE_AWAKE, xml="", said=idle, focus=shade, session=playing, title="Tone"):
+        return lock_screen_verdict(policy, power, xml, title, dump_said=said, focus=focus, session=session)[0]
+
+    check(fallback(), "ACCEPT: no dump (could not get idle state), System UI's lock-screen window focused, the session playing the track")
+    check(fallback(said="ERROR: null root node returned by UiTestAutomationBridge."), "ACCEPT: no dump (null root node), the same")
+    check(not fallback(said=""), "REJECT: an empty dump uiautomator gave no reason for")
+    check(not fallback(said="UI hierchary dumped to: /sdcard/lock.xml"), "REJECT: an empty dump uiautomator says it wrote")
+    check(not fallback(focus=app_focus), "REJECT: no dump, the app holding the focus")
+    check(not fallback(focus="mCurrentFocus=null\nmFocusedApp=null"), "REJECT: no dump, nothing focused")
+    check(not fallback(focus=""), "REJECT: no dump, no mCurrentFocus at all")
+    check(not fallback(session=paused), "REJECT: no dump, the session paused")
+    check(not fallback(session=playing.replace("active=true", "active=false")), "REJECT: no dump, the session inactive")
+    check(not fallback(session=""), "REJECT: no dump, no session of the app")
+    check(not fallback(title="Another track"), "REJECT: no dump, the session playing another track")
+    check(not fallback(title=""), "REJECT: no dump, no track title to look for")
+    check(not fallback(policy=unlocked), "REJECT: no dump, the shade over an unlocked screen (no keyguard)")
+    check(not fallback(policy=_policy("true", occluded="true", monitor="true")), "REJECT: no dump, the keyguard covered")
+    check(not fallback(power=SAMPLE_ASLEEP), "REJECT: no dump, the screen asleep")
+    check(not fallback(xml=SAMPLE_APP_HOME), "REJECT: a dump of the app's Home, whatever uiautomator also said")
+    check(not fallback(xml=SAMPLE_KEYGUARD_BARE), "REJECT: a dump of the keyguard without the track, whatever the session says")
+    check(not fallback(focus=shade + "\n" + app_focus), "REJECT: no dump, the app focused on another display line")
+    check(not fallback(focus="mCurrentFocus=Window{77aa u0 StatusBar}"), "REJECT: no dump, the status bar focused (not the lock screen)")
+    # The app's own block of `dumpsys media_session`, never another app's session after it
+    other = ("    com.other.player com.other.player/Session (userId=0)\n      package=com.other.player\n      active=true\n"
+             "      state=PlaybackState {state=PLAYING(3), position=1, speed=1.0}\n      metadata: size=3, description=Tone, x, y\n")
+    dump = "  Sessions Stack - have 2 sessions:\n" + paused + other
+    ours = session_block(dump)
+    check(ours.lstrip().startswith(f"package={PKG}") and "com.other.player" not in ours and "PAUSED(2)" in ours,
+          "session block: the app's own lines only, up to the next session")
+    check(not media_session_playing(ours, "Tone")[0], "REJECT: the app paused while another app plays the same title")
+    check(session_block(other) == "", "session block: none for an app without a session")
     if failed:
         print(f"self-test FAILED: {len(failed)} check(s)")
         return 1
