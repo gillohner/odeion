@@ -67,6 +67,11 @@ fn pubky() -> Pubky {
 }
 
 fn node(dir: &std::path::Path) -> Arc<NodeState> {
+    node_with_token(dir, None)
+}
+
+/// [`node`] with an API token, so owner browser sessions and device sign-ins are checked.
+fn node_with_token(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
     let db = dir.join("node.sqlite");
     NodeState::new(
         NodeSettings {
@@ -77,7 +82,7 @@ fn node(dir: &std::path::Path) -> Arc<NodeState> {
             art_dir: dir.join("art"),
             mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
-            token: None,
+            token: token.map(str::to_string),
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
@@ -1562,7 +1567,8 @@ async fn failed_wipe_marker_persistence_keeps_local_clear_intent() {
 }
 
 /// Suspend A-to-B after publication, then complete B-to-C before A-to-B's trailing cleanup.
-/// Every predecessor must already be retired when its replacement can be observed.
+/// Every predecessor must already be retired when its replacement can be observed, and the
+/// trailing cleanup keeps C's browser session and device sign-in made meanwhile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn overlapping_identity_swaps_retire_before_publication() {
     let Some(mut ids) = identities_with_sessions(3, &["node.pubky.music"]).await else {
@@ -1579,7 +1585,7 @@ async fn overlapping_identity_swaps_retire_before_publication() {
     let b = make(ids.pop().unwrap().pop().unwrap());
     let a = make(ids.pop().unwrap().pop().unwrap());
     let dir = tempfile::tempdir().unwrap();
-    let n = node(dir.path());
+    let n = node_with_token(dir.path(), Some("api-fixture"));
     n.set_sync(Some(a.clone()));
     let (reached, release) = pm_api::test_hooks::arm(&format!("sync.after_swap:{}", a.id()));
     let first = {
@@ -1595,6 +1601,9 @@ async fn overlapping_identity_swaps_retire_before_publication() {
     assert!(Arc::ptr_eq(&n.sync_handle().unwrap(), &b));
     n.set_sync(Some(c.clone()));
     assert!(a.is_retired() && b.is_retired() && !c.is_retired());
+    // C's owner signs in from a browser and from the app while A-to-B's cleanup is still held
+    let browser = pm_api::accounts::mint_owner(&n, c.z32()).unwrap();
+    let device = pm_api::accounts::mint_device(&n, c.z32()).unwrap();
     {
         let mut activity = n.sync_activity.lock().unwrap();
         activity.owner = Some(c.id());
@@ -1606,10 +1615,23 @@ async fn overlapping_identity_swaps_retire_before_publication() {
         .await
         .unwrap()
         .unwrap();
-    let activity = n.sync_activity.lock().unwrap();
-    assert_eq!(activity.owner, Some(c.id()));
-    assert!(activity.running);
-    assert_eq!(activity.step.as_deref(), Some("C owns this activity"));
+    {
+        let activity = n.sync_activity.lock().unwrap();
+        assert_eq!(activity.owner, Some(c.id()));
+        assert!(activity.running);
+        assert_eq!(activity.step.as_deref(), Some("C owns this activity"));
+    }
+    let c_key = c.z32().trim_start_matches("pubky").to_string();
+    for (what, token) in [("browser session", &browser), ("device sign-in", &device)] {
+        let who = pm_api::accounts::caller(&n, Some(token.as_str()));
+        assert!(
+            who.as_ref().is_some_and(
+                |w| w.role == pm_api::accounts::Role::Owner && w.key.as_deref() == Some(c_key.as_str())
+            ),
+            "C's {what} survives A-to-B's trailing cleanup: {:?}",
+            who.map(|w| w.key)
+        );
+    }
 }
 
 /// Exercise the actual synchronous completion boundary with success, ordinary failure and

@@ -507,7 +507,7 @@ fn mint_owners(s: &NodeState, key: &str, list: &str, cap: usize) -> Result<Strin
     let mut evicted = false;
     let made = update_in(&lib, list, |all| {
         // Still the node's identity, checked under the same hold as the cleanup when it takes on
-        // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
+        // another one (`keep_current_owner_sessions`), so no session of the old one slips past it
         let current = s
             .sync_handle()
             .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
@@ -551,18 +551,51 @@ fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
 /// The node took on the identity `owner` (restored at start, or a log in renewed or changed it):
 /// browser sessions and device sign-ins of any other identity end, so none can come back later.
 pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let r = retain_owner(&lib, owner);
+    drop(lib);
+    settle_retain(s, r)
+}
+
+/// [`keep_owner_sessions_of`] for the identity the node has loaded now, read under the library's
+/// hold and kept while the lists change (library before identity, as a sign-in mints): an
+/// identity change that took effect meanwhile can't be undone by an earlier one's cleanup, which
+/// would end the newer identity's sessions. No identity loaded: nothing ends here.
+pub fn keep_current_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let identity = s.sync.lock().expect("sync lock");
+    let Some(owner) = identity.as_ref().map(|h| h.z32().to_string()) else {
+        return Ok(());
+    };
+    let r = retain_owner(&lib, &owner);
+    // The usage lock is taken before the identity's when sessions are revoked: both are let go
+    // first
+    drop(identity);
+    drop(lib);
+    settle_retain(s, r)
+}
+
+/// What [`retain_owner`] did: whether any session ended, and each list's write.
+type Retained = (bool, Result<(), ApiError>, Result<(), ApiError>);
+
+/// Keep only `owner`'s browser sessions and device sign-ins.
+fn retain_owner(lib: &pm_library::Library, owner: &str) -> Retained {
     let owner = owner.trim_start_matches("pubky");
     let mut ended = false;
-    let browsers = update(s, OWNER_SESSIONS, |all| {
+    let browsers = update_in(lib, OWNER_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.key == owner);
         ended |= all.len() < before;
     });
-    let devices = update(s, DEVICE_SESSIONS, |all| {
+    let devices = update_in(lib, DEVICE_SESSIONS, |all| {
         let before = all.len();
         all.retain(|t| t.key == owner);
         ended |= all.len() < before;
     });
+    (ended, browsers, devices)
+}
+
+fn settle_retain(s: &NodeState, (ended, browsers, devices): Retained) -> Result<(), ApiError> {
     // A browser session or a device sign-in ended: its usage insights end too, also when a write
     // failed after
     if ended {
