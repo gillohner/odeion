@@ -157,12 +157,14 @@ docker exec "$NODE" sh -c "$NODE_BACKUP_SH"
 docker cp "$NODE:/tmp/pm-backup-library.db" "$DEST/node/library.db" > /dev/null
 docker exec "$NODE" rm -f /tmp/pm-backup-library.db
 # 3. the rest of the data folder (vault key, Pubky session, remote key, config, covers) and the
-#    tunnel settings. Never usage insights (usage.sqlite, docs/guides/usage-insights.md), and never
-#    a listener's homeserver grant (grants/: a key to their own homeserver, only theirs to give).
+#    tunnel settings. Never usage insights (usage.sqlite, docs/guides/usage-insights.md) or problem
+#    reports (feedback.sqlite), and never a listener's homeserver grant (grants/: a key to their own
+#    homeserver, only theirs to give).
 docker run --rm -v "$NODE_DATA:/data:ro" "$ALPINE" tar czf - -C /data \
   --exclude ./grants --exclude './grants/*' \
   --exclude ./library.db --exclude ./library.db-wal --exclude ./library.db-shm \
   --exclude ./usage.sqlite --exclude ./usage.sqlite-journal --exclude ./usage.sqlite-wal --exclude ./usage.sqlite-shm \
+  --exclude ./feedback.sqlite --exclude ./feedback.sqlite-journal --exclude ./feedback.sqlite-wal --exclude ./feedback.sqlite-shm \
   --exclude ./library.db.bak --exclude ./library.db.restoring . > "$DEST/node/data.tar.gz"
 [ -z "$TUNNEL" ] || docker run --rm -v "$TUNNEL:/t:ro" "$ALPINE" tar czf - -C /t . > "$DEST/node/tunnel.tar.gz"
 

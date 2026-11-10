@@ -208,7 +208,7 @@ html { -webkit-tap-highlight-color: transparent; }
 }
 .topbar .menu-btn { display: inline-flex; }
 .search {
-  display: flex; align-items: center; gap: 8px; flex: 0 1 420px;
+  display: flex; align-items: center; gap: 8px; flex: 0 1 420px; min-width: 44px;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-pill); padding: 0 12px; height: 38px;
   transition: border-color var(--dur-base) var(--ease), background var(--dur-base) var(--ease);
 }
@@ -219,6 +219,7 @@ html { -webkit-tap-highlight-color: transparent; }
 .search input::-webkit-search-cancel-button { appearance: none; }
 .search kbd { font: var(--fs-xs) ui-monospace, monospace; color: var(--muted); border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 1px 6px; }
 .topbar-right { margin-left: auto; font-size: var(--fs-xs); color: var(--muted); }
+.topbar-help { display: inline-flex; flex: none; }
 .scanning { display: inline-flex; align-items: center; gap: 8px; }
 .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line-strong); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -1438,11 +1439,17 @@ html[data-shell="phone"] .sidebar, html[data-shell="phone"] .menu-btn { display:
 html[data-shell="phone"] .me-btn { display: inline-flex; flex: none; width: 44px; height: 44px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 html[data-shell="phone"] .topbar { padding: 0 6px 0 14px; gap: 6px; }
 /* Nothing in the top bar may be wider than the screen: a too-wide bar made the whole page wider,
-   and the WebView then panned it sideways (owner's recording, 2026-11-06). The search field and the
-   status chip shrink; the buttons keep their size. */
-html[data-shell="phone"] .search { flex: 1 1 auto; min-width: 0; }
+   and the WebView then panned it sideways (owner's recording, 2026-11-06). The buttons keep their
+   size; the rest gives way. The search shrinks down to its magnifier (44 px, .search), also in the
+   desktop layout on a narrow window. A crowded bar (a scan running and a part not answering): the
+   scan shows as its spinner (the words stay for screen readers, and the library page says it too),
+   and the warning is cut with an ellipsis down to its dot. */
+html[data-shell="phone"] .search { flex: 1 1 auto; }
 html[data-shell="phone"] .topbar-right:empty { display: none; }
-html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: 0 1 auto; min-width: 0; max-width: 48%; }
+html[data-shell="phone"] .topbar-right { position: relative; flex: none; }
+html[data-shell="phone"] .topbar-right .scan-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: 0 1 auto; min-width: 28px; max-width: 48%; }
+html[data-shell="phone"] .topbar .upstreams .up-text { min-width: 0; }
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
 /* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
 html[data-shell="phone"] .player { grid-template-columns: minmax(150px, 1fr) fit-content(48%) auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
