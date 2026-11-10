@@ -133,14 +133,11 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
         assert_ne!(st, StatusCode::UNAUTHORIZED, "{open}: {body}");
     }
     for owners in [
-        "/v1/favourites",
-        "/v1/bookmarks",
-        "/v1/collections",
+        "/v1/collections/0034A0Z1Y2X3W/play-from",
         "/v1/me/listens",
         "/v1/me/listens/stats",
         "/v1/me/listens/settings",
         "/v1/activity",
-        "/v1/playlists",
         "/v1/tags",
         "/v1/reviews",
         "/v1/library/history",
@@ -188,13 +185,13 @@ async fn a_listener_reads_the_library_but_not_the_owners_things() {
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
-    // Writes outside their zones are refused
+    // Writes outside their zones and their own are refused
     let (st, _) = call(
         &app,
         &listener,
         "POST",
-        "/v1/playlists",
-        Some(serde_json::json!({"name": "x"})),
+        "/v1/playlists/from-queue",
+        Some(serde_json::json!({"zone": "kitchen"})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);

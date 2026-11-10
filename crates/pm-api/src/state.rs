@@ -178,16 +178,25 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
     /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
-    /// a device of the owner's).
+    /// a device of the owner's, the music access revision when it started).
+    #[allow(clippy::type_complexity)]
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<
             String,
-            (pm_pubky::homeserver::LoginFlow, std::time::Instant, String, bool),
+            (
+                pm_pubky::homeserver::LoginFlow,
+                std::time::Instant,
+                String,
+                bool,
+                u64,
+            ),
         >,
     >,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
     /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
     pub renewals: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Listeners' homeservers as a test stands them in (personal.rs); none: their grants.
+    personal_homeserver: Mutex<Option<Arc<dyn crate::personal::PersonalHomeserver>>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
     pub events: crate::events::EventBus,
@@ -203,8 +212,17 @@ pub struct NodeState {
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
     /// Held while the people roster is read, changed and stored (`people::update`), so no change
-    /// is made to a copy older than one stored meanwhile.
-    pub(crate) roster: tokio::sync::Mutex<()>,
+    /// is made to a copy older than one stored meanwhile. Public so tests can stand for a change
+    /// under way.
+    pub roster: tokio::sync::Mutex<()>,
+    /// Removals whose roster change has landed but whose cleanup is still running. Restore
+    /// waits for these without holding the roster lock, so it cannot re-add someone midway.
+    pub(crate) removing_people: Mutex<std::collections::HashSet<String>>,
+    pub(crate) people_access: Mutex<crate::people::AccessRevisions>,
+    /// Each listener's homeserver operations, and their membership changes, one at a time
+    /// (personal.rs `person_lock`, `membership_lock`).
+    pub(crate) person_locks: crate::personal::PersonLocks,
+    pub(crate) membership_locks: crate::personal::PersonLocks,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,
@@ -471,6 +489,7 @@ impl NodeState {
             login: tokio::sync::Mutex::new(None),
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             renewals: Default::default(),
+            personal_homeserver: Mutex::new(None),
             upload_jobs: Default::default(),
             pinakes_caps: Default::default(),
             copy_seams: Default::default(),
@@ -482,6 +501,10 @@ impl NodeState {
             watcher: Mutex::new(None),
             sleep: Mutex::new(HashMap::new()),
             roster: tokio::sync::Mutex::new(()),
+            removing_people: Mutex::new(Default::default()),
+            people_access: Mutex::new(Default::default()),
+            person_locks: Default::default(),
+            membership_locks: Default::default(),
             discover: Mutex::new(None),
             endpoint_keys: Mutex::new(None),
             pulls: Mutex::new(HashMap::new()),
@@ -2127,6 +2150,15 @@ impl NodeState {
                 }
             }
         }
+    }
+
+    /// Listeners' homeservers through something else than their grants: a test's fake.
+    pub fn set_personal_homeserver(&self, h: Arc<dyn crate::personal::PersonalHomeserver>) {
+        *self.personal_homeserver.lock().expect("personal lock") = Some(h);
+    }
+
+    pub(crate) fn personal_override(&self) -> Option<Arc<dyn crate::personal::PersonalHomeserver>> {
+        self.personal_homeserver.lock().expect("personal lock").clone()
     }
 
     pub fn sync_handle(&self) -> Option<Arc<crate::sync::PubkySync>> {

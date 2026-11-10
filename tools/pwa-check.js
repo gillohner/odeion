@@ -101,6 +101,15 @@ const code = (s) => s.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
 const list = /const FILES = \[([^\]]*)\]/.exec(sw);
 if (!list) fail('sw.js: no FILES list');
 else for (const f of list[1].match(/'[^']*'/g) || []) if (/\/v1|\/art|\/rest|\/party|\/mb\/|token|callback/i.test(f)) fail(`sw.js: ${f} is not a public page file`);
+// Every file the page waits for (its stylesheets, and scripts without async or defer) is one the
+// worker keeps and one a kept page needs (BLOCKING): else an offline launch waits for the node
+const waits = [...html.matchAll(/<link rel="stylesheet" href="(\/[^"]+)"|<script src="(\/[^"]+)"(?![^>]*\b(?:async|defer)\b)[^>]*>/g)].map((x) => x[1] || x[2]);
+const blocking = /const BLOCKING = \[([^\]]*)\]/.exec(sw);
+if (!blocking) fail('sw.js: no BLOCKING list');
+else for (const f of waits) {
+  if (!list || !list[1].includes(`'${f}'`)) fail(`sw.js: the page waits for ${f}, FILES doesn't keep it`);
+  if (!blocking[1].includes(`'${f}'`)) fail(`sw.js: the page waits for ${f}, BLOCKING doesn't name it`);
+}
 for (const [src, name] of [[sw, 'sw.js'], [pwaJs, 'pwa.js']]) {
   if (/caches\.delete|caches\.keys|\.unregister\(/.test(code(src))) fail(`${name}: deletes caches or workers`);
   // The one reload allowed: the Reconnect button a person presses once the node answers again
