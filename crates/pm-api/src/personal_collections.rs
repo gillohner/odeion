@@ -259,15 +259,17 @@ fn shelf_key(key: &str) -> String {
     format!("{PERSON_PREFIX}{}.collections", key.trim_start_matches("pubky"))
 }
 
-fn load(s: &NodeState, key: &str) -> Shelf {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(&shelf_key(key))
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default()
+fn load(s: &NodeState, key: &str) -> Result<Shelf, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let Some(json) = lib.get_setting(&shelf_key(key))? else {
+        return Ok(Shelf::default());
+    };
+    serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read saved collections: {e}"),
+        )
+    })
 }
 
 fn save(s: &NodeState, key: &str, sh: &Shelf) -> Result<(), ApiError> {
@@ -287,13 +289,13 @@ fn save(s: &NodeState, key: &str, sh: &Shelf) -> Result<(), ApiError> {
 }
 
 /// How many of their collections wait to be written (`GET /v1/me/homeserver`).
-pub(crate) fn pending(s: &NodeState, key: &str) -> usize {
-    load(s, key).items.iter().filter(|k| k.pending).count()
+pub(crate) fn pending(s: &NodeState, key: &str) -> Result<usize, ApiError> {
+    Ok(load(s, key)?.items.iter().filter(|k| k.pending).count())
 }
 
 /// Whether the node's last read of their collections was incomplete (`GET /v1/me/homeserver`).
-pub(crate) fn behind(s: &NodeState, key: &str) -> bool {
-    load(s, key).behind
+pub(crate) fn behind(s: &NodeState, key: &str) -> Result<bool, ApiError> {
+    Ok(load(s, key)?.behind)
 }
 
 fn rejected(e: impl std::fmt::Display) -> PersonalError {
@@ -607,21 +609,32 @@ async fn observe(
         .retain(|p| v1::parse_version(p).is_none_or(|(i, _)| i != id) || paths.contains(p));
     sh.too_big
         .retain(|t| v1::parse_version(&t.path).is_none_or(|(i, _)| i != id) || paths.contains(&t.path));
-    let mut candidate = old.clone();
+    let needs_read = |head: &v1::Head| {
+        old.as_ref()
+            .is_none_or(|k| force || k.pending || head.edit_id > k.head)
+    };
+    let was = old.as_ref().map_or(0, bytes_of);
+    // A current held head already prevents replacing or replaying this collection. Check
+    // both roots before downloading either sibling: otherwise an uncached private sibling
+    // spends a read on every request and can permanently starve older discovery. A size
+    // hold stops doing so once there is room. No cached candidate becomes write authority;
+    // explicit deletion/unsharing can still remove the current public paths while held.
     for head in remote.heads() {
-        let needs_read = old
-            .as_ref()
-            .is_none_or(|k| force || k.pending || head.edit_id > k.head);
-        if !needs_read {
+        if !needs_read(head) {
             continue;
         }
         if sh.other.contains(&head.path) {
             caught.held_back.insert(id.to_string(), Held::Unreadable);
-            continue;
-        }
-        let was = old.as_ref().map_or(0, bytes_of);
-        if sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was) {
+        } else if sh.too_big.iter().any(|t| t.path == head.path) && !fits_now(sh, &head.path, was) {
             caught.held_back.insert(id.to_string(), Held::Size);
+        }
+    }
+    if caught.held_back.contains_key(id) {
+        return Ok(caught);
+    }
+    let mut candidate = old.clone();
+    for head in remote.heads() {
+        if !needs_read(head) {
             continue;
         }
         let bytes = match work.read(b, key, &head.path).await {
@@ -1004,7 +1017,7 @@ async fn read(s: &NodeState, key: &str) -> Result<Option<Shelf>, ApiError> {
     if !b.connected(key) {
         return Ok(None);
     }
-    let mut sh = load(s, key);
+    let mut sh = load(s, key)?;
     bound_existing(&mut sh, None)?;
     let mut work = Work::new();
     if !personal::is_lost(s, key) {
@@ -1039,7 +1052,7 @@ async fn change(
     if personal::is_lost(s, key) {
         return Ok(personal::needs_connect(true));
     }
-    let mut sh = load(s, key);
+    let mut sh = load(s, key)?;
     let mut bounded = sh.clone();
     let recovering = bound_existing(&mut bounded, id).is_err();
     if !recovering {
@@ -1468,7 +1481,7 @@ pub(crate) async fn play(
     if !personal::backend(&s).connected(&key) {
         return Err(not_found(&id));
     }
-    let sh = load(&s, &key);
+    let sh = load(&s, &key)?;
     let k = sh
         .items
         .iter()

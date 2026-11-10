@@ -912,8 +912,8 @@ pub(crate) async fn status(
     Ok(Json(PersonalState {
         connected,
         lost: connected && copy.lost,
-        pending: copy.pending.len() + crate::personal_collections::pending(&s, &key),
-        stale: connected && crate::personal_collections::behind(&s, &key),
+        pending: copy.pending.len() + crate::personal_collections::pending(&s, &key)?,
+        stale: connected && crate::personal_collections::behind(&s, &key)?,
     }))
 }
 
@@ -937,7 +937,7 @@ pub(crate) async fn disconnect(
     Ok(Json(PersonalState {
         connected: false,
         lost: false,
-        pending: copy.pending.len() + crate::personal_collections::pending(&s, &key),
+        pending: copy.pending.len() + crate::personal_collections::pending(&s, &key)?,
         stale: false,
     }))
 }

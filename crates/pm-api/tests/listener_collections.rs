@@ -1983,6 +1983,94 @@ async fn held_uncached_heads_do_not_spend_the_next_requests_download_allowance()
 }
 
 #[tokio::test]
+async fn held_public_siblings_cannot_starve_discovery_from_an_empty_shelf() {
+    for marked in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let (_, made) = create(&router(s.clone()), &ann, "Older collection", &[SONG_A]).await;
+        assert_eq!(made["summary"]["synced"], true);
+        let older = made["summary"]["id"].as_str().unwrap();
+        let good = fake.json(ANN, &newest(&fake, ANN, older).0);
+        let good_post: pubky_social_specs::PubkySocialPost = serde_json::from_value(good.clone()).unwrap();
+        let note = pubky_social_specs::PubkySocialPost::new(
+            "Another app's public note".into(),
+            pubky_social_specs::PubkySocialPostKind::Note,
+            None,
+            None,
+            Vec::new(),
+        );
+        let owner = pm_pubky::v1::PubkyId::try_from(ANN).unwrap();
+        let base = pm_pubky::ids::now_micros() + 60_000_000;
+        let mut markers = Vec::new();
+        for n in 0..16 {
+            let id = pm_pubky::v1::id_of(base + n);
+            pm_pubky::v1::validate_social(&good_post, &id, pm_pubky::v1::Root::Priv, &owner).unwrap();
+            pm_pubky::v1::validate_social(&note, &id, pm_pubky::v1::Root::Pub, &owner).unwrap();
+            let private = format!("{DRAFTS}{id}/{id}.json");
+            let public = format!("{PUBLISHED}{id}/{}.json", pm_pubky::v1::id_of(base + 100 + n));
+            let mut files = fake.files.lock().unwrap();
+            let files = files.get_mut(ANN).unwrap();
+            files.insert(private, serde_json::to_vec(&good).unwrap());
+            files.insert(public.clone(), serde_json::to_vec(&note).unwrap());
+            markers.push(public);
+        }
+        let before = fake.files.lock().unwrap()[ANN].clone();
+        let mut shelf = stored_shelf(&s);
+        shelf["items"] = serde_json::json!([]);
+        shelf["other"] = if marked {
+            serde_json::json!(markers)
+        } else {
+            serde_json::json!([])
+        };
+        store_shelf(&s, &shelf);
+        // No pending queue exists to rotate. Unseen pairs take two bounded classification
+        // passes; known public holds must then cost zero private-sibling reads on reload.
+        let passes = if marked { 1 } else { 3 };
+        for pass in 0..passes {
+            fake.calls.lock().unwrap().clear();
+            let (st, list) = call(&router(s.clone()), &ann, "GET", "/v1/collections", None).await;
+            assert_eq!(st, StatusCode::OK, "marked={marked}, pass={pass}: {list}");
+            let calls = fake.calls.lock().unwrap().clone();
+            assert!(calls.len() <= 32, "{calls:?}");
+            let reads = calls.iter().filter(|c| c.contains(" read ")).count();
+            assert!(reads <= 16, "{calls:?}");
+            assert_eq!(calls.iter().filter(|c| c.contains(" list ")).count(), 2);
+            assert!(!calls
+                .iter()
+                .any(|c| c.contains(" write ") || c.contains(" remove ")));
+            assert_eq!(fake.files.lock().unwrap()[ANN], before);
+            let stored = stored_shelf(&s);
+            assert_eq!(pending_count(&s), 0);
+            if pass + 1 < passes {
+                assert_eq!(reads, 16, "unseen heads consume actual downloads");
+                assert_eq!(list, serde_json::json!([]));
+                assert_eq!(stored["other"].as_array().unwrap().len(), (pass + 1) * 8);
+            } else {
+                assert_eq!(reads, 1, "current holds skip their supported siblings too");
+                assert_eq!(names(&list), vec!["Older collection"]);
+                assert_eq!(stored["items"].as_array().unwrap().len(), 1);
+                assert_eq!(stored["items"][0]["id"], older);
+                assert_eq!(stored["other"].as_array().unwrap().len(), 16);
+            }
+        }
+        fake.calls.lock().unwrap().clear();
+        let (st, detail) = call(
+            &router(s.clone()),
+            &ann,
+            "GET",
+            &format!("/v1/collections/{older}"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{detail}");
+        assert_eq!(detail["playlist"]["name"], "Older collection");
+        assert_eq!(fake.calls.lock().unwrap().len(), 2, "only the two fresh listings");
+        assert_eq!(fake.files.lock().unwrap()[ANN], before);
+    }
+}
+
+#[tokio::test]
 async fn fallback_rotates_past_held_pending_intent_across_reloads() {
     let dir = tempfile::tempdir().unwrap();
     let (s, fake, ann, _) = node(dir.path());
@@ -2162,7 +2250,18 @@ async fn full_listings_rotate_past_pending_private_heads_with_held_public_heads(
                 1
             );
             if pass == 0 {
-                assert_eq!(reads, 16, "the regression must exhaust the real read budget");
+                if marked {
+                    assert_eq!(reads, 2, "only discovery and the ready pending private head");
+                    assert!(
+                        calls
+                            .iter()
+                            .filter(|c| c.contains(" read "))
+                            .all(|c| { !held_files.keys().any(|path| c.ends_with(path.as_str())) }),
+                        "known public holds skip both sibling reads: {calls:?}"
+                    );
+                } else {
+                    assert_eq!(reads, 16, "unseen holds must exhaust the real read budget");
+                }
                 assert!(list
                     .as_array()
                     .unwrap()
@@ -2196,6 +2295,125 @@ async fn full_listings_rotate_past_pending_private_heads_with_held_public_heads(
         );
         assert_eq!(newest(&fake, ANN, &ready).1["name"], "Waiting 16");
         assert_eq!(fake.paths(ANN, &format!("{DRAFTS}{ready}/")).len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn unreadable_shelves_preserve_pending_edits_and_privacy_withdrawal() {
+    for malformed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let (_, shared) = create(&app, &ann, "Shared", &[SONG_A]).await;
+        let shared_id = shared["summary"]["id"].as_str().unwrap();
+        let shared_at = format!("/v1/collections/{shared_id}");
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{shared_at}/visibility"),
+            Some(serde_json::json!({"public":true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, edited) = create(&app, &ann, "Before", &[SONG_B]).await;
+        let edited_id = edited["summary"]["id"].as_str().unwrap();
+        let edited_at = format!("/v1/collections/{edited_id}");
+        fake.down.store(true, Ordering::SeqCst);
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{shared_at}/visibility"),
+            Some(serde_json::json!({"public":false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &edited_at,
+            Some(serde_json::json!({"name":"Waiting", "uris":[SONG_C]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(pending_count(&s), 2);
+        assert!(stored_shelf(&s)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["id"] == shared_id && k["unshare"] == true && k["public"] == false));
+        let key = format!("person.{ANN}.collections");
+        let original = s.library.lock().unwrap().get_setting(&key).unwrap().unwrap();
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        if malformed {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(&key, &format!("{original} broken"))
+                .unwrap();
+        } else {
+            db.execute(
+                "UPDATE settings SET value=CAST(value AS BLOB) WHERE key=?1",
+                [&key],
+            )
+            .unwrap();
+            assert!(s.library.lock().unwrap().get_setting(&key).is_err());
+        }
+        // This row is writable: swallowing its read failure would really discard intent.
+        db.execute("UPDATE settings SET value=value WHERE key=?1", [&key])
+            .unwrap();
+        let raw = || -> Vec<u8> {
+            db.query_row(
+                "SELECT CAST(value AS BLOB) FROM settings WHERE key=?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = raw();
+        let files = fake.files.lock().unwrap()[ANN].clone();
+        fake.down.store(false, Ordering::SeqCst);
+        fake.calls.lock().unwrap().clear();
+        for (method, path, body) in [
+            ("GET", "/v1/collections".to_string(), None),
+            ("GET", shared_at.clone(), None),
+            (
+                "PUT",
+                edited_at.clone(),
+                Some(serde_json::json!({"name":"Replacement"})),
+            ),
+            (
+                "POST",
+                "/v1/collections".to_string(),
+                Some(serde_json::json!({"name":"Another", "uris":[SONG_A]})),
+            ),
+            ("DELETE", shared_at.clone(), None),
+            ("GET", "/v1/me/homeserver".to_string(), None),
+        ] {
+            let (st, v) = call(&app, &ann, method, &path, body).await;
+            assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{method} {path}: {v}");
+            assert_eq!(raw(), before);
+            assert!(
+                fake.calls.lock().unwrap().is_empty(),
+                "uncertain shelf must not cause remote work"
+            );
+            assert_eq!(fake.files.lock().unwrap()[ANN], files);
+        }
+        s.library.lock().unwrap().set_setting(&key, &original).unwrap();
+        let (st, list) = call(&router(s.clone()), &ann, "GET", "/v1/collections", None).await;
+        assert_eq!(st, StatusCode::OK, "{list}");
+        assert_eq!(names(&list), vec!["Shared", "Waiting"]);
+        assert_eq!(pending_count(&s), 0);
+        assert!(fake.paths(ANN, &format!("{PUBLISHED}{shared_id}/")).is_empty());
+        assert_eq!(item_uris(&newest(&fake, ANN, shared_id).1), vec![SONG_A]);
+        assert_eq!(newest(&fake, ANN, edited_id).1["name"], "Waiting");
+        assert_eq!(item_uris(&newest(&fake, ANN, edited_id).1), vec![SONG_C]);
+        for (path, bytes) in files.iter().filter(|(path, _)| path.starts_with(DRAFTS)) {
+            assert_eq!(&fake.files.lock().unwrap()[ANN][path], bytes);
+        }
     }
 }
 
@@ -2941,18 +3159,18 @@ async fn a_budget_boundary_between_draft_and_publication_keeps_the_completed_dra
     let mut shelf = stored_shelf(&s);
     // The full listing's two calls plus 29 private writes leave one call for this last
     // collection's draft. Publication must wait for the next request.
-    let last = shelf["items"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .filter(|k| k["pending"] == true)
-        .max_by_key(|k| k["id"].as_str().unwrap().to_string())
-        .unwrap();
+    let queue = shelf["items"].as_array_mut().unwrap();
+    let i = queue.iter().position(|k| k["pending"] == true).unwrap();
+    let mut last = queue.remove(i);
     last["public"] = true.into();
     let id = last["id"].as_str().unwrap().to_string();
+    queue.push(last); // The scheduler uses persisted queue order, not timestamp-ID order.
+    assert_eq!(queue.iter().filter(|k| k["pending"] == true).count(), 30);
+    assert_eq!(queue.last().unwrap()["id"], id.as_str());
     store_shelf(&s, &shelf);
     fake.calls.lock().unwrap().clear();
-    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let (st, v) = call(&app, &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(fake.calls.lock().unwrap().len(), 32);
     let shelf = stored_shelf(&s);
     let kept = shelf["items"]
@@ -2970,7 +3188,8 @@ async fn a_budget_boundary_between_draft_and_publication_keeps_the_completed_dra
     let draft = newest(&fake, ANN, &id).0;
     assert!(fake.paths(ANN, &format!("{PUBLISHED}{id}/")).is_empty());
     fake.calls.lock().unwrap().clear();
-    call(&app, &ann, "GET", "/v1/collections", None).await;
+    let (st, v) = call(&router(s.clone()), &ann, "GET", "/v1/collections", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(pending_count(&s), 0);
     assert_eq!(fake.paths(ANN, &format!("{DRAFTS}{id}/")), vec![draft]);
     let calls = fake.calls.lock().unwrap();
