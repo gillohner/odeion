@@ -127,8 +127,8 @@ one has stopped, but only one should start at boot. The same user, config and da
 library and sign-ins are all there. To go back:
 `sudo systemctl disable --now odeiond && sudo systemctl enable --now pubky-music-node`.
 
-Open `http://<this machine's address>:7788` (step 2 printed it), click **Or paste the API
-token**, paste the token and press **Connect**. Then in **Your library › Node library**, type your
+Open `http://<this machine's address>:7788` (step 2 printed it), open **Use the node’s API token
+instead**, paste the token and press **Log in with the token**. Then in **Your library › Node library**, type your
 music folder's path (for example `/srv/music`) and press **Add folder**. (Or list it in the config
 before the start: `[library]` `folders = ["/srv/music"]` in `/etc/pubky-music/node.toml`; the node
 then reads it at every start.) Continue with the

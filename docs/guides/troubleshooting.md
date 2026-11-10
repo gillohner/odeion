@@ -4,7 +4,7 @@ First look at the node's log; most problems are named there.
 
 | Install | Log |
 | :-- | :-- |
-| Odeion box (USB stick) | on its console: `sudo odeion-compose logs --tail 200 music` |
+| Odeion box (USB stick) | on its screen, logged in as `odeion`: `sudo odeion-compose logs --tail 200 music` |
 | Docker | `docker logs --tail 200 pubky-music` |
 | Docker bundle | in `deploy/bundle`: `docker compose logs --tail 200 music` |
 | Linux without Docker | `journalctl -u odeiond -n 200` (`-u pubky-music-node` on an install from before Odeion) |
@@ -27,7 +27,7 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 | :-- | :-- |
 | Docker | `docker exec pubky-music cat /data/api-token`, or `PM_TOKEN` if you set one |
 | Docker bundle | `PM_TOKEN` in `deploy/bundle/.env` |
-| Odeion box (USB stick) | on its console: `sudo grep PM_TOKEN /opt/odeion/.env` |
+| Odeion box (USB stick) | on its screen, logged in as `odeion`: `sudo sed -n 's/^PM_TOKEN=//p' /opt/odeion/.env` |
 | Linux without Docker | `token` in `/etc/pubky-music/node.toml` |
 
 - The Log in screen says the node isn't linked to a Pubky identity yet: use the token the first

@@ -206,15 +206,16 @@ connect them to it. Umbrel isn't supported right now.
 2. **Log in.** With Pubky Ring, once the node is signed in to Pubky (step 5). Before that, open
    **Use the node’s API token instead**, paste the token and press **Log in with the token**. The
    token is:
-   - Odeion box: on its console, `sudo grep PM_TOKEN /opt/odeion/.env`.
+   - Odeion box: log in on the box's own screen as `odeion` with the password you chose, then
+     run `sudo sed -n 's/^PM_TOKEN=//p' /opt/odeion/.env`.
    - Docker: the output of `docker exec pubky-music cat /data/api-token` (or `PM_TOKEN` if you set
      one; with the bundle, `PM_TOKEN` in `.env`).
    - Linux without Docker: the token the install printed, also in `/etc/pubky-music/node.toml`.
 
    Home's **Get started** card then lists what is left to do on this node, and only that.
-3. **Add your music.** With Docker the node reads the music folder (`/music`) by itself. Otherwise
-   go to **Your library › Node library** (or the Get started card), type the folder's path and press
-   **Add folder**. New files show up about 15 seconds after they land.
+3. **Add your music.** With Docker the node reads the music folder (`/music`) by itself.
+   Otherwise go to **Your library › Node library** (or the Get started card), type the folder's
+   path and press **Add folder**. New files show up about 15 seconds after they land.
 4. **Pick a speaker.** The zone button at the right of the player bar says **This browser** at
    first. Press it and choose a speaker, then press play. All speakers the node found are in
    **Settings › Zones and outputs**. If one is missing, see [Speakers](docs/guides/speakers.md).
