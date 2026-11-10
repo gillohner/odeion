@@ -1105,6 +1105,61 @@ mod tests {
         assert_eq!(first_end.url.as_deref(), Some(ub.as_str()), "{first_end:?}");
     }
 
+    /// A WAV file whose sink writes nothing until the test lets it (drops its lock on `gate`): the
+    /// zone is held at its first block, so the test sees the song playing however fast the unpaced
+    /// file would otherwise be written to its end.
+    struct HeldWav {
+        inner: WavFileOutput,
+        gate: Arc<Mutex<()>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Output for HeldWav {
+        fn id(&self) -> OutputId {
+            self.inner.id()
+        }
+        fn name(&self) -> String {
+            self.inner.name()
+        }
+        fn caps(&self) -> &OutputCaps {
+            self.inner.caps()
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            Ok(Box::new(HeldSink {
+                inner: self.inner.open(fmt).await?,
+                gate: self.gate.clone(),
+            }))
+        }
+    }
+
+    struct HeldSink {
+        inner: Box<dyn AudioSink>,
+        gate: Arc<Mutex<()>>,
+    }
+
+    impl AudioSink for HeldSink {
+        fn format(&self) -> AudioFormat {
+            self.inner.format()
+        }
+        fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
+            // (a test that failed while holding the gate poisoned it: the zone writes on)
+            drop(self.gate.lock().unwrap_or_else(|e| e.into_inner()));
+            self.inner.write(block)
+        }
+        fn buffer_level(&self) -> BufferLevel {
+            self.inner.buffer_level()
+        }
+        fn flush(&mut self) -> Result<(), SinkError> {
+            self.inner.flush()
+        }
+        fn drain(&mut self) -> Result<(), SinkError> {
+            self.inner.drain()
+        }
+        fn frames_written(&self) -> u64 {
+            self.inner.frames_written()
+        }
+    }
+
     /// A song kept on this device plays from its copy (no request reaches the node), and the
     /// status says so; one without a copy streams.
     #[test]
@@ -1114,21 +1169,36 @@ mod tests {
         std::fs::write(dir.path().join("3.wav"), &wav).unwrap();
         let (url, asked) = serve(wav.clone(), "audio/wav", Mode::default());
         let out_path = dir.path().join("out.wav");
-        let p = AppPlayer::new(Arc::new(WavFileOutput::new(&out_path)), OutputOwner::new());
+        // Held at its first block until the page was told it plays: the page only ever hears the
+        // zone's state as it is when its watcher looks, and an unpaced song may be over by then
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let out = HeldWav {
+            inner: WavFileOutput::new(&out_path),
+            gate: gate.clone(),
+        };
+        let p = AppPlayer::new(Arc::new(out), OutputOwner::new());
         let kept = dir.path().join("3.wav");
         let u2 = url.clone();
         p.sources()
             .set_local(Some(Box::new(move |u: &str| (u == u2).then(|| kept.clone()))));
         let seen = recorder(&p);
         p.load(&url, 0, None).unwrap();
-        wait(&p, "the end", |s| s.ended == 1);
-        assert!(
+        wait(&p, "plays from the device", |s| {
+            s.from_device && s.now_playing.is_some()
+        });
+        let told = || {
             seen.lock()
                 .unwrap()
                 .iter()
-                .any(|s| s.from_device && s.now_playing.is_some()),
-            "said it plays from the device"
-        );
+                .any(|s| s.from_device && s.now_playing.is_some())
+        };
+        wait(&p, "said it plays from the device", |_| told());
+        drop(held);
+        // (stopped: the zone has played the file out and closed it)
+        wait(&p, "the end", |s| {
+            s.ended == 1 && s.transport == Transport::Stopped
+        });
         p.stop();
         assert!(asked.lock().unwrap().is_empty(), "nothing asked of the node");
         assert_eq!(read_wav(&out_path).unwrap().samples, Samples::PcmI32(want));
