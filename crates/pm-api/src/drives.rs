@@ -711,10 +711,15 @@ pub(crate) async fn login(
         p.id()
     );
     if app.client_secret.is_empty() {
-        // A OneDrive app is a public client: it has no secret to add, only a return page of one's own
+        // A OneDrive app is a public client: no secret to add, so an own app needs an own return page
         let instead = match p {
-            Provider::Onedrive => "Use a return page of your own ([auth] return_page in node.toml).",
-            Provider::Google => "Use your own app with its secret (Settings › This node › Service apps).",
+            Provider::Onedrive => {
+                "Use your own OneDrive app with a return page of your own ([auth] return_page in node.toml)."
+            }
+            Provider::Google => {
+                "Use your own app with its secret (Settings › This node › Service apps, or \
+                 google_client_secret in node.toml)."
+            }
         };
         crate::project_apps::check_return_page(&s, &callback, instead)?;
     }

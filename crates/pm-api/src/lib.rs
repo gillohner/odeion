@@ -24780,7 +24780,7 @@ exec sleep 300
                 "POST",
                 "/v1/library/drives/onedrive/login",
                 "/drives/onedrive/callback",
-                "Use a return page of your own",
+                "Use your own OneDrive app with a return page of your own",
             ),
         ];
         let notes = |v: &serde_json::Value| -> Vec<String> {
