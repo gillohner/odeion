@@ -323,6 +323,36 @@ def zone_percent(zid):
     return (zone_state(zid).get("volume") or {}).get("percent")
 
 
+def diagnose(what):
+    """The screen's nodes and the media-controls log lines, kept in the artifact (ui-/media-<what>.txt)."""
+    (out / f"ui-{what}.txt").write_text("\n".join(ui_nodes()))
+    lines = [l for l in logcat().splitlines() if "media controls" in l or "message port" in l]
+    (out / f"media-{what}.txt").write_text("\n".join(lines[-80:]))
+
+
+def pick(name, what):
+    """Choose a zone in the page's picker. The WebView's accessibility dump can lag behind
+    the screen: the picker is closed and opened again (three tries) before giving up."""
+    for attempt in range(3):
+        tap(lambda n: "choose where to play" in n, "the zone button")
+        end = time.time() + 20
+        while time.time() < end:
+            node = next((n for n in ui_nodes() if name in n), None)
+            if node:
+                x, y = center(node)
+                if (x, y) != (0, 0):
+                    adb("shell", "input", "tap", str(x), str(y))
+                    log(f"tapped {what} at {x},{y}")
+                    return
+                adb("shell", "input", "swipe", "500", "1400", "500", "700", "300")
+            time.sleep(2)
+        log(f"{what} not in the screen's dump (try {attempt + 1}): the picker again")
+        adb("shell", "input", "keyevent", "KEYCODE_BACK")
+        time.sleep(2)
+    diagnose("picker")
+    raise RuntimeError(f"timed out waiting for {what}")
+
+
 def media_controls(zid, track):
     """The system's media controls while the phone's zone plays (see the module's doc)."""
     title = track.get("title") or ""
@@ -371,33 +401,6 @@ def media_controls(zid, track):
     assert nz, "no zone on the null output with a percent volume (PM_DEV_OUTPUTS)"
     api("POST", f"/v1/zones/{nz['id']}/volume", {"volume": {"percent": 3}})
     api("POST", f"/v1/zones/{nz['id']}/queue", {"track_ids": [track["id"]], "replace": True, "play": False})
-    def diagnose(what):
-        (out / f"ui-{what}.txt").write_text("\n".join(ui_nodes()))
-        lines = [l for l in logcat().splitlines() if "media controls" in l or "message port" in l]
-        (out / f"media-{what}.txt").write_text("\n".join(lines[-80:]))
-
-    def pick(name, what):
-        """Choose a zone in the page's picker. The WebView's accessibility dump can lag behind
-        the screen: the picker is closed and opened again (three tries) before giving up."""
-        for attempt in range(3):
-            tap(lambda n: "choose where to play" in n, "the zone button")
-            end = time.time() + 20
-            while time.time() < end:
-                node = next((n for n in ui_nodes() if name in n), None)
-                if node:
-                    x, y = center(node)
-                    if (x, y) != (0, 0):
-                        adb("shell", "input", "tap", str(x), str(y))
-                        log(f"tapped {what} at {x},{y}")
-                        return
-                    adb("shell", "input", "swipe", "500", "1400", "500", "700", "300")
-                time.sleep(2)
-            log(f"{what} not in the screen's dump (try {attempt + 1}): the picker again")
-            adb("shell", "input", "keyevent", "KEYCODE_BACK")
-            time.sleep(2)
-        diagnose("picker")
-        raise RuntimeError(f"timed out waiting for {what}")
-
     pick("Null output (% volume)", "the null output's zone")
     def remote():
         s = our_session()
@@ -704,6 +707,17 @@ def in_app_player(address, track):
     """The page's "This phone", played by the app itself (see the module's doc)."""
     adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
     time.sleep(3)
+    # Shuffle plays on the page's zone: "This phone" chosen in the picker first (the media-controls
+    # checks before leave the page on the phone's zone on the node, where Shuffle would play)
+    mark = len(logcat())
+    said = re.findall(r"the page controls this zone zone=(\S+)", logcat())
+    if not said or said[-1] != "browser":
+        pick('="This phone"', "the page's “This phone”")
+        try:
+            until("the page on “This phone”", lambda: "the page controls this zone zone=browser" in logcat()[mark:], timeout=20)
+        except RuntimeError:
+            diagnose("this-phone")
+            raise
     start = len(logcat())
     try:
         tap(lambda n: "Shuffle my music" in n, "“Shuffle my music”")
