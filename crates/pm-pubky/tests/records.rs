@@ -301,3 +301,44 @@ async fn a_stalled_network_still_leaves_both_stages_their_cached_records() {
         "{elapsed:?}"
     );
 }
+
+/// A log in anyone allowed may approve (a controller or browser log in: a listener on another
+/// homeserver as well as the owner): the owner's homeserver, whose newest record names only this
+/// machine or can't be found, is looked up to have it ready but never refuses it. The same
+/// owner as the one who approves (the node's own sign-in), and an explicit target, still refuse.
+#[tokio::test]
+async fn a_warmed_owner_homeserver_never_refuses_a_log_in_others_may_approve() {
+    let (user, hs) = (Keypair::random(), Keypair::random());
+    let local = {
+        let mut name = SVCB::new(10, "localhost".try_into().unwrap());
+        name.set_port(6287);
+        SignedPacket::builder()
+            .https(".".try_into().unwrap(), name, 3600)
+            .timestamp(Timestamp::from(1_762_300_000_000_000))
+            .sign(&hs)
+            .unwrap()
+    };
+    let me = user_record(&user, &hs.public_key(), 1_762_200_000_000_000);
+    let owner = pubky::PublicKey::from(user.public_key());
+    let theirs = pubky::PublicKey::from(hs.public_key());
+    // The owner's homeserver names only this machine, then can't be found at all
+    for packets in [vec![me.clone(), local], vec![me]] {
+        let (url, _) = relay(packets).await;
+        let (c, _) = client(&url, &[]);
+        let node = mainnet(c);
+        let out = node.warm_for_sign_in(Some(&owner), false).await;
+        let out = out.expect("a listener elsewhere may still approve");
+        assert!(
+            out.iter().any(|f| f.key == hs.public_key().to_string()),
+            "the owner's homeserver was looked up: {out:?}"
+        );
+        assert!(
+            node.fresh_for_sign_in(Some(&owner), None, false).await.is_err(),
+            "when the owner is the one who approves, their homeserver decides"
+        );
+        assert!(
+            node.fresh_for_sign_in(None, Some(&theirs), false).await.is_err(),
+            "an explicit target still refuses"
+        );
+    }
+}

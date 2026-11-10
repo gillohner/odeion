@@ -362,6 +362,32 @@ impl NodeHomeserver {
         target: Option<&PublicKey>,
         allow_local: bool,
     ) -> Result<Vec<crate::records::Freshened>, String> {
+        self.sign_in_records(identity, target, allow_local, true).await
+    }
+
+    /// [`Self::fresh_for_sign_in`] for a sign-in anyone allowed may approve (a controller or browser
+    /// log in, which a listener on another homeserver may approve as well as the owner): the
+    /// newest records of `likely` (the node's owner) and of the public homeserver are fetched
+    /// the same way, to have them ready, but the approver isn't known yet, so no homeserver is
+    /// selected and nothing found refuses the sign-in (an owner's homeserver that answers badly
+    /// doesn't keep a listener from logging in).
+    pub async fn warm_for_sign_in(
+        &self,
+        likely: Option<&PublicKey>,
+        allow_local: bool,
+    ) -> Result<Vec<crate::records::Freshened>, String> {
+        self.sign_in_records(likely, None, allow_local, false).await
+    }
+
+    /// The lookups of [`Self::fresh_for_sign_in`]; `identity_selects`: the identity is the one
+    /// that approves, so its homeserver is the one the sign-in routes to.
+    async fn sign_in_records(
+        &self,
+        identity: Option<&PublicKey>,
+        target: Option<&PublicKey>,
+        allow_local: bool,
+        identity_selects: bool,
+    ) -> Result<Vec<crate::records::Freshened>, String> {
         use crate::records::{self, freshen_until, IDENTITY_STAGE, SIGN_IN_LOOKUPS};
         let pkarr = self.pubky.client().pkarr();
         let start = tokio::time::Instant::now();
@@ -392,7 +418,9 @@ impl NodeHomeserver {
         let (mut out, own) = futures_util::future::join(ready, own).await;
         let selected = match (target, &own) {
             (Some(t), _) => Some(t.z32()),
-            (None, Some((named, _))) => Some(named.clone()),
+            (None, Some((named, _))) if identity_selects => Some(named.clone()),
+            // Only warmed: whoever approves decides where the sign-in goes
+            (None, Some(_)) => None,
             // Ring chooses the approving identity. Warming PUBLIC does not select it.
             (None, None) => None,
         };

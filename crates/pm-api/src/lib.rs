@@ -3520,11 +3520,12 @@ async fn controller_login_start(
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    // The newest records first, so the grant exchange routes on them (the owner's identity is
-    // the one that approves). Before the sign-ins' lock: these are network lookups, and the
-    // polls of every waiting sign-in take that lock too
+    // The newest records first, so the grant exchange routes on them: the owner's, to have them
+    // ready. A listener on another homeserver may approve this log in too, so what is found of
+    // the owner's homeserver never refuses it. Before the sign-ins' lock: these are network
+    // lookups, and the polls of every waiting sign-in take that lock too
     let identity = pubky::PublicKey::try_from(identity.as_str()).ok();
-    hs.fresh_for_sign_in(identity.as_ref(), None, s.bundled_homeserver().is_some())
+    hs.warm_for_sign_in(identity.as_ref(), s.bundled_homeserver().is_some())
         .await
         .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
