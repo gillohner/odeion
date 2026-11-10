@@ -203,8 +203,9 @@ pub struct NodeState {
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
     /// Held while the people roster is read, changed and stored (`people::update`), so no change
-    /// is made to a copy older than one stored meanwhile.
-    pub(crate) roster: tokio::sync::Mutex<()>,
+    /// is made to a copy older than one stored meanwhile. Public so tests can stand for a change
+    /// under way.
+    pub roster: tokio::sync::Mutex<()>,
     /// How to find outputs again (local devices, endpoints); set by the binary.
     #[allow(clippy::type_complexity)]
     pub discover: Mutex<Option<Arc<dyn Fn() -> Vec<Arc<dyn Output>> + Send + Sync>>>,

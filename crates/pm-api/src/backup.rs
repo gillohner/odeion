@@ -347,17 +347,19 @@ const CARRIED: &[&str] = &[
 /// For a restore that replaces the database file (`odeiond restore`), into the `staged` copy
 /// before it goes in: this node's own settings (`NODE_OWN`) from `here`, as the web restore
 /// keeps them; and each sign-in, the people list, the signup token and parties that `staged`
-/// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays.
+/// doesn't hold (a plain copy carries none), from `here`. What `staged` holds stays, except report
+/// memberships: those follow the current roster, never an older grant from the backup.
 /// For a restore that replaces the database file when there is no node to keep anything from
 /// (an empty data folder, or a current database that can't be read): none of a node's own
 /// settings (`NODE_OWN`) goes in from the backup. A backup made before they were left out
 /// still holds them, and the owner's browser sessions and device sign-ins among them would come
-/// back; the node makes its own id, stream key and the rest afresh.
+/// back; the node makes its own id, stream key and the rest afresh. Without a readable current
+/// roster, restored music access gets fresh report memberships too.
 pub fn forget_node_own(staged: &Library) -> Result<(), pm_library::LibraryError> {
     for key in NODE_OWN {
         staged.delete_setting(key)?;
     }
-    Ok(())
+    crate::people::restore_report_memberships(staged, None)
 }
 
 pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_library::LibraryError> {
@@ -383,7 +385,8 @@ pub fn keep_this_nodes(here: &Library, staged: &Library) -> Result<(), pm_librar
             staged.set_setting(&key, &v)?;
         }
     }
-    merge_carried(staged, &carried_of(here)?)
+    merge_carried(staged, &carried_of(here)?)?;
+    crate::people::restore_report_memberships(staged, here.get_setting(crate::people::SETTING)?.as_deref())
 }
 
 /// This node's [`CARRIED`] settings as they are now: what a restore keeps where the backup brings
@@ -784,6 +787,26 @@ async fn restore_locked(
             .collect::<Result<_, BackupError>>()?;
         let people_here = person_signins(&lib)?;
         let carried_here = carried_of(&lib)?;
+        // Choose the final carried settings, including a sealed roster, in the staged copy.
+        // Reconcile report memberships before replacing the live library: even a later restore
+        // error must not install an unchecked old membership. The roster lock keeps `here`
+        // current throughout; no inbox connection or report text enters this backup path.
+        {
+            let copy = Library::open(&staged)?;
+            let mut kept = Vec::new();
+            for (key, now) in &carried_here {
+                match secrets.as_ref().and_then(|x| x.settings.get(*key)) {
+                    Some(v) => copy.set_setting(key, v)?,
+                    None => kept.push((*key, now.clone())),
+                }
+            }
+            merge_carried(&copy, &kept)?;
+            let here = carried_here
+                .iter()
+                .find(|(key, _)| *key == crate::people::SETTING)
+                .and_then(|(_, value)| value.as_deref());
+            crate::people::restore_report_memberships(&copy, here)?;
+        }
         lib.restore_from(&staged)?;
         for (k, v) in keep {
             match v {
@@ -819,16 +842,6 @@ async fn restore_locked(
         {
             lib.set_setting(k, v)?;
         }
-        // Invites with their links, the signup token and parties: from the locked part, else as
-        // they were here (a plain backup restored on this node keeps the links it handed out)
-        let mut kept = Vec::new();
-        for (key, now) in carried_here {
-            match secrets.as_ref().and_then(|x| x.settings.get(key)) {
-                Some(v) => lib.set_setting(key, v)?,
-                None => kept.push((key, now)),
-            }
-        }
-        merge_carried(&lib, &kept)?;
         lib.drop_missing_art()?;
         report.restored = counts_of(&lib)?;
         report.missing_folders = lib

@@ -645,6 +645,30 @@ fn listener_of(s: &NodeState, token: &str) -> Option<String> {
     crate::people::may_use_music(s, &key).then_some(key)
 }
 
+/// This listener token's active report membership, read with its authorization under one library
+/// lock. `Some(None)` is a valid legacy membership; `None` means no matching token, no enabled
+/// music membership, or unreadable state. A restore cannot put the token and roster reads on
+/// opposite sides of a replacement. No roster lock: feedback also calls this inside an inbox write.
+pub(crate) fn listener_report_membership(s: &NodeState, token: &str, key: &str) -> Option<Option<String>> {
+    if !token.starts_with("pml_") || token == s.token()?.as_str() {
+        return None;
+    }
+    let key = key.trim_start_matches("pubky");
+    let h = hash(token);
+    let lib = s.library.lock().expect("library poisoned");
+    let tokens: Vec<PersonToken> = serde_json::from_str(&lib.get_setting(TOKENS).ok()??).ok()?;
+    if !tokens.iter().any(|t| t.hash == h && t.key == key) {
+        return None;
+    }
+    let roster: crate::people::Roster =
+        serde_json::from_str(&lib.get_setting(crate::people::SETTING).ok()??).ok()?;
+    roster
+        .people
+        .into_iter()
+        .find(|p| p.key == key && p.access.music() && p.music_enabled)
+        .map(|p| p.reports)
+}
+
 /// The zones a listener may play on: the owner's list, or every zone when none is set
 /// (`None`). A list that can't be read, or isn't a list of zone ids, is an error: listeners
 /// are then kept off every zone until the owner sets the list again, never let onto all of them.
@@ -736,6 +760,8 @@ const LISTENER_READS: &[&str] = &[
 /// acts on the caller's own account, reads included; the apps and clients behind them stay the
 /// owner's (the handlers refuse those fields, and [`LISTENER_OWN_EXCEPTIONS`] those routes).
 const LISTENER_OWN: &[&str] = &[
+    // Their own problem reports (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights: their own choice, aliases and events (usage.rs checks the person itself)
     "/usage",
     "/play-order",
@@ -760,6 +786,9 @@ const LISTENER_OWN: &[&str] = &[
 
 /// Inside [`LISTENER_OWN`], what goes on under every source policy: plays, streams and the play order.
 const LISTENER_OWN_ALWAYS: &[&str] = &[
+    // Problem reports aren't a sign-in either: a listener reports and sees their own whatever
+    // plays through whose sign-ins (feedback.rs keeps each person to theirs)
+    "/feedback",
     // Usage insights aren't a sign-in: a listener's own choice, Stop for me and Clear mine work
     // whatever plays through whose sign-ins (usage.rs checks the person)
     "/usage",
@@ -1020,11 +1049,13 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
 /// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
+/// Their problem reports go in People › Remove before this, while the roster is held.
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     let signed_out = sign_out_everywhere(s, key);
     // Their usage choice and what is still linked to them go (usage.rs), also when the token list
     // could not be written: they are already off the roster, so a retried remove never comes
     s.usage.forget_listener(key);
+    // Their problem reports go in People › Remove itself, while the roster is held (people.rs)
     signed_out?;
     // Their sign-ins still on the way: they would land again when the service answers
     let theirs = Who::Listener(key.to_string());
