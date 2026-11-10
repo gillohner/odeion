@@ -3525,9 +3525,11 @@ async fn controller_login_start(
     };
     let renew_asked = asked.renewal.is_some_and(|code| renewal_good(&s, &code));
     let device = asked.device;
+    // Before any relay wait: an approval kept at the relay is as old as the sign-in it answers
+    let access = people::access_started(&s);
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    logins.retain(|_, (_, at, _, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -3548,7 +3550,7 @@ async fn controller_login_start(
     loop {
         let waiting: Vec<(String, std::time::Instant, String)> = logins
             .iter()
-            .map(|(id, (_, at, o, _))| (id.clone(), *at, o.clone()))
+            .map(|(id, (_, at, o, _, _))| (id.clone(), *at, o.clone()))
             .collect();
         match make_room(&waiting, &origin) {
             Some(old) => {
@@ -3557,7 +3559,10 @@ async fn controller_login_start(
             None => break,
         }
     }
-    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin, device));
+    logins.insert(
+        id.clone(),
+        (flow, std::time::Instant::now(), origin, device, access),
+    );
     drop(logins);
     let qr_svg = qr_svg(&url);
     let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
@@ -3572,6 +3577,27 @@ async fn controller_login_start(
     }))
 }
 
+/// A listener's Ring approval becomes a personal token only while the music access it started
+/// under still stands: `started` is the access revision taken when the sign-in started, before
+/// any relay wait. The final check and the synchronous mint run under the listener's membership
+/// lock and the roster guard (the order Remove takes them), so Remove with a re-add, Music off or
+/// a restore cannot cross them. Neither lock is held over network I/O. `None`: no music access.
+pub(crate) async fn mint_listener_sign_in(
+    s: &NodeState,
+    who: &str,
+    started: u64,
+) -> Result<Option<String>, ApiError> {
+    let key = who.trim_start_matches("pubky");
+    let membership = personal::membership_lock(key);
+    let _membership = membership.lock().await;
+    let _roster = s.roster.lock().await;
+    people::access_current(s, key, started)?;
+    if !people::may_use_music(s, key) {
+        return Ok(None);
+    }
+    accounts::mint(s, key).map(Some)
+}
+
 /// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with a browser session
 /// of its own when the approver is the owner (renewing the node's session when this log in asked
 /// for its folders); `denied` otherwise, with who approved and whose node it is.
@@ -3581,10 +3607,10 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at, _, device)) = logins.get(&id) else {
+    let Some((flow, at, _, device, access)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus::of("expired")));
     };
-    let device = *device;
+    let (device, access) = (*device, *access);
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
         return Ok(Json(ControllerLoginStatus::of("expired")));
@@ -3597,9 +3623,9 @@ async fn controller_login_poll(
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
-                // A listener in People with music access gets a personal token
-                if people::may_use_music(&s, &who) {
-                    let token = accounts::mint(&s, &who)?;
+                // A listener in People with music access gets a personal token, unless their
+                // access changed after this sign-in started (409: start a new one)
+                if let Some(token) = mint_listener_sign_in(&s, &who, access).await? {
                     tracing::info!(%who, "listener signed in with Pubky Ring");
                     return Ok(Json(ControllerLoginStatus {
                         token: Some(token),
