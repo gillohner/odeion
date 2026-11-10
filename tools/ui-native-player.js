@@ -112,16 +112,21 @@ const waitFor = async (fn, ms = 8000) => {
 const watchToasts = (page) => page.evaluate(() => {
   window.__toastsSeen = []; const t = document.querySelector('#toast');
   if (window.__toastObs) window.__toastObs.disconnect();
-  window.__toastObs = new MutationObserver(() => { const x = t.textContent; if (x && window.__toastsSeen[window.__toastsSeen.length - 1] !== x) window.__toastsSeen.push(x); });
+  // (with whether the player was paused as the toast came: a later retry pausing it doesn't count)
+  window.__toastObs = new MutationObserver(() => { const x = t.textContent; const last = window.__toastsSeen[window.__toastsSeen.length - 1]; if (x && (!last || last.text !== x)) window.__toastsSeen.push({ text: x, paused: window.pmPlayer.now().paused }); });
   window.__toastObs.observe(t, { childList: true, characterData: true, subtree: true });
 });
-// Until a toast since watchToasts said `re` and the page's player is paused, at most `ms` (polled:
-// the page's CSP rules out waitForFunction)
+// Until a toast since watchToasts said `re` with the page's player paused as it came, at most `ms`;
+// the player must still be paused then (polled: the page's CSP rules out waitForFunction)
 const saidAndPaused = async (page, re, ms = 8000) => {
-  const end = Date.now() + ms; let seen = ''; let paused = false;
+  const end = Date.now() + ms;
   for (;;) {
-    seen = (await page.evaluate(() => window.__toastsSeen || [])).join(' | '); paused = (await now(page)).paused;
-    if ((re.test(seen) && paused) || Date.now() > end) return { ok: re.test(seen) && paused, seen, paused };
+    const toasts = await page.evaluate(() => window.__toastsSeen || []);
+    const hit = toasts.find((x) => re.test(x.text));
+    if (hit || Date.now() > end) {
+      const paused = (await now(page)).paused;
+      return { ok: !!hit && hit.paused && paused, seen: toasts.map((x) => `${x.text}${x.paused ? '' : ' [playing]'}`).join(' | '), paused };
+    }
     await sleep(100);
   }
 };
@@ -374,11 +379,14 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
       await settled(p, 500);
       await p.evaluate(() => { Object.assign(window.__app, { transport: 'playing', position_ms: 900 }); window.__send(); }); await sleep(150);
       await watchToasts(p);
-      await p.evaluate(() => { window.__failLoad = true; Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 900, error: 'decode: the stream broke off' }); window.__send(); }); await sleep(1700);
-      await p.evaluate(() => document.querySelector('#toggle').click()); await sleep(120);
-      await p.evaluate(() => document.querySelector('#toggle').click());
+      const mark = (await calls(p)).length;
+      await p.evaluate(() => { window.__failLoad = true; Object.assign(window.__app, { transport: 'paused', broke: true, position_ms: 900, error: 'decode: the stream broke off' }); window.__send(); });
+      // Pause and play once the page's mid-song retry is opening (not before: a pause first would hold it)
+      const reopened = await waitFor(async () => (await calls(p)).slice(mark).some((c) => c[0] === 'native_load' && /\/tracks\/2\//.test(c[1].url || '') && (c[1].atMs || 0) >= 800));
+      // (both presses in the page: no round trips between them while the retry opens)
+      await p.evaluate(async () => { const t = document.querySelector('#toggle'); t.click(); await new Promise((r) => setTimeout(r, 120)); t.click(); });
       const said2 = await saidAndPaused(p, /the node did not answer/);
-      check(second && said2.ok, `${at}: a failed mid-song retry after pause and play is said, not left "playing" (${second ? '' : 'the second song never played; '}${said2.seen}; paused ${said2.paused})`);
+      check(second && reopened && said2.ok, `${at}: a failed mid-song retry after pause and play is said, not left "playing" (${second ? '' : 'the second song never played; '}${reopened ? '' : 'the mid-song retry never opened; '}${said2.seen}; paused ${said2.paused})`);
       await p.evaluate(() => { window.__failLoad = false; Object.assign(window.__app, { broke: false, error: null }); }); await sleep(2500);
       check(!r.state.errors.length, `${at}: review checks: no page errors (${r.state.errors.join(' | ')})`);
       await r.context.close();
