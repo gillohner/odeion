@@ -243,7 +243,7 @@ fn media_start(b: &dyn TrackBackend, dac: &Dac) -> Result<(), String> {
     let level = usb_dac::media_start_level(dac.device.usb);
     let Some(now) = b.set_media_volume_on(dac.id, level) else {
         return Err(format!(
-            "Android does not play media to {} now: its volume was not set",
+            "Android's media volume could not be set for {} (media isn't on it alone, or Android didn't take the level): nothing plays",
             dac.device.name
         ));
     };
@@ -1643,6 +1643,15 @@ mod tests {
         assert!(
             set.contains("if (now > target) am.setStreamVolume"),
             "lowered only: {set}"
+        );
+        // ... and read back before it counts (a fixed volume, or a set Android ignored: none)
+        assert!(
+            set.contains("if (am.isVolumeFixed) return@runCatching -1"),
+            "{set}"
+        );
+        assert!(
+            set.rfind("getStreamVolume(") > sets && set.contains("if (v > target) return@runCatching -1"),
+            "read back: {set}"
         );
         assert!(
             !kt.contains("mediaVolumeDbOnUsb"),

@@ -644,18 +644,25 @@ pub fn hw_volume(dac: &Dac) -> Option<VolumeKind> {
     })
 }
 
-/// The DAC has a volume of its own that the app's driver can't set (a UAC1 feature unit: the driver
-/// sets units on UAC2 only), as its descriptors (or the held DAC's) tell: Exclusive USB would play
-/// it at whatever level that unit has, with no start level. Android plays it instead, which sets
-/// that unit itself. A quirk saying the unit doesn't work: no volume, not this.
+/// Why Exclusive USB doesn't play a DAC whose own volume its driver can't set.
+pub const VOLUME_OUT_OF_REACH: &str =
+    "Exclusive USB can't set this DAC's own volume (the app's USB driver doesn't reach it): Android plays it";
+
+/// A UAC1 DAC with a feature unit that has a volume: the app's driver sets units on UAC2 only.
+fn uac1_unit(d: &UsbAudioDevice) -> bool {
+    d.uac == Some(Uac::V1) && d.hardware_volume.as_ref().is_some_and(|h| h.volume)
+}
+
+/// The DAC has a volume of its own that the app's driver can't set (a UAC1 feature unit), as its
+/// descriptors (or the held DAC's) tell: Exclusive USB would play it at whatever level that unit
+/// has, with no start level. Android plays it instead, which sets that unit itself. A quirk saying
+/// the unit doesn't work: no volume, not this.
 fn volume_out_of_reach(dac: &Dac) -> bool {
     if let Some(u) = dac.device.usb {
         if quirks::lookup(u.vendor_id, u.product_id).no_hardware_volume {
             return false;
         }
     }
-    let uac1_unit =
-        |d: &UsbAudioDevice| d.uac == Some(Uac::V1) && d.hardware_volume.as_ref().is_some_and(|h| h.volume);
     let held = with_held(|h| {
         h.as_ref()
             .filter(|h| h.dac_id == dac.id)
@@ -668,15 +675,16 @@ fn volume_out_of_reach(dac: &Dac) -> bool {
 }
 
 /// Whether the phone plays this DAC exclusive now: `None` when it isn't offered here (no driver,
-/// no USB ids, a volume the driver can't set: `volume_out_of_reach`) or this DAC's Exclusive
-/// USB didn't start before (Android plays it, unless the listener has the zone muted on it);
-/// `Some(Ok(()))` when it plays exclusive; `Some(Err(why))` when Android's permission isn't
-/// given. The DAC it holds it keeps (no giving back and taking again at every format change).
+/// no USB ids) or this DAC's Exclusive USB didn't start before (Android plays it, unless the
+/// listener has the zone muted on it); `Some(Ok(()))` when it plays exclusive; `Some(Err(why))`
+/// when it can't: its own volume is out of the driver's reach ([`VOLUME_OUT_OF_REACH`]), or
+/// Android's permission isn't given. The DAC it holds it keeps (no giving back and taking again
+/// at every format change).
 pub fn decide(dac: &Dac) -> Option<Result<(), String>> {
     let b = backend()?;
     offer(dac).ok()?;
     if volume_out_of_reach(dac) {
-        return None;
+        return Some(Err(VOLUME_OUT_OF_REACH.into()));
     }
     let held = holds(dac.id);
     let permission = held || b.has_permission(ids(dac)?);
@@ -1087,6 +1095,19 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
             .and_then(|s| s.unit.as_ref())
             .map(|u| u.unit_id)
             .filter(|id| h.units.iter().any(|u| u.unit.id == *id));
+        // A volume of its own on this path that the driver can't set (a UAC1 unit, or a UAC2 unit
+        // whose range it couldn't read): there is no start level, so it would play at whatever
+        // level that unit has. Android's paths play it instead (they set that unit)
+        if setting.is_ok() && unit_id.is_none() && !h.quirks.no_hardware_volume {
+            let path_unit = setting
+                .as_ref()
+                .ok()
+                .and_then(|s| s.unit.as_ref())
+                .is_some_and(|u| u.volume);
+            if path_unit || uac1_unit(&h.dev) {
+                return Some(Err(ExclusiveError::Refused(VOLUME_OUT_OF_REACH.into())));
+            }
+        }
         if setting.is_ok() && unit_id.is_none() {
             let quieter = h.listener_db.is_some_and(|db| db < -0.01)
                 || h.units
@@ -1161,6 +1182,13 @@ pub fn open(id: OutputId, dac: &Dac, fmt: AudioFormat) -> Result<ExclusiveSink, 
             // Not playable here (the clock won't take the rate): back to Android, not kept claimed
             release();
             return Err(ExclusiveError::Unsupported(why));
+        }
+        Some(Err(ExclusiveError::Refused(why))) => {
+            // Its volume out of the driver's reach: back to Android, which plays it from now on
+            // (until it is unplugged), and nothing was sent
+            auto_failed(dac);
+            release();
+            return Err(ExclusiveError::Refused(why));
         }
         Some(Err(e)) => return Err(e),
         None => return Err(ExclusiveError::Gone(format!("{} was unplugged", dac.device.name))),
@@ -3510,7 +3538,8 @@ pub(crate) mod tests {
     }
 
     /// A UAC1 DAC (the KA17's ids): an AudioControl interface, a USB-streaming input terminal 1,
-    /// with `volume` a feature unit 2 (volume and mute) in between, and the speaker output 3.
+    /// with `volume` a feature unit 2 (volume and mute) in between, and the speaker output 3; one
+    /// playback interface (1) at 48 kHz, 16 bit, stereo, on an adaptive isochronous OUT endpoint.
     fn uac1_dac(volume: bool) -> Vec<u8> {
         let mut ac: Vec<u8> = vec![9, 0x24, 1, 0x00, 0x01, 0, 0, 1, 1];
         ac.extend([12, 0x24, 2, 1, 0x01, 0x01, 0, 2, 3, 0, 0, 0]);
@@ -3520,6 +3549,14 @@ pub(crate) mod tests {
         ac.extend([9, 0x24, 3, 3, 0x01, 0x03, 0, if volume { 2 } else { 1 }, 0]);
         let mut cfg: Vec<u8> = vec![9, 4, 0, 0, 0, 1, 1, 0x00, 0];
         cfg.extend(ac);
+        // Interface 1: alt 0 (no bandwidth), alt 1: AS_GENERAL (terminal 1, PCM), type I (2
+        // channels, 2-byte subframes, 16 bit, one rate: 48 kHz), the endpoint and its CS part
+        cfg.extend([9, 4, 1, 0, 0, 1, 2, 0, 0]);
+        cfg.extend([9, 4, 1, 1, 1, 1, 2, 0, 0]);
+        cfg.extend([7, 0x24, 1, 1, 1, 0x01, 0x00]);
+        cfg.extend([11, 0x24, 2, 1, 2, 2, 16, 1, 0x80, 0xbb, 0x00]);
+        cfg.extend([9, 5, 0x01, 0x09, 0xc4, 0x00, 1, 0, 0]);
+        cfg.extend([7, 0x25, 1, 0x01, 0, 0, 0]);
         let total = (9 + cfg.len()) as u16;
         let mut b = vec![
             18, 1, 0x00, 0x02, 0, 0, 0, 64, 0x72, 0x29, 0x93, 0x00, 0x00, 0x01, 1, 2, 3, 1,
@@ -3550,9 +3587,12 @@ pub(crate) mod tests {
         usb_dac::apply_report(&report(&raw));
         let dac = usb_dac::current_dac().unwrap();
         assert!(dac.descriptors.is_some(), "the descriptors were taken");
-        assert_eq!(decide(&dac), None);
+        assert_eq!(decide(&dac), Some(Err(VOLUME_OUT_OF_REACH.to_string())));
         assert!(!plays_exclusive(&dac) && !auto_fallback(&dac));
         assert_eq!(own_volume(&dac), None, "nothing claimed");
+        // Android 13: shared, and the note says why not Exclusive USB either
+        let note = usb_dac::current().unwrap().note.unwrap_or_default();
+        assert!(note.contains("can't set this DAC's own volume"), "{note}");
         assert!(matches!(
             open_phone(id(), AudioFormat::pcm(48_000, 16, 2)),
             PhoneOpen::Shared { .. }
@@ -3565,5 +3605,53 @@ pub(crate) mod tests {
         let (_p, _app) = phone(true);
         usb_dac::apply_report(&report(&uac1_dac(false)));
         assert_eq!(decide(&usb_dac::current_dac().unwrap()), Some(Ok(())));
+    }
+
+    /// A volume of its own that the driver can't set, seen only once the DAC is taken: a UAC1
+    /// unit (no descriptors reported before: permission just given), or a UAC2 unit whose range
+    /// the DAC won't say. Exclusive USB has no start level for it, so not a sample is sent: the
+    /// DAC goes back to Android, which plays it from then on.
+    #[test]
+    fn a_volume_the_driver_cant_reach_at_the_take_never_plays_exclusive() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let ka17: String = KA17.iter().map(|b| format!("{b:02x}")).collect();
+        let bare = ka17_report(33, "").replace(&format!(r#","descriptors":"{ka17}""#), "");
+        for uac1 in [true, false] {
+            let (_p, app) = phone(true);
+            let fmt = AudioFormat::pcm(48_000, 16, 2);
+            if uac1 {
+                assert!(pm_usb_audio::stream::choose(
+                    &pm_usb_audio::parse(&uac1_dac(true)),
+                    &[],
+                    48_000,
+                    16,
+                    2,
+                    Speed::High
+                )
+                .is_ok());
+                *app.raw.lock().unwrap() = Some(uac1_dac(true));
+                usb_dac::apply_report(&bare);
+            } else {
+                app.dac.state().volume_range = None;
+            }
+            let dac = usb_dac::current_dac().unwrap();
+            assert_eq!(
+                decide(&dac),
+                Some(Ok(())),
+                "uac1 {uac1}: nothing known before the take"
+            );
+            match open_phone(id(), fmt) {
+                PhoneOpen::Gone(_) | PhoneOpen::Shared { .. } => {}
+                PhoneOpen::Exclusive(_) => panic!("uac1 {uac1}: Exclusive USB without a start level"),
+                _ => panic!("uac1 {uac1}: unexpected"),
+            }
+            assert!(app.dac.state().out.is_empty(), "uac1 {uac1}: not a sample sent");
+            assert!(!holding(), "uac1 {uac1}: given back");
+            assert!(auto_skips(&dac), "uac1 {uac1}: Android plays it from now on");
+            // Android lists it again: its path, never taken again
+            usb_dac::apply_report(&if uac1 { bare.clone() } else { ka17_report(33, "") });
+            assert!(matches!(open_phone(id(), fmt), PhoneOpen::Shared { .. }));
+            assert_eq!(*app.opened.lock().unwrap(), 1, "uac1 {uac1}: taken once");
+        }
     }
 }

@@ -432,7 +432,8 @@ Android's media volume, which Android hands to the DAC's own volume. Nothing is 
    speaker or amplifier turned low instead), the KA17's own volume all the way down, and every
    volume (the KA17, Android's media volume, the zone) at 0-5 % throughout. In step 5 Android sets
    the KA17's volume itself, so its knob is no limit there.
-2. Plug in the KA17 with the app on screen; when Android asks whether Odeion may access it, Allow.
+2. Plug in the KA17 with the app on screen; when Android asks whether Odeion may access it, Allow
+   (if it doesn't ask, because it was denied earlier: Settings › This phone › Allow Exclusive USB).
    Play a 44.1/16 file, then a 96/24 file, on This phone. Expected: the KA17's display shows 44.1,
    then 96; Now playing › Details › Output says "Exclusive USB · FiiO KA17 · 44.1 kHz / 16 bit",
    then "… 96 kHz / 24 bit"; the first sound is quiet (the KA17 at -40 dB the first time, else the
