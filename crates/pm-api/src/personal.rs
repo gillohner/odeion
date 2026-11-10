@@ -2360,4 +2360,112 @@ mod tests {
             "the superseded retry did not delete the restored state"
         );
     }
+
+    #[tokio::test]
+    async fn a_ring_sign_in_started_before_removal_mints_nothing_after_readd() {
+        use axum::extract::{Path, State};
+        let dir = tempfile::tempdir().unwrap();
+        let key = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
+        let s = listener_state(dir.path(), key).await;
+        // Taken when the sign-in started; Ring's approval then waits at the relay
+        let started = crate::people::access_started(&s);
+        let (approved_tx, approved_rx) = tokio::sync::oneshot::channel::<()>();
+        let old = async {
+            approved_rx.await.unwrap();
+            crate::mint_listener_sign_in(&s, &format!("pubky{key}"), started).await
+        };
+        tokio::pin!(old);
+        assert!(futures_util::poll!(&mut old).is_pending());
+        crate::people::remove(State(s.clone()), Path(key.into()))
+            .await
+            .unwrap();
+        assert_eq!(crate::accounts::sessions_of(&s, key), 0);
+        crate::people::invite(
+            State(s.clone()),
+            Json(crate::people::NewInvite {
+                access: crate::people::Access::Music,
+                key: Some(key.into()),
+                name: None,
+                storage_quota_mb: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(crate::people::may_use_music(&s, key));
+        approved_tx.send(()).unwrap();
+        assert_eq!(old.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert_eq!(
+            crate::accounts::sessions_of(&s, key),
+            0,
+            "an approval from the removed membership minted a token"
+        );
+        // A sign-in started under the fresh membership still gets its token
+        let fresh = crate::people::access_started(&s);
+        let token = crate::mint_listener_sign_in(&s, key, fresh)
+            .await
+            .unwrap()
+            .expect("a current listener signs in");
+        assert_eq!(crate::accounts::sessions_of(&s, key), 1);
+        assert!(crate::accounts::caller(&s, Some(&token)).is_some());
+        // Music off alone also ends what started before it, and nothing is minted after
+        let off = crate::people::access_started(&s);
+        crate::people::change(
+            State(s.clone()),
+            Path(key.into()),
+            Json(crate::people::PersonChange {
+                music: Some(false),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::mint_listener_sign_in(&s, key, off)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        let now = crate::people::access_started(&s);
+        assert_eq!(crate::mint_listener_sign_in(&s, key, now).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_ring_sign_in_started_before_a_restore_mints_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn";
+        let s = listener_state(dir.path(), key).await;
+        let (backup, _) = crate::backup::make(&s, None).unwrap();
+        // A real restore lands while the approval waits at the relay
+        let started = crate::people::access_started(&s);
+        crate::backup::restore(&s, backup, None, false).await.unwrap();
+        assert!(crate::people::may_use_music(&s, key));
+        let sessions = crate::accounts::sessions_of(&s, key);
+        assert_eq!(
+            crate::mint_listener_sign_in(&s, key, started)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(crate::accounts::sessions_of(&s, key), sessions);
+        // Already past the membership lock and waiting for the roster when restore takes it
+        let started = crate::people::access_started(&s);
+        let roster = crate::people::roster_for_restore(&s).await;
+        let waiting = crate::mint_listener_sign_in(&s, key, started);
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        crate::people::restored_access(&s);
+        drop(roster);
+        assert_eq!(waiting.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert_eq!(crate::accounts::sessions_of(&s, key), sessions);
+        // A sign-in started after the restore is minted normally
+        let fresh = crate::people::access_started(&s);
+        let token = crate::mint_listener_sign_in(&s, key, fresh)
+            .await
+            .unwrap()
+            .expect("a current listener signs in");
+        assert_eq!(crate::accounts::sessions_of(&s, key), sessions + 1);
+        assert!(crate::accounts::caller(&s, Some(&token)).is_some());
+    }
 }

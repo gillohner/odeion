@@ -178,11 +178,18 @@ pub struct NodeState {
         Option<Arc<dyn crate::copy_guard::Room>>,
     )>,
     /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`, for
-    /// a device of the owner's).
+    /// a device of the owner's, the music access revision when it started).
+    #[allow(clippy::type_complexity)]
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<
             String,
-            (pm_pubky::homeserver::LoginFlow, std::time::Instant, String, bool),
+            (
+                pm_pubky::homeserver::LoginFlow,
+                std::time::Instant,
+                String,
+                bool,
+                u64,
+            ),
         >,
     >,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST

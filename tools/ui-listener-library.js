@@ -1,6 +1,7 @@
 // A listener's own bookmarks and sign-ins (TASK-listener-personal-library-1104):
 //   * a listener sees Favourites and the hearts; before their homeserver is connected the page
-//     asks them to connect it (one Pubky Ring approval), and a heart that needs it opens that;
+//     asks them to connect it (one Pubky Ring approval), and a heart that needs it opens that
+//     (choosing "Not now" there leaves the heart as it was);
 //   * connected: their own bookmarks; lost (revoked in Ring): the node's copy and "Approve again";
 //     changes waiting on the node say so;
 //   * Settings › You: My homeserver (connect, disconnect), My streaming accounts (their own
@@ -86,6 +87,17 @@ const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4" width="120
       await page.locator('#ifav').click();
       await page.locator('dialog.dialog h2').filter({ hasText: /Approve this node again/ }).waitFor();
       await page.locator('[data-hsclose]').click(); await sleep(200);
+      // "Not now" on a song row's heart: the heart stays as it was and nothing is saved
+      await go('/tracks');
+      const rowHeart = page.locator('#main .track [data-act="fav"]').first();
+      await rowHeart.waitFor({ state: 'attached' });
+      const wasOn = await rowHeart.evaluate((b) => b.classList.contains('on'));
+      const saved = writes.filter((w) => !w.refused).length;
+      await rowHeart.evaluate((b) => b.click());
+      await page.locator('dialog.dialog h2').filter({ hasText: /Approve this node again/ }).waitFor();
+      await page.locator('[data-hsclose]').click(); await sleep(400);
+      assert.equal(await rowHeart.evaluate((b) => b.classList.contains('on')), wasOn, 'cancelling the dialog leaves the heart as it was');
+      assert.equal(writes.filter((w) => !w.refused).length, saved, 'cancelling the dialog saves nothing');
       await go('/favourites');
       assert.match(await page.locator('#hsnote').innerText(), /no longer lets this node in/);
       await shot('bookmarks-lost');

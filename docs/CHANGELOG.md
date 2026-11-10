@@ -11,6 +11,7 @@ Newest first. Dates are when the change landed on `main`.
   - Their hearts and Favourites are theirs: written to their homeserver with their session, never into the owner's. When their homeserver doesn't answer, a change waits on the node and is written later; when it refuses the node (revoked in Ring), the page says so and asks them to approve it again.
   - Settings › You lists their own streaming accounts (TIDAL, Qobuz, Spotify) with their own sign-in ways. What the node's owner sets up (the Spotify and Qobuz apps, the TIDAL device client) is never a listener's to see or change.
   - The "your own come in a later version" sentence is gone. Their own collections come next.
+  - A Pubky Ring sign-in started before a listener's music access changed (removed, Music off, or a restore) no longer signs them in; the page starts a new one. Choosing "Not now" when a heart asks to connect leaves the heart as it was.
 
 - **Library controls are easier to tap on phones.** Add music on Library, Albums and Songs, and the My music, Node library and Import tabs, now have targets at least 44 px tall.
 
