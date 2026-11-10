@@ -358,6 +358,9 @@
     try { json = text ? JSON.parse(text) : null; } catch { json = { error: text }; }
     // The node refused this browser's token (its own answer, not a service refusing a sign-in typed here)
     if (r.status === 401 && json && json.error === NODE_REFUSED) { sessionEnded(sent); throw new Error('Log in to use the node.'); }
+    // A listener's collections are on their own homeserver: connect it (or approve it again), then the change goes
+    // again (sent as it is: this one is still the change on its way, so api() would hand back this very answer)
+    if (r.status === 409 && json && json.needs_connect && /^\/(playlists|collections)\b/.test(path) && await homeserverDialog(!!json.lost)) return apiSend(method, path, body, opts);
     if (!r.ok) { const raw = json && json.error ? json.error : `HTTP ${r.status}`; if (json && json.detail) console.warn(`${method} ${path}: ${json.detail}`); else if (raw !== humanError(raw, path)) console.warn(`${method} ${path}: ${raw}`); const err = new Error(humanError(raw, path)); err.raw = raw; err.status = r.status; err.body = json; throw err; }
     return json;
   };
@@ -1248,6 +1251,16 @@
   // External resources that do not answer (Pinakes, the homeserver, a service), or that need a
   // change (the API token): one quiet line under
   // the node status, only when something is wrong; the library keeps playing without them.
+  // Help "?" in the top bar: Report a problem and My reports (feedback.js), for the owner and
+  // listeners, mounted once the node answers. The version comes from the node, once.
+  let helpMounted = false;
+  const mountHelp = () => {
+    if (helpMounted || !window.PM_FEEDBACK || !state.token) return;
+    helpMounted = true;
+    let version = '';
+    api('GET', '/info').then((i) => { version = (i && i.version) || ''; }).catch(() => {});
+    PM_FEEDBACK.mount($('#help'), { token: () => state.token, view: () => state.view, shell: shellMode, version: () => version });
+  };
   let healthTimer = null;
   const checkHealth = async () => {
     clearTimeout(healthTimer); healthTimer = setTimeout(checkHealth, 60000);
@@ -1280,6 +1293,7 @@
   const NODE_REFUSED = 'missing or wrong bearer token';
   const forgetAccount = () => {
     const mine = state.token; state.token = '';
+    if (window.PM_FEEDBACK) PM_FEEDBACK.reset(); // a draft or open report goes with the sign-in
     try {
       // Another tab may have logged in again meanwhile: its token stays
       if (localStorage.getItem('pm.token') !== mine) return;
@@ -1814,7 +1828,7 @@
   // Offline (the app's local server, pm-offline): only what this device keeps, played here
   const isOffline = () => !!(state.info && state.info.offline);
   const OFFLINE_VIEWS = new Set(['downloads', 'queue', 'settings']);
-  const LISTENER_VIEWS_OFF = new Set(['home', 'favourites', 'playlists', 'playlist', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
+  const LISTENER_VIEWS_OFF = new Set(['home', 'radio', 'sources', 'source-item', 'identify', 'smart', 'smart-edit', 'dashboard', 'add-music']);
   const zoneOpen = (z) => !isListener() || !state.me.zones || z.id === BROWSER || state.me.zones.includes(z.id);
   // The phone's own zone (the node's, on this app's output) while the app plays its music itself:
   // one "This phone" in the phone's picker; listed again while it is the zone in use or plays
@@ -2028,6 +2042,8 @@
   const GUIDE = (file) => `https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/${file}`;
   const guideLink = (file) => `<a href="${GUIDE(file)}" target="_blank" rel="noopener">Guide</a>`;
   // A numbered step card, a check mark once done. `sub` and `body` are HTML
+  // What the node's owner sets up (node apps, device clients), in a listener's own sign-ins
+  const ownerSets = (what) => `<p class="muted small">${what} is set up by whoever runs this node (Settings › This node); ask them. Your own account goes here once it is.</p>`;
   const stepCard = (no, title, done, sub, body) => `<div class="setup-step card-step ${done ? 'done' : ''}" data-step="${no}"><span class="stepmark" aria-hidden="true">${done ? icon('check') : no}</span><div class="grow"><div class="name">${no}. ${title}${done ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${body}</div></div>`;
   // A secret field with Show / Hide: a password until shown
   const secretInput = (name, label, placeholder, autocomplete = 'off', disabled = false) => `<span class="secretwrap"><input class="input" name="${name}" type="password" placeholder="${esc(placeholder)}" autocomplete="${autocomplete}" aria-label="${esc(label)}" spellcheck="false" required ${disabled ? 'disabled' : ''}><button class="icon-btn showpw" type="button" aria-label="Show ${esc(label)}" aria-pressed="false" title="Show">${icon('eye')}</button></span>`;
@@ -2156,13 +2172,15 @@
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       const own = !u.from && u.signed_in;
       if (pick === 'browser') return own && u.session_client === 'pkce' ? h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') : tidalPkceSteps(u, h);
-      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in ${appPlatform() ? 'your browser' : 'this browser'} and comes back here.</span></div>${st.redirect_uri && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
+      if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in ${appPlatform() ? 'your browser' : 'this browser'} and comes back here.</span></div>${st.redirect_uri && !isListener() && !/^Odeion/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
         if (u.pending) return tidalCodeBox(u.pending);
         if (own && u.session_client === 'device') return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '');
         return `<div class="toolbar"><button class="btn primary" id="tfin">${h.m.codeExpired ? 'New code' : 'Sign in with a code'}</button><span class="muted small">${h.m.codeExpired ? 'The code expired before it was entered. ' : ''}A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>`;
       }
       if (pick === 'own-device') {
+        // A device client replaces the built-in one for everyone on the node: the owner's to set
+        if (isListener()) return ownerSets('A device client of the node’s own');
         const now = u.client_from === 'settings' ? '<p class="muted small">Your device client is set here and used for the code sign-in. <button class="btn ghost sm" id="tfclientforget">Forget it</button></p>'
           : u.client_from === 'config' ? '<p class="muted small">A device client is set in the node config; one entered here is used instead.</p>' : '';
         return now + stepCard(1, 'Device client ID and secret', u.client_from === 'settings', `A TIDAL device client you are allowed to use, for the code sign-in; it replaces the built-in one for everyone here. The node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
@@ -2295,9 +2313,9 @@
     actions: (pick, si, h) => {
       const st = si.details.status || {}; const ls = si.details.librespot || {}; const w = h.wayOf(pick);
       if (pick === 'app') {
-        if (!st.configured) return spotSetup(st, false);
+        if (!st.configured) return isListener() ? ownerSets('The node’s Spotify app') : spotSetup(st, false);
         if (st.signed_in) return h.useButton(w, st.display_name ? ' as ' + esc(st.display_name) : '');
-        return `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify’s sign-in; the app must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${spotAppRow(st)}${st.app_from === 'settings' ? spotSetup(st, true) : ''}`;
+        return `<div class="toolbar"><button class="btn primary" id="spotin">${icon('zone')} Connect Spotify</button><span class="muted small">Opens Spotify’s sign-in; the app must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and, while in development mode, your Spotify account under its user management.</span></div>${pasteBack('spotify')}${isListener() ? '' : spotAppRow(st) + (st.app_from === 'settings' ? spotSetup(st, true) : '')}`;
       }
       if (pick === 'librespot') return ls.enabled ? `<p class="muted small">librespot is on: pick it in a Spotify app on this network; its device name and output are below.</p>` : `<div class="toolbar"><button class="btn primary" data-sg="use">Switch librespot on</button><span class="muted small">Then pick it in a Spotify app on this network. Its device name and output are set below.</span></div>`;
       if (pick === 'librespot-file') return h.importArea({ fileLabel: 'credentials.json', accept: '.json,application/json', what: 'credentials.json', intro: 'The credentials.json another librespot saved; it is kept readable by the node only.', withPaste: true, label: 'credentials.json contents', placeholder: '{"username": …, "auth_type": …, "auth_data": …}' });
@@ -2539,8 +2557,36 @@
     startWait('play', state.zone, st.name, true);
     try { await api('POST', '/radio/play', { zone: state.zone, station: st }); startSent(); toast(`Tuning to ${st.name}`); refreshQueue(); } catch (e) { startFail(e.message, true); toast(e.message, 'error'); }
   };
+  // A listener's own collection as what this library has of it, in its order: a song as itself, a
+  // library album as its songs (as the node's Play on a zone queues it); `out` counts the items
+  // with nothing here. Where songs play from is the owner's: no play-from for a listener.
+  const listenerSongs = async (d) => {
+    const albums = new Map();
+    const ids = [...new Set((d.entries || []).filter((e) => e && e.kind === 'album' && e.album && e.album.id != null).map((e) => e.album.id))];
+    await Promise.all(ids.map(async (aid) => { try { albums.set(aid, (await api('GET', `/library/albums/${aid}/tracks`)).tracks || []); } catch { albums.set(aid, []); } }));
+    albums.forEach((ts) => rememberTracks(ts));
+    rememberTracks(d.tracks);
+    const song = (t) => ({ track_id: t.id, title: t.title, artist: artists(t), artists: t.artists, album: t.album && t.album.title, duration_ms: t.duration_ms });
+    let out = 0;
+    const songs = d.playlist.items.flatMap((it, k) => {
+      const t = d.tracks[k]; const e = d.entries && d.entries[k];
+      const here = t ? [t] : e && e.kind === 'album' && e.album ? albums.get(e.album.id) || [] : [];
+      if (!here.length) out += 1;
+      return here.map(song);
+    });
+    return { songs, out };
+  };
+
   const playPlaylist = async (id) => {
     try {
+      if (isBrowser() && isListener()) {
+        const d = await api('GET', `/playlists/${encodeURIComponent(id)}`);
+        const { songs, out } = await listenerSongs(d);
+        if (!songs.length) return toast('None of its songs is in this library', 'error');
+        if (out > 0) toast(`${countOf(out, 'items')} not in this library; left out of ${hereName().toLowerCase()}'s queue`);
+        await playSongs(songs);
+        return;
+      }
       if (isBrowser()) {
         // The list's Play shortcut uses the same resolved sources as the detail
         // page: d.tracks alone omits all service-only entries. Only a library song or a
@@ -3530,7 +3576,7 @@
       const word = fav ? 'In favourites' : 'Add to favourites';
       const had = document.activeElement && document.activeElement.id === 'npfav';
       h.innerHTML = `<button class="icon-btn np-heart ${fav ? 'on' : ''}" id="npfav" aria-pressed="${fav}" aria-label="${word}" title="${word}">${icon(fav ? 'heart-fill' : 'heart')}</button>`;
-      $('#npfav', overlay).onclick = async () => { try { await setFavourite(ref(), !fav); fav = !fav; drawHeart(); } catch (e) { toast(e.message, 'error'); } };
+      $('#npfav', overlay).onclick = async () => { try { if (await setFavourite(ref(), !fav)) { fav = !fav; drawHeart(); } } catch (e) { toast(e.message, 'error'); } };
       if (had) $('#npfav', overlay).focus({ preventScroll: true });
       npRestore();
     };
@@ -4425,7 +4471,7 @@
       else if (act === 'more') trackMenu(btn, [tracks[i]]);
       else if (act === 'fav') {
         const on = btn.classList.contains('on');
-        try { await setFavourite({ track_id: tracks[i].id }, !on); btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; }
+        try { if (await setFavourite({ track_id: tracks[i].id }, !on)) { btn.classList.toggle('on', !on); btn.innerHTML = icon(!on ? 'heart-fill' : 'heart'); btn.title = !on ? 'Remove from favourites' : 'Add to favourites'; } }
         catch (er) { toast(er.message, 'error'); }
       }
     });
@@ -4441,7 +4487,7 @@
     return [...new Set(ids)].map((x) => profileCache.get(x)).filter(Boolean);
   };
   const face = (c, size = 'sm') => (c.avatar ? `<img class="face ${size}" src="${esc(imgSrc(c.avatar))}" alt="" loading="lazy" data-err="hide">` : `<span class="face ${size} mono" style="background:hsl(${hue(c.id)} 35% 34%)">${esc(initials(c.name))}</span>`);
-  const peopleMenu = (anchor, title, cards, more = 0) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), icon: 'artist', run: () => setView('person', c.id) })), ...(more > 0 ? [{ title: `and ${more} more on Pubky` }] : [])]);
+  const peopleMenu = (anchor, title, cards, more = 0) => showMenu(anchor, [{ title }, ...cards.map((c) => ({ label: c.you ? `${c.name} (you)` : c.name, note: c.following ? 'you follow' : (c.known ? null : 'not on Pubky search yet'), face: c, run: () => setView('person', c.id) })), ...(more > 0 ? [{ title: `and ${more} more on Pubky` }] : [])]);
   // Tag colours as pubky.app draws them, so a label looks the same there and here: its
   // generateRandomColor and hexToRgba (pubky/pubky-app @7cb809a, src/libs/utils/utils.ts) ported as
   // they are, the hash that outgrows 32 bits and the mixed-case hex included (tools/tag-colour-check.js)
@@ -4455,6 +4501,43 @@
     if ((n === 3 || n === 4) && byte <= 85) { const cyan = (255 - Math.round(byte * 0.75)).toString(16).padStart(2, '0'); return n === 3 ? `#00${cyan}FF` : `#00FF${cyan}`; }
     return `#${[`FF00${hex}`, `FF${hex}00`, `${hex}FF00`, `${hex}00FF`, `00${hex}FF`, `00FF${hex}`][n]}`;
   };
+  // A listener connects their own homeserver (personal.rs): one approval in Pubky Ring for their
+  // bookmarks and collections folders, nothing else. Resolves true once the node holds it.
+  const homeserverDialog = (lost) => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    d.innerHTML = `<h2>${lost ? 'Approve this node again' : 'Connect your homeserver'}</h2><p class="muted">${lost ? 'Your homeserver no longer lets this node in (it was revoked in Pubky Ring, say). Approve it again to keep your bookmarks there.' : 'Your bookmarks are kept on your own homeserver, not the node’s. Approve this node once in Pubky Ring, for your bookmarks and collections folders only.'}</p><div id="hsbody"><p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p></div><div class="toolbar"><button class="btn ghost" data-hsclose>Not now</button></div>`;
+    document.body.appendChild(d);
+    let timer = null; let ended = false;
+    const tr = { open: () => d.open, close: (fromBack) => done(fromBack) };
+    const done = (fromBack, ok) => { ended = true; clearTimeout(timer); const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(!!ok); };
+    transients.push(tr); pushTransient();
+    $('[data-hsclose]', d).onclick = () => done();
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(); });
+    const body = $('#hsbody', d);
+    const start = async () => {
+      try {
+        const f = await api('POST', '/me/homeserver/connect');
+        if (ended) return;
+        body.innerHTML = `<div class="notice qrbox">${f.qr_svg ? `<div class="qr" role="img" aria-label="QR code to scan with Pubky Ring">${f.qr_svg}</div>` : ''}<div><p>Scan with Pubky Ring, or open the link on this device and approve.</p><a class="btn primary" href="${esc(f.url)}">Open in Pubky Ring</a></div></div>`;
+        const poll = async () => {
+          if (ended) return;
+          let p; try { p = await api('GET', `/me/homeserver/connect/poll?id=${encodeURIComponent(f.id)}`); } catch { timer = setTimeout(poll, 3000); return; }
+          if (ended) return;
+          if (p.state === 'pending') { timer = setTimeout(poll, 2000); return; }
+          if (p.state === 'ok') { toast('Your homeserver is connected: your bookmarks are kept there'); done(false, true); return; }
+          if (p.state === 'denied') { body.innerHTML = `<p class="notice warn" role="alert">Not kept: ${esc(p.reason || 'Pubky Ring didn’t approve it')}. Approve it with your own identity, for every folder it asks.</p><button class="btn" data-hsagain>Try again</button>`; $('[data-hsagain]', d).onclick = start; return; }
+          start(); // the approval expired: a fresh one
+        };
+        timer = setTimeout(poll, 2000);
+      } catch (e) {
+        if (ended) return;
+        body.innerHTML = `<p class="muted">Can’t start it: ${esc(e.message)}</p><button class="btn" data-hsagain>Try again</button>`;
+        $('[data-hsagain]', d).onclick = start;
+      }
+    };
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    start();
+  });
   const tagRgba = (hex, a) => { const [r, g, b] = hex.match(/\w\w/g).map((x) => parseInt(x, 16)); return `rgba(${r}, ${g}, ${b}, ${a})`; };
   // One tag chip wherever tags show (pubky.app's Tag): the label in its colour, no "#", how many
   // people used it, your own with a border. `attrs` go on the chip's button; `del` (the remove
@@ -4535,6 +4618,9 @@
   const qsOf = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
   // "On the TIDAL link" inside a sentence: only its first letter goes small
   const lower1 = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+  // The people of one label, from a group's Pubky answer: only its own entries (a label named
+  // "constructor" is a label, not something every object has)
+  const facesOf = (pub, label) => { const f = pub && pub.faces; return f && Object.prototype.hasOwnProperty.call(f, label) && Array.isArray(f[label]) ? f[label] : []; };
   const cardOf = (id) => profileCache.get(id) || { id, name: shortKey(id), known: false };
   const heroTagGroup = (g, ht) => {
     const pub = g.pub; const counts = new Map(pub.tags || []);
@@ -4546,7 +4632,7 @@
       .map((label, i) => ({ label, count: Math.max(counts.get(label) || 0, mine.has(label) ? 1 : 0), own: mine.get(label), i }))
       .sort((a, b) => b.count - a.count || a.i - b.i);
     const items = list.map((t) => {
-      const ids = (pub.faces || {})[t.label] || [];
+      const ids = facesOf(pub, t.label);
       const move = t.own && moves ? `<button class="chipx" data-htag-move="${g.scope}" data-label="${esc(t.label)}" aria-label="Move ${esc(t.label)} ${esc(lower1(other.name))}" title="${g.scope === 'link' ? `Put it on the ${esc(ht.kind)} instead` : `Keep it on the ${esc(ht.linkName)} link only`}">${icon(g.scope === 'link' ? 'compass' : 'disc')}</button>` : '';
       const chip = tagChip(t.label, { count: t.count, own: !!t.own, attrs: `data-htag-open="${esc(t.label)}"`, title: `${t.own ? `Your tag${t.own.synced ? '' : ', not pushed yet'}` : `${t.count} ${t.count === 1 ? 'person' : 'people'}`} · open ${t.label}`, del: t.own && edit ? `data-htag-del="${g.scope}" data-label="${esc(t.label)}"` : null, extra: move });
       const wait = t.own && t.own.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : '';
@@ -4573,18 +4659,28 @@
   };
   // Suggestions while adding: the labels on this page, then your own from everywhere (read once)
   const tagLabels = { mine: null };
+  // Half-typed tags, per page and group: they outlive the page being drawn again (a tag added in the other group,
+  // Pubky's answer). One being sent is kept apart until it lands, so it is never offered twice
+  const heroDrafts = new Map(); const heroSending = new Set(); let heroNow = null;
   const openHeroAdd = async (box, ht, b, focus = true) => {
     const g = ht.groups.find((x) => x.scope === b.dataset.htagPlus); if (!g) return;
     b.hidden = true;
     b.insertAdjacentHTML('afterend', `<input class="taginput" data-htag-add="${g.scope}" list="htagsugg" maxlength="20" autocomplete="off" placeholder="Add a tag…" aria-label="Add a tag ${esc(lower1(g.name))}"><span class="muted small tag-hint">Public on your homeserver</span>`);
     const inp = b.nextElementSibling; const hint = inp.nextElementSibling;
-    const close = () => { inp.remove(); hint.remove(); b.hidden = false; };
+    const dk = `${ht.page}|${g.scope}`;
+    const close = () => { heroDrafts.delete(dk); inp.remove(); hint.remove(); b.hidden = false; };
     if (focus) inp.focus();
+    inp.oninput = () => { if (inp.value.trim()) heroDrafts.set(dk, inp.value); else heroDrafts.delete(dk); };
     inp.onkeydown = async (e) => {
       if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); b.focus(); return; }
       if (e.key !== 'Enter' || e.isComposing || inp.disabled || !inp.value.trim()) return;
-      const label = inp.value.trim(); inp.disabled = true;
-      try { await api('PUT', '/tags', { ...g.ref, label }); toast(`Tagged ${label.toLowerCase()}`); render(); } catch (er) { toast(er.message, 'error'); inp.disabled = false; inp.focus(); }
+      const label = inp.value.trim(); inp.disabled = true; heroDrafts.set(dk, inp.value); heroSending.add(dk);
+      try { await api('PUT', '/tags', { ...g.ref, label }); heroSending.delete(dk); heroDrafts.delete(dk); toast(`Tagged ${label.toLowerCase()}`); render(); } catch (er) {
+        heroSending.delete(dk); toast(er.message, 'error');
+        if (inp.isConnected) { inp.disabled = false; inp.focus(); if (ht.later) { ht.later = false; drawHeroTags(ht); } }
+        // The page was drawn again meanwhile (the other group's tag landed): what was typed comes back there
+        else if (heroNow && heroNow.page === ht.page) drawHeroTags(heroNow);
+      }
     };
     inp.onblur = () => setTimeout(() => { if (inp.isConnected && !inp.value.trim() && !inp.disabled && document.activeElement !== inp) close(); }, 150);
     const here = ht.groups.flatMap((x) => [...(x.pub.tags || []).map(([l]) => l), ...(x.own || []).map((t) => t.label)]);
@@ -4597,11 +4693,12 @@
     const del = (ref, label) => api('DELETE', `/tags?${qsOf({ ...ref, label })}`);
     $$('[data-htag-open]', box).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.htagOpen }));
     $$('[data-htag-more]', box).forEach((b) => b.onclick = () => { ht.open.add(b.dataset.htagMore); const gr = b.closest('.tgroup'); const next = $('.tagitem[hidden] button', gr); $$('.tagitem', gr).forEach((it) => { it.hidden = false; }); b.remove(); if (next) next.focus(); });
-    $$('[data-htag-faces]', box).forEach((b) => b.onclick = () => { const g = groupOf(b.dataset.htagFaces); const label = b.dataset.label; const ids = (g.pub.faces || {})[label] || []; const cards = ids.map(cardOf); peopleMenu(b, label, cards, (new Map(g.pub.tags || []).get(label) || ids.length) - cards.length); });
+    $$('[data-htag-faces]', box).forEach((b) => b.onclick = () => { const g = groupOf(b.dataset.htagFaces); const label = b.dataset.label; const ids = facesOf(g.pub, label); const cards = ids.map(cardOf); peopleMenu(b, label, cards, (new Map(g.pub.tags || []).get(label) || ids.length) - cards.length); });
     $$('[data-htag-del]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagDel); if (!g || b.disabled) return; b.disabled = true; try { await del(g.ref, b.dataset.label); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
     // A move writes the other URI first: when that fails, the tag stays where it was
     $$('[data-htag-move]', box).forEach((b) => b.onclick = async () => { const g = groupOf(b.dataset.htagMove); const to = ht.groups.find((x) => x !== g); const label = b.dataset.label; if (!g || !to || b.disabled) return; b.disabled = true; try { await api('PUT', '/tags', { ...to.ref, label }); await del(g.ref, label); toast(`${label} is ${lower1(to.name)} now`); render(); } catch (er) { b.disabled = false; toast(er.message, 'error'); } });
-    $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => openHeroAdd(box, ht, b));
+    // Opening the input is at once: the suggestions it reads after aren't the button's to wait for
+    $$('[data-htag-plus]', box).forEach((b) => b.onclick = () => { openHeroAdd(box, ht, b); });
     const m = $('[data-htag-match]', box); if (m) m.onclick = () => setView('identify', { tracks: ht.match.tracks });
   };
   // The faces come with the people's names and pictures once their profiles are read
@@ -4610,13 +4707,21 @@
     if (!ids.length || ids.every((x) => profileCache.has(x))) return;
     await loadProfiles(ids);
     if (!box.isConnected || box.dataset.for !== ht.key) return;
-    $$('[data-htag-faces]', box).forEach((b) => { const g = ht.groups.find((x) => x.scope === b.dataset.htagFaces); const fids = (g.pub.faces || {})[b.dataset.label] || []; b.innerHTML = tagFaces(fids.map(cardOf), new Map(g.pub.tags || []).get(b.dataset.label) || fids.length); });
+    $$('[data-htag-faces]', box).forEach((b) => { const g = ht.groups.find((x) => x.scope === b.dataset.htagFaces); const fids = facesOf(g.pub, b.dataset.label); b.innerHTML = tagFaces(fids.map(cardOf), new Map(g.pub.tags || []).get(b.dataset.label) || fids.length); });
   };
   let heroTagsRo = null;
   const drawHeroTags = (ht) => {
     const box = $('#htags'); if (!box || box.dataset.for !== ht.key) return;
-    // A half-typed tag stays when the public tags come in meanwhile
-    const drafts = $$('input[data-htag-add]', box).map((t) => ({ scope: t.dataset.htagAdd, value: t.value, focus: document.activeElement === t }));
+    // Half-typed tags stay when the public tags come in meanwhile (each group's own); while one is being sent, the
+    // redraw waits for its answer
+    heroNow = ht;
+    const typing = $$('input[data-htag-add]', box);
+    if (typing.some((t) => t.disabled)) { ht.later = true; return; }
+    const open = new Map(typing.map((t) => [t.dataset.htagAdd, { value: t.value, focus: document.activeElement === t }]));
+    // What was typed on this page before it was drawn again, except one being sent
+    ht.groups.forEach((g) => { const dk = `${ht.page}|${g.scope}`; if (!open.has(g.scope) && heroDrafts.has(dk) && !heroSending.has(dk)) open.set(g.scope, { value: heroDrafts.get(dk), focus: false }); });
+    // An empty input nobody is in isn't kept (it would never close)
+    const drafts = [...open].filter(([, d]) => d.value.trim() || d.focus).map(([scope, d]) => ({ scope, ...d }));
     box.innerHTML = `${ht.groups.map((g) => heroTagGroup(g, ht)).join('')}${ht.note ? `<p class="hnote small"><span class="muted">${esc(ht.note)}</span>${ht.match ? ` <button class="btn sm" data-htag-match>${esc(ht.match.label)}</button>` : ''}</p>` : ''}<datalist id="htagsugg"></datalist>`;
     bindHeroTags(box, ht);
     drafts.forEach((d) => { const b = $(`[data-htag-plus="${d.scope}"]`, box); if (b) { openHeroAdd(box, ht, b, d.focus); const inp = $(`input[data-htag-add="${d.scope}"]`, box); if (inp) inp.value = d.value; } });
@@ -4678,7 +4783,7 @@
       if (!sw.dir && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) { sw.moved = true; sw.dir = Math.abs(dx) > Math.abs(dy) * 1.5 ? 'x' : 'y'; } // locked on the first move
       if (sw.dir !== 'x') return;
       if (!sw.on) { sw.on = true; sw.row.classList.add('swiping'); }
-      sw.dx = Math.max(isListener() ? 0 : -140, Math.min(140, dx)); // listeners have no playlists to add to
+      sw.dx = Math.max(-140, Math.min(140, dx));
       sw.row.style.transform = `translateX(${sw.dx}px)`;
       sw.row.dataset.swipeLabel = sw.dx > 0 ? 'Play next' : 'Add to playlist';
       sw.row.classList.toggle('swipe-ready', Math.abs(sw.dx) >= 80);
@@ -4725,11 +4830,11 @@
     el.addEventListener('touchcancel', () => end(true), { passive: true });
   };
   [[menuEl, closeMenu], [zonePop, closePop], [qPanel, closeQPanel], [jobPop(), closeJobPop], [volPop(), closeVolPop]].forEach(([el, close]) => { if (el) sheetSwipe(el, close); });
-  const OWNER_MENU = /favourite|playlist|^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
+  const OWNER_MENU = /^tag|post about|link another|wrong match|homeserver|upload|copy to|rename|description|identify|which song|fix tags|delete|remove from library/i;
   let menuPick = null; // { label, at }: run that item of the next menu instead of showing it (row swipes)
   // `opts.all`: every item stays for a listener too (the items are names, not owner actions)
   const showMenu = (anchor, items, opts = {}) => {
-    if (isListener() && !opts.all) { items = items.filter((it) => it.title || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
+    if (isListener() && !opts.all) { items = items.filter((it) => it.title || it.own || !OWNER_MENU.test(it.label || '')); if (!items.some((it) => !it.title)) { if (menuPick && menuPick.anchor === anchor) { toast(`${menuPick.label} isn't available here`); menuPick = null; } return; } }
     if (menuPick && (menuPick.anchor !== anchor || Date.now() - menuPick.at > 4000)) { if (Date.now() - menuPick.at > 4000) menuPick = null; } // another menu: open it as usual
     else if (menuPick) {
       const want = menuPick; menuPick = null; closeMenu();
@@ -4739,7 +4844,7 @@
         return;
       }
     }
-    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
+    menuEl.innerHTML = items.map((it, i) => it.title ? `<div class="pop-title">${esc(it.title)}</div>` : `<button class="pop-item ${it.on ? 'on' : ''}" data-mi="${i}" ${it.disabled ? 'disabled' : ''} ${it.on != null ? `aria-checked="${!!it.on}" role="menuitemradio"` : ''}>${it.face ? face(it.face) : it.svc ? svcBadge(it.svc) : it.icon ? icon(it.icon) : ''}<span>${esc(it.label)}${it.note ? `<span class="pop-note">${esc(it.note)}</span>` : ''}</span>${it.on ? icon('check', 'ic pop-check') : ''}</button>`).join('');
     // The item runs first: a page it opens replaces the transient entry; otherwise it is popped. The menu
     // closes at once, so the control that opened it (its ⋯) shows the progress until the item is done.
     $$('[data-mi]', menuEl).forEach((b) => b.onclick = () => { menuEl.hidden = true; Promise.resolve(busy(anchor, () => items[Number(b.dataset.mi)].run())).catch(() => {}).finally(popTransient); });
@@ -4769,7 +4874,7 @@
     if (!state.playlists.length) { try { state.playlists = await api('GET', '/playlists'); } catch { /* keep */ } }
     await pubkyUser();
     const single = tracks.length === 1 ? tracks[0] : null;
-    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite({ track_id: single.id }, !isFav(single)); render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
+    const favItem = single ? [{ label: isFav(single) ? 'Remove from favourites' : 'Add to favourites', icon: isFav(single) ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite({ track_id: single.id }, !isFav(single))) render(); } catch (e) { toast(e.message, 'error'); } } }] : [];
     // Start radio: from the single track, or from a random track of a set (album page menu).
     const seeds = tracks.filter((t) => t && trackHasId(t));
     let versionItems = [];
@@ -5073,7 +5178,7 @@
       { label: 'Add to queue', icon: 'plus', run: () => playSongs(o.songs || [], 0, 'end', o.plays_from, anchorEl, o.fallback) },
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker(addTo, o.title || 'New playlist', async (name) => { try { await api('POST', '/playlists', trackIds.length === (o.songs || []).length && trackIds.length ? { name, track_ids: trackIds } : { name, uris: uris.length ? uris : o.uri ? [o.uri] : [] }); state.playlists = await api('GET', '/playlists'); toast(`Created “${name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...(o.dl ? dlItem(o.dl.kind, o.dl.id, o.title, o.dl.sub, o.dl.online, o.dl.songs) : single && single.track_id != null ? dlItem('track', single.track_id, single.title, single.artist) : []),
-      ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav); render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
+      ...(single ? [{ label: singleFav ? 'Remove from favourites' : 'Add to favourites', icon: singleFav ? 'heart-fill' : 'heart', run: async () => { try { if (await setFavourite(single.track_id != null ? { track_id: single.track_id } : { uri: single.page || uriOf('song', single.id) }, !singleFav)) render(); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && trackIds.length === 1 && !isBrowser() ? [{ label: 'Start radio', icon: 'radio', run: async () => { try { await playSongs([single], 0, 'replace', o.plays_from, anchorEl, o.fallback); await api('PUT', `/zones/${encodeURIComponent(state.zone)}/radio`, { on: true }); toast('Radio: similar music follows when the queue ends'); } catch (e) { toast(e.message, 'error'); } } }] : []),
       ...(single && single.id && !onThis('song', single.id) ? [{ label: 'Go to song page', icon: 'compass', run: () => setView('item', { kind: 'song', id: single.id }) }] : []),
       ...(o.artistId ? [{ label: 'Go to artist', icon: 'artist', run: () => setView('item', { kind: 'artist', id: o.artistId }) }] : o.artistName ? [{ label: `Search “${o.artistName}”`, icon: 'artist', run: () => { search.value = o.artistName; runSearch(); } }] : []),
@@ -5532,17 +5637,31 @@
   const loading = () => { main.innerHTML = `<div class="skeleton" style="height:28px;width:220px"></div><div class="sk-grid">${'<div class="skeleton"></div>'.repeat(8)}</div>`; };
 
   const loadFavourites = async () => { const f = await api('GET', '/favourites'); state.favUris = new Set(f.uris || []); return f; };
-  // A song not identified yet is a favourite on this node only until "Which song is this?"
-  const setFavourite = async (ref, on) => {
+  // A song not identified yet is a favourite on this node only until "Which song is this?".
+  // A listener's go to their own homeserver: the first one asks them to connect it.
+  // True once changed; false when they chose not to connect (nothing was changed): callers
+  // toggle or redraw only on true.
+  const setFavourite = async (ref, on, again = true) => {
     let note = '';
-    if (on) {
-      const r = await api('PUT', '/favourites', ref); const k = ((r && r.uri) || '').split(':')[0];
-      if (isOffline()) note = ' (sent to your node when it is back)';
-      else if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
-      else if (k === 'album' || k === 'artist') note = ` (kept on this node until MusicBrainz knows this ${k})`;
-    } else await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
+    try {
+      if (on) {
+        const r = await api('PUT', '/favourites', ref); const k = ((r && r.uri) || '').split(':')[0];
+        if (isOffline()) note = ' (sent to your node when it is back)';
+        else if (r && r.pending) note = ' (on this node until your homeserver answers)';
+        else if (k === 'track') note = ' (kept on this node until you pick which song it is: the ? on its row)';
+        else if (k === 'album' || k === 'artist') note = ` (kept on this node until MusicBrainz knows this ${k})`;
+      } else {
+        const r = await api('DELETE', '/favourites?' + new URLSearchParams(Object.entries(ref).map(([k, v]) => [k, String(v)])).toString());
+        if (r && r.pending) note = ' (on this node until your homeserver answers)';
+      }
+    } catch (e) {
+      if (!(again && e.status === 409 && e.body && e.body.needs_connect)) throw e;
+      if (await homeserverDialog(!!e.body.lost)) return setFavourite(ref, on, false);
+      return false;
+    }
     await loadFavourites();
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
+    return true;
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
@@ -5922,13 +6041,21 @@
           const f = await loadFavourites();
           if (state.view !== 'favourites') return;
           const none = !f.albums.length && !f.tracks.length && !f.artists.length && !f.other.length;
+          // A listener's are on their own homeserver: connect it, approve it again, or what waits
+          const hs = f.homeserver;
+          const hsNote = !hs ? '' : !hs.connected ? `<div class="notice" id="hsnote"><p>Your bookmarks are kept on your own homeserver. Connect it once (one approval in Pubky Ring), then the hearts here are yours.</p><button class="btn primary" data-hsconnect>Connect your homeserver</button></div>`
+            : hs.lost ? `<div class="notice warn" role="alert" id="hsnote"><p>Your homeserver no longer lets this node in. These are the node’s copy; approve it again to change them.</p><button class="btn" data-hsconnect>Approve again</button></div>`
+              : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} wait on this node until your homeserver answers.</p>`
+                : hs.stale ? '<p class="muted small" id="hsnote" role="status">Your homeserver didn’t answer just now: this is the node’s copy.</p>' : '';
           main.innerHTML = pageHead('Favourites', `${countOf(f.albums.length, 'albums')} · ${countOf(f.tracks.length, 'tracks')} · ${countOf(f.artists.length, 'artists')}`, f.tracks.length ? `<button class="btn primary" id="favplay">${icon('play')} Play tracks</button>` : '')
-            + (none ? emptyState('heart', 'Nothing hearted yet', 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.') : '')
+            + hsNote
+            + (none && !(hs && !hs.connected) ? emptyState('heart', 'Nothing hearted yet', hs ? 'Press the heart on a song, album or artist to keep it here, on your own homeserver.' : 'Press the heart on a song, album or artist to keep it here. Signed in with Pubky, your favourites are also kept in your own Pubky storage.') : '')
             + (f.albums.length ? `<section class="section"><div class="section-head"><h3>Albums</h3></div>${albumGrid(f.albums)}</section>` : '')
             + (f.artists.length ? `<section class="section"><div class="section-head"><h3>Artists</h3></div><div class="chips">${f.artists.map((a) => `<button class="chip" data-artist="${a.id}">${esc(a.name)}</button>`).join('')}</div></section>` : '')
             + (f.tracks.length ? `<section class="section"><div class="section-head"><h3>Tracks</h3></div>${trackRows(f.tracks, { key: 'fav' })}</section>` : '')
             + (f.other.length ? `<section class="section"><div class="section-head"><h3>From other services</h3></div><div id="favother"><div class="skeleton" style="height:56px"></div></div></section>` : '');
           lists.fav = f.tracks;
+          const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
           const fp = $('#favplay'); if (fp) fp.onclick = () => playTracks(f.tracks, true);
           if (f.other.length) { const items = await describe(f.other); const box = $('#favother'); if (box && state.view === 'favourites') { box.innerHTML = discoverRows(items); bindDiscoverRows(items); } }
           break;
@@ -6135,6 +6262,7 @@
           const want = state.viewArg && state.viewArg.tracks;
           if (want && want.length) {
             state.viewArg = { ...state.viewArg, tracks: null };
+            try { history.replaceState({ ...(history.state || {}), arg: histArg('identify', state.viewArg) }, '', location.pathname + location.search); } catch { /* sandboxed */ }
             const row = want.map((t) => $(`.idrow[data-track="${Number(t)}"]`, main)).find(Boolean); const sec = row && row.closest('.idalbum');
             if (sec) { sec.scrollIntoView({ block: 'start' }); const h = $('h3', sec); if (h) { h.tabIndex = -1; h.focus({ preventScroll: true }); } }
             else toast(next != null ? 'This album isn\'t among the first folders here: Show more at the end lists the rest.' : 'This album has no matches waiting to be confirmed. Identify (Settings) looks for it again.');
@@ -6300,22 +6428,29 @@
           break;
         }
         case 'playlists': {
-          state.playlists = await api('GET', '/playlists');
-          const smarts = await api('GET', '/smart').catch(() => []);
+          // A listener's are their own, on their own homeserver (no imports or smart playlists: those are the owner's)
+          const mine = isListener();
+          const [lists, smarts, hs] = await Promise.all([api('GET', '/playlists'), mine ? [] : api('GET', '/smart').catch(() => []), mine ? api('GET', '/me/homeserver').catch(() => null) : null]);
+          state.playlists = lists;
           if (state.view !== 'playlists') return;
-          main.innerHTML = pageHead('Playlists', state.playlists.length) + `
-            <div class="toolbar"><input class="input" id="plname" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button><label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label></div>
+          const hsNote = !hs ? '' : !hs.connected ? `<div class="notice" id="hsnote"><p>Your collections are kept on your own homeserver. Connect it once (one approval in Pubky Ring), then the ones you make here are yours.</p><button class="btn primary" data-hsconnect>Connect your homeserver</button></div>`
+            : hs.lost ? `<div class="notice warn" role="alert" id="hsnote"><p>Your homeserver no longer lets this node in. These are the node’s copy; approve it again to change them.</p><button class="btn" data-hsconnect>Approve again</button></div>`
+              : hs.pending ? `<p class="muted small" id="hsnote" role="status">${countOf(hs.pending, 'changes')} ${hs.pending === 1 ? 'waits' : 'wait'} on this node until your homeserver answers.</p>`
+                : hs.stale ? '<p class="muted small" id="hsnote" role="status">The node couldn’t read all of your homeserver just now (it didn’t answer, was slow, or has more posts than the node reads at once): this list is the node’s copy.</p>' : '';
+          main.innerHTML = pageHead('Playlists', state.playlists.length) + hsNote + `
+            <div class="toolbar"><input class="input" id="plname" placeholder="New playlist name"><button class="btn" id="plcreate">${icon('plus')} Create</button>${mine ? '' : `<label class="btn file-btn">${icon('upload')} Import M3U, CSV or Roon export<input type="file" id="plimport" accept=".m3u,.m3u8,.csv,.xlsx"></label>`}</div>
             <div class="toolbar"><input class="input" id="plshared" placeholder="Paste a pubky:// link to a shared playlist, or a Pubky key" style="flex:1;min-width:240px"><button class="btn" id="plopenshared">${icon('external')} Open</button></div>`
-            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : emptyState('playlist', 'No playlists yet', 'Create one, import a file from another player, or add tracks from any list.'))
-            + `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`;
-          $('#smartnew').onclick = () => setView('smart-edit', 'new');
+            + (state.playlists.length ? `<div class="list">${state.playlists.map((p) => `<div class="list-row clickable" data-pl="${esc(p.id)}">${mosaic(p.covers, p.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(p.name)}</div><div class="sub">${p.items} item${p.items === 1 ? '' : 's'}${p.description ? ' · ' + esc(p.description) : ''}</div></div><span class="pill ${p.synced ? 'ok' : ''}">${p.synced ? 'synced' : mine ? 'waiting' : 'local'}</span><button class="icon-btn" data-plplay="${esc(p.id)}" title="Play">${icon('play')}</button></div>`).join('')}</div>` : hs && !hs.connected ? '' : emptyState('playlist', 'No playlists yet', mine ? 'Create one, or add songs from any ⋯ menu. They’re kept on your own homeserver.' : 'Create one, import a file from another player, or add tracks from any list.'))
+            + (mine ? '' : `<section class="section"><div class="section-head"><h3>Smart playlists</h3><button class="btn sm" id="smartnew">${icon('plus')} New smart playlist</button></div><p class="muted small">Songs picked by rules over your library and your tags; they change as your library does.</p>${smarts.length ? `<div class="list">${smarts.map((x) => `<div class="list-row clickable" data-smart="${esc(x.id)}">${mosaic([], x.name, 'pl-thumb')}<div class="grow"><div class="name">${esc(x.name)}</div><div class="sub">${esc(smartSummary(x))}</div></div><span class="pill">smart</span></div>`).join('')}</div>` : ''}</section>`);
+          const hc = $('[data-hsconnect]', main); if (hc) hc.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) render(); };
+          const sn = $('#smartnew'); if (sn) sn.onclick = () => setView('smart-edit', 'new');
           $$('[data-smart]', main).forEach((r) => r.onclick = () => setView('smart', r.dataset.smart));
           $('#plcreate').onclick = async () => { const n = $('#plname').value.trim(); if (!n) { $('#plname').focus(); return; } try { await api('POST', '/playlists', { name: n }); toast(`Created “${n}”`); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#plname').onkeydown = (e) => { if (e.key === 'Enter') $('#plcreate').click(); };
           needsText($('#plname'), $('#plcreate')); needsText($('#plshared'), $('#plopenshared'));
           const openShared = async () => { try { const t = await api('GET', `/shared/resolve?link=${encodeURIComponent($('#plshared').value)}`); setView('shared', t.id ? { user: t.user, id: t.id } : { user: t.user }); } catch (e) { toast(e.message, 'error'); } };
           $('#plopenshared').onclick = openShared; $('#plshared').onkeydown = (e) => { if (e.key === 'Enter' && $('#plshared').value.trim()) openShared(); };
-          $('#plimport').onchange = async (e) => {
+          if ($('#plimport')) $('#plimport').onchange = async (e) => {
             const f = e.target.files[0]; if (!f) return;
             try {
               const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
@@ -6394,7 +6529,9 @@
           // the songs show at once, the chips follow.
           const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
           const pfFailed = !cachedPf && state.plPf && state.plPf.id === plId && state.plPf.failed && Date.now() - state.plPf.at < 30000;
-          const pfP = cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
+          // A listener's collection plays what the library has: no play-from orders or pins (those are the owner's)
+          const mine = isListener();
+          const pfP = mine ? Promise.resolve(null) : cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`);
           let pf = cachedPf || await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]);
           if (state.view !== 'playlist') return;
@@ -6407,6 +6544,10 @@
             const kind = d.entries && d.entries[k] && d.entries[k].kind;
             if (kind === 'link' && mbSearchWords(it.uri)) return { no: k + 1, card: true, search: true, title: mbSearchWords(it.uri), page: it.uri };
             if (kind === 'link' || kind === 'post') return { no: k + 1, card: true, title: (() => { try { return new URL(it.uri).hostname.replace(/^www\./, ''); } catch { return it.uri; } })(), page: it.uri };
+            // A listener's library album shows as itself, in its place; Play and Shuffle play its
+            // songs there (listenerSongs), a row's own play skips it as it does any card
+            const ea = mine && kind === 'album' && d.entries[k].album;
+            if (ea) return { no: k + 1, card: true, title: ea.album_artist ? `${ea.title} · ${ea.album_artist}` : ea.title, page: it.uri };
             const t = d.tracks[k]; const r = pf && pf.items[k];
             const base = r ? { plays: r.plays_from, pinned: !!(r.pin && !r.pin_unavailable), pinLost: !!r.pin_unavailable, unavailable: r.plays_from ? null : (r.reason || 'Not on your connected services'), sources: r.sources, connect: r.connect } : {};
             const lib = r && r.plays_from && r.plays_from.service === 'library';
@@ -6424,16 +6565,18 @@
           const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
           // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
           const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songCount} song${songCount === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
-          const pfNote = !pf && !pfPending && songs.length ? '<p class="muted small pfnote" role="status">Couldn’t find where these songs play. <button class="link" id="pfretry">Try again</button></p>' : '';
+          const pfNote = !mine && !pf && !pfPending && songs.length ? '<p class="muted small pfnote" role="status">Couldn’t find where these songs play. <button class="link" id="pfretry">Try again</button></p>' : '';
+          // Whose homeserver a shared copy is on: the owner's Pubky identity, or the listener's own
+          const sharer = mine ? state.me && state.me.key : state.pubkyUser;
           const sharingActions = d.summary.visibility === 'public'
-            ? `${state.pubkyUser ? `<button class="btn hero-zone" id="plcopylink" aria-label="Copy link" title="Copy link">${icon('copy')}<span class="lbl"> Copy link</span></button>` : ''}<button class="btn ghost hero-zone" id="plunshare" aria-label="Make private" title="Make private">${icon('eye-off')}<span class="lbl"> Make private</span></button>`
+            ? `${sharer ? `<button class="btn hero-zone" id="plcopylink" aria-label="Copy link" title="Copy link">${icon('copy')}<span class="lbl"> Copy link</span></button>` : ''}<button class="btn ghost hero-zone" id="plunshare" aria-label="Make private" title="Make private">${icon('eye-off')}<span class="lbl"> Make private</span></button>`
             : `<button class="btn hero-zone" id="plshare" aria-label="Share on Pubky" title="Share on Pubky">${icon('upload')}<span class="lbl"> Share on Pubky</span></button>`;
           const sharingNote = d.summary.visibility === 'public'
-            ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : 'Public copy pending: shared on the next sync with your homeserver.')
-            : (d.summary.synced ? 'Private on your homeserver.' : 'Private on this node; saved to your homeserver on the next sync.');
-          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
+            ? (d.summary.synced ? 'Public on Pubky. Anyone with the link can open it.' : mine ? 'Public copy pending: shared once your homeserver answers.' : 'Public copy pending: shared on the next sync with your homeserver.')
+            : (d.summary.synced ? 'Private on your homeserver.' : mine ? 'Private; it waits on this node until your homeserver answers.' : 'Private on this node; saved to your homeserver on the next sync.');
+          main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? (mine ? 'on your homeserver' : 'synced to your homeserver') : mine ? 'waiting for your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn hero-zone" id="plzone" aria-label="Play on…" title="Play on…">${icon('zone')}<span class="lbl"> Play on…</span></button>${sharingActions}<button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger pldel" id="pldel">${icon('trash')} Delete</button></div><p class="muted small" role="status">${sharingNote}</p></div></div>`
-            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3></div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', mine ? 'Add songs from any ⋯ menu.' : 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + `<section class="section"><div class="section-head"><h3>Description</h3><button class="link" id="pldesc">${d.playlist.description ? 'Edit' : 'Add one'}</button></div>${d.playlist.description ? `<p>${esc(d.playlist.description)}</p>` : '<p class="muted small">A few words about this playlist, shown with it when you share it.</p>'}</section>`
             + `<section class="section"><div class="section-head"><h3>About</h3></div><dl class="kv"><dt>Songs</dt><dd>${songs.length} · ${d.tracks.filter(Boolean).length} in this library</dd><dt>Length</dt><dd>${total ? mins(total) : '—'}</dd><dt>Stored</dt><dd>${d.summary.synced ? 'your homeserver (private)' : 'this node'}</dd></dl></section>`;
@@ -6452,7 +6595,14 @@
           // In this browser only a library song or a stream plays: a row with neither (a Spotify
           // Connect pick, a song still being found) is left out and said, as the list's Play does,
           // never played alone in place of the rest (review of #258); a zone (Shuffle on a speaker) keeps them, as before
-          const playAll = (shuffle, anchorEl) => {
+          const playAll = async (shuffle, anchorEl) => {
+            // A listener's: what the library has of each item, albums as their songs, on any zone
+            if (mine) {
+              const { songs: list, out } = await listenerSongs(d);
+              if (!list.length) return toast('None of its songs is in this library', 'error');
+              if (out) toast(`${countOf(out, 'items')} not in this library; left out of the queue`);
+              return playSongs(shuffle ? [...list].sort(() => Math.random() - 0.5) : list, 0, 'replace', null, anchorEl);
+            }
             const all = [...playable(songs), ...localSongs]; const list = isBrowser() ? all.filter((t) => t.track_id != null || t.uri) : all; const out = all.length - list.length;
             if (!list.length) return toast(out ? `${countOf(out, 'songs')} ${out === 1 ? 'plays' : 'play'} only elsewhere; nothing here plays ${hereIn()}` : 'Nothing here plays on your services', 'error');
             if (out) toast(`${countOf(out, 'songs')} left out of ${hereName().toLowerCase()}'s queue: ${out === 1 ? 'it plays' : 'they play'} only elsewhere`);
@@ -6469,9 +6619,9 @@
             try { await api('PUT', `/playlists/${d.summary.id}`, { [key]: r.text }); state.playlists = await api('GET', '/playlists'); toast(key === 'name' ? `Renamed to “${r.text}”` : 'Description saved'); render(); } catch (er) { toast(er.message, 'error'); }
           };
           $('#pldesc').onclick = () => editField('description', 'Description', d.playlist.description);
-          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', run: () => editField('description', 'Description', d.playlist.description) },
+          $('#plmore').onclick = (e) => itemMenu(e.currentTarget, { title: d.summary.name, songs, path: `/playlist/${encodeURIComponent(d.summary.id)}`, dl: { kind: 'playlist', id: d.summary.id, online: songs.filter((t) => t.track_id == null && !t.card).length }, extra: [{ label: 'Rename…', icon: 'notes', own: true, run: () => editField('name', 'Name', d.summary.name) }, { label: d.playlist.description ? 'Edit description…' : 'Add a description…', icon: 'notes', own: true, run: () => editField('description', 'Description', d.playlist.description) },
             // Delete is beside Play only in a wide desktop window (CSS, so it follows a resize); else here
-            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
+            ...($('#pldel') && $('#pldel').getClientRects().length ? [] : [{ label: 'Delete playlist…', icon: 'trash', own: true, run: async () => { const ok = await choiceDialog({ title: 'Delete this playlist?', text: `“${d.summary.name}” goes from this node and your homeserver. The songs stay where they are.`, choices: [{ label: 'Delete', value: true, primary: true }] }); if (!ok) return; try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (er) { toast(er.message, 'error'); } } }])] });
           if ($('#pldel')) $('#pldel').onclick = async () => { if (!$('#pldel').dataset.armed) { $('#pldel').dataset.armed = '1'; $('#pldel').innerHTML = `${icon('trash')} Really delete?`; setTimeout(() => { if ($('#pldel')) { delete $('#pldel').dataset.armed; $('#pldel').innerHTML = `${icon('trash')} Delete`; } }, 3000); return; } try { await api('DELETE', `/playlists/${d.summary.id}`); toast('Playlist deleted'); setView('playlists'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-rm]', main).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api('DELETE', `/playlists/${d.summary.id}/items/${b.dataset.rm}`); state.plPf = null; render(); } catch (er) { toast(er.message, 'error'); } });
           const pmove = async (i2, j2) => { const uris = d.playlist.items.map((it) => it.uri); if (j2 < 0 || j2 >= uris.length) return; const [u] = uris.splice(i2, 1); uris.splice(j2, 0, u); try { await api('PUT', `/playlists/${d.summary.id}`, { uris }); state.plPf = null; render(); } catch (e) { toast(e.message, 'error'); } };
@@ -6486,18 +6636,18 @@
               ...(t.connect && t.connect.length ? [{ label: `Connect ${t.connect.map((c) => SERVICE_NAMES[c] || c).join(' or ')}`, icon: 'plus', run: () => setView('sources') }] : []),
               ...(t.id ? [{ label: 'Find another version', icon: 'disc', run: () => setView('item', { kind: 'song', id: t.id }) }] : [])]);
           });
-          const setVis = async (pub) => { try { await api('PUT', `/playlists/${d.summary.id}/visibility`, { public: pub }); toast(pub ? 'Shared: it goes public on the next sync' : 'Private again: the public copy is removed on the next sync'); render(); } catch (e) { toast(e.message, 'error'); } };
+          const setVis = async (pub) => { try { const r = await api('PUT', `/playlists/${d.summary.id}/visibility`, { public: pub }); toast(mine ? (pub ? 'Shared' : 'Private again: the public copy is removed') + (r.summary.synced ? '' : ' once your homeserver answers') : pub ? 'Shared: it goes public on the next sync' : 'Private again: the public copy is removed on the next sync'); render(); } catch (e) { toast(e.message, 'error'); } };
           // Going public asks first, and says what happens without a Pubky sign-in (second review)
           const sh = $('#plshare'); if (sh) sh.onclick = async () => {
-            const who = await pubkyUser();
+            const who = mine ? sharer : await pubkyUser();
             const go = await choiceDialog({ title: `Share “${d.summary.name}”?`, text: who
-              ? 'A public copy goes to your homeserver with the next sync (in a few minutes): the songs and their order, never audio. Anyone with the link can open it, and people on Pubky can find it. You can make it private again at any time.'
+              ? (mine ? 'A public copy goes to your homeserver' : 'A public copy goes to your homeserver with the next sync (in a few minutes)') + ': the songs and their order, never audio. Anyone with the link can open it, and people on Pubky can find it. You can make it private again at any time.'
               : 'You aren\'t signed in to Pubky yet, so there is nowhere to share it from. Sign in with Pubky Ring first (Settings › My accounts); the playlist stays on this node until then.',
               choices: who ? [{ label: 'Share', value: 'share', primary: true }] : [{ label: 'Open Accounts', value: 'accounts', primary: true }] });
             if (go === 'share') setVis(true); else if (go === 'accounts') setView('settings', 'accounts');
           };
           const us = $('#plunshare'); if (us) us.onclick = () => setVis(false);
-          const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = `pubky://${state.pubkyUser.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
+          const cl = $('#plcopylink'); if (cl) cl.onclick = async () => { const t = `pubky://${sharer.replace(/^pubky/, '')}/pub/social/v1/posts/${d.summary.id}`; try { await navigator.clipboard.writeText(t); toast('Link copied'); } catch { toast(t); } };
           $$('[data-pfilter]', main).forEach((b) => b.onclick = () => { state.plFilter = b.dataset.pfilter ? { id: plId, key: b.dataset.pfilter } : null; render(); });
           break;
         }
@@ -6874,7 +7024,7 @@
             + `<div class="tracks">${it.tracks.map((t, i) => `<div class="track compact" data-i="${i}"><div class="no"><span class="num">${t.track_no ?? i + 1}</span><button class="rowplay" data-aplay="${i}" title="Play from here">${icon('play')}</button></div><div class="main-col"><div class="title">${esc(t.title)}</div><div class="by">${esc(t.artist || it.creator || '')}</div></div><div><span class="fmt">${esc(t.format)}</span></div><div class="dur">${fmt(t.duration_ms)}</div><div class="row-actions"><button class="icon-btn" data-aadd1="${i}" title="Add to queue">${icon('plus')}</button></div></div>`).join('')}</div>`;
           $('#aplay').onclick = () => playFrom(0, true); $('#aadd').onclick = () => playFrom(0, false);
           $('#amore').onclick = (e) => { e.stopPropagation(); uriMenu($('#amore'), it.tracks.map((t) => t.url), it.title); };
-          const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { await setFavourite({ uri: it.url }, !on); render(); } catch (er) { toast(er.message, 'error'); } };
+          const ah = $('#aheart'); if (ah) ah.onclick = async () => { const on = state.favUris.has(it.url); try { if (await setFavourite({ uri: it.url }, !on)) render(); } catch (er) { toast(er.message, 'error'); } };
           $$('[data-aplay]', main).forEach((b) => b.onclick = () => playFrom(Number(b.dataset.aplay), true));
           const ainlib = $('#ainlib'); if (ainlib) ainlib.onclick = () => setView('album', it.library_album_id);
           $$('[data-aadd1]', main).forEach((b) => b.onclick = async () => { const i = Number(b.dataset.aadd1); if (isBrowser()) { const q = qitems[i]; state.browserQueue.push({ id: Date.now(), uri: q.uri, track_id: q.track_id ?? trackIdOf(q), artists: q.artists, stream: streamUrlFor(q.uri) || q.uri, title: q.title, artist: q.artist, album: q.album, duration_ms: q.duration_ms, image: q.image || null }); toast('Added to queue'); return; } try { await api('POST', `/zones/${state.zone}/queue`, { items: [qitems[i]], at: 'end' }); toast('Added to queue'); refreshQueue(); } catch (e) { toast(e.message, 'error'); } });
@@ -6990,7 +7140,7 @@
             ...(linkRef ? [{ scope: 'link', name: `On the ${linkName} link`, ref: linkRef, own: linkOwn.tags, pub: pubFrom(linkRef.uri) }] : []),
           ];
           const htKey = `${kind}:${id}:${++heroTagsGen}`;
-          const ht = { key: htKey, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
+          const ht = { key: htKey, page: `${kind}:${id}`, kind, linkName, groups: tagGroups, canEdit: !isListener(), note: '', match: null, open: state.heroTagsOpen && state.heroTagsOpen.page === `${kind}:${id}` ? state.heroTagsOpen.set : new Set() };
           // No identity: say so; the owner's album leads to its folder in the matches to confirm
           const unmatched = () => { ht.note = 'Not matched to MusicBrainz yet, so other apps can\'t tell what it is.'; ht.match = kind === 'album' && !isListener() ? { label: 'Match this album to tag it', tracks: songs.map((t) => t.track_id).filter((x) => x != null) } : null; };
           if (localRef && songOwn.needsMatch) unmatched();
@@ -7194,7 +7344,7 @@
           $('#izone').onclick = (e) => showMenu(e.currentTarget, [{ title: 'Play on' }, ...zoneList().map((z) => ({ label: z.name, icon: 'zone', run: () => { state.zone = z.id; try { localStorage.setItem('pm.zone', z.id); } catch { /* */ } renderZoneName(); renderBar(); playAll(false); } }))]);
           $('#ifav').onclick = async () => {
             // A file not matched yet: "Which song is this?" first, then the heart
-            try { await setFavourite(target, !fav); render(); } catch (er) { toast(er.message, 'error'); }
+            try { if (await setFavourite(target, !fav)) render(); } catch (er) { toast(er.message, 'error'); }
           };
           const extra = [...(commentUri ? [{ label: 'Post about this…', icon: 'notes', run: () => postAbout(commentUri, pg.title) }] : [])];
           $('#imore').onclick = (e) => itemMenu(e.currentTarget, { title: pg.title, songs, plays_from: pf, dl: kind === 'album' && /^lib-\d+$/.test(String(id)) ? { kind: 'album', id: String(id).slice(4), sub: pg.artist && pg.artist.name, songs: (songs || []).length } : null, fallback, artistId: pg.artist && pg.artist.id, artistName: pg.artist && pg.artist.name, albumId: kind === 'album' ? null : pg.album && pg.album.id, openOn: pg.open_on, alsoHere: iconAlso ? alsoHere.map(({ v, k }) => ({ label: instName(v), svc: alsoSvc(v), k })) : [], switchTo: (k) => setView('item', { kind, id: pg.also_on[k].page }), path: `/${kind}/${id}`, uri: pg.uri, extra });
@@ -7244,7 +7394,7 @@
           await refreshQueue(false);
           if (state.view !== 'queue') return;
           const z = currentZone(); const q = isBrowser() ? state.browserQueue : state.queue;
-          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
+          main.innerHTML = pageHead('Queue', z ? z.name : '', (isBrowser() ? '' : `<button class="btn ${z && z.radio ? 'primary' : ''}" id="qradio" title="When the queue ends, keep playing similar music from the library">${icon('radio')} Radio ${z && z.radio ? 'on' : 'off'}</button>`) + (q.length > 1 ? `<button class="btn" id="qshuffle" title="Shuffle what comes next; the playing track stays">${icon('shuffle')} Shuffle</button>` : '') + (q.length && zoneList().filter((o) => o.id !== state.zone).length ? `<button class="btn" id="qtransfer" title="Move this queue, the song where it is, repeat and radio to another device">${icon('zone')} Move to…</button>` : '') + (q.length && !isListener() ? `<button class="btn" id="qsave" title="A new private playlist from this queue">${icon('playlist')} Save as playlist</button>` : '') + (q.length && !isBrowser() ? `<button class="btn" id="qclear">${icon('trash')} Clear</button>` : ''))
             + (q.length ? `<div class="list queue">${q.map((it, i) => `<div class="list-row ${z && z.queue_index === i ? 'cur' : ''}" data-qrow="${i}"><span class="qgrip" data-qgrip="${i}" role="button" tabindex="0" aria-label="Drag to reorder (or Alt+↑/↓)" title="Drag to reorder">⋮⋮</span><button class="icon-btn" data-qi="${i}" title="Play from here">${z && z.queue_index === i ? icon('play') : `<span class="num">${i + 1}</span>`}</button><div class="grow"><div class="name" ${z && z.queue_index === i ? 'style="color:var(--accent-strong)"' : ''}>${esc(itemName(it))}</div><div class="sub">${esc([it.artist, it.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${it.duration_ms ? fmt(it.duration_ms) : ''}</span><span class="row-actions q-actions"><button class="icon-btn" data-qup="${i}" title="Move up" ${i === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-qdown="${i}" title="Move down" ${i === q.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-qrm="${i}" title="Remove">${icon('close')}</button></span></div>`).join('')}</div>` : emptyState('queue', 'The queue is empty', 'Play an album or add tracks with the row actions.'));
           $$('[data-qi]', main).forEach((b) => b.onclick = () => transport({ action: 'play', index: Number(b.dataset.qi) }));
           const qedit = async (i, op, to) => {
@@ -7553,17 +7703,34 @@
             const group = (title, body) => `<div class="set-group"><h3 class="set-h">${title}</h3><div class="set-rows">${body}</div></div>`;
             // null: every zone; []: none right now (the node can't read its list); else the zones named
             const zonesText = Array.isArray(me.zones) && !me.zones.length ? 'none of its zones right now (ask whoever runs it)' : me.zones && me.zones.length ? me.zones.map((z) => (state.zones[z] ? state.zones[z].name : z)).join(', ') : 'any of its zones';
+            // Their own homeserver, for their bookmarks (personal.rs)
+            const [hs, svcs] = await Promise.all([api('GET', '/me/homeserver').catch(() => null), api('GET', '/me/services').catch(() => null)]);
+            const hsRow = !hs ? row('My homeserver', 'The node can’t say right now.', '')
+              : hs.connected && !hs.lost ? row('My homeserver', `Connected: your bookmarks are kept there${hs.pending ? `, ${countOf(hs.pending, 'changes')} waiting on this node until it answers` : ''}. The node may write your bookmarks and collections folders, nothing else.`, '<button class="btn ghost" id="hsoff">Disconnect</button>')
+                : row('My homeserver', hs.lost ? '<span class="warn-text">It no longer lets this node in.</span> Approve it again to keep your bookmarks there.' : 'Not connected. Your bookmarks are kept on your own homeserver once you approve this node in Pubky Ring (your bookmarks and collections folders only).', `<button class="btn primary" id="hson">${hs.lost ? 'Approve again' : 'Connect'}</button>`);
             const srcNote = !ms ? '' : ms.plays_with === 'node' ? 'TIDAL, Qobuz and Spotify play through this node’s sign-ins.' : 'TIDAL, Qobuz and Spotify play with your own sign-ins.';
             const srcCtl = ms && ms.may_choose ? `<div class="chips" role="radiogroup" aria-label="Whose sign-ins">${[['node', 'This node’s'], ['own', 'My own']].map(([v, l]) => `<button class="chip scope ${ms.use === v ? 'on' : ''}" role="radio" aria-checked="${ms.use === v}" data-mysrc="${v}">${l}</button>`).join('')}</div>` : '';
             main.innerHTML = pageHead('Settings', null)
               + group('You', row(esc((who && who.name) || 'Signed in with Pubky Ring'), keyHtml(me.key), `<button class="btn" id="lsignout">${icon('logout')} Log out</button>`)
-                + row(`On ${esc(info.name)}`, `You can play its music ${hereIn()} and on ${esc(zonesText)}. Favourites, playlists and the node’s settings belong to whoever runs it; your own come in a later version.`, '')
+                + hsRow
+                + row(`On ${esc(info.name)}`, `You can play its music ${hereIn()} and on ${esc(zonesText)}. Your bookmarks are your own; the node’s playlists and settings belong to whoever runs it.`, '')
                 + (ms ? row('Music services', srcNote + (ms.may_choose ? ' You choose; your own sign-ins stay kept either way.' : ''), srcCtl) : ''))
+              // Your own streaming accounts: nobody else on the node plays with them (node apps stay the owner's)
+              + group('My streaming accounts', svcs ? svcs.map((v) => `<details class="set-row svc-own" data-svc="${esc(v.source)}"><summary class="set-label"><span class="set-name">${esc(v.name)}</span><span class="set-help">${v.connected ? `Signed in${v.user ? ' as ' + esc(v.user) : ''}.` : v.available ? 'Not signed in. Sign in with your own account to play from it here.' : esc(v.reason || 'Not set up on this node yet.')}</span></summary><div class="svc-body"></div></details>`).join('') : row('Streaming accounts', 'The node can’t say right now.', ''))
               + group('Play from', row('Your personal source order', 'Applies to every playlist you play.', '<div id="gorder"></div>'))
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             loadOrder();
             $('#lsignout').onclick = logOut;
+            // A service opens its own sign-in ways (the same as the owner's, without the node's setup)
+            $$('details[data-svc]', main).forEach((d) => d.addEventListener('toggle', () => {
+              const body = $('.svc-body', d); if (!d.open || body.dataset.drawn) return; body.dataset.drawn = '1';
+              const src = d.dataset.svc;
+              if (src === 'qobuz') qobuzSetup(body);
+              else signinChooser(src === 'tidal' ? tidalSigninCfg(body) : spotifySigninCfg(body));
+            }));
+            const hon = $('#hson'); if (hon) hon.onclick = async () => { if (await homeserverDialog(!!(hs && hs.lost))) { loadFavourites().catch(() => {}); render(); } };
+            const hoff = $('#hsoff'); if (hoff) hoff.onclick = async () => { hoff.disabled = true; try { await api('DELETE', '/me/homeserver'); toast('Disconnected: your homeserver keeps your bookmarks'); state.favUris = new Set(); render(); } catch (e) { hoff.disabled = false; toast(e.message, 'error'); } };
             $$('[data-mysrc]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/sources', { use: b.dataset.mysrc }); toast(b.dataset.mysrc === 'own' ? 'You play with your own sign-ins' : 'You play through this node’s sign-ins'); render(); } catch (e) { toast(e.message, 'error'); } });
             break;
           }
@@ -8097,7 +8264,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); state.zonesSeen = true; ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
+    setConn('ok', nodeLabel()); checkHealth(); mountHelp(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {
@@ -8110,7 +8277,7 @@
   };
   // Scan indicator: while the node says it is scanning, poll /info until it is done.
   let scanTimer = null;
-  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
+  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning" title="Scanning library…"><span class="spin"></span><span class="scan-text">Scanning library…</span></span>` : ''; };
   // ---- identify library (Settings card and the review view) ----
   let idTimer = null; let idRenderGen = 0; // an older card draw that answers last is dropped
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
@@ -8257,7 +8424,11 @@
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
         // The outputs, so the bar names a zone's device (a phone's USB DAC) without the picker first
         refreshOutputs();
-      } else { state.favUris = new Set(); state.sources = []; }
+      } else {
+        state.favUris = new Set(); state.sources = [];
+        // A listener's own bookmarks, from their homeserver (none until they connect it)
+        loadFavourites().catch(() => {});
+      }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z])); state.zonesSeen = true;
       ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();

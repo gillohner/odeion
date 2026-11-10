@@ -12,7 +12,8 @@
 //     Android" / "Played by the app" / "Played by this browser";
 //   * in the Android app, Details' Output line says Android's mixer plays it (usually 48 kHz) and
 //     why it is not bit-perfect: without the phone's own zone (remote access), where bit-perfect
-//     plays; once the app says which output is its own (with a USB DAC on it), the DAC's name and
+//     plays; once the app says which output is its own (with a USB DAC on it), the paused bar moves
+//     to the phone's own zone with a note, and with "This phone" chosen again, the DAC's name and
 //     that zone's name. The desktop app and the web UI show no Output line;
 //   * in the apps, none of those screens (bar, picker, Sound panel, the Queue page, Now playing)
 //     shows the word "browser";
@@ -109,7 +110,16 @@ const hasBrowser = (t) => /\bbrowser\b/i.test(t);
       // The app registered its player, a USB DAC on it: the DAC's name, and the zone to play on instead
       state.fixtures['/outputs'] = { body: [{ ...outputs[0], device: { name: 'FiiO KA17', kind: 'usb_dac', mode: 'shared', modes: ['shared'], confirmed: false } }] };
       await page.keyboard.press('Escape'); await sleep(200);
-      await page.evaluate((id) => { window.pmDesktop.outputs = [id]; window.pmDesktop.output = id; window.dispatchEvent(new Event('pmdesktop:output')); }, outputs[0].id); await sleep(500);
+      await page.evaluate((id) => { window.pmDesktop.outputs = [id]; window.pmDesktop.output = id; window.dispatchEvent(new Event('pmdesktop:output')); }, outputs[0].id);
+      // With the page's player paused, the bar moves to the phone's own zone, the path that reaches
+      // the DAC unchanged, and says so (once per DAC)
+      const moved = async () => (await text(page, '#zonename')).trim() === zone.name && (await text(page, 'body')).includes(`FiiO KA17: this phone plays through ${zone.name}, straight to the DAC`);
+      for (let i = 0; i < 30 && !(await moved()); i++) await sleep(100);
+      check(await moved(), `${at}: a DAC on the app's output moves the paused bar to ${zone.name}, with a note (${(await text(page, '#zonename')).trim()})`);
+      // Chosen again, "This phone" stays (the move is once per DAC): its Output line names the DAC and that zone
+      await page.click('#zonebtn'); await page.waitForSelector('#zonepop:not([hidden])'); await sleep(200);
+      await page.click('#zonepop [data-zone="browser"]'); await page.waitForSelector('#npart', { timeout: 5000 }); await sleep(500);
+      check((await text(page, '#zonename')).trim() === name, `${at}: "${name}" chosen again stays chosen (${(await text(page, '#zonename')).trim()})`);
       await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
       if (await details.count()) { await details.first().click(); await sleep(500); }
       const out1 = await outLine(); seen.push(await text(page, '#nowplaying'));

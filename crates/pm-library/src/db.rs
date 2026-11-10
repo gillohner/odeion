@@ -2426,6 +2426,20 @@ impl Library {
             .optional()?)
     }
 
+    /// How many bytes the setting `key` holds (`None`: no such setting), from the row's header:
+    /// the value itself is not read, so a caller can refuse an oversized one before it is.
+    pub fn setting_bytes(&self, key: &str) -> Result<Option<u64>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT octet_length(value) FROM settings WHERE key = ?1",
+                [key],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .map(|n| u64::try_from(n.unwrap_or(0)).unwrap_or(0)))
+    }
+
     // ---- identification (crate::identify) ----
 
     /// A cheap content key for the fingerprint cache: size plus BLAKE3 of
@@ -4609,6 +4623,19 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    #[test]
+    fn a_settings_size_is_its_bytes_without_reading_it() {
+        let lib = Library::open_in_memory().unwrap();
+        assert_eq!(lib.setting_bytes("none").unwrap(), None);
+        lib.set_setting("ascii", "0123456789").unwrap();
+        assert_eq!(lib.setting_bytes("ascii").unwrap(), Some(10));
+        // Bytes, not characters: "é" is two bytes in UTF-8
+        lib.set_setting("accent", "é").unwrap();
+        assert_eq!(lib.setting_bytes("accent").unwrap(), Some(2));
+        lib.set_setting("empty", "").unwrap();
+        assert_eq!(lib.setting_bytes("empty").unwrap(), Some(0));
+    }
 
     #[test]
     fn tracks_sharing_genres_rank_by_shared_genres() {
