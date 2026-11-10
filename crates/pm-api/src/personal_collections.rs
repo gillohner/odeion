@@ -46,6 +46,9 @@ const READS_PER_REQUEST: usize = 16;
 /// homeserver cannot keep the person operation lock for a whole backlog. Each completed
 /// mutation is checkpointed; reaching either limit leaves the remaining intent pending.
 const CALLS_PER_REQUEST: usize = 32;
+/// The time one request may spend waiting on their homeserver, all calls together. The node's
+/// own work (reading and saving a large copy) doesn't count: on slow hardware it could otherwise
+/// use the whole allowance before the first write, and every request would leave it waiting.
 const REQUEST_TIME: Duration = Duration::from_secs(8);
 
 struct Work<'a> {
@@ -55,7 +58,8 @@ struct Work<'a> {
     started: u64,
     left: usize,
     reads: usize,
-    deadline: tokio::time::Instant,
+    /// Time spent waiting on their homeserver so far in this request.
+    waited: Duration,
 }
 
 impl<'a> Work<'a> {
@@ -66,12 +70,12 @@ impl<'a> Work<'a> {
             started,
             left: CALLS_PER_REQUEST,
             reads: READS_PER_REQUEST,
-            deadline: tokio::time::Instant::now() + REQUEST_TIME,
+            waited: Duration::ZERO,
         }
     }
 
     fn available(&self) -> bool {
-        self.left > 0 && tokio::time::Instant::now() < self.deadline
+        self.left > 0 && self.waited < REQUEST_TIME
     }
 
     /// Access failures escape the operation; backend failures retain their offline/retry
@@ -87,7 +91,8 @@ impl<'a> Work<'a> {
             )));
         }
         self.left -= 1;
-        let result = tokio::time::timeout_at(self.deadline, f)
+        let begun = tokio::time::Instant::now();
+        let result = tokio::time::timeout(REQUEST_TIME.saturating_sub(self.waited), f)
             .await
             .unwrap_or_else(|_| {
                 self.left = 0;
@@ -95,6 +100,7 @@ impl<'a> Work<'a> {
                     "collection request deadline reached".into(),
                 ))
             });
+        self.waited += begun.elapsed();
         // A completed call cannot be undone. Reject its stale result before any further
         // remote call, error handling that writes a grant flag, or local checkpoint.
         personal::require_access(self.state, self.key, self.started)?;
