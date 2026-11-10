@@ -138,7 +138,7 @@ const PEOPLE = { homeserver: { configured: true, reachable: true, version: '0.6.
       assert.ok(h >= 40, `a tag chip is 40 px to touch at ${width} (${h})`);
       for (const part of ['.chiplink', '.chipx']) {
         const ph = await page.locator(`#htags .ptag.own ${part}`).first().evaluate((e) => e.getBoundingClientRect().height);
-        assert.ok(ph >= 36, `a tag chip's ${part} fills it at ${width} (${ph})`);
+        assert.ok(ph >= 40, `a tag chip's ${part} is 40 px to touch at ${width} (${ph})`);
       }
       await page.locator('#htags [data-htag-plus]').first().click();
       assert.match(await page.locator('#htags .tag-hint').textContent(), /Public on your homeserver/);

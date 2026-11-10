@@ -613,6 +613,7 @@ jobs:
           ui-redesign.js redesign-shots
           ui-item-about.js item-about-shots
           ui-usb-dac.js usb-dac-shots
+          ui-phone-library-targets.js phone-library-targets-shots
           LIST
       # feedback.js on a test page, the node mocked: text stays text, a draft is its sign-in's,
       # only ticked details are sent. It takes <token> <mock> <shots>, not the list's <repo> <shots>
