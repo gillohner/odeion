@@ -55,12 +55,11 @@ On Windows: `certutil -hashfile odeion-edge-amd64.iso SHA256` prints the checksu
 ## 4. Set it up
 
 Open **http://odeion.local:7788** in a browser on the same network. If your device doesn't find `odeion.local`, use
-the address the box's screen shows, like `http://192.168.1.20:7788`. The first time, log in with the box's API token:
-on the box's own screen, log in as `odeion` with the password you chose and run
-`sudo sed -n 's/^PM_TOKEN=//p' /opt/odeion/.env`, which shows it; on the Log in page open **Use the node’s API token instead**,
-type it in and press **Log in with the token**. The web setup does the rest: create your Pubky account
-on the box (or sign in with Pubky Ring), then add your music folders and network shares. From then on you log in with
-Pubky Ring.
+the address the box's screen shows, like `http://192.168.1.20:7788`. The first time, log in with the box's API token.
+On the box's own screen, log in as `odeion` with the password you chose and run
+`sudo sed -n 's/^PM_TOKEN=//p' /opt/odeion/.env`. On the Log in page open **Use the node’s API token instead**, type
+it in and press **Log in with the token**. The web setup does the rest: create your Pubky account on the box (or sign
+in with Pubky Ring), then add your music folders and network shares. From then on you log in with Pubky Ring.
 
 ## What runs on the box
 

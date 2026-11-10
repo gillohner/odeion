@@ -128,11 +128,11 @@ library and sign-ins are all there. To go back:
 `sudo systemctl disable --now odeiond && sudo systemctl enable --now pubky-music-node`.
 
 Open `http://<this machine's address>:7788` (step 2 printed it), open **Use the node’s API token
-instead**, paste the token and press **Log in with the token**. Then in **Your library › Node library**, type your
-music folder's path (for example `/srv/music`) and press **Add folder**. (Or list it in the config
-before the start: `[library]` `folders = ["/srv/music"]` in `/etc/pubky-music/node.toml`; the node
-then reads it at every start.) Continue with the
-[first steps](../../README.md#first-steps-after-installing).
+instead**, paste the token and press **Log in with the token**. Then in **Your library › Node
+library**, type your music folder's path (for example `/srv/music`) and press **Add folder**. (Or
+list it in the config before the start: `[library]` `folders = ["/srv/music"]` in
+`/etc/pubky-music/node.toml`; the node then reads it at every start.) Continue with the [first
+steps](../../README.md#first-steps-after-installing).
 
 Music inside your home folder works only if the `pubky-music` user may read it; many systems keep
 home folders private. A folder such as `/srv/music` is simpler.
