@@ -104,6 +104,11 @@ pub struct NodeState {
     pub remote: tokio::sync::Mutex<crate::remote::Remote>,
     /// The tunnel's key once it runs, for `/v1/info`.
     pub remote_id: std::sync::RwLock<Option<String>>,
+    /// The apps' players reached through the tunnel (`tunnel:<the app's key>`): where the node
+    /// reaches each on its own loopback while this run lasts ([`crate::remote`]; the tunnel, once
+    /// started, runs until the node stops, so its relays stay valid; an entry goes with its
+    /// endpoint or a failed registration).
+    pub tunnel_players: std::sync::Mutex<std::collections::HashMap<String, std::net::SocketAddr>>,
     /// Keys the pull-stream URLs handed to renderers (`stream_key`), so a TV gets a URL for its
     /// own stream and never the API token. Kept in the library: URLs survive restarts.
     stream_secret: [u8; 32],
@@ -433,6 +438,7 @@ impl NodeState {
             node_id,
             remote: Default::default(),
             remote_id: Default::default(),
+            tunnel_players: Default::default(),
             stream_secret,
             sonos: Default::default(),
             heos: Default::default(),
@@ -1700,7 +1706,26 @@ impl NodeState {
                 return Err("no key stored for it; the app registers it again on its next start".into())
             }
         };
-        let outs = match pm_out_net::NetOutput::connect(addr.as_str(), &cell) {
+        // The app's player away from home: at the tunnel's relay for that app, named by its key
+        let target = if addr.starts_with(TUNNEL_PREFIX) {
+            let relay = self
+                .tunnel_players
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&addr)
+                .copied();
+            let Some(relay) = relay else {
+                if let Some(old) = old {
+                    cell.set(old);
+                }
+                return Err("the app is not connected through remote access now".into());
+            };
+            cell.through_tunnel(&addr);
+            relay.to_string()
+        } else {
+            addr.clone()
+        };
+        let outs = match pm_out_net::NetOutput::connect(target.as_str(), &cell) {
             Ok(o) => o,
             Err(e) => {
                 // A key that does not work leaves the one that did
@@ -1774,7 +1799,9 @@ impl NodeState {
         saved.len() != before || had_key || !gone.is_empty()
     }
 
-    /// Re-add the saved endpoint addresses, with their stored keys, at start and on rescan.
+    /// Re-add the saved endpoint addresses, with their stored keys, at start and on rescan. An app
+    /// reached through the tunnel can't be reached before it connects again: it registers again
+    /// itself on each new tunnel connection (the app's `watch_tunnel`).
     /// Blocking.
     pub fn restore_endpoint_addresses(self: &Arc<Self>) -> Vec<OutputId> {
         let mut new = Vec::new();
@@ -2265,6 +2292,10 @@ fn volume_poll() -> std::time::Duration {
         .map(std::time::Duration::from_millis)
         .unwrap_or(std::time::Duration::from_secs(10))
 }
+
+/// How an app's player away from home is named (`tunnel:<the app's iroh key>`), reached through
+/// the node's tunnel instead of an address.
+pub const TUNNEL_PREFIX: &str = "tunnel:";
 
 /// Where a zone's crossfade length (ms) is kept.
 pub fn crossfade_key(zone: &ZoneId) -> String {

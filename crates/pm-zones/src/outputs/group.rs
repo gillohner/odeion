@@ -239,8 +239,11 @@ impl Output for GroupOutput {
             .collect();
         let same = protocols.windows(2).all(|w| w[0] == w[1]);
         let system_mixer = self.members.iter().any(|m| m.id().0.contains("/cpal:"));
+        // A player away from home (through the remote-access tunnel): a mobile link's delay
+        let tunnel = self.members.iter().any(|m| m.id().0.starts_with("net:tunnel:"));
         if same
             && !system_mixer
+            && !tunnel
             && matches!(protocols.first().map(String::as_str), Some("net") | Some("slim"))
         {
             crate::SyncClass::Tight

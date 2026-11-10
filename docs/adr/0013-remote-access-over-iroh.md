@@ -114,4 +114,15 @@ Steps 1 and 2 are built (`crates/pm-remote`, `pm-api/src/remote.rs`, the app's `
    label. A test runs a node and the app proxy as two processes on one machine.
 3. Measure on real networks (the owner's phone on cellular): time to connect, direct versus relayed,
    and resync after a network switch (`docs/CONNECTION.md` covers the reconnect).
-4. Later: pin controller keys, and `pm-endpoint` over iroh.
+4. Later: pin controller keys.
+5. Built (2026-11-09): `pm-endpoint` over iroh, the app's player away from home.
+   - The app keeps its iroh key (`iroh-app.key` next to its settings), so the node knows it again.
+   - It serves its player over the tunnel's own connection (`ClientTunnel::serve_player`) and
+     registers it as `tunnel:<its key>`, with the player's key as on a LAN.
+   - The node reaches it through a loopback relay into that connection (`NodeTunnel::player_relay`)
+     and names its outputs by the key, not by the relay's port.
+   - Audio over the tunnel may have 1.5 s in flight (100 ms on a LAN), so a mobile round trip
+     doesn't starve it.
+   - The player still answers only the node holding its key.
+   - Tested by `crates/pm-remote/tests/player.rs` (the relay, a reconnect with the kept key) and
+     `crates/pm-api/tests/tunnel_player.rs` (registration and audio through an in-process tunnel).

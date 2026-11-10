@@ -1794,18 +1794,31 @@ async fn add_endpoint(
             "the player's key is not 32 to 256 visible ASCII characters".to_string()
         })
     })?;
-    let st = s.clone();
-    let address = body.address.clone();
-    let outs = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
-        .await
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| {
-            let from = local_address().unwrap_or_else(|| "this node".into());
+    // The app's player away from home: reached through the tunnel, by the app's key (one spelling)
+    // A relay stays after a failed registration (it is made only for an app connected now, with
+    // the owner's token, and another registration may be using it this very moment): it goes
+    // with the endpoint (DELETE)
+    let mut body = body;
+    if let Some(peer) = body.address.trim().strip_prefix(state::TUNNEL_PREFIX) {
+        let (name, _made) = s.tunnel_player(peer).await.map_err(|e| {
             ApiError::bad_request(format!(
-                "cannot reach the endpoint at {}: {e} (asked from {} at {from})",
-                body.address, s.name
+                "cannot reach the app's player through remote access: {e}"
             ))
         })?;
+        body.address = name;
+    }
+    let st = s.clone();
+    let address = body.address.clone();
+    let added = tokio::task::spawn_blocking(move || st.add_endpoint_address(&address, Some(&key)))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let outs = added.map_err(|e| {
+        let from = local_address().unwrap_or_else(|| "this node".into());
+        ApiError::bad_request(format!(
+            "cannot reach the endpoint at {}: {e} (asked from {} at {from})",
+            body.address, s.name
+        ))
+    })?;
     tracing::info!(address = %body.address, outputs = outs.len(), "endpoint added by address");
     Ok(Json(outs))
 }
@@ -1817,6 +1830,9 @@ async fn remove_endpoint(
 ) -> ApiResult<Vec<String>> {
     if !s.remove_endpoint_address(&address) {
         return Err(ApiError::not_found(format!("{address} is not a saved endpoint")));
+    }
+    if address.trim().starts_with(state::TUNNEL_PREFIX) {
+        s.drop_tunnel_player(address.trim()).await;
     }
     Ok(Json(s.endpoint_addresses()))
 }

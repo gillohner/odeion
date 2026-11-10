@@ -136,6 +136,48 @@ pub async fn register(mut s: Settings, player: Option<Arc<Player>>) -> Settings 
     s
 }
 
+/// Away from home (the node reached through the tunnel): the node reaches this machine's player
+/// through the same tunnel. The player listens on loopback only, the tunnel serves it to the node
+/// (`ClientTunnel::serve_player`), and the node is given `tunnel:<this app's iroh key>` with the
+/// player's key, so the phone stays a zone of its own (the same one as last time: the app keeps
+/// its iroh key). Failures are logged, never fatal; `false` when it was not registered.
+pub async fn register_through_tunnel(
+    mut s: Settings,
+    player: Option<Arc<Player>>,
+    tunnel: &pm_remote::ClientTunnel,
+) -> (Settings, bool) {
+    let Some(player) = player else { return (s, false) };
+    let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    // The tunnel's streams come from an address of their own: they get the node's room before
+    // Hello (the phone's other apps, connecting from 127.0.0.1, don't)
+    player.endpoint.expect_peer(pm_remote::tunnel_source());
+    let Some(port) = player.listen(lo) else {
+        return (s, false);
+    };
+    tunnel.serve_player(SocketAddr::new(lo, port)).await;
+    let address = format!("tunnel:{}", tunnel.id());
+    if !s.player_address.is_empty() && s.player_address != address {
+        if let Err(e) = crate::node::remove_endpoint(&s, &s.player_address).await {
+            tracing::debug!(old = %s.player_address, "old player address: {e}");
+        }
+    }
+    match crate::node::add_endpoint(&s, &address, &player.key).await {
+        Ok(ids) => {
+            tracing::info!(
+                outputs = ids.len(),
+                "player registered with the node through the tunnel"
+            );
+            s.player_address = address;
+            *OUTPUT_IDS.lock().unwrap_or_else(|e| e.into_inner()) = ids;
+            (s, true)
+        }
+        Err(e) => {
+            tracing::warn!("player not registered through the tunnel (an older node?): {e}");
+            (s, false)
+        }
+    }
+}
+
 /// The node's ids for this player's outputs, as the last registration answered.
 static OUTPUT_IDS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
