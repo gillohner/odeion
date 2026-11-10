@@ -543,10 +543,10 @@ async fn push(
 }
 
 /// What a homeserver answer means for a read: a refusal marks the grant lost.
-fn read_outcome(s: &NodeState, key: &str, e: PersonalError) -> Result<bool, ApiError> {
+async fn read_outcome(s: &NodeState, key: &str, e: PersonalError) -> Result<bool, ApiError> {
     match e {
         PersonalError::Refused(m) => {
-            personal::mark_lost(s, key, &m)?;
+            personal::mark_lost(s, key, &m).await?;
             Ok(false)
         }
         _ => Ok(true),
@@ -648,7 +648,7 @@ async fn observe(
                 continue;
             }
             Err(e) => {
-                caught.stale = read_outcome(s, key, e)?;
+                caught.stale = read_outcome(s, key, e).await?;
                 return Ok(caught);
             }
         };
@@ -748,7 +748,7 @@ async fn catch_up_one(
     });
     let remote = match list_one(b, key, id, expected, work).await {
         Ok(r) => r,
-        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e)?), Remote::default())),
+        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e).await?), Remote::default())),
     };
     let caught = observe(s, b, key, sh, id, &remote, true, work).await?;
     save(s, key, sh)?;
@@ -800,7 +800,7 @@ async fn replay(
             caught.held_back.extend(read.held_back);
             save(s, key, sh)?;
         }
-        Pushed::Waiting(e) => caught.stale |= read_outcome(s, key, e)?,
+        Pushed::Waiting(e) => caught.stale |= read_outcome(s, key, e).await?,
     }
     Ok(())
 }
@@ -823,7 +823,7 @@ async fn refresh(
         .await
     {
         Ok(paths) => v1::heads(paths),
-        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e)?), HashMap::new())),
+        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e).await?), HashMap::new())),
     };
     let public = match work
         .call(b.list(
@@ -834,7 +834,7 @@ async fn refresh(
         .await
     {
         Ok(paths) => v1::heads(paths),
-        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e)?), HashMap::new())),
+        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e).await?), HashMap::new())),
     };
     let heads: std::collections::HashSet<&str> = private
         .values()
@@ -895,10 +895,10 @@ async fn refresh(
         // Work::read charges actual downloads. Known held heads cost no read allowance,
         // so unrelated or unrepresentable posts cannot starve older valid collections.
         let mut one = observe(s, b, key, sh, &id, &remote, Some(id.as_str()) == first, work).await?;
-        if !editing && !one.stale && !personal::is_lost(s, key) {
+        if !editing && !one.stale && !personal::is_lost(s, key)? {
             replay(s, b, key, sh, &id, &remote, &mut one, work).await?;
         }
-        let stopped = one.stale || personal::is_lost(s, key);
+        let stopped = one.stale || personal::is_lost(s, key)?;
         caught.stale |= one.stale;
         caught.held_back.extend(one.held_back);
         remotes.insert(id, remote);
@@ -942,11 +942,11 @@ async fn drain_one_by_one(
         }
         rotate_pending(s, key, sh, &id)?;
         let (mut caught, remote) = catch_up_one(s, b, key, sh, &id, work).await?;
-        if caught.stale || personal::is_lost(s, key) {
+        if caught.stale || personal::is_lost(s, key)? {
             break;
         }
         replay(s, b, key, sh, &id, &remote, &mut caught, work).await?;
-        if caught.stale || personal::is_lost(s, key) {
+        if caught.stale || personal::is_lost(s, key)? {
             break;
         }
     }
@@ -1020,10 +1020,10 @@ async fn read(s: &NodeState, key: &str) -> Result<Option<Shelf>, ApiError> {
     let mut sh = load(s, key)?;
     bound_existing(&mut sh, None)?;
     let mut work = Work::new();
-    if !personal::is_lost(s, key) {
+    if !personal::is_lost(s, key)? {
         let (caught, _) = refresh(s, b.as_ref(), key, &mut sh, None, false, &mut work).await?;
         sh.behind = caught.stale;
-        if caught.stale && !personal::is_lost(s, key) {
+        if caught.stale && !personal::is_lost(s, key)? {
             drain_one_by_one(s, b.as_ref(), key, &mut sh, None, &mut work).await?;
         }
         save(s, key, &sh)?;
@@ -1049,7 +1049,7 @@ async fn change(
     if !b.connected(key) {
         return Ok(personal::needs_connect(false));
     }
-    if personal::is_lost(s, key) {
+    if personal::is_lost(s, key)? {
         return Ok(personal::needs_connect(true));
     }
     let mut sh = load(s, key)?;
@@ -1071,7 +1071,7 @@ async fn change(
     };
     sh.behind = caught.stale;
     if let (true, Some(id)) = (caught.stale, id) {
-        if !recovering && !personal::is_lost(s, key) && work.available() {
+        if !recovering && !personal::is_lost(s, key)? && work.available() {
             let (one, remote) = catch_up_one(s, b.as_ref(), key, &mut sh, id, &mut work).await?;
             caught.stale = one.stale;
             caught.held_back.extend(one.held_back);
@@ -1081,7 +1081,7 @@ async fn change(
     if !recovering {
         save(s, key, &sh)?;
     }
-    if personal::is_lost(s, key) {
+    if personal::is_lost(s, key)? {
         return Ok(personal::needs_connect(true));
     }
     if id.is_none() && sh.items.iter().filter(|k| !k.deleted).count() >= MAX_COLLECTIONS {
@@ -1179,7 +1179,7 @@ async fn change(
                 sh.behind = true;
             }
             Pushed::Waiting(PersonalError::Refused(m)) => {
-                personal::mark_lost(s, key, &m)?;
+                personal::mark_lost(s, key, &m).await?;
             }
             Pushed::Waiting(PersonalError::Rejected(m)) => {
                 if !k.deleted && !k.unshare {
@@ -1196,7 +1196,7 @@ async fn change(
             }
         }
     }
-    if !recovering && work.available() && !personal::is_lost(s, key) {
+    if !recovering && work.available() && !personal::is_lost(s, key)? {
         drain_one_by_one(s, b.as_ref(), key, &mut sh, Some(&k.id), &mut work).await?;
     }
     save(s, key, &sh)?;

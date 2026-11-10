@@ -47,6 +47,8 @@ pub struct Fake {
     /// Held (written) by a test: a bookmark write waits on it, keeping her person lock meanwhile.
     pub gate: tokio::sync::RwLock<()>,
     pub put_started: tokio::sync::Notify,
+    pub list_started: tokio::sync::Notify,
+    pub delete_started: tokio::sync::Notify,
     pub write_started: tokio::sync::Notify,
     pub removal_gate: tokio::sync::RwLock<()>,
     pub remove_started: tokio::sync::Notify,
@@ -134,6 +136,8 @@ impl PersonalHomeserver for Fake {
         key: &str,
         _known: &[(String, i64)],
     ) -> Result<Vec<(String, i64)>, PersonalError> {
+        self.list_started.notify_one();
+        let _open = self.gate.read().await;
         Self::moment().await;
         self.check(key, "list", "")?;
         Ok(self
@@ -156,6 +160,8 @@ impl PersonalHomeserver for Fake {
         Ok(())
     }
     async fn delete_bookmark(&self, key: &str, uri: &str) -> Result<(), PersonalError> {
+        self.delete_started.notify_one();
+        let _open = self.gate.read().await;
         Self::moment().await;
         self.check(key, "delete", uri)?;
         if let Some(mine) = self.bookmarks.lock().unwrap().get_mut(key) {

@@ -5,11 +5,14 @@
 
 mod personal_fake;
 
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
 use personal_fake::*;
 use pm_api::personal::PersonalHomeserver;
 use pm_api::{router, NodeState};
 use std::sync::atomic::Ordering;
+use tower::ServiceExt;
 
 #[tokio::test]
 async fn each_person_bookmarks_on_their_own_homeserver() {
@@ -795,6 +798,380 @@ async fn a_removal_whose_token_write_fails_still_forgets_her_grant_and_copy() {
     let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(pm_api::accounts::sessions_of(&s, ANN), 0, "her sessions are gone");
+}
+
+#[tokio::test]
+async fn remote_hearts_respect_newer_clears_and_newer_known_hearts() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    fake.down.store(true, Ordering::SeqCst);
+    let (st, v) = call(
+        &app,
+        &ann,
+        "DELETE",
+        &format!("/v1/bookmarks?uri={SONG_A}&at=200"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["bookmarked"], false);
+    fake.down.store(false, Ordering::SeqCst);
+    // Flush the newer clear first.
+    call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    // Remote timestamps are microseconds. These differ by many seconds, beyond clock tolerance.
+    fake.bookmarks
+        .lock()
+        .unwrap()
+        .insert(ANN.into(), vec![(SONG_A.into(), 100_000_000)]);
+    for _ in 0..2 {
+        let (st, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(
+            uris(&v).is_empty(),
+            "an older remote heart cannot undo the offline clear: {v}"
+        );
+    }
+    fake.bookmarks
+        .lock()
+        .unwrap()
+        .insert(ANN.into(), vec![(SONG_A.into(), 300_000_000)]);
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(
+        uris(&v),
+        vec![SONG_A],
+        "a genuinely newer remote heart is accepted"
+    );
+    fake.bookmarks
+        .lock()
+        .unwrap()
+        .insert(ANN.into(), vec![(SONG_A.into(), 250_000_000)]);
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert_eq!(
+        uris(&v),
+        vec![SONG_A],
+        "an older same-kind entry does not drop the newer heart"
+    );
+    let copy: serde_json::Value = serde_json::from_str(
+        &s.library
+            .lock()
+            .unwrap()
+            .get_setting(&format!("person.{ANN}.bookmarks"))
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(copy["items"][0]["at"], 300_000_000_i64);
+    fake.bookmarks.lock().unwrap().insert(ANN.into(), Vec::new());
+    let (_, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+    assert!(
+        uris(&v).is_empty(),
+        "absence still honors an actual remote deletion"
+    );
+}
+
+#[tokio::test]
+async fn restore_during_bookmark_io_preserves_the_restored_copy_and_stops_old_replay() {
+    for operation in ["list", "replay", "put", "delete", "refused-put"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let key = format!("person.{ANN}.bookmarks");
+        let restored = serde_json::json!({
+            "items":[{"uri":SONG_C,"at":300_000_000}],
+            "pending":[{"uri":SONG_C,"on":true,"at":300_000_000}],
+            "cleared":[{"uri":SONG_B,"at":200_000_000}], "lost":false,
+        })
+        .to_string();
+        s.library.lock().unwrap().set_setting(&key, &restored).unwrap();
+        let (backup, _) = pm_api::backup::make(&s, None).unwrap();
+        let pending = if operation == "replay" {
+            serde_json::json!([
+                {"uri":SONG_B,"on":true,"at":100_000_000},
+                {"uri":SONG_A,"on":false,"at":100_000_000},
+            ])
+        } else {
+            serde_json::json!([])
+        };
+        let old = serde_json::json!({
+            "items":[{"uri":SONG_A,"at":50_000_000}],
+            "pending":pending, "cleared":[], "lost":false,
+        })
+        .to_string();
+        s.library.lock().unwrap().set_setting(&key, &old).unwrap();
+        fake.bookmarks
+            .lock()
+            .unwrap()
+            .insert(ANN.into(), vec![(SONG_A.into(), 50_000_000)]);
+        if operation == "refused-put" {
+            fake.refused.lock().unwrap().insert(ANN.into());
+        }
+        let hold = fake.gate.write().await;
+        let (a, token) = (app.clone(), ann.clone());
+        let inflight = tokio::spawn(async move {
+            match operation {
+                "list" | "replay" => call(&a, &token, "GET", "/v1/bookmarks", None).await,
+                "delete" => call(&a, &token, "DELETE", &format!("/v1/bookmarks?uri={SONG_A}"), None).await,
+                _ => {
+                    call(
+                        &a,
+                        &token,
+                        "PUT",
+                        "/v1/bookmarks",
+                        Some(serde_json::json!({"uri":SONG_B})),
+                    )
+                    .await
+                }
+            }
+        });
+        let entered = match operation {
+            "list" => &fake.list_started,
+            "delete" => &fake.delete_started,
+            _ => &fake.put_started,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        // The handler is past authentication, its initial generation check and Copy load.
+        // Perform the actual database restore while its homeserver call is still held.
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/restore")
+            .header("authorization", format!("Bearer {OWNER}"))
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(backup))
+            .unwrap();
+        let restored_response =
+            tokio::time::timeout(std::time::Duration::from_secs(10), app.clone().oneshot(request))
+                .await
+                .expect("restore must not wait for homeserver I/O")
+                .unwrap();
+        let status = restored_response.status();
+        let report = restored_response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&report));
+        assert_eq!(
+            s.library.lock().unwrap().get_setting(&key).unwrap(),
+            Some(restored.clone())
+        );
+        assert!(
+            pm_api::people::may_use_music(&s, ANN),
+            "membership alone cannot detect this restore"
+        );
+        assert!(!inflight.is_finished());
+        drop(hold);
+        let (st, v) = inflight.await.unwrap();
+        assert_eq!(st, StatusCode::CONFLICT, "{operation}: {v}");
+        assert_eq!(
+            s.library.lock().unwrap().get_setting(&key).unwrap(),
+            Some(restored)
+        );
+        assert_eq!(
+            fake.calls.lock().unwrap().len(),
+            1,
+            "after an in-flight call returns, superseded replay must make no further calls"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unreadable_bookmark_copies_preserve_pending_changes_and_clear_tombstones() {
+    for malformed in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        fake.down.store(true, Ordering::SeqCst);
+        assert_eq!(
+            call(
+                &app,
+                &ann,
+                "DELETE",
+                &format!("/v1/bookmarks?uri={SONG_A}&at=200"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &app,
+                &ann,
+                "PUT",
+                "/v1/bookmarks",
+                Some(serde_json::json!({"uri":SONG_B,"at":300}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let key = format!("person.{ANN}.bookmarks");
+        let original = s.library.lock().unwrap().get_setting(&key).unwrap().unwrap();
+        let original_json: serde_json::Value = serde_json::from_str(&original).unwrap();
+        assert_eq!(original_json["pending"].as_array().unwrap().len(), 2);
+        assert_eq!(original_json["cleared"][0]["uri"], SONG_A);
+        let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+        if malformed {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(&key, &format!("{original} broken"))
+                .unwrap();
+        } else {
+            db.execute(
+                "UPDATE settings SET value=CAST(value AS BLOB) WHERE key=?1",
+                [&key],
+            )
+            .unwrap();
+            assert!(s.library.lock().unwrap().get_setting(&key).is_err());
+        }
+        // The same row can be written: a swallowed read failure really could replace it.
+        db.execute("UPDATE settings SET value=value WHERE key=?1", [&key])
+            .unwrap();
+        let raw = || -> Vec<u8> {
+            db.query_row(
+                "SELECT CAST(value AS BLOB) FROM settings WHERE key=?1",
+                [&key],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = raw();
+        fake.down.store(false, Ordering::SeqCst);
+        fake.bookmarks
+            .lock()
+            .unwrap()
+            .insert(ANN.into(), vec![(SONG_A.into(), 100_000_000)]);
+        fake.calls.lock().unwrap().clear();
+        for (method, path, body) in [
+            ("GET", "/v1/bookmarks".to_string(), None),
+            (
+                "PUT",
+                "/v1/bookmarks".to_string(),
+                Some(serde_json::json!({"uri":SONG_C})),
+            ),
+            ("DELETE", format!("/v1/bookmarks?uri={SONG_B}"), None),
+            ("GET", "/v1/me/homeserver".to_string(), None),
+        ] {
+            let (st, v) = call(&app, &ann, method, &path, body).await;
+            assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{method} {path}: {v}");
+            assert_eq!(raw(), before);
+            assert!(
+                fake.calls.lock().unwrap().is_empty(),
+                "uncertain local intent must not be replayed or replaced"
+            );
+        }
+        s.library.lock().unwrap().set_setting(&key, &original).unwrap();
+        let (st, v) = call(&app, &ann, "GET", "/v1/bookmarks", None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(uris(&v), vec![SONG_B]);
+        let saved: serde_json::Value =
+            serde_json::from_str(&s.library.lock().unwrap().get_setting(&key).unwrap().unwrap()).unwrap();
+        assert_eq!(saved["cleared"], original_json["cleared"]);
+        assert_eq!(saved["pending"], serde_json::json!([]));
+    }
+}
+
+#[tokio::test]
+async fn failed_token_cleanup_followed_by_an_unreadable_store_cannot_reenable_old_tokens() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, fake, ann, _) = node(dir.path());
+    fake.connected.lock().unwrap().insert(ANN.to_string());
+    let app = router(s.clone());
+    let db = rusqlite::Connection::open(dir.path().join("lib.sqlite")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_token_update BEFORE UPDATE ON settings WHEN NEW.key='accounts.tokens'
+           BEGIN SELECT RAISE(ABORT, 'fixture: token write failed'); END;
+         CREATE TRIGGER fail_token_insert BEFORE INSERT ON settings WHEN NEW.key='accounts.tokens'
+           BEGIN SELECT RAISE(ABORT, 'fixture: token write failed'); END;",
+    )
+    .unwrap();
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert!(!pm_api::people::may_use_music(&s, ANN));
+    assert!(
+        pm_api::accounts::sessions_of(&s, ANN) > 0,
+        "failed write retained old hashes"
+    );
+    assert!(!fake.connected(ANN), "the rest of removal still ran");
+    // Preserve the exact token bytes but make this one row unreadable as TEXT. Other
+    // settings stay readable/writable, so the old fail-open re-add really could succeed.
+    db.execute_batch(
+        "DROP TRIGGER fail_token_update;
+         DROP TRIGGER fail_token_insert;
+         UPDATE settings SET value=CAST(value AS BLOB) WHERE key='accounts.tokens';",
+    )
+    .unwrap();
+    let roster = s.library.lock().unwrap().get_setting("people").unwrap().unwrap();
+    s.library.lock().unwrap().set_setting("people", &roster).unwrap();
+    assert!(s.library.lock().unwrap().get_setting("accounts.tokens").is_err());
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/people/invites",
+        Some(serde_json::json!({"access":"music", "key":ANN})),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "uncertain cleanup must block re-add: {v}"
+    );
+    assert!(!pm_api::people::may_use_music(&s, ANN));
+    // No grant short-circuits discovery: this retry must aggregate the token-read uncertainty
+    // itself, while still removing other retained settings.
+    assert!(!fake.connected(ANN));
+    let prefs = format!("me.prefs.{ANN}");
+    s.library.lock().unwrap().set_setting(&prefs, "{}").unwrap();
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot check retained personal data"),
+        "{v}"
+    );
+    assert!(s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none());
+    // A repeated Remove must still reach grant/settings cleanup and report the read error.
+    fake.connected.lock().unwrap().insert(ANN.into());
+    s.library.lock().unwrap().set_setting(&prefs, "{}").unwrap();
+    let (st, v) = call(&app, OWNER, "DELETE", &format!("/v1/people/{ANN}"), None).await;
+    assert_eq!(st, StatusCode::INTERNAL_SERVER_ERROR, "{v}");
+    assert!(
+        !fake.connected(ANN),
+        "discovery uncertainty must not skip grant cleanup"
+    );
+    assert!(s.library.lock().unwrap().get_setting(&prefs).unwrap().is_none());
+    // Restore reads/writes. Before and after a successful new membership, the old token fails.
+    db.execute_batch("UPDATE settings SET value=CAST(value AS TEXT) WHERE key='accounts.tokens';")
+        .unwrap();
+    assert!(
+        pm_api::accounts::sessions_of(&s, ANN) > 0,
+        "read failure did not erase retained hashes"
+    );
+    assert_eq!(
+        call(&app, &ann, "GET", "/v1/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (st, v) = call(
+        &app,
+        OWNER,
+        "POST",
+        "/v1/people/invites",
+        Some(serde_json::json!({"access":"music", "key":ANN})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(pm_api::people::may_use_music(&s, ANN));
+    assert_eq!(pm_api::accounts::sessions_of(&s, ANN), 0);
+    assert_eq!(
+        call(&app, &ann, "GET", "/v1/me", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 #[cfg(unix)]
