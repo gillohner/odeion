@@ -2049,6 +2049,156 @@ async fn fallback_rotates_past_held_pending_intent_across_reloads() {
     assert_eq!(newest(&fake, ANN, &ready).1["name"], "Waiting 16");
 }
 
+#[tokio::test]
+async fn full_listings_rotate_past_pending_private_heads_with_held_public_heads() {
+    for marked in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let (_, made) = create(&router(s.clone()), &ann, "Template", &[SONG_A]).await;
+        let template = made["summary"]["id"].as_str().unwrap();
+        let good = fake.json(ANN, &newest(&fake, ANN, template).0);
+        let good_post: pubky_social_specs::PubkySocialPost = serde_json::from_value(good.clone()).unwrap();
+        let note = pubky_social_specs::PubkySocialPost::new(
+            "Another app's public note".into(),
+            pubky_social_specs::PubkySocialPostKind::Note,
+            None,
+            None,
+            Vec::new(),
+        );
+        seed_pending(&s, 17);
+        let mut shelf = stored_shelf(&s);
+        let base = pm_pubky::ids::now_micros();
+        let owner = pm_pubky::v1::PubkyId::try_from(ANN).unwrap();
+        let mut held_files = std::collections::BTreeMap::new();
+        let mut markers = Vec::new();
+        let mut ready = String::new();
+        for (n, k) in shelf["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|k| k["pending"] == true)
+            .enumerate()
+        {
+            let id = k["id"].as_str().unwrap().to_string();
+            pm_pubky::v1::validate_social(&good_post, &id, pm_pubky::v1::Root::Priv, &owner).unwrap();
+            // All sixteen held entries sort ahead of the ready existing private head.
+            let edit = pm_pubky::v1::id_of(
+                base + if n < 16 {
+                    120_000_000 + n as i64
+                } else {
+                    60_000_000
+                },
+            );
+            let path = format!("{DRAFTS}{id}/{edit}.json");
+            let bytes = serde_json::to_vec(&good).unwrap();
+            fake.files
+                .lock()
+                .unwrap()
+                .get_mut(ANN)
+                .unwrap()
+                .insert(path.clone(), bytes.clone());
+            k["head"] = edit.into();
+            k["versions"] = serde_json::json!([path.clone()]);
+            k.as_object_mut().unwrap().remove("writing");
+            if n < 16 {
+                let public_edit = pm_pubky::v1::id_of(base + 150_000_000 + n as i64);
+                let public = format!("{PUBLISHED}{id}/{public_edit}.json");
+                pm_pubky::v1::validate_social(&note, &id, pm_pubky::v1::Root::Pub, &owner).unwrap();
+                let note_bytes = serde_json::to_vec(&note).unwrap();
+                fake.files
+                    .lock()
+                    .unwrap()
+                    .get_mut(ANN)
+                    .unwrap()
+                    .insert(public.clone(), note_bytes.clone());
+                k["versions"].as_array_mut().unwrap().push(public.clone().into());
+                held_files.insert(path, bytes);
+                held_files.insert(public.clone(), note_bytes);
+                markers.push(public);
+            } else {
+                ready = id;
+            }
+        }
+        if marked {
+            shelf["other"] = serde_json::json!(markers);
+        }
+        let held: Vec<_> = shelf["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|k| k["pending"] == true && k["id"] != ready.as_str())
+            .cloned()
+            .collect();
+        store_shelf(&s, &shelf);
+        // Fair replay must also leave a discovery turn for an uncached, older collection.
+        let discovered = pm_pubky::v1::id_of(base - 120_000_000);
+        pm_pubky::v1::validate_social(&good_post, &discovered, pm_pubky::v1::Root::Priv, &owner).unwrap();
+        fake.files.lock().unwrap().get_mut(ANN).unwrap().insert(
+            format!("{DRAFTS}{discovered}/{}.json", pm_pubky::v1::id_of(base)),
+            serde_json::to_vec(&good).unwrap(),
+        );
+        for pass in 0..4 {
+            fake.calls.lock().unwrap().clear();
+            // Each request loads the persisted shelf and queue order afresh.
+            let (st, list) = call(&router(s.clone()), &ann, "GET", "/v1/collections", None).await;
+            assert_eq!(st, StatusCode::OK, "marked={marked}, pass={pass}: {list}");
+            let calls = fake.calls.lock().unwrap().clone();
+            assert!(calls.len() <= 32, "{calls:?}");
+            let reads = calls.iter().filter(|c| c.contains(" read ")).count();
+            assert!(reads <= 16, "{calls:?}");
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| c.ends_with(&format!(" list {DRAFTS}")))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|c| c.ends_with(&format!(" list {PUBLISHED}")))
+                    .count(),
+                1
+            );
+            if pass == 0 {
+                assert_eq!(reads, 16, "the regression must exhaust the real read budget");
+                assert!(list
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|k| k["id"] == discovered.as_str()));
+            }
+            let stored = stored_shelf(&s);
+            for before in &held {
+                let current = stored["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|k| k["id"] == before["id"])
+                    .unwrap();
+                assert_eq!(current, before, "held intent must not change");
+                let id = current["id"].as_str().unwrap();
+                assert_eq!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).len(), 1);
+                assert_eq!(fake.paths(ANN, &format!("{PUBLISHED}{id}/")).len(), 1);
+            }
+            for (path, bytes) in &held_files {
+                assert_eq!(&fake.files.lock().unwrap()[ANN][path], bytes);
+            }
+            if pending_count(&s) == 16 {
+                break;
+            }
+        }
+        assert_eq!(
+            pending_count(&s),
+            16,
+            "the seventeenth existing head must get a validation turn"
+        );
+        assert_eq!(newest(&fake, ANN, &ready).1["name"], "Waiting 16");
+        assert_eq!(fake.paths(ANN, &format!("{DRAFTS}{ready}/")).len(), 2);
+    }
+}
+
 fn reapprove_fake(s: &pm_api::NodeState) {
     // keep_grant clears the bookmark copy's lost bit; it preserves the collection shelf.
     let key = format!("person.{ANN}.bookmarks");
@@ -2096,6 +2246,100 @@ async fn a_refused_first_draft_returns_its_accepted_identity_before_reapproval()
     let paths = fake.paths(ANN, DRAFTS);
     assert_eq!(paths.len(), 1);
     assert!(paths[0].starts_with(&format!("{DRAFTS}{accepted}/")));
+}
+
+#[tokio::test]
+async fn accepted_item_commands_are_not_repeated_after_grant_loss() {
+    for no_grant in [false, true] {
+        for remove in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (s, fake, ann, _) = node(dir.path());
+            fake.connected.lock().unwrap().insert(ANN.to_string());
+            let app = router(s.clone());
+            let original = if remove {
+                vec![SONG_A, SONG_B, SONG_C]
+            } else {
+                vec![SONG_A]
+            };
+            let expected = if remove {
+                vec![SONG_B, SONG_C]
+            } else {
+                vec![SONG_A, SONG_B]
+            };
+            let (_, made) = create(&app, &ann, "One edit", &original).await;
+            let id = made["summary"]["id"].as_str().unwrap();
+            let (method, path, body) = if remove {
+                ("DELETE", format!("/v1/collections/{id}/items/0"), None)
+            } else {
+                (
+                    "POST",
+                    format!("/v1/collections/{id}/items"),
+                    Some(serde_json::json!({"uris":[SONG_B]})),
+                )
+            };
+            fake.calls.lock().unwrap().clear();
+            if no_grant {
+                fake.lose_draft_once.store(true, Ordering::SeqCst);
+            } else {
+                fake.refuse_draft_once.store(true, Ordering::SeqCst);
+            }
+            let (st, first) = call(&app, &ann, method, &path, body.clone()).await;
+            let calls = fake.calls.lock().unwrap().clone();
+            assert_eq!(
+                calls.iter().filter(|c| c.contains(" list ")).count(),
+                2,
+                "{calls:?}"
+            );
+            assert_eq!(
+                calls.iter().filter(|c| c.contains(" read ")).count(),
+                1,
+                "{calls:?}"
+            );
+            assert_eq!(
+                calls.iter().filter(|c| c.contains(" write ")).count(),
+                1,
+                "{calls:?}"
+            );
+            let accepted = stored_shelf(&s);
+            assert_eq!(item_uris(&accepted["items"][0]["playlist"]), expected);
+            assert_eq!(accepted["items"][0]["pending"], true);
+            assert_eq!(accepted["items"][0]["writing"]["drafted"], false);
+            assert_eq!(item_uris(&newest(&fake, ANN, id).1), original);
+            let (_, me) = call(&app, &ann, "GET", "/v1/me/homeserver", None).await;
+            if no_grant {
+                assert_eq!(me["connected"], false);
+            } else {
+                assert_eq!(me["lost"], true);
+            }
+            // An edit refused before acceptance still requests approval without mutating.
+            let (blocked, v) = call(&app, &ann, method, &path, body.clone()).await;
+            assert_eq!(blocked, StatusCode::CONFLICT, "{v}");
+            assert_eq!(v["needs_connect"], true);
+            assert_eq!(stored_shelf(&s), accepted);
+            if no_grant {
+                fake.connected.lock().unwrap().insert(ANN.to_string());
+            } else {
+                reapprove_fake(&s);
+            }
+            // Follow the actual apiSend retry contract. A 409 for the accepted first command
+            // would add B twice or remove both A and B after reapproval.
+            let (reply_st, reply) = if st == StatusCode::CONFLICT && first["needs_connect"] == true {
+                call(&app, &ann, method, &path, body).await
+            } else {
+                (st, first)
+            };
+            assert_eq!(reply_st, StatusCode::OK, "{reply}");
+            assert_eq!(item_uris(&reply["playlist"]), expected);
+            assert_eq!(reply["summary"]["id"], id);
+            assert_eq!(reply["summary"]["synced"], false);
+            let (st, list) = call(&app, &ann, "GET", "/v1/collections", None).await;
+            assert_eq!(st, StatusCode::OK, "{list}");
+            assert_eq!(pending_count(&s), 0);
+            assert_eq!(item_uris(&newest(&fake, ANN, id).1), expected);
+            assert_eq!(stored_shelf(&s)["items"].as_array().unwrap().len(), 1);
+            assert_eq!(fake.paths(ANN, &format!("{DRAFTS}{id}/")).len(), 2);
+        }
+    }
 }
 
 #[tokio::test]

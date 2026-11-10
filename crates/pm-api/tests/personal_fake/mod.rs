@@ -40,6 +40,8 @@ pub struct Fake {
     pub refuse_pub: AtomicBool,
     /// Listings/reads succeed, but the next private draft loses approval before landing.
     pub refuse_draft_once: AtomicBool,
+    /// Listings/reads succeed, but the next private draft finds its local grant gone.
+    pub lose_draft_once: AtomicBool,
     /// The node can't delete its copy of the grant.
     pub disconnect_fails: AtomicBool,
     /// Held (written) by a test: a bookmark write waits on it, keeping her person lock meanwhile.
@@ -194,6 +196,10 @@ impl PersonalHomeserver for Fake {
         }
         if path.starts_with("/priv/") && self.refuse_draft_once.swap(false, Ordering::SeqCst) {
             return Err(PersonalError::Refused("403 Forbidden".into()));
+        }
+        if path.starts_with("/priv/") && self.lose_draft_once.swap(false, Ordering::SeqCst) {
+            self.connected.lock().unwrap().remove(key);
+            return Err(PersonalError::NoGrant);
         }
         if path.starts_with("/pub/") && self.refuse_pub.load(Ordering::SeqCst) {
             return Err(PersonalError::Refused("403 Forbidden".into()));

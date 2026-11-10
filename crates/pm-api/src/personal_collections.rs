@@ -834,9 +834,30 @@ async fn refresh(
     ids.extend(sh.items.iter().map(|k| k.id.clone()));
     ids.sort();
     ids.dedup();
+    let pending: HashMap<String, usize> = sh
+        .items
+        .iter()
+        .filter(|k| k.pending)
+        .enumerate()
+        .map(|(i, k)| (k.id.clone(), i))
+        .collect();
+    let turn = sh
+        .items
+        .iter()
+        .find(|k| k.pending && Some(k.id.as_str()) != first)
+        .map(|k| k.id.clone());
     ids.sort_by(|a, b| {
         (Some(b.as_str()) == first)
             .cmp(&(Some(a.as_str()) == first))
+            // Give the stored pending queue a turn before discovery can spend every read.
+            // Then leave room for discovery, with the remaining pending work in queue order.
+            .then_with(|| (Some(b) == turn.as_ref()).cmp(&(Some(a) == turn.as_ref())))
+            .then_with(|| match (pending.get(a), pending.get(b)) {
+                (Some(a), Some(b)) => a.cmp(b),
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
             .then_with(|| {
                 private
                     .get(b)
@@ -847,7 +868,7 @@ async fn refresh(
     let mut caught = Caught::default();
     let mut remotes = HashMap::new();
     for id in ids {
-        if !work.available() {
+        if !work.available() || (pending.contains_key(&id) && work.reads == 0) {
             caught.stale = true;
             break;
         }
@@ -855,6 +876,9 @@ async fn refresh(
             private: private.get(&id).cloned(),
             public: public.get(&id).cloned(),
         };
+        if pending.contains_key(&id) {
+            rotate_pending(s, key, sh, &id)?;
+        }
         // Work::read charges actual downloads. Known held heads cost no read allowance,
         // so unrelated or unrepresentable posts cannot starve older valid collections.
         let mut one = observe(s, b, key, sh, &id, &remote, Some(id.as_str()) == first, work).await?;
@@ -873,6 +897,16 @@ async fn refresh(
     Ok((caught, remotes))
 }
 
+fn rotate_pending(s: &NodeState, key: &str, sh: &mut Shelf, id: &str) -> Result<(), ApiError> {
+    // The stored order is a round-robin queue (the UI sorts by playlist timestamps).
+    // Move an attempted entry before awaiting: budget exhaustion or cancellation must
+    // leave the next request a new starting point. Reordering adds no shelf metadata.
+    let i = sh.items.iter().position(|k| k.id == id).expect("pending item");
+    let k = sh.items.remove(i);
+    sh.items.push(k);
+    save(s, key, sh)
+}
+
 async fn drain_one_by_one(
     s: &NodeState,
     b: &dyn PersonalHomeserver,
@@ -889,17 +923,11 @@ async fn drain_one_by_one(
         .take(READS_PER_REQUEST)
         .collect();
     for id in ids {
-        if !work.available() {
+        if !work.available() || work.reads == 0 {
             sh.behind = true;
             break;
         }
-        // The stored order is a round-robin queue (the UI sorts by playlist timestamps).
-        // Move an attempted entry before awaiting: budget exhaustion or cancellation must
-        // leave the next request a new starting point. Reordering adds no shelf metadata.
-        let i = sh.items.iter().position(|k| k.id == id).expect("pending item");
-        let k = sh.items.remove(i);
-        sh.items.push(k);
-        save(s, key, sh)?;
+        rotate_pending(s, key, sh, &id)?;
         let (mut caught, remote) = catch_up_one(s, b, key, sh, &id, work).await?;
         if caught.stale || personal::is_lost(s, key) {
             break;
@@ -1133,24 +1161,12 @@ async fn change(
             Pushed::Full if k.unshare => {} // The privacy intent remains durable for the next batch.
             Pushed::Full => return Err(shelf_full()),
             Pushed::Waiting(PersonalError::NoGrant) => {
-                if id.is_some() {
-                    return Ok(personal::needs_connect(false));
-                }
-                // A create was already accepted durably. Return its identity below, so
-                // approval/retry cannot turn one action into a second pending collection.
+                // This edit was already accepted durably. Return its pending result below:
+                // a reconnect response would make apiSend apply the same command again.
                 sh.behind = true;
             }
             Pushed::Waiting(PersonalError::Refused(m)) => {
                 personal::mark_lost(s, key, &m)?;
-                let landed = sh
-                    .items
-                    .iter()
-                    .find(|x| x.id == k.id)
-                    .and_then(|x| x.writing.as_ref())
-                    .is_some_and(|w| w.drafted);
-                if id.is_some() && !landed {
-                    return Ok(personal::needs_connect(true));
-                }
             }
             Pushed::Waiting(PersonalError::Rejected(m)) => {
                 if !k.deleted && !k.unshare {
