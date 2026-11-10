@@ -1265,15 +1265,17 @@ pub fn volume() -> Option<pm_model::ZoneVolume> {
 /// start level for the next time; a mute from a start below the path's range ends with it), or
 /// the listener's mute.
 pub fn set_volume(v: Volume) -> Result<(), String> {
-    // Not held (a refusal gave it back): an unmute still clears the mute kept for the DAC
+    // Not held (a refusal gave it back): an unmute still clears the mute kept for the DAC, and
+    // Exclusive USB is tried again from the next song (a refusal that said to unmute is followed,
+    // also when it gave the DAC to Android's paths because the DAC couldn't be told apart then)
     if !holding() {
         let b = backend().ok_or("no DAC is held")?;
         return match v {
-            Volume::Mute(false) => unmute_saved(&*b),
+            Volume::Mute(false) => unmute_saved(&*b).map(|()| forget_auto_failed()),
             _ => Err("no DAC is held".into()),
         };
     }
-    let set = with_held(|h| {
+    let set = with_held(|h| -> Result<Option<(UsbIds, f32)>, String> {
         let h = h.as_mut().ok_or("no DAC is held")?;
         let uid = h
             .shown()
