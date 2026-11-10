@@ -814,7 +814,10 @@ async fn an_open_ahead_still_next_is_kept_when_the_queue_changes() {
     // The open ahead ends (it fails); the track then ends into it and on to "b"
     r.hang.allow(1);
     wait_for(|| r.hang.waiting.load(Ordering::SeqCst) == 0).await;
-    r.gate.allow(1_000);
+    // One permit: the last block of "a". "b" then starts and waits at its first block, so it is
+    // still playing when the test looks (with blocks flowing, its three blocks play out at once
+    // and the state watch folds it into the Stopped at the end of the queue)
+    r.gate.allow(1);
     let mut w = r.zone.watch();
     tokio::time::timeout(
         Duration::from_secs(3),
@@ -823,6 +826,7 @@ async fn an_open_ahead_still_next_is_kept_when_the_queue_changes() {
     .await
     .expect("the added song plays")
     .unwrap();
+    r.gate.allow(1_000);
     assert_eq!(
         r.hang.taken.load(Ordering::SeqCst),
         1,

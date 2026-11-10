@@ -705,15 +705,28 @@ pub(crate) async fn login(
             ),
         )
     })?;
-    let verifier = crate::tidal::random_urlsafe(48);
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
-    let nonce = crate::tidal::random_urlsafe(18);
     let callback = format!(
         "{}/drives/{}/callback",
         crate::tidal::external_base(&s, &headers),
         p.id()
     );
+    if app.client_secret.is_empty() {
+        // A OneDrive app is a public client: no secret to add, so an own app needs an own return page
+        let instead = match p {
+            Provider::Onedrive => {
+                "Use your own OneDrive app with a return page of your own ([auth] return_page in node.toml)."
+            }
+            Provider::Google => {
+                "Use your own app with its secret (Settings › This node › Service apps, or \
+                 google_client_secret in node.toml)."
+            }
+        };
+        crate::project_apps::check_return_page(&s, &callback, instead)?;
+    }
+    let verifier = crate::tidal::random_urlsafe(48);
+    let challenge =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let nonce = crate::tidal::random_urlsafe(18);
     // A node's own app with its secret returns to the node; the project app via the return page
     let (redirect, state) = if app.client_secret.is_empty() {
         (

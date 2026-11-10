@@ -717,7 +717,7 @@ async fn a_removal_whose_token_write_fails_still_takes_the_usage_rows() {
            BEGIN SELECT RAISE(ABORT, 'test: no token writes'); END;",
     )
     .unwrap();
-    assert!(pm_api::accounts::forget_person(&s, KEY).is_err());
+    assert!(pm_api::accounts::forget_person(&s, KEY).await.is_err());
     assert_eq!(by_role(&export(&app).await), (0, 1), "their linked events went");
 }
 
@@ -740,7 +740,7 @@ async fn a_removed_listener_loses_aliases_choice_and_linked_events() {
         send(&app, &l2, &a2, json!([nav("albums")])).await.0,
         StatusCode::NO_CONTENT
     );
-    pm_api::accounts::forget_person(&s, KEY).unwrap();
+    pm_api::accounts::forget_person(&s, KEY).await.unwrap();
     assert_eq!(
         send(&app, &l1, &a1, json!([nav("home")])).await.0,
         StatusCode::UNAUTHORIZED

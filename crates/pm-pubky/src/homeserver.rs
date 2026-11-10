@@ -175,6 +175,16 @@ pub struct ListBounds {
     /// The listing must end within the bounds: a cut one is [`HomeserverError::Cut`] (a sync
     /// must never take a partial listing for the whole; it would read the rest as deleted).
     pub whole: bool,
+    /// At most this long, one entry as listed (its cursor: the pubky URL holding its path). The
+    /// listing stops, cut, at a longer one.
+    pub max_entry_bytes: usize,
+    /// At most this many bytes of entries (their cursors) in the whole listing; past it the
+    /// listing stops, cut, like one past [`ListBounds::max_entries`]. When this is bounded the node
+    /// sends each LIST itself and reads its body to at most this, and to at most
+    /// `LIST_LIMIT × (max_entry_bytes + 128)`, before parsing it (the SDK reads a page whole); a
+    /// bigger page is [`HomeserverError::TooLarge`]. A legacy cookie session's private listings
+    /// still go through the SDK.
+    pub max_bytes: usize,
 }
 
 impl ListBounds {
@@ -187,6 +197,8 @@ impl ListBounds {
         deadline: std::time::Duration::from_secs(20),
         newest_first: true,
         whole: false,
+        max_entry_bytes: usize::MAX,
+        max_bytes: usize::MAX,
     };
     /// The owner's own homeserver: complete, but finite (200,000 entries, 2,000 pages, 10 min).
     /// A listing that reaches a limit is an error, never a partial listing taken as complete.
@@ -196,6 +208,8 @@ impl ListBounds {
         deadline: std::time::Duration::from_secs(600),
         newest_first: false,
         whole: true,
+        max_entry_bytes: usize::MAX,
+        max_bytes: usize::MAX,
     };
 }
 
@@ -238,8 +252,9 @@ where
 
 /// A listing within `bounds`, page by page from `page(cursor)`, which answers `Ok(None)` for a
 /// directory that isn't there (it lists as empty). The listing stops, incomplete, at the entry
-/// cap (entries past it are dropped, from the page that crosses it too), the page cap, the
-/// deadline, or a cursor that doesn't move on (one seen before); with `bounds.whole` that is
+/// cap (entries past it are dropped, from the page that crosses it too), the byte caps (the page
+/// with an entry past them is dropped whole), the page cap, the deadline, or a cursor that
+/// doesn't move on (one seen before); with `bounds.whole` that is
 /// [`HomeserverError::Cut`] instead. A page shorter than [`LIST_LIMIT`] is the end only when its
 /// cursor moved on: a short page that ends on a cursor seen before is a homeserver going round,
 /// not a whole listing.
@@ -258,6 +273,7 @@ where
     let mut seen = std::collections::HashSet::new();
     let mut complete = false;
     let mut answered = false;
+    let mut bytes = 0usize;
     for _ in 0..bounds.max_pages {
         let left = bounds.deadline.saturating_sub(started.elapsed());
         let Ok(got) = tokio::time::timeout(left, page(cursor.clone())).await else {
@@ -272,6 +288,14 @@ where
             complete = true;
             break;
         };
+        // Long paths count as well as many entries: past a byte cap the listing is cut there
+        let over = got.iter().any(|(_, c)| {
+            bytes = bytes.saturating_add(c.len());
+            c.len() > bounds.max_entry_bytes || bytes > bounds.max_bytes
+        });
+        if over {
+            break;
+        }
         let n = got.len();
         let next = got.last().map(|(_, c)| c.clone());
         let moved_on = next.as_ref().is_none_or(|c| !seen.contains(c));
@@ -296,6 +320,101 @@ where
         return Err(HomeserverError::Cut { dir: dir.to_string() });
     }
     Ok(Listing { entries, complete })
+}
+
+/// Room for a LIST line beyond its entry's cursor: a line may be the entry's transport URL
+/// (`https://_pubky.<key>/…`) instead of its pubky URL. A page of [`LIST_LIMIT`] entries within
+/// [`ListBounds::max_entry_bytes`] fits in `LIST_LIMIT × (max_entry_bytes + this)` bytes.
+const LIST_LINE_SLACK: usize = 128;
+
+/// How long before its expiry a grant's bearer is refreshed, as the SDK does when it attaches it
+/// to a request of its own (`REFRESH_SLACK_SECS`, five minutes).
+const GRANT_REFRESH_SLACK_SECS: u64 = 300;
+
+/// The bearer a grant session's own requests carry: refreshed first when it is about to expire.
+async fn grant_bearer(session: &PubkySession) -> Result<String, HomeserverError> {
+    let grant = session.as_grant().ok_or(HomeserverError::NeedsSession)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let expires = grant.session_info().await.token_expires_at;
+    if expires.saturating_sub(GRANT_REFRESH_SLACK_SECS) <= now {
+        grant.refresh_if_needed().await?;
+    }
+    Ok(grant.current_bearer().await)
+}
+
+/// One LIST page's URL, as the SDK's `ListBuilder` builds it: the folder's transport URL with
+/// `reverse`, `shallow`, `limit` and `cursor`, in that order.
+fn list_url(
+    owner: PublicKey,
+    dir: &str,
+    shallow: bool,
+    newest_first: bool,
+    cursor: Option<&str>,
+) -> Result<reqwest::Url, HomeserverError> {
+    if !dir.ends_with('/') {
+        return Err(HomeserverError::Transport(format!(
+            "a listing is of a folder, ending with /: {dir}"
+        )));
+    }
+    let mut url = pubky::PubkyResource::new(owner, dir)?.to_transport_url()?;
+    {
+        let mut q = url.query_pairs_mut();
+        if newest_first {
+            q.append_key_only("reverse");
+        }
+        if shallow {
+            q.append_key_only("shallow");
+        }
+        q.append_pair("limit", &LIST_LIMIT.to_string());
+        if let Some(c) = cursor {
+            q.append_pair("cursor", c);
+        }
+    }
+    Ok(url)
+}
+
+/// One LIST page from `request` (credential attached), its body read to at most `max` bytes
+/// before anything is parsed ([`read_capped`]): a homeserver can't make the node hold a bigger
+/// page. `None` for a folder that isn't there (404), as through the SDK; another status is the
+/// SDK's server error.
+async fn list_page_within(
+    request: reqwest::RequestBuilder,
+    max: usize,
+) -> Result<Option<Page<String>>, HomeserverError> {
+    let resp = request.send().await.map_err(pubky::Error::from)?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        let message = status.canonical_reason().unwrap_or("Unknown Error").to_string();
+        return Err(pubky::Error::from(pubky::errors::RequestError::Server { status, message }).into());
+    }
+    let body = read_capped(resp, max, STALL_TIMEOUT).await?;
+    parse_list_page(&body).map(Some)
+}
+
+/// A LIST body as the SDK's `ListBuilder::send` reads it: each non-blank line a transport URL
+/// (`http(s)://…`) or a pubky URL; each entry with the cursor that continues after it.
+fn parse_list_page(body: &[u8]) -> Result<Page<String>, HomeserverError> {
+    let mut page = Vec::new();
+    for line in String::from_utf8_lossy(body).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: pubky::PubkyResource = if line.starts_with("http://") || line.starts_with("https://") {
+            let url = reqwest::Url::parse(line)
+                .map_err(|e| HomeserverError::Transport(format!("a listing line is no URL: {e}")))?;
+            pubky::PubkyResource::from_transport_url(&url)?
+        } else {
+            line.parse()?
+        };
+        page.push((entry.path.to_string(), entry.to_pubky_url()));
+    }
+    Ok(page)
 }
 
 #[derive(Clone)]
@@ -455,8 +574,9 @@ impl NodeHomeserver {
                 None => unknown.push(path),
             }
         }
+        // A bookmark removed between the listing and its fetch (in another app) is simply gone
         for (path, bytes) in self
-            .fetch_many(&user, unknown, Visibility::Private, Some(session))
+            .fetch_present(&user, unknown, Visibility::Private, Some(session))
             .await?
         {
             if let Some((uri, created_at)) = crate::v1::music_bookmark(&path, &bytes) {
@@ -487,6 +607,33 @@ impl NodeHomeserver {
         results.into_iter().map(|(p, r)| r.map(|b| (p, b))).collect()
     }
 
+    /// [`Self::fetch_many`], leaving out a file that is gone (404) since it was listed.
+    async fn fetch_present(
+        &self,
+        user: &PublicKey,
+        paths: Vec<String>,
+        visibility: Visibility,
+        session: Option<&PubkySession>,
+    ) -> Result<Vec<(String, Vec<u8>)>, HomeserverError> {
+        use futures_util::StreamExt;
+        let results: Vec<(String, Result<Vec<u8>, HomeserverError>)> = futures_util::stream::iter(paths)
+            .map(|path| async move {
+                let r = self.fetch(user, &path, visibility, session).await;
+                (path, r)
+            })
+            .buffered(FETCH_AT_ONCE)
+            .collect()
+            .await;
+        results
+            .into_iter()
+            .filter_map(|(p, r)| match r {
+                Ok(b) => Some(Ok((p, b))),
+                Err(HomeserverError::Pubky(e)) if is_not_found(&e) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect()
+    }
+
     async fn list_paths(
         &self,
         user: &PublicKey,
@@ -499,7 +646,42 @@ impl NodeHomeserver {
         if visibility == Visibility::Private && session.is_none() {
             return Err(HomeserverError::NeedsSession);
         }
+        // A listing with a byte budget (a listener's homeserver) is read by the node itself, each
+        // page's body capped before it is held or parsed: the SDK reads a page whole. A legacy
+        // cookie session keeps the SDK's request (its credential is the SDK's own).
+        let capped = if bounds.max_bytes < usize::MAX
+            && (visibility == Visibility::Public || session.is_some_and(|s| s.as_grant().is_some()))
+        {
+            let page = LIST_LIMIT as usize;
+            Some(
+                bounds
+                    .max_bytes
+                    .min(page.saturating_mul(bounds.max_entry_bytes.saturating_add(LIST_LINE_SLACK))),
+            )
+        } else {
+            None
+        };
         list_within(bounds, dir, |cursor| async move {
+            if let Some(max) = capped {
+                return within(OBJECT_TIMEOUT, async {
+                    let (client, owner, bearer) = match (visibility, session) {
+                        (Visibility::Private, Some(session)) => (
+                            session.client(),
+                            session.public_key(),
+                            Some(grant_bearer(session).await?),
+                        ),
+                        (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
+                        (Visibility::Public, _) => (self.pubky.client(), user.clone(), None),
+                    };
+                    let url = list_url(owner, dir, shallow, bounds.newest_first, cursor.as_deref())?;
+                    let mut request = client.request_async(reqwest::Method::GET, url).await?;
+                    if let Some(bearer) = bearer {
+                        request = request.bearer_auth(bearer);
+                    }
+                    list_page_within(request, max).await
+                })
+                .await;
+            }
             let page = match (visibility, session) {
                 (Visibility::Public, _) => {
                     let public = self.pubky.public_storage();
@@ -1384,6 +1566,8 @@ mod listing_tests {
             deadline: std::time::Duration::from_millis(deadline_ms),
             newest_first: false,
             whole: false,
+            max_entry_bytes: usize::MAX,
+            max_bytes: usize::MAX,
         }
     }
 
@@ -1626,12 +1810,198 @@ mod listing_tests {
         let l = list(120, usize::MAX, whole, &asked).await.unwrap();
         assert_eq!((l.entries.len(), l.complete), (120, true));
     }
+
+    #[tokio::test]
+    async fn long_paths_cut_a_listing_like_too_many_entries() {
+        // The pages' cursors ("pubky://u/pub/x/<i>"): 1,790 bytes for the first hundred, 1,900
+        // for the second, 950 for the last fifty; 4,640 in all
+        let within = ListBounds {
+            max_bytes: 4_640,
+            ..bounds(10_000, 100, 5_000)
+        };
+        let asked = AtomicUsize::new(0);
+        let l = list(250, usize::MAX, within, &asked).await.unwrap();
+        assert_eq!((l.entries.len(), l.complete), (250, true), "exactly at the cap");
+        // Under the 3,690 bytes of the first two pages: cut at the second, which is dropped
+        let asked = AtomicUsize::new(0);
+        let over = ListBounds {
+            max_bytes: 3_000,
+            ..bounds(10_000, 100, 5_000)
+        };
+        let l = list(250, usize::MAX, over, &asked).await.unwrap();
+        assert_eq!((l.entries.len(), l.complete), (100, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 2, "no page asked for after the cut");
+        let asked = AtomicUsize::new(0);
+        let e = list(250, usize::MAX, ListBounds { whole: true, ..over }, &asked)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, HomeserverError::Cut { .. }), "{e}");
+        // One entry longer than an entry may be
+        let asked = AtomicUsize::new(0);
+        let long = ListBounds {
+            max_entry_bytes: 17,
+            ..bounds(10_000, 100, 5_000)
+        };
+        let l = list(250, usize::MAX, long, &asked).await.unwrap();
+        assert_eq!(
+            (l.entries.len(), l.complete),
+            (0, false),
+            "the first page's cursors from 10 on are 18 bytes"
+        );
+        let asked = AtomicUsize::new(0);
+        let e = list(250, usize::MAX, ListBounds { whole: true, ..long }, &asked)
+            .await
+            .unwrap_err();
+        assert!(matches!(e, HomeserverError::Cut { .. }), "{e}");
+        // A hostile homeserver's one page of huge paths: cut, nothing kept
+        let huge = format!("/pub/x/{}", "a".repeat(64 * 1024));
+        let l = list_within(
+            ListBounds {
+                max_entry_bytes: 2 * 1024,
+                ..bounds(10_000, 100, 5_000)
+            },
+            "/pub/x/",
+            |_| {
+                let huge = huge.clone();
+                async move { Ok(Some(vec![(huge.clone(), format!("pubky://u{huge}"))])) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (0, false));
+    }
 }
 
 #[cfg(test)]
 mod object_tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// A server answering each connection with the next of `answers` (`(status, body, flood)`):
+    /// `body` with its length said, or, when `flood` isn't 0, that many bytes of listing lines
+    /// with no length said. Returns its URL and how many body bytes each answer got out.
+    fn serve_lists(answers: Vec<(u16, Vec<u8>, usize)>) -> (String, std::thread::JoinHandle<Vec<usize>>) {
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/priv/social/v1/posts/", server.local_addr().unwrap());
+        let t = std::thread::spawn(move || {
+            let mut sent_all = Vec::new();
+            for (status, body, flood) in answers {
+                let (mut c, _) = server.accept().unwrap();
+                let mut req = [0u8; 2048];
+                let _ = c.read(&mut req);
+                let len = if flood == 0 {
+                    format!("Content-Length: {}\r\n", body.len())
+                } else {
+                    String::new()
+                };
+                let head = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: text/plain\r\n{len}Connection: close\r\n\r\n"
+                );
+                c.write_all(head.as_bytes()).unwrap();
+                if flood == 0 {
+                    let _ = c.write_all(&body);
+                    sent_all.push(body.len());
+                    continue;
+                }
+                let line: &[u8] = b"pubky://o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy/priv/social/v1/posts/0/0.json\n";
+                let block: Vec<u8> = line.iter().copied().cycle().take(64 * 1024).collect();
+                let mut sent = 0;
+                while sent < flood {
+                    match c.write(&block[..block.len().min(flood - sent)]) {
+                        Ok(n) if n > 0 => sent += n,
+                        _ => break,
+                    }
+                }
+                sent_all.push(sent);
+            }
+            sent_all
+        });
+        (url, t)
+    }
+
+    /// A listener's homeserver can answer a LIST with as much as it likes: the node reads a page
+    /// to its cap before parsing anything, refusing one that says it is bigger unread and giving
+    /// up on one that doesn't as soon as more arrives (Kimi 285 M2). A page within the cap reads
+    /// as the SDK reads it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listing_page_is_read_to_a_cap_before_it_is_parsed() {
+        const HUGE: usize = 64 * 1024 * 1024;
+        let user = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let pubky_line = format!("pubky://{user}/priv/social/v1/posts/a/1.json");
+        let transport_line = format!("https://_pubky.{user}/priv/social/v1/posts/b/2.json");
+        let body = format!("{pubky_line}\n\n  {transport_line}  \n").into_bytes();
+        let (url, server) = serve_lists(vec![
+            (200, body, 0),
+            (200, Vec::new(), HUGE),
+            (200, vec![b'x'; 1024], 0),
+            (404, Vec::new(), 0),
+            (500, Vec::new(), 0),
+        ]);
+        let client = reqwest::Client::new();
+        let get = || client.get(&url);
+        // Within the cap: each line parsed by the SDK's own functions, blank lines skipped
+        let page = list_page_within(get(), 4096).await.unwrap().unwrap();
+        let expected: Vec<(String, String)> = [
+            pubky_line.parse::<pubky::PubkyResource>().unwrap(),
+            pubky::PubkyResource::from_transport_url(&reqwest::Url::parse(&transport_line).unwrap()).unwrap(),
+        ]
+        .into_iter()
+        .map(|e| (e.path.to_string(), e.to_pubky_url()))
+        .collect();
+        assert_eq!(page, expected);
+        assert_eq!(page.len(), 2);
+        // Over the cap, its length not said: given up as it arrives, never read whole
+        let e = list_page_within(get(), 256 * 1024).await.unwrap_err();
+        assert!(
+            matches!(e, HomeserverError::TooLarge { max } if max == 256 * 1024),
+            "{e}"
+        );
+        // Over the cap and saying so: refused unread
+        let e = list_page_within(get(), 512).await.unwrap_err();
+        assert!(matches!(e, HomeserverError::TooLarge { max: 512 }), "{e}");
+        // No such folder lists as nothing; a server error stays the SDK's server error
+        assert_eq!(list_page_within(get(), 4096).await.unwrap(), None);
+        let e = list_page_within(get(), 4096).await.unwrap_err();
+        assert!(e.is_server_error(), "{e}");
+        let sent = server.join().unwrap();
+        assert!(
+            sent[1] < HUGE / 4,
+            "the server got {} bytes of the oversized page out",
+            sent[1]
+        );
+    }
+
+    #[test]
+    fn a_listing_url_is_built_as_the_sdk_builds_it() {
+        let owner = PublicKey::try_from("o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
+        let cursor = "pubky://o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy/priv/x/a.json";
+        let url = list_url(owner.clone(), "/priv/x/", true, true, Some(cursor)).unwrap();
+        let base = pubky::PubkyResource::new(owner.clone(), "/priv/x/")
+            .unwrap()
+            .to_transport_url()
+            .unwrap();
+        assert_eq!(url.path(), base.path());
+        assert_eq!(url.host_str(), base.host_str());
+        let query: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            query,
+            vec![
+                ("reverse".to_string(), String::new()),
+                ("shallow".to_string(), String::new()),
+                ("limit".to_string(), LIST_LIMIT.to_string()),
+                ("cursor".to_string(), cursor.to_string()),
+            ]
+        );
+        let plain = list_url(owner.clone(), "/priv/x/", false, false, None).unwrap();
+        assert_eq!(plain.query(), Some("limit=100"));
+        assert!(
+            list_url(owner, "/priv/x", false, false, None).is_err(),
+            "a folder ends with /"
+        );
+    }
 
     /// A server answering each connection with the next of `bodies` (`(with_length, size,
     /// stall)`): `size` bytes, its length said or not, or after the head nothing at all for a

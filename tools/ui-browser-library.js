@@ -21,6 +21,7 @@ async function setup(browser,width,mode='mixed',duplicate=false,token='fixture-o
  const fx={'/playlists/c1':{body:d},'/playlists/c1/play-from':{body:pf}};
  tracks.forEach(t=>fx[`/library/tracks/${t.id}`]={body:t});
  const run=await create(browser,width,{realAudio:true,token,tracks,collections:[d.summary],fixtures:fx});
+ await run.context.addInitScript(recordQueueSaves);
  const streams=[];run.streams=streams;
  await run.context.route(/\/v1\/(?:library\/tracks\/[^/]+\/file|sources\/tidal\/stream\/999)/,r=>{
   const u=new URL(r.request().url()),range=r.request().headers().range||'',match=/bytes=(\d+)-(\d*)/.exec(range);
@@ -35,7 +36,18 @@ async function setup(browser,width,mode='mixed',duplicate=false,token='fixture-o
  return run;
 }
 async function until(f,label){const t=Date.now();while(Date.now()-t<7000){if(await f())return;await new Promise(r=>setTimeout(r,100));}throw new Error('Timed out: '+label);}
-async function queue(page){await page.waitForTimeout(2200);return page.evaluate(()=>JSON.parse(localStorage.getItem('pm.browserQueue')||'[]'));}
+// The app saves the browser queue on a 2 s interval (app.js). Each document records, from document
+// start, the saves that reached storage, so a check never reads a queue an earlier page left there.
+// queue() takes the first non-empty save; that is the action's queue only because every case reads it
+// in a fresh context (empty storage) or, after a reload, in a fresh document with no further action.
+// Waiting is bounded by the fixture's page default (7000 ms); the contents are asserted once, after.
+// oneQueue() at the end of a case fails it if, from the first non-empty save on, the page persisted a
+// different queue (by uri list) or cleared it to [] before that check, usually within the first save
+// tick. A rewrite on a later tick is not observed: a recorded, accepted loss, like the shorter window
+// for page errors. No waiting is added for it.
+function recordQueueSaves(){const set=Storage.prototype.setItem;window.__queueSaves=[];Storage.prototype.setItem=function(k,v){const r=set.call(this,k,v);if(this===window.localStorage&&k==='pm.browserQueue'&&this.getItem(k)===String(v))window.__queueSaves.push(String(v));return r;};}
+async function queue(page){const saved=await page.waitForFunction(()=>window.__queueSaves.find(v=>v!=='[]'));return JSON.parse(await saved.jsonValue());}
+async function oneQueue(page){const uris=await page.evaluate(()=>{const s=window.__queueSaves,i=s.findIndex(v=>v!=='[]');return s.slice(i<0?s.length:i).map(v=>JSON.stringify(JSON.parse(v).map(x=>x.uri)));});assert.equal(new Set(uris).size,1,'from its first non-empty save the page persisted one queue, never a different or cleared one');}
 async function starts(run,id){await until(async()=>{const p=await run.page.evaluate(()=>pmPlayer.now());return p.time>0&&!p.paused;},'real muted audio starts');const now=await run.page.evaluate(()=>pmPlayer.now());assert.match(now.src,new RegExp(`/v1/library/tracks/${id}/file\\?`),'requested library song, not Muzika');assert.equal(now.index,0);assert.ok(run.streams.some(s=>s.path===`/v1/library/tracks/${id}/file`&&s.token===run.state.token&&s.status===206&&s.contentType==='audio/wav'),'authenticated, ranged audio response decoded');}
 (async()=>{const browser=await chromium.launch();try{
  for(const width of [1280,390]){
@@ -49,11 +61,11 @@ async function starts(run,id){await until(async()=>{const p=await run.page.evalu
    }else{
     const id=action==='direct-middle'?5:1;await starts(run,id);const q=await queue(page);assert.deepEqual(q.map(x=>x.uri),run.expected.slice(action==='direct-middle'?4:0),'direct click and Play keep full ordered suffix');
    }
-   assert.deepEqual(state.errors,[]);fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,`${width}-${action}.png`)});console.log(`PASS ${width} ${action}: actual muted ranged WAV decode, membership/order`);await run.context.close();
+   assert.deepEqual(state.errors,[]);fs.mkdirSync(shots,{recursive:true});await page.screenshot({path:path.join(shots,`${width}-${action}.png`)});await oneQueue(page);console.log(`PASS ${width} ${action}: actual muted ranged WAV decode, membership/order`);await run.context.close();
   }
  }
- {const run=await setup(browser,820,'library');await run.page.locator('#plplay').click();await starts(run,1);assert.deepEqual((await queue(run.page)).map(x=>x.uri),run.expected);console.log('PASS all-library');await run.context.close();}
- {const run=await setup(browser,820,'mixed',true);await run.page.locator('#plshuffle').click();await until(async()=>{const p=await run.page.evaluate(()=>pmPlayer.now());return p.time>0&&!p.paused;},'duplicate Shuffle audio');assert.deepEqual((await queue(run.page)).map(x=>x.uri).sort(),[...run.expected].sort());assert.equal((await queue(run.page)).filter(x=>x.uri==='track:1').length,2);await run.page.reload();await run.page.waitForTimeout(600);const q=await queue(run.page);assert.deepEqual(q.map(x=>x.uri).sort(),[...run.expected].sort());console.log('PASS Shuffle duplicates, restore full queue');await run.context.close();}
+ {const run=await setup(browser,820,'library');await run.page.locator('#plplay').click();await starts(run,1);assert.deepEqual((await queue(run.page)).map(x=>x.uri),run.expected);await oneQueue(run.page);console.log('PASS all-library');await run.context.close();}
+ {const run=await setup(browser,820,'mixed',true);await run.page.locator('#plshuffle').click();await until(async()=>{const p=await run.page.evaluate(()=>pmPlayer.now());return p.time>0&&!p.paused;},'duplicate Shuffle audio');const saved=await queue(run.page);assert.deepEqual(saved.map(x=>x.uri).sort(),[...run.expected].sort());assert.equal(saved.filter(x=>x.uri==='track:1').length,2);await oneQueue(run.page);await run.page.reload();await run.page.waitForFunction(()=>window.pmPlayer&&pmPlayer.now().index>=0);const now=await run.page.evaluate(()=>pmPlayer.now());const q=await queue(run.page);assert.deepEqual(q.map(x=>x.uri).sort(),[...run.expected].sort());assert.equal(now.index,0,'reload restores the song that was playing');assert.match(now.src,q[0].uri==='tidal:track:999'?/\/v1\/sources\/tidal\/stream\/999\?/:new RegExp(`/v1/library/tracks/${q[0].uri.slice(6)}/file\\?`),'restored bar holds the saved first song');await oneQueue(run.page);console.log('PASS Shuffle duplicates, restore full queue');await run.context.close();}
  {const run=await setup(browser,1280);run.failFiles=true;await run.page.locator('#plplay').click();await until(async()=>/503/.test(await run.page.locator('#toast').innerText()),'safe HTTP playback failure shown');await run.page.waitForTimeout(3000);assert.equal((await run.page.evaluate(()=>pmPlayer.now())).index,0,'error never advances through library to TIDAL');assert.ok(!run.streams.some(s=>s.path.includes('/tidal/')));assert.doesNotMatch(await run.page.locator('#toast').innerText(),/fixture-owner|token=|http:\/\//);console.log('PASS 503: useful safe error, bounded retry, no auto-skip');await run.context.close();}
  {const runs=await Promise.all(['fixture-person-A','fixture-person-B'].map(t=>setup(browser,820,'mixed',false,t)));for(const run of runs){await run.page.locator('#plplay').click();await starts(run,1);assert.ok(run.streams.every(s=>s.token===run.state.token));await run.page.evaluate(()=>pmPlayer.play([{uri:'tidal:track:999',title:'Muzika'}]));await until(()=>Promise.resolve(run.streams.some(s=>s.path.includes('/tidal/'))),'caller-bound provider stream');assert.ok(run.streams.every(s=>s.token===run.state.token));}for(const run of runs)await run.context.close();console.log('PASS separate browser callers: library and provider proxies carry only own token');}
  console.log('browser library playback: PASS');

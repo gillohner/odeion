@@ -268,6 +268,8 @@ works until the Pubky transport exists (ADR 0008):
 
 Nothing for most services. A release build carries the project's own TIDAL, Jamendo and AcoustID apps (public ids only;
 no secrets ship), and the TIDAL sign-in goes through the project's static return page, so it works on a LAN address.
+That page returns only to a node on a local address (a LAN or loopback address, a `.local` name); a node on an
+internet address uses TIDAL's code sign-in, or an app of its own with its secret.
 Open Sources › TIDAL › Sign in. Settings › This node › Service apps lists every service: whether this build's app is
 in use or yours, and what the service limits.
 

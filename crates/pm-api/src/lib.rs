@@ -47,6 +47,7 @@ pub mod discover;
 pub mod downloads;
 pub mod drives;
 pub mod events;
+pub mod feedback;
 pub mod files;
 pub mod first_run;
 pub mod first_steps;
@@ -74,6 +75,8 @@ pub mod opensubsonic;
 pub mod party;
 pub mod peer;
 pub mod people;
+pub mod personal;
+pub mod personal_collections;
 pub mod pinakes_reader;
 pub mod play_from;
 pub mod playlists;
@@ -322,32 +325,42 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route("/library/folders/suggest", get(first_run::suggest_folders))
         .route("/library/scan", post(scan))
-        // Collections: the same resource as /playlists (playlists.rs)
-        .route("/collections", get(playlists::list).post(playlists::create))
+        // Collections: the same resource as /playlists (playlists.rs); each caller their own
+        // (a listener's: personal_collections.rs)
+        .route(
+            "/collections",
+            get(personal_collections::list).post(personal_collections::create),
+        )
         .route(
             "/collections/{id}",
-            get(playlists::get)
-                .put(playlists::update)
-                .delete(playlists::delete),
+            get(personal_collections::get)
+                .put(personal_collections::update)
+                .delete(personal_collections::delete),
         )
-        .route("/collections/{id}/items", post(playlists::add_items))
+        .route("/collections/{id}/items", post(personal_collections::add_items))
         .route(
             "/collections/{id}/items/{index}",
-            axum::routing::delete(playlists::remove_item),
+            axum::routing::delete(personal_collections::remove_item),
         )
         .route(
             "/collections/{id}/local/{index}",
             axum::routing::delete(playlists::remove_local),
         )
-        .route("/collections/{id}/play", post(playlists::play))
+        .route("/collections/{id}/play", post(personal_collections::play))
         .route("/collections/{id}/play-from", get(play_from::playlist_play_from))
         .route("/collections/{id}/order", put(playlists::set_order))
-        .route("/collections/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/collections/{id}/visibility",
+            put(personal_collections::set_visibility),
+        )
         .route(
             "/collections/{id}/items/{index}/source",
             put(playlists::pin_source),
         )
-        .route("/playlists", get(playlists::list).post(playlists::create))
+        .route(
+            "/playlists",
+            get(personal_collections::list).post(personal_collections::create),
+        )
         .route("/playlists/from-queue", post(playlists::from_queue))
         .route("/playlists/import", post(activity::import_playlist))
         .route("/playlists/import/file", post(activity::import_playlist_file))
@@ -380,23 +393,26 @@ pub fn router(state: Arc<NodeState>) -> Router {
         )
         .route(
             "/playlists/{id}",
-            get(playlists::get)
-                .put(playlists::update)
-                .delete(playlists::delete),
+            get(personal_collections::get)
+                .put(personal_collections::update)
+                .delete(personal_collections::delete),
         )
-        .route("/playlists/{id}/items", post(playlists::add_items))
+        .route("/playlists/{id}/items", post(personal_collections::add_items))
         .route(
             "/playlists/{id}/local/{index}",
             axum::routing::delete(playlists::remove_local),
         )
         .route(
             "/playlists/{id}/items/{index}",
-            axum::routing::delete(playlists::remove_item),
+            axum::routing::delete(personal_collections::remove_item),
         )
-        .route("/playlists/{id}/play", post(playlists::play))
+        .route("/playlists/{id}/play", post(personal_collections::play))
         .route("/playlists/{id}/play-from", get(play_from::playlist_play_from))
         .route("/playlists/{id}/order", put(playlists::set_order))
-        .route("/playlists/{id}/visibility", put(playlists::set_visibility))
+        .route(
+            "/playlists/{id}/visibility",
+            put(personal_collections::set_visibility),
+        )
         .route("/playlists/{id}/items/{index}/source", put(playlists::pin_source))
         .route("/shared/resolve", get(shared::resolve))
         .route("/shared/{user}/playlists", get(shared::list))
@@ -734,6 +750,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        // A listener's own homeserver, for their bookmarks (personal.rs)
+        .route(
+            "/me/homeserver",
+            get(personal::status).delete(personal::disconnect),
+        )
+        .route("/me/homeserver/connect", post(personal::connect_start))
+        .route("/me/homeserver/connect/poll", get(personal::connect_poll))
         // Usage insights, each person's own side (usage.rs: owner and listeners, never guests or
         // a node without a token; the handlers read bodies themselves, within their own limits)
         .route("/usage/me", get(usage::me).put(usage::choose))
@@ -757,6 +780,9 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(accounts::my_sources).put(accounts::set_my_sources),
         )
         .route("/people", get(people::list))
+        // Problem reports to the node's private inbox (feedback.rs)
+        .route("/feedback", post(feedback::send))
+        .route("/feedback/mine", get(feedback::mine))
         .route("/devices", get(devices::list))
         .route(
             "/devices/{id}",
@@ -844,6 +870,8 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/ux/", get(ux_index))
         .route("/ux/{*path}", get(ux_file))
         .route("/app.js", get(web_js))
+        .route("/feedback.js", get(feedback_js))
+        .route("/feedback.css", get(feedback_css))
         .route("/manifest.webmanifest", get(web_manifest))
         .route("/icon.svg", get(web_icon))
         // Installing the web app (docs/guides/install-web-app.md): public like the page
@@ -1004,6 +1032,9 @@ async fn auth(
         .get::<axum::extract::MatchedPath>()
         .map(|m| m.as_str().to_string());
     let token = bearer_for(&headers, &query, req.method(), route.as_deref());
+    // Stamp before authenticating: work delayed after admission must not inherit a later
+    // removal/re-add or restore merely because music is enabled again when it resumes.
+    let access_started = people::access_started(&state);
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
         // (the page keeps it), it works again once the identity is. Log out still ends it, so the
@@ -1053,7 +1084,9 @@ async fn auth(
     };
     req.extensions_mut().insert(caller);
     // Catalogue reads (search, item pages) use the asking person's sign-in, or the app's
-    let resp = accounts::ASKING.scope(asking, next.run(req)).await;
+    let resp = personal::AUTHENTICATED_ACCESS
+        .scope(access_started, accounts::ASKING.scope(asking, next.run(req)))
+        .await;
     if let Some((zone, caller)) = played.filter(|_| resp.status().is_success()) {
         presence::played(&state, &zone, &caller);
     }
@@ -1213,6 +1246,29 @@ async fn web_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("../static/app.js"),
+    )
+        .into_response()
+}
+
+/// Help and problem reports (feedback.js, feedback.css), loaded by the page.
+async fn feedback_js() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/feedback.js"),
+    )
+        .into_response()
+}
+
+async fn feedback_css() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("../static/feedback.css"),
     )
         .into_response()
 }
@@ -3511,9 +3567,11 @@ async fn controller_login_start(
     };
     let renew_asked = asked.renewal.is_some_and(|code| renewal_good(&s, &code));
     let device = asked.device;
+    // Before any relay wait: an approval kept at the relay is as old as the sign-in it answers
+    let access = people::access_started(&s);
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
+    logins.retain(|_, (_, at, _, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -3534,7 +3592,7 @@ async fn controller_login_start(
     loop {
         let waiting: Vec<(String, std::time::Instant, String)> = logins
             .iter()
-            .map(|(id, (_, at, o, _))| (id.clone(), *at, o.clone()))
+            .map(|(id, (_, at, o, _, _))| (id.clone(), *at, o.clone()))
             .collect();
         match make_room(&waiting, &origin) {
             Some(old) => {
@@ -3543,7 +3601,10 @@ async fn controller_login_start(
             None => break,
         }
     }
-    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin, device));
+    logins.insert(
+        id.clone(),
+        (flow, std::time::Instant::now(), origin, device, access),
+    );
     drop(logins);
     let qr_svg = qr_svg(&url);
     let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
@@ -3558,6 +3619,27 @@ async fn controller_login_start(
     }))
 }
 
+/// A listener's Ring approval becomes a personal token only while the music access it started
+/// under still stands: `started` is the access revision taken when the sign-in started, before
+/// any relay wait. The final check and the synchronous mint run under the listener's membership
+/// lock and the roster guard (the order Remove takes them), so Remove with a re-add, Music off or
+/// a restore cannot cross them. Neither lock is held over network I/O. `None`: no music access.
+pub(crate) async fn mint_listener_sign_in(
+    s: &NodeState,
+    who: &str,
+    started: u64,
+) -> Result<Option<String>, ApiError> {
+    let key = who.trim_start_matches("pubky");
+    let membership = personal::membership_lock(s, key);
+    let _membership = membership.lock().await;
+    let _roster = s.roster.lock().await;
+    people::access_current(s, key, started)?;
+    if !people::may_use_music(s, key) {
+        return Ok(None);
+    }
+    accounts::mint(s, key).map(Some)
+}
+
 /// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with a browser session
 /// of its own when the approver is the owner (renewing the node's session when this log in asked
 /// for its folders); `denied` otherwise, with who approved and whose node it is.
@@ -3567,10 +3649,10 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at, _, device)) = logins.get(&id) else {
+    let Some((flow, at, _, device, access)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus::of("expired")));
     };
-    let device = *device;
+    let (device, access) = (*device, *access);
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
         return Ok(Json(ControllerLoginStatus::of("expired")));
@@ -3583,9 +3665,9 @@ async fn controller_login_poll(
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
-                // A listener in People with music access gets a personal token
-                if people::may_use_music(&s, &who) {
-                    let token = accounts::mint(&s, &who)?;
+                // A listener in People with music access gets a personal token, unless their
+                // access changed after this sign-in started (409: start a new one)
+                if let Some(token) = mint_listener_sign_in(&s, &who, access).await? {
                     tracing::info!(%who, "listener signed in with Pubky Ring");
                     return Ok(Json(ControllerLoginStatus {
                         token: Some(token),
@@ -3783,7 +3865,7 @@ mod tests {
         w.finalize().unwrap();
     }
 
-    async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
+    pub(crate) async fn state(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
         state_with(dir, token, Default::default()).await
     }
 
@@ -6250,7 +6332,8 @@ mod tests {
             ("PUT", "/v1/node/settings"),
             ("POST", "/v1/library/folders"),
             ("POST", "/v1/zones"),
-            ("POST", "/v1/playlists"),
+            // (a listener's own collections are theirs: tests/listener_collections.rs)
+            ("POST", "/v1/playlists/from-queue"),
             ("GET", "/v1/sources/plex/server"),
         ] {
             let (st, v) = send(m, p.into(), tok.clone(), Some(serde_json::json!({}))).await;
@@ -24683,5 +24766,133 @@ exec sleep 300
         let (st, _) = call(&app, "DELETE", &format!("/v1/zones/{}", zone2.id()), None).await;
         assert_eq!(st, StatusCode::NO_CONTENT);
         assert_eq!(s.sources.volume_limit(&group), None);
+    }
+
+    /// The project's return page forwards only to a node on a local address: a sign-in through
+    /// it from any other address answers 412 (and the apps listing says so), a local address
+    /// signs in through it, and a node's own `[auth] return_page` is never second-guessed.
+    #[tokio::test]
+    async fn the_shared_return_page_needs_a_local_address() {
+        use base64::Engine;
+        let dir = tempfile::tempdir().unwrap();
+        // A node reached by another name than localhost has a token
+        let s = state(dir.path(), Some("fixture-api")).await;
+        s.tidal.write().unwrap().creds = tidal::TidalCredentials {
+            client_id: "project-app".into(),
+            ..Default::default()
+        };
+        s.spotify.write().unwrap().creds = spotify::SpotifyCredentials {
+            client_id: "own-app".into(),
+            client_secret: String::new(),
+        };
+        let no_secret = |id: &str| drives::App {
+            client_id: id.into(),
+            client_secret: String::new(),
+        };
+        s.set_drive_apps(drives::apps_from(no_secret("g-client"), no_secret("m-client")));
+        let app = router(s.clone());
+        let send = |method: &'static str, path: &'static str, host: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("host", host)
+                    .header("authorization", "Bearer fixture-api")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                let st = resp.status();
+                let b = resp.into_body().collect().await.unwrap().to_bytes();
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let logins = [
+            (
+                "GET",
+                "/v1/sources/tidal/login",
+                "/tidal/callback",
+                "Use the code sign-in",
+            ),
+            (
+                "GET",
+                "/v1/sources/spotify/login",
+                "/spotify/callback",
+                "Use your own app with its secret in node.toml",
+            ),
+            (
+                "POST",
+                "/v1/library/drives/google/login",
+                "/drives/google/callback",
+                "Use your own app",
+            ),
+            (
+                "POST",
+                "/v1/library/drives/onedrive/login",
+                "/drives/onedrive/callback",
+                "Use your own OneDrive app with a return page of your own",
+            ),
+        ];
+        let notes = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .filter(|a| {
+                    a["note"]
+                        .as_str()
+                        .is_some_and(|n| n.contains("returns only to local"))
+                })
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // An internet address: refused before any sign-in starts, with what to use instead
+        for (m, path, _, instead) in logins {
+            let (st, v) = send(m, path, "music.example.com").await;
+            assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{path}: {v}");
+            let msg = v["error"]
+                .as_str()
+                .or(v["message"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            assert!(
+                msg.contains("isn't a local one") && msg.contains(instead),
+                "{path}: {v}"
+            );
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
+        assert_eq!(
+            notes(&apps),
+            ["spotify", "tidal", "google-drive", "onedrive"],
+            "{apps}"
+        );
+        // A local address: through the return page, which forwards to this node's callback
+        for (m, path, callback, _) in logins {
+            let (st, v) = send(m, path, "192.168.1.5:7788").await;
+            assert_eq!(st, StatusCode::OK, "{path}: {v}");
+            let u = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+            let q: std::collections::HashMap<String, String> = u.query_pairs().into_owned().collect();
+            assert_eq!(q["redirect_uri"], crate::project_apps::RETURN_PAGE, "{path}");
+            let (_, enc) = q["state"].split_once('.').unwrap();
+            let back = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(enc)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(back).unwrap(),
+                format!("http://192.168.1.5:7788{callback}")
+            );
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "192.168.1.5:7788").await;
+        assert!(notes(&apps).is_empty(), "{apps}");
+        // The node's own return page: its owner's redirector, used from any address
+        s.set_return_page("https://return.example/callback");
+        for (m, path, _, _) in logins {
+            let (st, v) = send(m, path, "music.example.com").await;
+            assert_eq!(st, StatusCode::OK, "{path}: {v}");
+        }
+        let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
+        assert!(notes(&apps).is_empty(), "{apps}");
     }
 }
