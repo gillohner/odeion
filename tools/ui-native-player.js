@@ -81,6 +81,8 @@ async function open(browser, w, app) {
   if (app) await run.context.addInitScript(FAKE_APP, app);
   else await run.context.addInitScript(() => { window.__calls = []; window.__audioPlays = []; const p0 = HTMLMediaElement.prototype.play; HTMLMediaElement.prototype.play = function () { window.__audioPlays.push(this.src); return p0.call(this); }; });
   if (app && app.mirror) {
+    // Android's WebView: no Media Session API at all (the bridge puts in its own)
+    if (app.mirror === 'webview') await run.context.addInitScript(() => { delete Navigator.prototype.mediaSession; delete window.MediaSession; delete window.MediaMetadata; });
     await run.context.addInitScript(() => { window.__media = []; window.OdeionAndroidPort = { postMessage: (m) => window.__media.push(JSON.parse(m)) }; });
     await run.context.addInitScript(MIRROR);
   }
@@ -143,6 +145,19 @@ const fileUrl = (id) => `${fx.ORIGIN}/v1/library/tracks/${id}/file?token=fixture
   const browser = await chromium.launch();
   for (const w of [390, 1280]) {
     const at = `${w}px`;
+    {
+      // As in Android's WebView (no Media Session API): the song's title and the native timing
+      // still reach the app, and its buttons the page
+      const r = await open(browser, w, { nativePlayer: true, len: 60000, mirror: 'webview' });
+      const p = r.page;
+      check(await p.evaluate(() => !(typeof MediaSession === 'function') && 'mediaSession' in navigator && typeof MediaMetadata === 'function'), `${at}: without a Media Session API the bridge puts in its own`);
+      await p.evaluate((q) => window.pmPlayer.play(q), queue(3)); await sleep(500);
+      const mirror = await p.evaluate(() => window.__media.filter((m) => m.t === 'session').at(-1));
+      check(mirror && mirror.meta && mirror.meta.title === 'Song 1' && mirror.native && mirror.state === 'playing' && mirror.pos > 0 && mirror.dur === 60 && mirror.handlers.includes('nexttrack'), `${at}: without a Media Session API the bridge still mirrors the song and native timing (${JSON.stringify(mirror)})`);
+      await p.evaluate(() => window.dispatchEvent(new CustomEvent('pmdesktop:media', { detail: { action: 'pause' } }))); await sleep(200);
+      check((await calls(p, 'native_pause')).length > 0, `${at}: without a Media Session API the session's pause reaches the engine`);
+      await r.context.close();
+    }
     {
       const r = await open(browser, w, { nativePlayer: true, len: 60000, mirror: true });
       const p = r.page;
