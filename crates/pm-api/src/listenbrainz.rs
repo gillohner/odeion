@@ -302,6 +302,10 @@ fn owns_queue(lib: &pm_library::Library, token: &str, generation: &Option<String
 }
 
 async fn send_owned(s: &NodeState, token: &str, generation: Option<String>, new: Vec<Value>) {
+    // The account a listen is kept for in memory while the library refuses it: this token in this
+    // connection (a reconnect makes a new generation)
+    let owner = format!("{token}#{}", generation.as_deref().unwrap_or(""));
+    let who = (s.node_id.as_str(), "listenbrainz", owner.as_str());
     // Check ownership and enqueue under one guard, before any sender-lock wait.
     let unstored = {
         let lib = s.library.lock().expect("library poisoned");
@@ -318,28 +322,35 @@ async fn send_owned(s: &NodeState, token: &str, generation: Option<String>, new:
     };
     let _one = crate::send_queue::sender(&s.node_id, "listenbrainz").await;
     // The account and the list together, under the library's lock: a sender that waited while
-    // the owner connected another account sends nothing (the list is that account's now)
-    let all = {
+    // the owner connected another account sends nothing (the list is that account's now; what
+    // only memory had waits there for its own account)
+    let batch = {
         let lib = s.library.lock().expect("library poisoned");
         if !owns_queue(&lib, token, &generation) {
+            crate::send_queue::hold(who.0, who.1, who.2, unstored, PENDING_MAX);
             return;
         }
-        crate::send_queue::batch(&lib, PENDING_KEY, unstored)
+        crate::send_queue::batch(&lib, PENDING_KEY, PENDING_MAX, who, unstored)
     };
     let mut sent: Vec<Value> = Vec::new();
     // ListenBrainz takes up to 1000 per import; listens are small
-    for chunk in all.chunks(100) {
+    for chunk in batch.all().chunks(100) {
         let kind = if chunk.len() == 1 { "single" } else { "import" };
         match submit(s, token, kind, chunk.to_vec()).await {
             Ok(()) => sent.extend_from_slice(chunk),
             Err(e) => tracing::debug!("listenbrainz: {e}; keeping {} listens for later", chunk.len()),
         }
     }
-    if let Err(e) =
-        crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent)
-    {
-        tracing::warn!("listenbrainz: the ones sent couldn't be taken off the list ({e})");
-    }
+    // Still this connection's list (sending switched off meanwhile: still its own)
+    let lib = s.library.lock().expect("library poisoned");
+    let owns = lib.get_setting(GENERATION_KEY).ok().as_ref() == Some(&generation)
+        && lib
+            .get_setting(ACCOUNT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<Account>(&j).ok())
+            .is_some_and(|a| a.token == token);
+    crate::send_queue::settle(&lib, PENDING_KEY, PENDING_MAX, who, owns, batch, &sent);
 }
 
 fn view(s: &NodeState) -> ListenBrainzView {

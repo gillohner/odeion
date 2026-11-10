@@ -470,19 +470,27 @@ pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
     let Some((app, sess)) = ready(s) else {
         return;
     };
+    // The account a scrobble is kept for in memory while the library refuses it: this session
+    let who = (s.node_id.as_str(), "lastfm", sess.key.as_str());
     let _one = crate::send_queue::sender(&s.node_id, "lastfm").await;
+    let current = |lib: &pm_library::Library| {
+        session_of(lib)
+            .filter(|x| x.submit && x.problem.is_none())
+            .is_some_and(|c| c.key == sess.key)
+    };
     // The session and the list together, under the library's lock: a sender that waited while
-    // the owner signed in to another account sends nothing (the list is that account's now)
-    let all = {
+    // the owner signed in to another account sends nothing (the list is that account's now; what
+    // only memory had waits there for its own session)
+    let batch = {
         let lib = s.library.lock().expect("library poisoned");
-        let current = session_of(&lib).filter(|x| x.submit && x.problem.is_none());
-        if current.is_none_or(|c| c.key != sess.key) {
+        if !current(&lib) {
+            crate::send_queue::hold(who.0, who.1, who.2, unstored, PENDING_MAX);
             return;
         }
-        crate::send_queue::batch(&lib, PENDING_KEY, unstored)
+        crate::send_queue::batch(&lib, PENDING_KEY, PENDING_MAX, who, unstored)
     };
     let mut sent: Vec<Value> = Vec::new();
-    for chunk in all.chunks(BATCH) {
+    for chunk in batch.all().chunks(BATCH) {
         let mut params: Vec<(String, String)> = Vec::new();
         for (i, sc) in chunk.iter().enumerate() {
             if let Some(m) = sc.as_object() {
@@ -507,11 +515,11 @@ pub(crate) async fn send_scrobbles(s: &NodeState, new: Vec<Value>) {
             }
         }
     }
-    if let Err(e) =
-        crate::send_queue::remove_sent(&s.library.lock().expect("library poisoned"), PENDING_KEY, &sent)
-    {
-        tracing::warn!("lastfm: the ones sent couldn't be taken off the list ({e})");
-    }
+    // Still this session's list (a refusal just now may have marked a problem: the scrobbles are
+    // still its own)
+    let lib = s.library.lock().expect("library poisoned");
+    let owns = session_of(&lib).is_some_and(|c| c.key == sess.key);
+    crate::send_queue::settle(&lib, PENDING_KEY, PENDING_MAX, who, owns, batch, &sent);
 }
 
 // ---- similar artists ---------------------------------------------------------------------------

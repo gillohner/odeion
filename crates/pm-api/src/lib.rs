@@ -25235,4 +25235,211 @@ exec sleep 300
             .collect();
         assert_eq!(sent, [7], "sent from memory");
     }
+
+    /// The library refuses `key`'s writes until the returned triggers are dropped.
+    fn refuse_writes_of(dir: &std::path::Path, key: &str) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(dir.join("lib.sqlite")).unwrap();
+        db.execute_batch(&format!(
+            "CREATE TRIGGER no_pending_i BEFORE INSERT ON settings WHEN NEW.key = '{key}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;
+             CREATE TRIGGER no_pending_u BEFORE UPDATE ON settings WHEN NEW.key = '{key}'
+             BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;"
+        ))
+        .unwrap();
+        db
+    }
+
+    fn writes_work_again(db: &rusqlite::Connection) {
+        db.execute_batch("DROP TRIGGER no_pending_i; DROP TRIGGER no_pending_u;")
+            .unwrap();
+    }
+
+    /// A listen the library refused to store is sent from memory; ListenBrainz refuses it, and
+    /// by then the library takes writes again: it is stored to wait for the next send, not lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listen_sent_from_memory_and_refused_waits_once_storage_is_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, entered) = gated_listenbrainz(&s).await;
+        let db = refuse_writes_of(dir.path(), "listenbrainz.pending");
+        // `listened_at` 0: the mock refuses it
+        let send = listenbrainz::send_listens(&s, "LBT", vec![a_listen(0)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            writes_work_again(&db);
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(waiting_listens(&s), [0], "kept for the next send");
+    }
+
+    /// A full backlog (the cap) and a new listen, ListenBrainz taking everything: every one is
+    /// sent, the oldest too; the cap only holds what is still waiting after a send.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_listenbrainz_backlog_and_a_new_listen_are_all_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (gate, got, _) = gated_listenbrainz(&s).await;
+        gate.add_permits(100);
+        let backlog = serde_json::Value::from((1..=1000).map(a_listen).collect::<Vec<_>>()).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listenbrainz.pending", &backlog)
+            .unwrap();
+        listenbrainz::send_listens(&s, "LBT", vec![a_listen(1001)]).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l["listened_at"].as_u64().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            (1..=1001).collect::<Vec<u64>>(),
+            "none dropped before it was tried"
+        );
+        assert!(waiting_listens(&s).is_empty());
+    }
+
+    /// A Last.fm mock for this node: each `track.scrobble` answers once let through (`gate`),
+    /// refused while `refuse` is set; the track names it took are in `got`; `entered` counts
+    /// requests that arrived.
+    struct LastfmMock {
+        gate: Arc<tokio::sync::Semaphore>,
+        got: Arc<std::sync::Mutex<Vec<String>>>,
+        refuse: Arc<std::sync::atomic::AtomicBool>,
+        entered: Arc<tokio::sync::Semaphore>,
+    }
+
+    async fn gated_lastfm(s: &NodeState) -> LastfmMock {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let got: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let mock = Router::new().route(
+            "/",
+            post({
+                let (gate, got, refuse, entered) =
+                    (gate.clone(), got.clone(), refuse.clone(), entered.clone());
+                move |body: String| {
+                    let (gate, got, refuse, entered) =
+                        (gate.clone(), got.clone(), refuse.clone(), entered.clone());
+                    async move {
+                        entered.add_permits(1);
+                        gate.acquire().await.unwrap().forget();
+                        if refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                            return Json(serde_json::json!({"error": 11, "message": "Service Offline"}));
+                        }
+                        let tracks: Vec<String> = url::form_urlencoded::parse(body.as_bytes())
+                            .filter(|(k, _)| k.starts_with("track["))
+                            .map(|(_, v)| v.into_owned())
+                            .collect();
+                        let n = tracks.len();
+                        got.lock().unwrap().extend(tracks);
+                        Json(serde_json::json!({"scrobbles": {"@attr": {"accepted": n, "ignored": 0}}}))
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        lastfm::set_api_base(&format!("{base}/"));
+        let app = serde_json::json!({
+            "api_key": "0123456789abcdef0123456789abcdef",
+            "api_secret": "fedcba9876543210fedcba9876543210",
+            "from": "settings"
+        })
+        .to_string();
+        let lib = s.library.lock().unwrap();
+        lib.set_setting(lastfm::APP_KEY, &app).unwrap();
+        lib.set_setting(
+            "lastfm.session",
+            &serde_json::json!({"key": "sess-key-xyz", "user": "listener", "submit": true}).to_string(),
+        )
+        .unwrap();
+        LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        }
+    }
+
+    fn a_scrobble(n: u64) -> serde_json::Value {
+        serde_json::json!({"artist": "A", "track": format!("T{n}"), "timestamp": n.to_string()})
+    }
+
+    fn waiting_scrobbles(s: &NodeState) -> Vec<String> {
+        let v: Vec<serde_json::Value> = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("lastfm.pending")
+            .unwrap()
+            .map(|j| serde_json::from_str(&j).unwrap())
+            .unwrap_or_default();
+        v.iter()
+            .map(|l| l["track"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The same for Last.fm: a scrobble the library refused, sent from memory and refused by
+    /// Last.fm, is stored once the library takes writes again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scrobble_sent_from_memory_and_refused_waits_once_storage_is_back() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock {
+            gate,
+            got,
+            refuse,
+            entered,
+        } = gated_lastfm(&s).await;
+        refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let db = refuse_writes_of(dir.path(), "lastfm.pending");
+        let send = lastfm::send_scrobbles(&s, vec![a_scrobble(7)]);
+        let drive = async {
+            entered.acquire().await.unwrap().forget();
+            writes_work_again(&db);
+            gate.add_permits(1);
+        };
+        tokio::join!(send, drive);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(waiting_scrobbles(&s), ["T7"], "kept for the next send");
+    }
+
+    /// The same for Last.fm: a full backlog and a new scrobble are all sent, the oldest too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_lastfm_backlog_and_a_new_scrobble_are_all_sent() {
+        let _api_guard = lastfm::API_TEST_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let LastfmMock { gate, got, .. } = gated_lastfm(&s).await;
+        gate.add_permits(100);
+        let backlog = serde_json::Value::from((1..=1000).map(a_scrobble).collect::<Vec<_>>()).to_string();
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("lastfm.pending", &backlog)
+            .unwrap();
+        lastfm::send_scrobbles(&s, vec![a_scrobble(1001)]).await;
+        let mut sent: Vec<u64> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t[1..].parse().unwrap())
+            .collect();
+        sent.sort();
+        assert_eq!(
+            sent,
+            (1..=1001).collect::<Vec<u64>>(),
+            "none dropped before it was tried"
+        );
+        assert!(waiting_scrobbles(&s).is_empty());
+    }
 }
