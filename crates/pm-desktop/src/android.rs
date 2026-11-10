@@ -863,32 +863,37 @@ impl pm_out_local::bit_perfect::TrackBackend for JniBitPerfect {
         Ok((Box::new(track), report))
     }
 
-    fn media_volume(&self) -> Option<u8> {
-        use jni021::objects::JClass;
-        let p = with_jvm(&self.vm, |env| {
+    fn set_media_volume_on(
+        &self,
+        dac_id: i32,
+        percent: u8,
+    ) -> Result<u8, pm_out_local::bit_perfect::MediaRefused> {
+        use jni021::objects::{JClass, JValue};
+        use pm_out_local::bit_perfect::MediaRefused;
+        let now = with_jvm(&self.vm, |env| {
             let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "mediaVolume", "()I", &[])?.i()
+            env.call_static_method(
+                class,
+                "setMediaVolumeOn",
+                "(II)I",
+                &[JValue::Int(dac_id), JValue::Int(i32::from(percent))],
+            )?
+            .i()
         })
-        .ok()?;
-        u8::try_from(p).ok().filter(|p| *p <= 100)
-    }
-
-    fn media_db_on_dac(&self) -> Option<f32> {
-        use jni021::objects::JClass;
-        let db = with_jvm(&self.vm, |env| {
-            let class: &JClass = self.class.as_obj().into();
-            env.call_static_method(class, "mediaVolumeDbOnUsb", "()F", &[])?
-                .f()
-        })
-        .ok()?;
-        // NaN: Android can't say for the DAC; -inf: silent (both: the hand-over mutes)
-        (!db.is_nan()).then_some(db)
+        .map_err(|_| MediaRefused::Route)?;
+        // -1: media doesn't go to that DAC alone (nothing set); -2: the volume is fixed, or the
+        // set didn't take
+        match now {
+            0..=100 => Ok(now as u8),
+            -2 => Err(MediaRefused::Level),
+            _ => Err(MediaRefused::Route),
+        }
     }
 }
 
 /// Exclusive USB's app side (`UsbExclusive.kt`) for pm-out-local's `exclusive`: Android's
-/// permission for the DAC (asked only when the listener chose Exclusive USB), and the open device's
-/// file descriptor, on which the app's driver speaks usbfs.
+/// permission for the DAC (asked once per DAC by Auto, and by Settings' "Allow Exclusive USB"), and
+/// the open device's file descriptor, on which the app's driver speaks usbfs.
 struct JniUsbExclusive {
     vm: std::sync::Arc<jni021::JavaVM>,
     class: jni021::objects::GlobalRef,
@@ -950,6 +955,21 @@ impl pm_out_local::exclusive::UsbBackend for JniUsbExclusive {
         if let Err(e) = r {
             tracing::warn!("Exclusive USB: cannot ask Android's permission: {e}");
         }
+    }
+
+    /// Auto's ask again on a re-attach (`UsbExclusive.requestPermissionAgain`: on screen only):
+    /// whether Android was asked.
+    fn ask_again(&self, usb: pm_out_local::exclusive::UsbIds) -> bool {
+        use jni021::objects::JClass;
+        with_jvm(&self.vm, |env| {
+            let class: &JClass = self.class.as_obj().into();
+            env.call_static_method(class, "requestPermissionAgain", "(II)Z", &Self::ids(usb))?
+                .z()
+        })
+        .unwrap_or_else(|e| {
+            tracing::warn!("Exclusive USB: cannot ask Android's permission again: {e}");
+            false
+        })
     }
 
     fn open(

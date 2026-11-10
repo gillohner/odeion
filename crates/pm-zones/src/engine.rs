@@ -663,8 +663,8 @@ impl Engine {
             .sink
             .as_ref()
             .is_some_and(|s| s.room_frames().is_some_and(|r| r < block.frames() as u64));
-        // A sink that may not carry on as it is (a phone's DAC that would go back to full level
-        // without consent): a fresh one, planned as things are now
+        // A sink that may not carry on as it is (it says so: `AudioSink::reopen_now`): a fresh
+        // one, planned as things are now
         let reopen = self.sink.as_ref().is_some_and(|s| s.reopen_now());
         !(full || reopen) || self.renew_full_sink(block.format, reopen)
     }

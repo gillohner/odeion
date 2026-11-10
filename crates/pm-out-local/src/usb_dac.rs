@@ -11,8 +11,14 @@
 //! (`getSupportedMixerAttributes`), from which [`crate::bit_perfect`] plays it bit-perfect; the
 //! description itself ([`describe`]) always says shared, and [`current`] says what the last open
 //! got, confirmed or not, with why.
+//!
+//! One behaviour, no settings: Exclusive USB where it opens, else Android's bit-perfect, else
+//! shared only where neither is possible (the note says why). What a UI sends
+//! ([`set_settings`]) only asks Android's permission for Exclusive USB again. The level the app
+//! last played each DAC at is kept by its USB ids ([`saved_level`]), next to the app's settings
+//! file ([`keep_settings_in`]): the first sound on a DAC is that level, else a low one.
 
-use pm_zones::{DeviceKind, DeviceMode, DeviceSettings, DsdKind, OutputDevice, UsbIds};
+use pm_zones::{DeviceKind, DeviceMode, DeviceSettings, DsdKind, OutputDevice, PreferredMode, UsbIds};
 use serde::Deserialize;
 use std::sync::Mutex;
 
@@ -60,6 +66,8 @@ pub struct Report {
     #[serde(default)]
     pub release_exclusive: bool,
     /// Android's media volume, 0 to 100 (-1: unknown); the app reports again at every change.
+    /// On a DAC Android plays bit-perfect it is the DAC's own volume: kept as its level
+    /// ([`saved_level`]).
     #[serde(default)]
     pub media_volume: Option<i32>,
 }
@@ -384,25 +392,24 @@ fn describe_device(report: &Report, d: &ReportDevice) -> Option<OutputDevice> {
         format: None,
         settings: None,
         formats: Vec::new(),
-        media_volume: None,
+        own_volume: None,
+        usb_permission: None,
     })
 }
 
-/// What the phone's output knows about its DAC: the DAC, the listener's settings, what the last
-/// open got, and how often a DAC went away.
+/// What the phone's output knows about its DAC: the DAC, what the last open got, and how often a
+/// DAC went away.
 #[derive(Default)]
 struct Phone {
     dac: Option<Dac>,
-    settings: DeviceSettings,
     last: Option<LastOpen>,
     /// Counts DACs that went away: a sink opened on a DAC stops when it changes.
     gone: u64,
     /// Why the last one went ("FiiO KA17 was unplugged", or media moved elsewhere).
     gone_why: String,
-    /// Where the settings are kept (the app's data folder), once known.
-    settings_file: Option<std::path::PathBuf>,
-    /// The DAC the listener's agreement to full level (`full_level_ok`) was given for.
-    consent_dac: Option<String>,
+    /// The DAC (Android's id) whose start level Android's bit-perfect path set since it was
+    /// plugged in, and when: Android's media volume is its level from then on.
+    media_start: Option<(i32, std::time::Instant)>,
     /// Sinks open for a DAC now, and when the last one closed: an unplug then is one no sink
     /// may have seen yet.
     sinks_open: u32,
@@ -410,14 +417,13 @@ struct Phone {
     /// A DAC went while a sink was open for it or moments after one closed, and nothing has
     /// reported it yet: the next open pauses instead of opening the default route.
     gone_unseen: Option<(String, std::time::Instant)>,
-    /// Android's media volume as the app last reported it.
-    media: Option<u8>,
 }
 
 /// [`gone_count`] without the lock, for the audio callback.
 static GONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// Counts changes to the settings or the DAC: a sink opened before one is closed at the next song,
-/// so the change applies from there (`AudioSink::reopen_at_track`).
+/// Counts changes to the DAC (another one, or Android's permission for it given): a sink opened
+/// before one is closed at the next song, so the change applies from there
+/// (`AudioSink::reopen_at_track`).
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// Called when what the phone's output reports changed outside a report from the app (a
 /// confirmation withdrawn): the app registers its player again, so the node learns it.
@@ -434,7 +440,7 @@ pub(crate) fn notify_change() {
     }
 }
 
-/// The settings-or-DAC generation: it changes with the settings or the DAC, and a sink opened
+/// The DAC generation: it changes with the DAC (or Android's permission for it), and a sink opened
 /// before a change is closed at the next song.
 pub fn generation() -> u64 {
     GENERATION.load(std::sync::atomic::Ordering::SeqCst)
@@ -623,11 +629,6 @@ impl DacGate {
     }
 }
 
-/// Android's media volume as the app last reported it (`None`: not reported, or unknown).
-pub fn reported_media_volume() -> Option<u8> {
-    with_phone(|p| p.media)
-}
-
 /// What an open of the phone's output got, on which DAC.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LastOpen {
@@ -646,10 +647,24 @@ fn with_phone<T>(f: impl FnOnce(&mut Phone) -> T) -> T {
     f(p.get_or_insert_with(Phone::default))
 }
 
-/// The phone's DAC as the output reports it: described, with the modes it allows, the settings,
-/// and what the last open got (confirmed bit-perfect, or shared with why).
+/// The phone's DAC as the output reports it: described, with the modes it allows, whether it has
+/// a volume of its own, Android's permission for Exclusive USB, and what the last open got
+/// (confirmed bit-perfect or Exclusive USB, or shared with why).
 pub fn current() -> Option<OutputDevice> {
     with_phone(|p| view(p))
+}
+
+/// The note for a DAC that plays bit-perfect without a volume of its own.
+pub const NO_OWN_VOLUME: &str = "This DAC has no volume of its own: set the volume on the DAC or amplifier.";
+
+/// The note for a DAC Android plays bit-perfect while whether it has a volume of its own is not
+/// known (no descriptors yet): Android hands its media volume to the DAC's own volume, which a DAC
+/// without one, or a phone that doesn't pass it, doesn't follow.
+pub const FOLLOW_VOLUME: &str = "If the DAC's own level doesn't follow the volume, set it on the DAC.";
+
+/// `first` then `then`, as sentences.
+pub(crate) fn sentences(first: &str, then: &str) -> String {
+    format!("{}. {then}", first.trim_end_matches('.'))
 }
 
 fn view(p: &Phone) -> Option<OutputDevice> {
@@ -663,39 +678,49 @@ fn view(p: &Phone) -> Option<OutputDevice> {
     if crate::exclusive::offer(d).is_ok() {
         dev.modes.push(DeviceMode::Exclusive);
     }
-    dev.settings = Some(p.settings);
-    // What bit-perfect would play now, and Android's volume (it plays at full level)
-    let (formats, media) = crate::bit_perfect::view_extras(d, p.settings, consent(p), p.media);
-    dev.formats = formats;
-    dev.media_volume = media;
-    match p.last.as_ref().filter(|l| l.dac_id == d.id) {
+    dev.usb_permission = crate::exclusive::permission(d);
+    dev.own_volume = crate::exclusive::own_volume(d);
+    // What Exclusive USB or bit-perfect plays now, exactly (none when it plays shared)
+    dev.formats = crate::bit_perfect::view_extras(d);
+    // (bit-perfect or Exclusive USB, Android's bit-perfect path)
+    let (bit_perfect_path, android_path) = match p.last.as_ref().filter(|l| l.dac_id == d.id) {
         Some(l) => {
             dev.mode = l.mode;
             dev.confirmed = l.confirmed && l.mode != DeviceMode::Shared;
             dev.note = l.note.clone();
             dev.format = Some(l.format);
+            (l.mode != DeviceMode::Shared, l.mode == DeviceMode::BitPerfect)
         }
         // Nothing played on it yet: why it can't be bit-perfect, when it can't (and Exclusive
-        // USB isn't there instead)
+        // USB doesn't play it instead: then why not that either)
         None => {
             if let Err(why) = offer {
-                if !dev.modes.contains(&DeviceMode::Exclusive) {
-                    dev.note = dev.note.or(Some(why));
+                if !crate::exclusive::plays_exclusive(d) {
+                    let why = dev.note.take().unwrap_or(why);
+                    dev.note = Some(match crate::exclusive::decide(d) {
+                        Some(Err(ex)) => sentences(&why, &ex),
+                        _ => why,
+                    });
                 }
             }
+            let unchanged = !dev.formats.is_empty();
+            (unchanged, unchanged && !crate::exclusive::plays_exclusive(d))
         }
+    };
+    // Bit-perfect on a DAC without a volume of its own: said plainly (the zone's volume is fixed).
+    // Android's bit-perfect path while that isn't known: what to do if the volume doesn't reach it
+    let add = match dev.own_volume {
+        Some(false) if bit_perfect_path => Some(NO_OWN_VOLUME),
+        None if android_path => Some(FOLLOW_VOLUME),
+        _ => None,
+    };
+    if let Some(add) = add {
+        dev.note = Some(match dev.note.take() {
+            Some(n) => sentences(&n, add),
+            None => add.into(),
+        });
     }
     Some(dev)
-}
-
-/// Whether the listener agreed to full level for the DAC attached now.
-fn consent(p: &Phone) -> bool {
-    p.settings.full_level_ok && p.dac.as_ref().map(|d| &d.device.name) == p.consent_dac.as_ref()
-}
-
-/// Whether the listener agreed to full level (Bit-perfect below full volume) for the DAC attached now.
-pub fn full_level_consent() -> bool {
-    with_phone(|p| consent(p))
 }
 
 /// The DAC itself, for the bit-perfect player.
@@ -703,68 +728,186 @@ pub fn current_dac() -> Option<Dac> {
     with_phone(|p| p.dac.clone())
 }
 
-/// The listener's settings for the phone's DAC.
-pub fn settings() -> DeviceSettings {
-    with_phone(|p| p.settings)
+/// What a UI sent for the phone's DAC (`PUT /v1/outputs/{id}/device`): `mode: exclusive` asks
+/// Android's permission for Exclusive USB again (Settings' "Allow Exclusive USB"); nothing is
+/// kept, every other mode is the one behaviour. `dac_volume` and `full_level_ok` are not read.
+pub fn set_settings(s: DeviceSettings) {
+    crate::exclusive::settings_changed(s.mode == PreferredMode::Exclusive);
 }
 
-/// Keep the listener's settings (and save them when the app said where). Returns whether they
-/// changed.
-pub fn set_settings(s: DeviceSettings) -> bool {
-    let mut s = s;
-    // The agreement to full level goes with Bit-perfect or Exclusive USB, for the DAC attached now
-    if !full_level_mode(s.mode) {
-        s.full_level_ok = false;
-    }
-    let (changed, file) = with_phone(|p| {
-        if s.full_level_ok {
-            match p.dac.as_ref() {
-                Some(d) => p.consent_dac = Some(d.device.name.clone()),
-                None => s.full_level_ok = false,
-            }
-        } else {
-            p.consent_dac = None;
-        }
-        let changed = p.settings != s;
-        p.settings = s;
-        (changed, p.settings_file.clone())
-    });
-    if changed {
-        GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-    // Exclusive USB chosen (again: Android's permission is asked again when it isn't given);
-    // another mode gives the DAC back
-    if changed || s.mode == pm_zones::PreferredMode::Exclusive {
-        crate::exclusive::settings_changed(s.mode);
-    }
-    if let (true, Some(f)) = (changed, file) {
-        if let Err(e) = std::fs::write(&f, serde_json::to_vec(&s).expect("serializes")) {
-            tracing::warn!(path = %f.display(), "cannot save the DAC settings: {e}");
-        }
-    }
-    changed
-}
-
-/// The modes that may play at full level, with the listener's agreement.
-pub fn full_level_mode(m: pm_zones::PreferredMode) -> bool {
-    matches!(
-        m,
-        pm_zones::PreferredMode::BitPerfect | pm_zones::PreferredMode::Exclusive
-    )
-}
-
-/// Where the settings are kept: read them from there now, save them there from now on.
+/// Where the app's settings file is (`usb-dac.json` in its data folder): the level the app last
+/// played each DAC at is kept next to it ([`LEVELS_FILE`]) and read from there now. What an
+/// earlier app saved in the settings file itself (a mode, the full-level agreement) is not read:
+/// it all plays as the one behaviour.
 pub fn keep_settings_in(path: std::path::PathBuf) {
-    let saved = std::fs::read(&path)
+    let file = path.with_file_name(LEVELS_FILE);
+    let saved = std::fs::read(&file)
         .ok()
-        .and_then(|b| serde_json::from_slice::<DeviceSettings>(&b).ok());
-    with_phone(|p| {
-        if let Some(mut s) = saved {
-            // An agreement to full level is for the DAC it was given with: asked again after a start
-            s.full_level_ok = false;
-            p.settings = s;
+        .filter(|b| b.len() <= MAX_LEVELS_FILE)
+        .and_then(|b| serde_json::from_slice::<std::collections::BTreeMap<String, DacLevel>>(&b).ok())
+        .unwrap_or_default();
+    let mut l = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
+    l.by_dac = saved
+        .into_iter()
+        .map(|(k, v)| (k, v.checked()))
+        .filter(|(_, v)| *v != DacLevel::default())
+        .take(LEVELS_KEPT)
+        .collect();
+    l.file = Some(file);
+}
+
+/// The file the levels are kept in, next to the settings file.
+pub const LEVELS_FILE: &str = "usb-dac-levels.json";
+const MAX_LEVELS_FILE: usize = 64 * 1024;
+/// How many DACs' levels are kept.
+const LEVELS_KEPT: usize = 32;
+
+/// The level the app last played a DAC at, by path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, Deserialize)]
+pub struct DacLevel {
+    /// Exclusive USB: its feature unit's level, in dB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive_db: Option<f32>,
+    /// Android's bit-perfect path: Android's media volume on the DAC's route, in percent (Android
+    /// passes it to the DAC's own volume).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<u8>,
+    /// Android's permission for Exclusive USB was given for these USB ids before: Auto asks again
+    /// when a replug ended it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub granted: bool,
+}
+
+impl DacLevel {
+    /// Only values that can be levels (a hand-edited or broken file is no level).
+    fn checked(self) -> Self {
+        DacLevel {
+            exclusive_db: self
+                .exclusive_db
+                .filter(|d| d.is_finite() && (-200.0..=50.0).contains(d)),
+            media: self.media.filter(|p| *p <= 100),
+            granted: self.granted,
         }
-        p.settings_file = Some(path);
+    }
+}
+
+struct Levels {
+    file: Option<std::path::PathBuf>,
+    by_dac: std::collections::BTreeMap<String, DacLevel>,
+}
+
+/// Its own lock, with nothing else locked under it (the held DAC's give-back saves here, also while
+/// the phone's state is locked).
+static LEVELS: Mutex<Levels> = Mutex::new(Levels {
+    file: None,
+    by_dac: std::collections::BTreeMap::new(),
+});
+
+fn level_key(u: UsbIds) -> String {
+    format!("{:04x}:{:04x}", u.vendor_id, u.product_id)
+}
+
+/// The level the app last played the DAC with these USB ids at (nothing kept: none).
+pub fn saved_level(u: UsbIds) -> DacLevel {
+    LEVELS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .by_dac
+        .get(&level_key(u))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn save_level(u: UsbIds, f: impl FnOnce(&mut DacLevel)) {
+    let mut l = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
+    let key = level_key(u);
+    let before = l.by_dac.get(&key).copied();
+    let mut now = before.unwrap_or_default();
+    f(&mut now);
+    let now = now.checked();
+    if Some(now) == before {
+        return;
+    }
+    if before.is_none() && l.by_dac.len() >= LEVELS_KEPT {
+        if let Some(first) = l.by_dac.keys().next().cloned() {
+            l.by_dac.remove(&first);
+        }
+    }
+    l.by_dac.insert(key, now);
+    if let Some(file) = l.file.clone() {
+        if let Err(e) = std::fs::write(&file, serde_json::to_vec(&l.by_dac).expect("serializes")) {
+            tracing::warn!(path = %file.display(), "cannot save the DAC levels: {e}");
+        }
+    }
+}
+
+/// Keep `db` as the level Exclusive USB last played this DAC at.
+pub fn save_exclusive_db(u: UsbIds, db: f32) {
+    save_level(u, |l| l.exclusive_db = Some(db));
+}
+
+/// Keep that Android's permission for Exclusive USB was given for these USB ids.
+pub fn save_granted(u: UsbIds) {
+    save_level(u, |l| l.granted = true);
+}
+
+/// Keep `percent` as Android's media volume Android's bit-perfect path last played this DAC at.
+pub fn save_media(u: UsbIds, percent: u8) {
+    save_level(u, |l| l.media = Some(percent));
+}
+
+/// Forget every kept level, in memory only (tests).
+#[cfg(test)]
+pub(crate) fn forget_levels() {
+    let mut l = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
+    l.by_dac.clear();
+    l.file = None;
+}
+
+/// Android's media volume before the first bit-perfect track on a DAC that has no level kept.
+pub const MEDIA_START_PERCENT: u8 = 20;
+
+/// Android's media volume before the first bit-perfect track on the DAC with these USB ids: the
+/// level the app last played it at, else [`MEDIA_START_PERCENT`].
+pub fn media_start_level(u: Option<UsbIds>) -> u8 {
+    u.and_then(|u| saved_level(u).media)
+        .unwrap_or(MEDIA_START_PERCENT)
+}
+
+/// Whether the start level was set for the DAC Android knows as `dac_id` since it was plugged in.
+pub fn media_start_done(dac_id: i32) -> bool {
+    with_phone(|p| p.media_start.is_some_and(|(id, _)| id == dac_id))
+}
+
+/// How long after the start level was set a report's media volume is not kept as the DAC's level:
+/// a report built just before the set still carries the old volume.
+const MEDIA_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`media_start_done`], and long enough ago that a report's media volume is the DAC's level.
+fn media_start_settled(dac_id: i32) -> bool {
+    with_phone(|p| {
+        p.media_start
+            .is_some_and(|(id, at)| id == dac_id && at.elapsed() >= MEDIA_SETTLE)
+    })
+}
+
+/// The start level was set for `dac_id` (while Android routed media to it): Android's media volume
+/// is its level from now on, kept at every report.
+pub fn media_start_set(dac_id: i32) {
+    with_phone(|p| {
+        if p.dac.as_ref().is_some_and(|d| d.id == dac_id) {
+            p.media_start = Some((dac_id, std::time::Instant::now()));
+        }
+    });
+}
+
+/// Make the start level's set `by` older (tests).
+#[cfg(test)]
+pub(crate) fn age_media_start(by: std::time::Duration) {
+    with_phone(|p| {
+        if let Some((_, at)) = p.media_start.as_mut() {
+            *at = at.checked_sub(by).unwrap_or(*at);
+        }
     });
 }
 
@@ -866,11 +1009,20 @@ fn set_dac_locked(dac: Option<Dac>, why: Option<String>) -> bool {
                 p.gone_unseen = Some((p.gone_why.clone(), std::time::Instant::now()));
             }
         }
+        // The same DAC, now with its descriptors: Android's permission was given (Exclusive USB
+        // may take it from the next song)
+        let permitted = !other
+            && p.dac.as_ref().is_some_and(|d| d.descriptors.is_none())
+            && dac.as_ref().is_some_and(|d| d.descriptors.is_some());
+        if permitted {
+            GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         if other {
             // A DAC the app held for Exclusive USB goes with it
             crate::exclusive::dac_changed(dac.as_ref().map(|d| d.id));
             GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             p.last = None;
+            p.media_start = None;
             // The next DAC's reason, when it goes, is its own; an earlier unplug is moot now
             if dac.is_some() {
                 p.gone_why.clear();
@@ -896,19 +1048,13 @@ fn kept_while_held(r: &Report) -> Option<Dac> {
 }
 
 /// A report from the app, kept as the phone's DAC: a report that can't be read (too large,
-/// malformed) means no DAC, never the last one seen. Returns whether the DAC changed.
+/// malformed) means no DAC, never the last one seen. Returns whether the DAC changed. Android's
+/// media volume in it is no change (it never changes how the DAC plays); on a DAC Android plays
+/// bit-perfect it is kept as that DAC's level.
 pub fn apply_report(json: &str) -> bool {
     let parsed = parse_report(json);
-    let mut media_changed = false;
-    if let Ok(r) = parsed.as_ref() {
-        let v = r
-            .media_volume
-            .and_then(|v| u8::try_from(v).ok())
-            .filter(|v| *v <= 100);
-        // Compared before it is kept: a volume-only report is a change too (the node re-reads
-        // the caps: Auto at 100 % plays bit-perfect again, below it shared)
-        media_changed = with_phone(|p| std::mem::replace(&mut p.media, v) != v);
-    }
+    let mut media = None;
+    let mut listed_for_level = None;
     let (dac, why) = match parsed {
         // Android is about to move audio off the DAC: gone now, before its removal arrives (not
         // while the app holds it: taking it from Android's driver warns the same way)
@@ -918,8 +1064,13 @@ pub fn apply_report(json: &str) -> bool {
                 crate::exclusive::release();
             }
             let listed = dac(&r);
-            if listed.is_some() {
+            if let Some(l) = listed.as_ref() {
                 LISTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                media = r
+                    .media_volume
+                    .and_then(|v| u8::try_from(v).ok())
+                    .filter(|v| *v <= 100);
+                listed_for_level = l.device.usb.map(|u| (l.id, u));
             }
             let dac = listed.or_else(|| kept_while_held(&r));
             // The DAC still attached, but media goes elsewhere (Bluetooth, the speaker)
@@ -935,10 +1086,16 @@ pub fn apply_report(json: &str) -> bool {
         }
     };
     tracing::info!(dac = ?dac.as_ref().map(|d| &d.device.summary), "USB audio devices changed");
-    // Android's volume decides only a DAC's mode: without one, a volume step is no change (the
-    // app doesn't register again at every step of the slider)
-    let volume_counts = media_changed && dac.is_some();
-    set_dac_because(dac, why) || volume_counts
+    let changed = set_dac_because(dac, why);
+    // Android's media volume on the DAC it routes media to, once Android's bit-perfect path set
+    // its start level there (and not a report from just before that): the level the listener
+    // ends up with, for the next time
+    if let (Some(v), Some((id, usb))) = (media, listed_for_level) {
+        if media_start_settled(id) {
+            save_media(usb, v);
+        }
+    }
+    changed
 }
 
 #[cfg(test)]
@@ -1156,7 +1313,7 @@ mod tests {
             [DeviceMode::Shared],
             "no mixer attributes listed: shared only"
         );
-        assert_eq!(v.settings, Some(DeviceSettings::default()));
+        assert_eq!(v.settings, None, "no settings: one behaviour");
         let g = gone_count();
         assert!(set_dac(None));
         assert_eq!(current(), None);
@@ -1234,5 +1391,53 @@ mod tests {
         assert!(apply_report("{\"devices\": [ broken"));
         assert_eq!(current(), None);
         assert!(!apply_report("also broken"), "still none: no change");
+    }
+
+    /// The level the app last played each DAC at is kept by its USB ids next to the settings
+    /// file, and read back when the app starts again; a broken or hand-edited file is no level.
+    #[test]
+    fn levels_are_kept_next_to_the_settings_file() {
+        let _one = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        forget_levels();
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("usb-dac.json");
+        // An earlier app's settings there are not read (nothing to choose any more)
+        std::fs::write(&settings, r#"{"mode":"shared","full_level_ok":true}"#).unwrap();
+        keep_settings_in(settings.clone());
+        let ka17 = UsbIds {
+            vendor_id: 0x2972,
+            product_id: 0x0093,
+        };
+        let other = UsbIds {
+            vendor_id: 0x2972,
+            product_id: 0x0094,
+        };
+        assert_eq!(saved_level(ka17), DacLevel::default());
+        assert_eq!(media_start_level(Some(ka17)), MEDIA_START_PERCENT);
+        save_exclusive_db(ka17, -23.5);
+        save_media(ka17, 35);
+        assert_eq!(saved_level(other), DacLevel::default(), "another DAC's own");
+        assert!(dir.path().join(LEVELS_FILE).exists());
+        // The app starts again
+        forget_levels();
+        keep_settings_in(settings.clone());
+        assert_eq!(
+            saved_level(ka17),
+            DacLevel {
+                exclusive_db: Some(-23.5),
+                media: Some(35),
+                granted: false,
+            }
+        );
+        assert_eq!(media_start_level(Some(ka17)), 35);
+        assert_eq!(media_start_level(None), MEDIA_START_PERCENT);
+        // A hand-edited or broken file: no level, never a loud one
+        for broken in [r#"{"2972:0093":{"exclusive_db":90.0,"media":250}}"#, "not json"] {
+            std::fs::write(dir.path().join(LEVELS_FILE), broken).unwrap();
+            forget_levels();
+            keep_settings_in(settings.clone());
+            assert_eq!(saved_level(ka17), DacLevel::default(), "{broken}");
+        }
+        forget_levels();
     }
 }

@@ -13,8 +13,10 @@
 //! One volume (odeion-control-consistency): a network zone's session volume is the zone's own (the
 //! same `POST /zones/{id}/volume` the slider uses; the node's read-back is what it shows); the
 //! phone's own zone and the WebView player use Android's media volume, which the keys move
-//! themselves (a local session); in Exclusive USB the native player and phone's zone use the
-//! DAC's own volume (dB), or fixed volume when the output provides no attenuation.
+//! themselves (a local session; on a USB DAC Android plays bit-perfect, Android hands it to the
+//! DAC's own volume); in Exclusive USB the native player and phone's zone use the DAC's own
+//! volume (dB steps, remote); a DAC without a volume of its own is a fixed volume (set it on the
+//! DAC or amplifier).
 
 // The runtime that uses all of it (`media_live`) is Android's; elsewhere only the tests build this
 #![cfg_attr(not(target_os = "android"), allow(dead_code))]
@@ -252,8 +254,8 @@ pub fn session_for_zone(zone: &Value, phone: bool, scale: Option<Scale>) -> Sess
             current: level.and_then(|v| s.step_of(v)).unwrap_or(0),
         },
         (true, Some(Scale::Percent)) => SessionVolume::Local,
-        // No volume of its own now (Exclusive USB without a unit, bit-perfect at full level by
-        // agreement): the keys can't change what plays
+        // No volume of its own now (a USB DAC without one: set on the DAC or amplifier): the keys
+        // can't change what plays
         (true, None) => SessionVolume::Fixed,
         (false, Some(s)) => SessionVolume::Remote {
             max: s.steps(),
@@ -794,6 +796,81 @@ mod tests {
         // Nothing queued: the session goes
         let empty = json!({"id": "z", "name": "Z", "transport": "stopped", "queue": [], "now_playing": null});
         assert!(!session_for_zone(&empty, false, None).active);
+    }
+
+    /// The phone's own player on a USB DAC, one volume per path (pm-out-local's `phone_kind`):
+    /// Exclusive USB with a feature unit is the DAC's own volume in dB steps (a remote session
+    /// volume: the keys and the panel set the unit); Android's bit-perfect (or shared) path is
+    /// Android's media volume (a local session: the keys move it themselves, and Android hands it
+    /// to the DAC's own volume); a DAC without a volume of its own is fixed (no slider, the keys
+    /// do nothing).
+    #[test]
+    fn the_phones_session_volume_follows_the_dac_path() {
+        use pm_model::{VolumeKind, VolumeLevel, ZoneVolume};
+        let p = PagePlayer {
+            title: "Song".into(),
+            ..Default::default()
+        };
+        let n = NativePlayback {
+            playing: true,
+            position_ms: 0,
+            duration_ms: 1_000,
+        };
+        let db = VolumeKind::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        };
+        let unit = phone_volume_value(
+            Some(db),
+            Some(ZoneVolume {
+                level: VolumeLevel::Db(-40.0),
+                muted: false,
+            }),
+        );
+        assert_eq!(
+            session_for_native(&p, n, &unit).volume,
+            SessionVolume::Remote { max: 60, current: 20 },
+            "Exclusive USB: the DAC's unit"
+        );
+        let media = phone_volume_value(
+            Some(VolumeKind::Percent),
+            Some(ZoneVolume {
+                level: VolumeLevel::Percent(20),
+                muted: false,
+            }),
+        );
+        assert_eq!(
+            session_for_native(&p, n, &media).volume,
+            SessionVolume::Local,
+            "Android's bit-perfect: Android's media volume"
+        );
+        let fixed = phone_volume_value(None, None);
+        assert_eq!(fixed, Value::Null, "no slider");
+        assert_eq!(session_for_native(&p, n, &fixed).volume, SessionVolume::Fixed);
+        // The node's view of the phone's own zone says the same
+        let scale = Scale::Db {
+            min: -60.0,
+            max: 0.0,
+            step: 1.0,
+        };
+        assert_eq!(
+            session_for_zone(&zone("playing", json!({"db": -40.0})), true, Some(scale)).volume,
+            SessionVolume::Remote { max: 60, current: 20 }
+        );
+        assert_eq!(
+            session_for_zone(
+                &zone("playing", json!({"percent": 20})),
+                true,
+                Some(Scale::Percent)
+            )
+            .volume,
+            SessionVolume::Local
+        );
+        assert_eq!(
+            session_for_zone(&zone("playing", Value::Null), true, None).volume,
+            SessionVolume::Fixed
+        );
     }
 
     #[test]
