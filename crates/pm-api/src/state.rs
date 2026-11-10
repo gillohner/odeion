@@ -1587,7 +1587,10 @@ impl NodeState {
                     new
                 })
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    tracing::warn!("AirPlay/BluOS pass failed: {e}");
+                    Vec::new()
+                });
                 if !new.is_empty() {
                     tracing::info!(count = new.len(), "AirPlay/BluOS speakers found after the start");
                 }
@@ -2031,11 +2034,12 @@ impl NodeState {
                 // (said once per receiver: the watch finds it again every minute)
                 static SAID: Mutex<std::collections::BTreeSet<String>> =
                     Mutex::new(std::collections::BTreeSet::new());
-                if SAID
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(d.id.clone())
-                {
+                // (kept to MAX_FOUND_OUTPUTS: a network announcing endless receivers isn't remembered)
+                let first = {
+                    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+                    !said.contains(&d.id) && said.len() < MAX_FOUND_OUTPUTS && said.insert(d.id.clone())
+                };
+                if first {
                     tracing::info!(receiver = %d.name, "AirPlay receiver skipped: {why}");
                 } else {
                     tracing::debug!(receiver = %d.name, "AirPlay receiver skipped: {why}");

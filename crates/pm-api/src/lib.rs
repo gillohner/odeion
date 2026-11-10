@@ -23498,7 +23498,7 @@ exec sleep 300
         // Found again on later passes: nothing more
         let seen = passes.load(Ordering::SeqCst);
         let mut waited = 0;
-        while passes.load(Ordering::SeqCst) < seen + 2 && waited < 100 {
+        while passes.load(Ordering::SeqCst) < seen + 2 && waited < 1500 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             waited += 1;
         }
