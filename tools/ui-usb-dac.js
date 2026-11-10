@@ -23,11 +23,15 @@
 //   * DSD: native and DoP by name, anything else just "DSD";
 //   * step 2: "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit" only when the device confirmed bit-perfect
 //     for the format playing now and the node's path changes nothing; a confirmation for another
-//     format, or a path with a conversion or DSP, reads shared (with why); Settings › This phone
-//     offers Preferred mode and Use the DAC's volume when the app takes them, and sends them with
-//     PUT /v1/outputs/{id}/device; a zone paused because the DAC was unplugged says so in the bar.
-//   * Now playing › Details has an Output line, the Sound panel's: shared with Android's reason
-//     (its volume below full), and bit-perfect with the rate and bits when confirmed.
+//     format, or a path with a conversion or DSP, reads shared (with why); a zone paused because
+//     the DAC was unplugged says so in the bar.
+//   * one behaviour, nothing to choose: Settings › This phone is read-only (the path and why, who
+//     sets the volume: "Volume: the DAC’s own" or "Volume: set it on the DAC", nothing while that
+//     is unknown), with one "Allow Exclusive USB" button while Android's permission is missing
+//     (a PUT /v1/outputs/{id}/device of mode exclusive); no Preferred mode selector, no DAC-volume
+//     switch, no full-level warning or question anywhere, also for what an earlier app reports.
+//   * Now playing › Details has an Output line, the Sound panel's: shared with the phone's reason,
+//     and bit-perfect with the rate and bits when confirmed.
 // At 390 and 1280 px. Screenshots go to the shots folder.
 //   node tools/ui-usb-dac.js [repo] [shots]     (ONLY=web: the web UI part alone)
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -154,11 +158,13 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       const all = await page.evaluate(() => ({ pill: document.querySelector('#quality .qtext').textContent, head: (document.querySelector('#qpanel .path-head') || {}).textContent || '' }));
       check(all.pill === 'FLAC 24/96 → 24/96 · Bit-perfect → FiiO KA17 · bit-perfect' && /^Bit-perfect/.test(all.head.trim()), `${at}: confirmed: pill "${all.pill}", headline "${all.head.trim()}"`);
     }
-    // Bit-perfect at full level below Android's full volume (the listener agreed): the panel says so
-    await nodePlug(run, { ...BP, media_volume: 40, settings: { mode: 'bit_perfect', dac_volume: true, full_level_ok: true } });
+    // Bit-perfect at any media volume, the DAC's own volume in the path: the Sound panel keeps its
+    // line and adds no warning, also for what an earlier app reports (its agreement to full level)
+    await nodePlug(run, { ...BP, own_volume: true, media_volume: 40, settings: { mode: 'bit_perfect', dac_volume: true, full_level_ok: true } });
     {
-      const warn = await page.evaluate(() => (document.querySelector('#qpanel .qp-zone .warn-text') || {}).textContent || '');
-      check(warn === 'Bit-perfect plays at full level: Android’s volume (40%) does not apply. Set the level on the DAC or amplifier.', `${at}: the Sound panel shows the full-level warning ("${warn}")`);
+      const zl = await page.evaluate(() => { const z = document.querySelector('#qpanel .qp-zone'); return z ? { warn: (z.querySelector('.warn-text') || {}).textContent || '', text: z.textContent } : null; });
+      check(zl && zl.warn === '' && !/full level|does not apply/.test(zl.text), `${at}: the Sound panel has no full-level warning (${JSON.stringify(zl)})`);
+      check(await panelLine(page) === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit', `${at}: and its line stays ("${await panelLine(page)}")`);
     }
     // The node no longer knows the DAC (unplugged), the node's path unchanged: no bit-perfect claim
     await nodePlug(run, null);
@@ -171,7 +177,7 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
 
     // Now playing › Details: the Output line, with Android's reason when it is shared
     {
-      const VOL = 'Android\'s volume is at 60%, and bit-perfect plays at full level: turn Android\'s volume up to full and set the level on the DAC, or choose Bit-perfect in Settings';
+      const VOL = 'Android 13: bit-perfect needs Android 14. Exclusive USB needs Android\'s permission for the DAC: tap Allow Exclusive USB in Settings > This phone';
       const detailsOutput = async () => {
         await page.click('#npart'); await page.waitForSelector('#nowplaying:not([hidden])', { timeout: 5000 }); await sleep(400);
         // the Details tab on wide screens (one scroll on phones, where Details is always there)
@@ -179,16 +185,16 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
         const t = await page.evaluate(() => { const d = document.querySelector('#nowplaying .np-output'); return d ? d.textContent : null; });
         return t;
       };
-      await setZone(run, bpZone); await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, media_volume: 60, note: VOL });
+      await setZone(run, bpZone); await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, note: VOL });
       const o1 = await detailsOutput();
-      check(o1 === `Shared · FiiO KA17 · ${VOL}`, `${at}: Details' Output line, Auto below full volume: "${o1}"`);
+      check(o1 === `Shared · FiiO KA17 · ${VOL}`, `${at}: Details' Output line, shared with the phone's reason: "${o1}"`);
       await page.screenshot({ path: path.join(SHOTS, `details-output-shared-${w}.png`) });
       await page.keyboard.press('Escape'); await sleep(300);
       await nodePlug(run, BP);
       const o2 = await detailsOutput();
       check(o2 === 'Bit-perfect · FiiO KA17 · 96 kHz / 24 bit', `${at}: Details' Output line, confirmed: "${o2}"`);
       // Keep Details open: a changed route must not leave an old bit-perfect claim on screen.
-      await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, media_volume: 60, note: VOL });
+      await nodePlug(run, { ...BP, mode: 'shared', confirmed: false, note: VOL });
       await page.waitForFunction((reason) => document.querySelector('#nowplaying .np-output')?.textContent === `Shared · FiiO KA17 · ${reason}`, VOL);
       check(true, `${at}: open Details follows the same song from bit-perfect to shared`);
       await nodePlug(run, BP);
@@ -242,60 +248,43 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
     await page.waitForFunction(() => /Bit-perfect · /.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
     const con = await dacTab(page);
     check(/Playing through it\s+Bit-perfect · FiiO KA17 · 96 kHz \/ 24 bit\./.test(con) && !/not confirmed/.test(con), `${at}: Settings, confirmed for what plays: "Bit-perfect · FiiO KA17 · 96 kHz / 24 bit."`);
-    // The choices: Preferred mode and the DAC's volume, sent to the node
-    const ctl = await page.evaluate(() => { const s = document.querySelector('#dvmode'); return s ? { opts: [...s.options].map((o) => `${o.value}${o.disabled ? '(off)' : ''}`), value: s.value, vol: !!document.querySelector('#dvvol') } : null; });
-    check(ctl && ctl.opts.join(',') === 'auto,bit_perfect,exclusive(off),shared' && ctl.value === 'auto' && ctl.vol === false, `${at}: Settings offers Preferred mode (Auto, Bit-perfect, Exclusive USB only where the phone offers it, Shared), no volume switch (${JSON.stringify(ctl)})`);
+    // One behaviour, nothing to choose: no Preferred mode selector, no DAC-volume switch, no
+    // question; who sets the volume, read-only
+    let dialogs = 0; const onDialog = (d) => { dialogs++; d.dismiss(); };
+    page.on('dialog', onDialog);
+    const ctl = await page.evaluate(() => ({ mode: !!document.querySelector('#dvmode'), vol: !!document.querySelector('#dvvol'), selects: document.querySelectorAll('#set-dac select').length, allow: !!document.querySelector('#dvallow') }));
+    check(!ctl.mode && !ctl.vol && ctl.selects === 0, `${at}: Settings has no Preferred mode and no DAC-volume switch (${JSON.stringify(ctl)})`);
+    check(!ctl.allow, `${at}: no Allow button while Android's permission isn't known to be missing`);
     const help = await dacTab(page);
-    check(/Bit-perfect plays at full level/.test(help) && /Auto plays bit-perfect only while Android’s volume is at full/.test(help), `${at}: Settings says bit-perfect plays at full level and when Auto uses it`);
-    const h0 = state.hits.length;
-    await page.selectOption('#dvmode', 'shared'); await sleep(400);
-    const puts = state.hits.slice(h0).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => `${decodeURIComponent(h.v)} ${h.body}`);
-    check(puts.length === 1 && puts[0] === `/outputs/${OUT}/device {"mode":"shared"}`, `${at}: each choice is a PUT /v1/outputs/{id}/device (${JSON.stringify(puts)})`);
-    // Bit-perfect below Android's full volume needs the listener's OK: Cancel keeps the mode
-    await nodePlug(run, { ...KA17, modes: ['shared', 'bit_perfect'], media_volume: 40, settings: { mode: 'auto', dac_volume: true, full_level_ok: false } });
-    await page.waitForSelector('#dvmode'); await sleep(200);
+    check(!/Preferred mode|full level|Use the DAC’s volume/.test(help), `${at}: Settings says nothing of a mode to pick or of full level`);
+    check(!/Volume: /.test(help), `${at}: whether it has a volume of its own unknown: nothing claimed`);
+    // Its own volume (from its descriptors): said
+    await nodePlug(run, { ...KA17, own_volume: true, usb_permission: true, mode: 'bit_perfect', modes: ['shared', 'bit_perfect', 'exclusive'], confirmed: true, format: src });
+    await page.waitForFunction(() => /Volume: the DAC’s own/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
     {
-      let asked = null;
-      page.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
-      const h1 = state.hits.length;
-      await page.selectOption('#dvmode', 'bit_perfect'); await sleep(400);
-      const sent = state.hits.slice(h1).filter((h) => h.m === 'PUT' && h.v.endsWith('/device'));
-      const value = await page.evaluate(() => document.querySelector('#dvmode').value);
-      check(asked === 'Bit-perfect plays at full level; Android’s volume (40%) no longer applies. Set the level on the DAC or amplifier first.\n\nUse bit-perfect?' && sent.length === 0 && value === 'auto', `${at}: below full volume, Bit-perfect asks first; Cancel sends nothing and keeps Auto (asked ${JSON.stringify(asked)}, sent ${sent.length}, now ${value})`);
-      page.once('dialog', (d) => d.accept());
-      const h2 = state.hits.length;
-      await page.selectOption('#dvmode', 'bit_perfect'); await sleep(400);
-      const ok = state.hits.slice(h2).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
-      check(ok.length === 1 && ok[0] === '{"mode":"bit_perfect","full_level_ok":true}', `${at}: OK sends Bit-perfect with the agreement (${JSON.stringify(ok)})`);
+      const t = await dacTab(page);
+      check(/Volume: the DAC’s own/.test(t) && /volume keys/.test(t), `${at}: "Volume: the DAC’s own" (${(t.match(/Volume:[^\n]*/) || [''])[0]})`);
+      check(!(await page.evaluate(() => !!document.querySelector('#dvallow'))), `${at}: the permission given: no Allow button`);
     }
-    // At full volume nothing to agree to: no question
-    await nodePlug(run, { ...KA17, modes: ['shared', 'bit_perfect'], media_volume: 100, settings: { mode: 'auto', dac_volume: true, full_level_ok: false } });
-    await page.waitForSelector('#dvmode'); await sleep(200);
+    // What an earlier app reports (a mode chosen, the agreement to full level, its media volume):
+    // still no selector, no warning
+    await nodePlug(run, { ...KA17, mode: 'bit_perfect', modes: ['shared', 'bit_perfect'], confirmed: true, format: src, media_volume: 40, settings: { mode: 'bit_perfect', dac_volume: true, full_level_ok: true } });
+    await sleep(200);
     {
-      let asked = false; const onDialog = (d) => { asked = true; d.dismiss(); };
-      page.on('dialog', onDialog);
-      const h3 = state.hits.length;
-      await page.selectOption('#dvmode', 'bit_perfect'); await sleep(400);
-      page.off('dialog', onDialog);
-      const sent = state.hits.slice(h3).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
-      check(!asked && sent.length === 1 && sent[0] === '{"mode":"bit_perfect"}', `${at}: at full volume no question (${JSON.stringify(sent)})`);
+      const t = await dacTab(page);
+      check(!/full level|does not apply/.test(t) && !(await page.evaluate(() => !!document.querySelector('#dvmode'))), `${at}: an earlier app's agreement to full level: no warning, no selector`);
     }
     // Exclusive USB (the app's own driver), confirmed for what plays: said as such, with its format
-    const EX = { ...KA17, hardware_volume: true, mode: 'exclusive', modes: ['shared', 'exclusive'], confirmed: true, format: src, media_volume: 40, settings: { mode: 'exclusive', dac_volume: true } };
+    const EX = { ...KA17, hardware_volume: true, own_volume: true, usb_permission: true, mode: 'exclusive', modes: ['shared', 'exclusive'], confirmed: true, format: src };
     await setZone(run, bpZone); await nodePlug(run, EX);
     await page.waitForFunction(() => /Exclusive USB · /.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
     {
       const t = await dacTab(page);
       check(/Playing through it\s+Exclusive USB · FiiO KA17 · 96 kHz \/ 24 bit\./.test(t), `${at}: Exclusive USB confirmed: "Exclusive USB · FiiO KA17 · 96 kHz / 24 bit." (${(t.match(/Playing through it[^\n]*\n?[^\n]*/) || [''])[0]})`);
-      check(!/Exclusive USB plays at full level|does not apply/.test(t), `${at}: Exclusive USB on a DAC with its own volume: no full-level warning`);
-      const c = await page.evaluate(() => { const s = document.querySelector('#dvmode'); const v = document.querySelector('#dvvol'); return { opts: [...s.options].map((o) => `${o.value}${o.disabled ? '(off)' : ''}`).join(','), value: s.value, vol: v ? v.checked : null }; });
-      check(c.opts === 'auto,bit_perfect(off),exclusive,shared' && c.value === 'exclusive' && c.vol === true, `${at}: Exclusive USB offered and chosen, "Use the DAC's volume" on (${JSON.stringify(c)})`);
+      check(/Volume: the DAC’s own/.test(t) && !/full level|does not apply/.test(t), `${at}: Exclusive USB: the DAC's own volume, no warning`);
+      check(!(await page.evaluate(() => !!document.querySelector('#dvvol') || !!document.querySelector('#dvmode'))), `${at}: Exclusive USB: no switch, no selector`);
       const pp = await pill(page);
       check(pp.endsWith('→ FiiO KA17 · exclusive USB'), `${at}: the pill: "… → FiiO KA17 · exclusive USB" ("${pp}")`);
-      const h4 = state.hits.length;
-      await page.click('#dvvol'); await sleep(400);
-      const sent = state.hits.slice(h4).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
-      check(sent.length === 1 && sent[0] === '{"dac_volume":false}', `${at}: the volume switch is a PUT of dac_volume (${JSON.stringify(sent)})`);
     }
     // Not confirmed (the clock not read back yet, or another rate): never bit-perfect anywhere
     await nodePlug(run, { ...EX, confirmed: false });
@@ -305,43 +294,37 @@ const dacTab = (page) => page.evaluate(() => { const p = document.querySelector(
       check(/Playing through it\s+Exclusive USB · FiiO KA17 · not confirmed\./.test(t) && /Exclusive USB mode is not confirmed for this format\./.test(t), `${at}: Exclusive USB unconfirmed: said so (${(t.match(/Playing through it[^\n]*\n?[^\n]*/) || [''])[0]})`);
       check(pp.endsWith('→ FiiO KA17 · shared') && !/bit.?perfect|exclusive/i.test(pp), `${at}: unconfirmed, the pill claims nothing ("${pp}")`);
     }
-    // A DAC without a volume of its own plays at full level: the same consent as Bit-perfect
-    await nodePlug(run, { ...KA17, modes: ['shared', 'exclusive'], media_volume: 40, settings: { mode: 'auto', dac_volume: true, full_level_ok: false } });
-    await page.waitForSelector('#dvmode'); await sleep(200);
+    // A DAC without a volume of its own: bit-perfect all the same; the volume is set on the DAC
+    const NOVOL = 'This DAC has no volume of its own: set the volume on the DAC or amplifier.';
+    await nodePlug(run, { ...KA17, own_volume: false, usb_permission: true, mode: 'bit_perfect', modes: ['shared', 'bit_perfect', 'exclusive'], confirmed: true, format: src, note: NOVOL });
+    await page.waitForFunction(() => /Volume: set it on the DAC/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
     {
-      let asked = null;
-      page.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
-      const h5 = state.hits.length;
-      await page.selectOption('#dvmode', 'exclusive'); await sleep(400);
-      const sent = state.hits.slice(h5).filter((h) => h.m === 'PUT' && h.v.endsWith('/device'));
-      const value = await page.evaluate(() => document.querySelector('#dvmode').value);
-      check(asked === 'Exclusive USB plays at full level on this DAC (it has no volume of its own); Android’s volume (40%) no longer applies. Set the level on the amplifier first.\n\nUse Exclusive USB?' && sent.length === 0 && value === 'auto', `${at}: no volume of its own: Exclusive USB asks first; Cancel sends nothing (asked ${JSON.stringify(asked)}, sent ${sent.length}, now ${value})`);
-      page.once('dialog', (d) => d.accept());
-      const h6 = state.hits.length;
-      await page.selectOption('#dvmode', 'exclusive'); await sleep(400);
-      const ok = state.hits.slice(h6).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
-      check(ok.length === 1 && ok[0] === '{"mode":"exclusive","full_level_ok":true}', `${at}: OK sends Exclusive USB with the agreement (${JSON.stringify(ok)})`);
+      const t = await dacTab(page);
+      check(/Playing through it\s+Bit-perfect · FiiO KA17 · 96 kHz \/ 24 bit\./.test(t), `${at}: no volume of its own: still bit-perfect (${(t.match(/Playing through it[^\n]*/) || [''])[0]})`);
+      check(/Volume: set it on the DAC/.test(t) && t.includes(NOVOL), `${at}: "Volume: set it on the DAC", and the note says it plainly`);
+      await page.screenshot({ path: path.join(SHOTS, `settings-no-volume-${w}.png`), fullPage: true });
     }
-    await nodePlug(run, { ...KA17, modes: ['shared', 'exclusive'], media_volume: 40, settings: { mode: 'exclusive', dac_volume: true, full_level_ok: true } });
-    await page.waitForFunction(() => /full level/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
-    check(/Exclusive USB plays at full level: this DAC has no volume of its own, and Android’s volume \(40%\) does not apply\. Set the level on the amplifier\./.test(await dacTab(page)), `${at}: and the warning stays while it applies`);
-    // With a volume of its own: no question (the DAC starts no louder than Android played)
-    await nodePlug(run, { ...KA17, hardware_volume: true, modes: ['shared', 'exclusive'], media_volume: 40, settings: { mode: 'auto', dac_volume: true } });
-    await page.waitForSelector('#dvmode'); await sleep(200);
+    // Android's permission for Exclusive USB missing (Android 13): one button asks again, a PUT of
+    // mode exclusive; nothing else to press
+    await setZone(run, zone);
+    const WHY13 = 'Android 13: bit-perfect needs Android 14. Exclusive USB needs Android\'s permission for the DAC: tap Allow Exclusive USB in Settings > This phone';
+    await nodePlug(run, { ...KA17, usb_permission: false, modes: ['shared', 'exclusive'], note: WHY13 });
+    await page.waitForSelector('#dvallow', { timeout: 5000 }).catch(() => {});
     {
-      let asked = false; const onDialog = (d) => { asked = true; d.dismiss(); };
-      page.on('dialog', onDialog);
-      const h7 = state.hits.length;
-      await page.selectOption('#dvmode', 'exclusive'); await sleep(400);
-      page.off('dialog', onDialog);
-      const sent = state.hits.slice(h7).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => h.body);
-      check(!asked && sent.length === 1 && sent[0] === '{"mode":"exclusive"}', `${at}: with its own volume, no question (${JSON.stringify(sent)})`);
+      const t = await dacTab(page);
+      const b = await page.evaluate(() => { const x = document.querySelector('#dvallow'); return x ? x.textContent.trim() : null; });
+      check(b === 'Allow Exclusive USB', `${at}: permission missing: an "Allow Exclusive USB" button ("${b}")`);
+      check(t.includes(WHY13), `${at}: and why it plays shared`);
+      const n = await page.evaluate(() => document.querySelectorAll('#set-dac input, #set-dac select, #set-dac textarea, #set-dac button:not([data-tabs-back])').length);
+      check(n === 1, `${at}: the one control on This phone (${n})`);
+      await page.screenshot({ path: path.join(SHOTS, `settings-allow-${w}.png`), fullPage: true });
+      const h0 = state.hits.length;
+      if (b) { await page.click('#dvallow'); await sleep(400); }
+      const puts = state.hits.slice(h0).filter((h) => h.m === 'PUT' && h.v.endsWith('/device')).map((h) => `${decodeURIComponent(h.v)} ${h.body}`);
+      check(puts.length === 1 && puts[0] === `/outputs/${OUT}/device {"mode":"exclusive"}`, `${at}: Allow is one PUT of mode exclusive (${JSON.stringify(puts)})`);
     }
-    // An app without bit-perfect here (Android 13): Bit-perfect can't be picked
-    await nodePlug(run, { ...KA17, modes: ['shared'], settings: { mode: 'auto', dac_volume: true }, note: 'Android 13: bit-perfect needs Android 14' });
-    await page.waitForFunction(() => /Android 13/.test((document.querySelector('#set-dac') || {}).innerText || '')).catch(() => {});
-    const off = await page.evaluate(() => { const o = document.querySelector('#dvmode option[value="bit_perfect"]'); return o ? o.disabled : null; });
-    check(off === true, `${at}: Android 13: Bit-perfect is not offered (${off})`);
+    page.off('dialog', onDialog);
+    check(dialogs === 0, `${at}: no question asked anywhere (${dialogs} dialogs)`);
     await setZone(run, zone);
     // Unplugged with the node's event only (no app event): This phone goes
     await nodePlug(run, null);
