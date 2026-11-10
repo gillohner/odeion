@@ -727,9 +727,11 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
     let mut discovery_problems = Vec::new();
     if !load(&s).people.iter().any(|p| p.key == key) {
         match crate::personal::leftover(&s, &key) {
-            Ok(false) => reconcile(&s).await?,
+            Ok(false) => {
+                reconcile(&s).await?;
+            }
             Ok(true) => {}
-            Err(e) => discovery_problems.push(e.message),
+            Err(e) => discovery_problems.push(format!("cannot check retained personal data: {}", e.message)),
         }
     }
     let membership = crate::personal::membership_lock(&key);
@@ -754,7 +756,9 @@ async fn remove_person(s: Arc<NodeState>, key: String) -> ApiResult<Roster> {
                 Ok(true) => {}
                 // Uncertainty must not skip removal. Attempt every cleanup below and
                 // report this read failure as well; re-add instead refuses uncertainty.
-                Err(e) => discovery_problems.push(e.message),
+                Err(e) => {
+                    discovery_problems.push(format!("cannot check retained personal data: {}", e.message))
+                }
             }
         }
         revoke_access(&s, &key);

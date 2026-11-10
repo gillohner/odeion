@@ -81,7 +81,8 @@ pub trait PersonalHomeserver: Send + Sync {
     /// there (it couldn't be deleted).
     async fn disconnect(&self, key: &str) -> Result<(), String>;
     /// Every bookmark of `key`: the stored URI and when it was made (Unix microseconds).
-    /// `known` is what the node has already: those aren't downloaded again.
+    /// `known` is what the node has already. Timestamps remain mutable at the same path and
+    /// must be refreshed; the known list only helps detect an unexpectedly empty listing.
     async fn bookmarks(
         &self,
         key: &str,
@@ -302,22 +303,15 @@ impl PersonalHomeserver for Grants {
         known: &[(String, i64)],
     ) -> Result<Vec<(String, i64)>, PersonalError> {
         let hs = self.client()?;
-        // A listing, and only the bookmarks the node doesn't know yet (as the owner's sync)
-        let known: HashMap<String, (String, i64)> = known
-            .iter()
-            .filter_map(|(uri, at)| {
-                let path = pm_pubky::v1::bookmark_path(uri).ok()?;
-                Some((path.rsplit('/').next()?.to_string(), (uri.clone(), *at)))
-            })
-            .collect();
-        let known = &known;
+        // A re-heart keeps its URI-derived filename but has a new timestamp. Cached names
+        // cannot stand in for current objects when deciding whether an offline clear is old.
         let expected = !known.is_empty();
         let all = self
             .attempt(
                 key,
                 false,
                 |v: &Vec<_>| expected && v.is_empty(),
-                |session| async move { hs.read_v1_bookmarks_except(&session, known).await },
+                |session| async move { hs.read_v1_bookmarks(&session).await },
             )
             .await?
             .unwrap_or_default();
@@ -405,15 +399,17 @@ fn copy_key(key: &str) -> String {
     format!("{PERSON_PREFIX}{}.bookmarks", key.trim_start_matches("pubky"))
 }
 
-fn load(s: &NodeState, key: &str) -> Copy {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .get_setting(&copy_key(key))
-        .ok()
-        .flatten()
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default()
+fn load(s: &NodeState, key: &str) -> Result<Copy, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let Some(json) = lib.get_setting(&copy_key(key))? else {
+        return Ok(Copy::default());
+    };
+    serde_json::from_str(&json).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot read saved bookmarks: {e}"),
+        )
+    })
 }
 
 /// One listener's copy changes one request at a time: two devices, or a read writing what waited
@@ -443,16 +439,24 @@ pub(crate) fn membership_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
-fn save(s: &NodeState, key: &str, c: &Copy) -> Result<(), ApiError> {
+fn save_guarded(
+    s: &NodeState,
+    key: &str,
+    c: &Copy,
+    started: u64,
+    _roster: &tokio::sync::MutexGuard<'_, ()>,
+) -> Result<(), ApiError> {
+    // Restore and revocation hold the same roster guard. The authenticated generation check
+    // and this synchronous write are one commit, even when music remains enabled by restore.
+    require_access(s, key, started)?;
     let lib = s.library.lock().expect("library poisoned");
-    // Removed (People › Remove) while this request waited on their homeserver: nothing of
-    // theirs comes back. Checked under the same hold as the write, so a removal can't land
-    // between the two
-    if !crate::people::listed_for_music(&lib, key.trim_start_matches("pubky")) {
-        return Ok(());
-    }
     lib.set_setting(&copy_key(key), &serde_json::to_string(c).expect("serializes"))?;
     Ok(())
+}
+
+async fn save(s: &NodeState, key: &str, c: &Copy, started: u64) -> Result<(), ApiError> {
+    let roster = s.roster.lock().await;
+    save_guarded(s, key, c, started, &roster)
 }
 
 impl Copy {
@@ -538,15 +542,17 @@ pub(crate) async fn bookmark_uris(
     if !connected {
         return Ok((Vec::new(), PersonalState::default()));
     }
-    let mut c = load(s, key);
+    let mut c = load(s, key)?;
     let mut stale = false;
     if !c.lost {
         while let Some(ch) = c.pending.first().cloned() {
+            require_access(s, key, started)?;
             let r = if ch.on {
                 b.put_bookmark(key, &ch.uri, ch.at).await
             } else {
                 b.delete_bookmark(key, &ch.uri).await
             };
+            require_access(s, key, started)?;
             match r {
                 Ok(()) => {
                     c.pending.remove(0);
@@ -568,8 +574,11 @@ pub(crate) async fn bookmark_uris(
             }
         }
         if !c.lost && !stale {
+            require_access(s, key, started)?;
             let known: Vec<(String, i64)> = c.items.iter().map(|i| (i.uri.clone(), i.at)).collect();
-            match b.bookmarks(key, &known).await {
+            let listed = b.bookmarks(key, &known).await;
+            require_access(s, key, started)?;
+            match listed {
                 Ok(list) => {
                     c.merge_remote(list);
                 }
@@ -580,7 +589,7 @@ pub(crate) async fn bookmark_uris(
                 Err(_) => stale = true,
             }
         }
-        save(s, key, &c)?;
+        save(s, key, &c, started).await?;
     }
     let mut items = c.items.clone();
     items.sort_by_key(|i| std::cmp::Reverse(i.at));
@@ -612,7 +621,7 @@ pub(crate) async fn set_bookmark(
     if !b.connected(key) {
         return Ok(needs_connect(false));
     }
-    let mut c = load(s, key);
+    let mut c = load(s, key)?;
     if c.lost {
         return Ok(needs_connect(true));
     }
@@ -624,11 +633,13 @@ pub(crate) async fn set_bookmark(
         let now_on = c.bookmarked(&uri);
         return Ok(Json(BookmarkChanged::new(uri, now_on)).into_response());
     }
+    require_access(s, key, started)?;
     let r = if on {
         b.put_bookmark(key, &uri, at).await
     } else {
         b.delete_bookmark(key, &uri).await
     };
+    require_access(s, key, started)?;
     let pending = match r {
         // Written: whatever still waited for this one is older and goes
         Ok(()) => {
@@ -646,7 +657,7 @@ pub(crate) async fn set_bookmark(
         Err(PersonalError::Refused(m)) => {
             tracing::info!(%key, "a listener's homeserver refused the node: {m}");
             c.lost = true;
-            save(s, key, &c)?;
+            save(s, key, &c, started).await?;
             return Ok(needs_connect(true));
         }
         Err(PersonalError::Unreachable(m)) => {
@@ -661,7 +672,7 @@ pub(crate) async fn set_bookmark(
         }
     };
     c.apply(&uri, on, at);
-    save(s, key, &c)?;
+    save(s, key, &c, started).await?;
     let mut answer = BookmarkChanged::new(uri, on);
     answer.pending = pending;
     Ok(Json(answer).into_response())
@@ -745,7 +756,7 @@ async fn keep_if_current(
     let lock = person_lock(key);
     let _one = lock.lock().await;
     // Restore/revocation cannot cross the final generation check and synchronous grant write.
-    let _roster = s.roster.lock().await;
+    let roster = s.roster.lock().await;
     let revision = connects()
         .lock()
         .await
@@ -758,7 +769,20 @@ async fn keep_if_current(
     if let Err(e) = require_access(s, key, revision) {
         return serde_json::json!({"state":"denied", "reason":e.message});
     }
-    keep()
+    // Read before replacing the grant: an unreadable copy is not an empty one, and cannot
+    // lose its pending changes or tombstones merely because the listener approves again.
+    let mut copy = match load(s, key) {
+        Ok(copy) => copy,
+        Err(e) => return serde_json::json!({"state":"error", "reason":e.message}),
+    };
+    let answer = keep();
+    if answer["state"] == "ok" {
+        copy.lost = false;
+        if let Err(e) = save_guarded(s, key, &copy, revision, &roster) {
+            return serde_json::json!({"state":"error", "reason":format!("approval kept, but bookmarks could not be updated: {}", e.message)});
+        }
+    }
+    answer
 }
 
 /// Ends every approval `key` has in progress (Disconnect, People › Remove): none of them can
@@ -833,12 +857,6 @@ async fn keep_grant(s: Arc<NodeState>, id: String, key: String, session: PubkySe
             return serde_json::json!({"state": "error", "reason": format!("cannot keep the grant: {e}")});
         }
         sessions().lock().expect("sessions").insert(key.clone(), session);
-        // Approved again: the node tries their homeserver again
-        let mut copy = load(&s, &key);
-        copy.lost = false;
-        if let Err(e) = save(&s, &key, &copy) {
-            tracing::warn!(%key, "a listener's grant is kept, but not that it works again: {}", e.message);
-        }
         tracing::info!(%key, "a listener connected their homeserver");
         serde_json::json!({"state": "ok"})
     })
@@ -861,7 +879,7 @@ pub(crate) async fn status(
 ) -> Result<Json<PersonalState>, ApiError> {
     let key = listener_key(&c)?;
     let connected = backend(&s).connected(&key);
-    let copy = load(&s, &key);
+    let copy = load(&s, &key)?;
     Ok(Json(PersonalState {
         connected,
         lost: connected && copy.lost,
@@ -888,7 +906,7 @@ pub(crate) async fn disconnect(
         .disconnect(&key)
         .await
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    let copy = load(&s, &key);
+    let copy = load(&s, &key)?;
     Ok(Json(PersonalState {
         connected: false,
         lost: false,
@@ -1552,6 +1570,321 @@ mod tests {
         s.set_personal_homeserver(Arc::new(Forgets::default()));
         crate::accounts::mint(&s, key).unwrap();
         s
+    }
+
+    #[tokio::test]
+    async fn a_copy_commit_rechecks_its_revision_after_waiting_for_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "b".repeat(52);
+        let s = listener_state(dir.path(), &key).await;
+        let started = crate::people::access_started(&s);
+        let old = Copy::default();
+        let roster = s.roster.lock().await;
+        let committing = save(&s, &key, &old, started);
+        tokio::pin!(committing);
+        assert!(futures_util::poll!(&mut committing).is_pending());
+        crate::people::restored_access(&s);
+        let restored = r#"{"items":[],"pending":[],"lost":true,"cleared":[]}"#;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&copy_key(&key), restored)
+            .unwrap();
+        drop(roster);
+        assert_eq!(committing.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(&copy_key(&key))
+                .unwrap()
+                .as_deref(),
+            Some(restored)
+        );
+    }
+
+    #[tokio::test]
+    async fn authentication_passes_its_revision_through_a_delayed_handler() {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let key = "c".repeat(52);
+        let s = listener_state(dir.path(), &key).await;
+        let token = crate::accounts::mint(&s, &key).unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new()
+            .route(
+                "/bookmarks",
+                axum::routing::put({
+                    let (s, key, entered, resume) = (s.clone(), key.clone(), entered.clone(), resume.clone());
+                    move || {
+                        let (s, key, entered, resume) =
+                            (s.clone(), key.clone(), entered.clone(), resume.clone());
+                        async move {
+                            entered.notify_one();
+                            resume.notified().await;
+                            set_bookmark(&s, &key, "https://example.com/song".into(), true, None).await
+                        }
+                    }
+                }),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(s.clone(), crate::auth));
+        let request = axum::http::Request::builder()
+            .method("PUT")
+            .uri("/bookmarks")
+            .header("authorization", format!("Bearer {token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        let roster = s.roster.lock().await;
+        crate::people::restored_access(&s);
+        drop(roster);
+        resume.notify_one();
+        let response = response.await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert!(
+            body["error"].as_str().unwrap().contains("music access changed"),
+            "{body}"
+        );
+        assert!(
+            body.get("needs_connect").is_none(),
+            "the stale handler must stop before using its grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_reset_preserves_an_unreadable_copy_and_its_existing_grant() {
+        for malformed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let key = if malformed { "d".repeat(52) } else { "f".repeat(52) };
+            let s = listener_state(dir.path(), &key).await;
+            let original = serde_json::json!({
+                "items":[], "lost":true,
+                "pending":[{"uri":"https://example.com/new","on":true,"at":300_000_000}],
+                "cleared":[{"uri":"https://example.com/old","at":200_000_000}],
+            })
+            .to_string();
+            let setting = copy_key(&key);
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(&setting, &original)
+                .unwrap();
+            let file = grant_file(&grants_dir(&s), &key).unwrap();
+            crate::imports::write_private(&file, b"existing-grant").unwrap();
+            let db = rusqlite::Connection::open(&s.db_path).unwrap();
+            if malformed {
+                s.library
+                    .lock()
+                    .unwrap()
+                    .set_setting(&setting, &format!("{original} broken"))
+                    .unwrap();
+            } else {
+                db.execute(
+                    "UPDATE settings SET value=CAST(value AS BLOB) WHERE key=?1",
+                    [&setting],
+                )
+                .unwrap();
+            }
+            let raw = || -> Vec<u8> {
+                db.query_row(
+                    "SELECT CAST(value AS BLOB) FROM settings WHERE key=?1",
+                    [&setting],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            };
+            let before = raw();
+            let id = format!("copy-read-{malformed}");
+            begin_approval(&s, &id, &key).await.unwrap();
+            let answer = keep_if_current(&s, &id, &key, || {
+                panic!("approval must not replace a grant before its existing copy is readable")
+            })
+            .await;
+            assert_eq!(answer["state"], "error", "{answer}");
+            assert_eq!(raw(), before);
+            assert_eq!(std::fs::read(&file).unwrap(), b"existing-grant");
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(&setting, &original)
+                .unwrap();
+            let answer = keep_if_current(&s, &id, &key, || {
+                crate::imports::write_private(&file, b"new-grant").unwrap();
+                serde_json::json!({"state":"ok"})
+            })
+            .await;
+            assert_eq!(answer["state"], "ok", "{answer}");
+            let mut expected: serde_json::Value = serde_json::from_str(&original).unwrap();
+            expected["lost"] = false.into();
+            assert_eq!(serde_json::to_value(load(&s, &key).unwrap()).unwrap(), expected);
+            end_approvals_of(&key).await;
+        }
+    }
+
+    /// Exercise Grants and the SDK's real listing/object fetches over isolated HTTPS. Cached
+    /// pkarr records point only at this loopback fixture; no testnet or real account is used.
+    #[tokio::test]
+    #[allow(deprecated)] // A local legacy cookie session avoids a remote grant exchange.
+    async fn the_grants_adapter_refreshes_a_known_hearts_timestamp_before_an_offline_clear() {
+        use axum::extract::{Request, State};
+        use axum::http::Method;
+        use http_body_util::BodyExt;
+        use pubky::pkarr::dns::rdata::SVCB;
+        use pubky::pkarr::{Cache, InMemoryCache, SignedPacket};
+        use pubky::{Keypair, Pubky, PubkyHttpClient};
+        use std::num::NonZeroUsize;
+        struct Remote {
+            owner: String,
+            session: Vec<u8>,
+            path: String,
+            object: Mutex<Vec<u8>>,
+            requests: Mutex<Vec<(Method, String)>>,
+        }
+        async fn answer(State(remote): State<Arc<Remote>>, request: Request) -> Response {
+            let path = request.uri().path();
+            if path == "/info" {
+                return Json(serde_json::json!({"features":[]})).into_response();
+            }
+            let cookie = format!("{}=bookmark-test-cookie", remote.owner);
+            if request.headers().get("cookie").and_then(|h| h.to_str().ok()) != Some(cookie.as_str()) {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            if path == "/session" {
+                return remote.session.clone().into_response();
+            }
+            remote
+                .requests
+                .lock()
+                .unwrap()
+                .push((request.method().clone(), path.to_string()));
+            if path == pm_pubky::v1::bookmarks_dir() && request.method() == Method::GET {
+                return format!("pubky://{}{}\n", remote.owner, remote.path).into_response();
+            }
+            if path == remote.path && request.method() == Method::GET {
+                return remote.object.lock().unwrap().clone().into_response();
+            }
+            // An intermediate-time clear must never reach the remote DELETE.
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        struct Stop(axum_server::Handle<std::net::SocketAddr>);
+        impl Drop for Stop {
+            fn drop(&mut self) {
+                self.0.shutdown();
+            }
+        }
+        const URI: &str = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let owner = Keypair::random();
+        let homeserver = Keypair::random();
+        let key = owner.public_key().z32();
+        let (old, path) = pm_pubky::v1::bookmark_of(URI, 100_000_000).unwrap();
+        let remote = Arc::new(Remote {
+            owner: key.clone(),
+            path,
+            session: pubky::CookieSessionRecord::new(
+                &owner.public_key(),
+                PERSONAL_CAPABILITIES.parse().unwrap(),
+                None,
+            )
+            .serialize(),
+            object: Mutex::new(serde_json::to_vec(&old).unwrap()),
+            requests: Mutex::new(Vec::new()),
+        });
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+            cert.cert.pem().into_bytes(),
+            cert.signing_key.serialize_pem().into_bytes(),
+        )
+        .await
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = axum_server::Handle::new();
+        let _stop = Stop(server.clone());
+        let handle = server.clone();
+        let app = axum::Router::new().fallback(answer).with_state(remote.clone());
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, tls)
+                .unwrap()
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), server.listening())
+            .await
+            .unwrap()
+            .unwrap();
+        let cache = Arc::new(InMemoryCache::new(NonZeroUsize::new(2).unwrap()));
+        let mut target = SVCB::new(1, "localhost".try_into().unwrap());
+        target.set_port(port);
+        let hs_packet = SignedPacket::builder()
+            .https(".".try_into().unwrap(), target, 3600)
+            .sign(&homeserver)
+            .unwrap();
+        let user_packet = SignedPacket::builder()
+            .https(
+                "_pubky".try_into().unwrap(),
+                SVCB::new(0, homeserver.public_key().z32().as_str().try_into().unwrap()),
+                3600,
+            )
+            .sign(&owner)
+            .unwrap();
+        cache.put(&hs_packet.public_key().into(), &hs_packet);
+        cache.put(&user_packet.public_key().into(), &user_packet);
+        let mut builder = PubkyHttpClient::builder();
+        builder.pkarr(|b| b.no_default_network().bootstrap(&["127.0.0.1:1"]).cache(cache));
+        builder
+            .add_root_certificates_pem(cert.cert.pem().as_bytes())
+            .unwrap();
+        let pubky = Pubky::with_client(builder.build().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let s = listener_state(dir.path(), &key).await;
+        let grants = Grants {
+            dir: grants_dir(&s),
+            hs: Some(NodeHomeserver::from_pubky(pubky)),
+        };
+        crate::imports::write_private(
+            &grant_file(&grants.dir, &key).unwrap(),
+            format!("{key}:bookmark-test-cookie").as_bytes(),
+        )
+        .unwrap();
+        s.set_personal_homeserver(Arc::new(grants));
+        assert_eq!(bookmark_uris(&s, &key).await.unwrap().0, vec![URI]);
+        assert_eq!(load(&s, &key).unwrap().items[0].at, 100_000_000);
+        let (new, same_path) = pm_pubky::v1::bookmark_of(URI, 300_000_000).unwrap();
+        assert_eq!(same_path, remote.path, "a re-heart does not change the filename");
+        *remote.object.lock().unwrap() = serde_json::to_vec(&new).unwrap();
+        assert_eq!(bookmark_uris(&s, &key).await.unwrap().0, vec![URI]);
+        assert_eq!(load(&s, &key).unwrap().items[0].at, 300_000_000);
+        let response = set_bookmark(&s, &key, URI.into(), false, Some(200))
+            .await
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(
+            body["bookmarked"], true,
+            "the newer remote heart survives: {body}"
+        );
+        assert_eq!(*remote.object.lock().unwrap(), serde_json::to_vec(&new).unwrap());
+        let requests = remote.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(method, path)| *method == Method::GET && path == &remote.path)
+                .count(),
+            2
+        );
+        assert!(requests.iter().all(|(method, _)| *method != Method::DELETE));
+        sessions().lock().unwrap().remove(&key);
     }
 
     async fn revoked(s: &NodeState, key: &str) {
