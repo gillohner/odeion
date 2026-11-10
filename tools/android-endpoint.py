@@ -29,10 +29,14 @@ track's title and PLAYING; KEYCODE_MEDIA_NEXT moves the node's queue; one volume
 volume is the zone's (set at 0, KEYCODE_VOLUME_UP raises it one step and the node reads it back,
 the node's set moves it back to 0); a network zone (the node's null output with a percent volume)
 chosen in the page gets the volume keys as its own volume, Android's media volume untouched.
-Screenshots of the media notification and the lock screen. Volumes stay at 0-5 %.
+Screenshots of the media notification and the lock screen; the lock screen's is taken only once the
+keyguard is showing (`dumpsys window policy`, the screen awake) with the track on it (the screen's
+uiautomator dump), else the run fails. Volumes stay at 0-5 %.
 
 Usage: android-endpoint.py <apk> <pm-node binary> <out dir>
+       android-endpoint.py --self-test   (the lock-screen decision on synthetic dumps; no adb)
 """
+import html
 import json
 import os
 import re
@@ -51,7 +55,9 @@ NODE = os.environ.get("PM_TEST_NODE", "http://127.0.0.1:7788")
 # The node gets an API token: the app reaches it as 10.0.2.2 (the emulator's name for the runner),
 # and a node without one answers only at its loopback names. Made per run.
 TOKEN = secrets.token_hex(16)
-apk, node_bin, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+SELF_TEST = sys.argv[1:] == ["--self-test"]
+if not SELF_TEST:
+    apk, node_bin, out = sys.argv[1], sys.argv[2], Path(sys.argv[3])
 
 
 def log(msg):
@@ -323,14 +329,7 @@ def media_controls(zid, track):
     time.sleep(3)
     shot("6-media-notification")
     adb("shell", "cmd", "statusbar", "collapse", check=False)
-    adb("shell", "input", "keyevent", "KEYCODE_SLEEP", check=False)
-    time.sleep(2)
-    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
-    time.sleep(3)
-    shot("7-lock-screen")
-    adb("shell", "wm", "dismiss-keyguard", check=False)
-    adb("shell", "input", "keyevent", "82", check=False)
-    time.sleep(2)
+    lock_screen(title)
 
     # A media button: the node's queue moves on
     at = zone_state(zid).get("queue_index") or 0
@@ -388,6 +387,187 @@ def media_controls(zid, track):
     shot("8-network-zone")
     # Back to the phone's zone in the page
     pick(zone_state(zid)["name"][:20], "the phone's zone")
+
+
+# The lock screen. Its screenshot counts only with the keyguard showing (not covered by an app, not
+# dreaming) on an awake screen, with the track on it: a sleep and a wake alone once gave the app's
+# own page under that name (#329's first 7-lock-screen.png). The decision is in pure functions, tried
+# offline by --self-test on synthetic dumps.
+#
+# The keyguard's flags as `dumpsys window policy` prints them across Android versions:
+# KeyguardServiceDelegate's `showing=` / `occluded=` / `dreaming=` lines, its KeyguardStateMonitor's
+# `mIsShowing=`, older PhoneWindowManager's `mShowingLockscreen=` / `mDreamingLockscreen=` /
+# `mKeyguardOccluded=`, and `isKeyguardShowing=` / `mKeyguardShowing=`. No known flag at all, or
+# flags that disagree, is not a lock screen.
+KEYGUARD_SHOWING = ("showing", "mIsShowing", "mShowingLockscreen", "isKeyguardShowing", "mKeyguardShowing")
+# True on any of these: something is over the keyguard (an activity shown when locked, a dream)
+KEYGUARD_COVERED = ("occluded", "dreaming", "mKeyguardOccluded", "mDreamingLockscreen")
+KEYGUARD_NAMED = re.compile(r"\b(mIsShowing|mShowingLockscreen|isKeyguardShowing|mKeyguardShowing|mKeyguardOccluded|mDreamingLockscreen)=(true|false)\b")
+SYSTEMUI = "com.android.systemui"
+
+
+def keyguard_flags(policy):
+    """[(flag, bool)] for every known keyguard flag in `dumpsys window policy`. The bare `showing=`,
+    `occluded=` and `dreaming=` are read only in the KeyguardServiceDelegate block (the lines
+    indented under its heading), not anywhere else they may appear."""
+    flags = []
+    m = re.search(r"^([ \t]*)KeyguardServiceDelegate[^\n]*\n((?:\1[ \t]+[^\n]*(?:\n|$))*)", policy, re.M)
+    if m:
+        for name, v in re.findall(r"^[ \t]*(showing|occluded|dreaming)=(true|false)[ \t]*$", m.group(2), re.M):
+            flags.append((name, v == "true"))
+    flags += [(name, v == "true") for name, v in KEYGUARD_NAMED.findall(policy)]
+    return flags
+
+
+def keyguard_state(policy):
+    """("showing" | "hidden" | "covered" | "unknown" | "conflict", why) from `dumpsys window policy`."""
+    flags = keyguard_flags(policy)
+    shows = [(n, v) for n, v in flags if n in KEYGUARD_SHOWING]
+    covered = [n for n, v in flags if n in KEYGUARD_COVERED and v]
+    said = ", ".join(f"{n}={str(v).lower()}" for n, v in flags)
+    if not shows:
+        return "unknown", f"no known keyguard flag in dumpsys window policy ({said or 'none at all'})"
+    if all(v for _, v in shows):
+        if covered:
+            return "covered", f"the keyguard is covered ({said})"
+        return "showing", f"keyguard showing ({said})"
+    if not any(v for _, v in shows):
+        return "hidden", f"no keyguard ({said})"
+    return "conflict", f"the keyguard flags disagree ({said})"
+
+
+def screen_awake(power):
+    """(True, why) when `dumpsys power` says the screen is awake (mWakefulness=Awake)."""
+    m = re.search(r"\bmWakefulness=(\w+)", power)
+    if not m:
+        return False, "no mWakefulness in dumpsys power"
+    return m.group(1) == "Awake", f"mWakefulness={m.group(1)}"
+
+
+def media_on_lock_screen(xml, title, pkg=PKG):
+    """(True, why) when the screen's uiautomator dump is System UI's with the track's title on it
+    (the lock screen's media player or the media notification) and none of the app's own nodes."""
+    nodes = re.findall(r"<node [^>]*>", xml)
+    if not nodes:
+        return False, "no nodes in the screen's dump"
+    if not title:
+        return False, "no track title to look for on the lock screen"
+    ours = [n for n in nodes if f'package="{pkg}"' in n]
+    if ours:
+        return False, f"the app is on screen ({len(ours)} of its nodes), not the lock screen"
+    want = title.casefold()
+    for n in nodes:
+        if f'package="{SYSTEMUI}"' not in n:
+            continue
+        for attr in re.findall(r'\s(?:text|content-desc)="([^"]*)"', n):
+            if want in html.unescape(attr).casefold():
+                return True, f"the track's title {title!r} in System UI's node {html.unescape(attr)!r}"
+    return False, f"the track's title {title!r} is not on the screen in System UI's nodes"
+
+
+def lock_screen_verdict(policy, power, xml, title, pkg=PKG):
+    """(True, why) only for an awake screen whose keyguard shows, uncovered, with the track on it."""
+    awake, why_awake = screen_awake(power)
+    if not awake:
+        return False, f"the screen is not awake ({why_awake})"
+    state, why_kg = keyguard_state(policy)
+    if state != "showing":
+        return False, why_kg
+    media, why_media = media_on_lock_screen(xml, title, pkg)
+    if not media:
+        return False, f"{why_kg}, but {why_media}"
+    return True, f"{why_awake}; {why_kg}; {why_media}"
+
+
+def screen_dumps():
+    """`dumpsys window policy`, `dumpsys power` and the screen's uiautomator dump, kept in the
+    artifact (keyguard-policy.txt, keyguard-power.txt, ui-lock-screen.xml)."""
+    policy = adb("shell", "dumpsys", "window", "policy")
+    power = adb("shell", "dumpsys", "power")
+    (out / "keyguard-policy.txt").write_text(policy)
+    (out / "keyguard-power.txt").write_text(power)
+    xml = ""
+    if screen_awake(power)[0]:
+        adb("shell", "uiautomator", "dump", "/sdcard/lock.xml", check=False)
+        xml = adb("exec-out", "cat", "/sdcard/lock.xml", check=False)
+        (out / "ui-lock-screen.xml").write_text(xml)
+    return policy, power, xml
+
+
+def lock_screen(title):
+    """The lock screen with the track on it, screenshot 7-lock-screen, then unlocked again. The
+    emulator's keyguard is enabled for it when `locksettings` says it is disabled (an insecure
+    keyguard, no credential), and disabled again after. Fails when no such lock screen shows."""
+    said = adb("shell", "locksettings", "get-disabled", check=False).strip()
+    enabled_here = said == "true"
+    if enabled_here:
+        adb("shell", "locksettings", "set-disabled", "false")
+        log("the emulator's keyguard was disabled (locksettings get-disabled: true): enabled for the lock screen")
+    elif said != "false":
+        log(f"locksettings get-disabled said {said!r}: the keyguard left as it is")
+    done = False
+    try:
+        last = "not looked at"
+        for attempt in (1, 2):
+            adb("shell", "input", "keyevent", "KEYCODE_SLEEP", check=False)
+            try:
+                until("the screen off", lambda: not screen_awake(adb("shell", "dumpsys", "power"))[0], timeout=15)
+            except RuntimeError as e:
+                log(f"{e} (try {attempt})")
+            time.sleep(1)
+            adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+
+            def ready():
+                nonlocal last
+                ok, last = lock_screen_verdict(*screen_dumps(), title)
+                return ok
+
+            try:
+                until("the lock screen with the track on it", ready, timeout=30, every=2)
+                break
+            except RuntimeError:
+                log(f"no lock screen with the track (try {attempt}): {last}")
+        else:
+            raise AssertionError(f"no lock screen with the track on it after sleep and wake (locksettings get-disabled: "
+                                 f"{said!r}): {last}; see keyguard-policy.txt, keyguard-power.txt, ui-lock-screen.xml")
+        shot("7-lock-screen")
+        ok, why = lock_screen_verdict(*screen_dumps(), title)
+        assert ok, f"the lock screen went while its screenshot was taken: {why}"
+        log(f"lock screen: {why}")
+        done = True
+    finally:
+        try:
+            unlock()
+        except Exception as e:  # noqa: BLE001 (the lock screen's own failure is the one reported)
+            if done:
+                raise
+            log(f"unlocking after the failure: {e}")
+        finally:
+            if enabled_here:
+                adb("shell", "locksettings", "set-disabled", "true", check=False)
+                log("the emulator's keyguard disabled again (as it was)")
+
+
+def unlock():
+    """The keyguard dismissed (no credential is set) and the app in front again, as before the lock."""
+    steps = [("wm", "dismiss-keyguard"), ("input", "keyevent", "82"), ("input", "swipe", "500", "1700", "500", "400", "300")]
+    n = [0]
+
+    def gone():
+        state, _ = keyguard_state(adb("shell", "dumpsys", "window", "policy"))
+        if state == "hidden":
+            return True
+        adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+        adb("shell", *steps[n[0] % len(steps)], check=False)
+        n[0] += 1
+        return False
+
+    try:
+        until("the keyguard dismissed", gone, timeout=30, every=2)
+    except RuntimeError:
+        raise AssertionError(f"the keyguard does not go away: {keyguard_state(adb('shell', 'dumpsys', 'window', 'policy'))[1]}") from None
+    adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
+    log("unlocked: the keyguard dismissed, the app in front again")
 
 
 def position(zid):
@@ -727,7 +907,101 @@ def run(node):
         lc.terminate()
 
 
+# --self-test: the lock-screen decision on SYNTHETIC samples, written here by hand in the formats
+# Android prints (not captured from a device or CI run). No adb, no emulator, no arguments.
+def _policy(showing, occluded="false", dreaming="false", monitor=None, indent="    "):
+    """A made-up `dumpsys window policy` tail with a KeyguardServiceDelegate block."""
+    i2 = indent + "  "
+    text = (f"WINDOW MANAGER POLICY STATE (dumpsys window policy)\n{indent}mSafeMode=false mSystemReady=true\n"
+            f"{indent}KeyguardServiceDelegate\n{i2}showing={showing}\n{i2}inputRestricted={showing}\n"
+            f"{i2}occluded={occluded}\n{i2}secure=false\n{i2}dreaming={dreaming}\n{i2}systemIsReady=true\n"
+            f"{i2}deviceHasKeyguard=true\n{i2}enabled=true\n{i2}screenState=SCREEN_STATE_ON\n"
+            f"{i2}interactiveState=INTERACTIVE_STATE_AWAKE\n")
+    if monitor is not None:
+        text += f"{i2}KeyguardStateMonitor\n{i2}  mIsShowing={monitor}\n{i2}  mSimSecure=false\n{i2}  mTrusted=false\n"
+    return text + f"{indent}mHomePressed=false\n"
+
+
+def _ui(*nodes):
+    """A made-up uiautomator dump: (package, resource-id, text, content-desc) per node."""
+    body = "".join(f'<node index="{k}" text="{t}" resource-id="{r}" class="android.widget.TextView" package="{p}" '
+                   f'content-desc="{d}" bounds="[0,{k * 100}][1080,{k * 100 + 90}]" />' for k, (p, r, t, d) in enumerate(nodes))
+    return f"<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation=\"0\">{body}</hierarchy>"
+
+
+SAMPLE_AWAKE = "POWER MANAGER (dumpsys power)\n  mWakefulness=Awake\n  mWakefulnessChanging=false\n"
+SAMPLE_ASLEEP = "POWER MANAGER (dumpsys power)\n  mWakefulness=Asleep\n  mWakefulnessChanging=false\n"
+SAMPLE_APP_HOME = _ui((PKG, "", "Home", ""), (PKG, "", "Nothing playing", ""), (PKG, "", "", "Library"))
+SAMPLE_SHADE = _ui((SYSTEMUI, f"{SYSTEMUI}:id/clock", "12:00", ""), (SYSTEMUI, f"{SYSTEMUI}:id/header_title", "Tone", ""),
+                   (SYSTEMUI, f"{SYSTEMUI}:id/header_artist", "This phone", ""), (SYSTEMUI, "", "", "Pause"),
+                   (SYSTEMUI, f"{SYSTEMUI}:id/clear_all", "Clear all", ""))
+SAMPLE_KEYGUARD_BARE = _ui((SYSTEMUI, f"{SYSTEMUI}:id/keyguard_status_view", "", ""), (SYSTEMUI, f"{SYSTEMUI}:id/lockscreen_clock_view", "12:00", ""),
+                           (SYSTEMUI, f"{SYSTEMUI}:id/keyguard_indication_text", "Swipe up to open", ""))
+SAMPLE_KEYGUARD_MEDIA = _ui((SYSTEMUI, f"{SYSTEMUI}:id/keyguard_status_view", "", ""), (SYSTEMUI, f"{SYSTEMUI}:id/lockscreen_clock_view", "12:00", ""),
+                            (SYSTEMUI, f"{SYSTEMUI}:id/header_title", "Tone", ""), (SYSTEMUI, f"{SYSTEMUI}:id/header_artist", "This phone", ""),
+                            (SYSTEMUI, "", "", "Pause"), (SYSTEMUI, f"{SYSTEMUI}:id/keyguard_indication_text", "Swipe up to open", ""))
+
+
+def self_test():
+    failed = []
+
+    def check(cond, what):
+        print(("ok   " if cond else "FAIL ") + what)
+        if not cond:
+            failed.append(what)
+
+    def verdict(policy, power, xml, title="Tone"):
+        return lock_screen_verdict(policy, power, xml, title)[0]
+
+    unlocked = _policy("false", monitor="false")
+    locked = _policy("true", monitor="true")
+    # The four the lock screen's screenshot turns on
+    check(not verdict(unlocked, SAMPLE_AWAKE, SAMPLE_APP_HOME), "REJECT: the app's Home page, unlocked (#329's first 7-lock-screen.png)")
+    check(not verdict(unlocked, SAMPLE_AWAKE, SAMPLE_SHADE), "REJECT: the notification shade with the track, no keyguard")
+    check(not verdict(locked, SAMPLE_AWAKE, SAMPLE_KEYGUARD_BARE), "REJECT: the keyguard without the track")
+    check(verdict(locked, SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA), "ACCEPT: the keyguard with the track on it")
+    # Fail closed
+    check(not verdict(_policy("true", occluded="true", monitor="true"), SAMPLE_AWAKE, SAMPLE_APP_HOME),
+          "REJECT: the keyguard covered by the app (occluded=true)")
+    check(not verdict(_policy("true", occluded="true", monitor="true"), SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA),
+          "REJECT: occluded=true, whatever the dump shows")
+    check(not verdict(_policy("true", dreaming="true", monitor="true"), SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA), "REJECT: dreaming over the keyguard")
+    check(not verdict(locked, SAMPLE_ASLEEP, SAMPLE_KEYGUARD_MEDIA), "REJECT: the screen asleep")
+    check(not verdict(locked, "POWER MANAGER\n  mScreenOn=?\n", SAMPLE_KEYGUARD_MEDIA), "REJECT: dumpsys power without mWakefulness")
+    check(not verdict("WINDOW MANAGER POLICY STATE\n    mSafeMode=false\n", SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA),
+          "REJECT: no known keyguard flag (an unknown format)")
+    check(not verdict(_policy("true", monitor="false"), SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA), "REJECT: keyguard flags that disagree")
+    check(not verdict(locked, SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA, title=""), "REJECT: no track title to look for")
+    check(not verdict(locked, SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA, title="Another track"), "REJECT: another title on the lock screen")
+    check(not verdict(locked, SAMPLE_AWAKE, ""), "REJECT: an empty screen dump")
+    check(not verdict(locked, SAMPLE_AWAKE, _ui((PKG, "", "Tone", ""))), "REJECT: the title only in the app's own nodes")
+    check(not verdict("    showing=true\n    occluded=false\n", SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA),
+          "REJECT: a bare showing=true outside the KeyguardServiceDelegate block")
+    # The other spellings
+    check(verdict(_policy("true"), SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA), "ACCEPT: KeyguardServiceDelegate showing=true alone")
+    check(verdict("  mShowingLockscreen=true mShowingDream=false mDreamingLockscreen=false\n", SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA),
+          "ACCEPT: the older mShowingLockscreen=true")
+    check(not verdict("  mShowingLockscreen=true mShowingDream=true mDreamingLockscreen=true\n", SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA),
+          "REJECT: the older mDreamingLockscreen=true")
+    check(verdict("  isKeyguardShowing=true\n", SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA), "ACCEPT: isKeyguardShowing=true")
+    check(not verdict("  mKeyguardShowing=false\n", SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA), "REJECT: mKeyguardShowing=false")
+    check(verdict(locked, SAMPLE_AWAKE, SAMPLE_KEYGUARD_MEDIA, title="tone"), "ACCEPT: the title in another case")
+    check(verdict(locked, SAMPLE_AWAKE, _ui((SYSTEMUI, "", "R&amp;B", ""), (SYSTEMUI, "", "Swipe up to open", "")), title="R&B"),
+          "ACCEPT: an XML-escaped title")
+    # What unlock() waits for
+    check(keyguard_state(unlocked)[0] == "hidden", "unlock: no keyguard is seen as hidden")
+    check(keyguard_state(locked)[0] == "showing", "unlock: the keyguard is seen as showing")
+    check(keyguard_state("")[0] == "unknown", "unlock: nothing known is not hidden")
+    if failed:
+        print(f"self-test FAILED: {len(failed)} check(s)")
+        return 1
+    print("self-test ok: the lock screen's screenshot is taken only on an awake, uncovered keyguard with the track on it")
+    return 0
+
+
 if __name__ == "__main__":
+    if SELF_TEST:
+        sys.exit(self_test())
     try:
         main()
     except Exception as e:
