@@ -711,9 +711,10 @@ pub(crate) async fn change(
 ) -> ApiResult<Person> {
     let key = valid_key(&key)?;
     let started = access_started(&s);
-    // An already listed person's revocation needn't wait for a homeserver invite lookup.
+    // An already listed person's revocation (Music off) needn't wait for a homeserver invite
+    // lookup. Every other change first turns used invites into people, as it always has.
     let mut r = load(&s);
-    if !r.people.iter().any(|p| p.key == key) {
+    if b.music != Some(false) || !r.people.iter().any(|p| p.key == key) {
         r = reconcile(&s).await?;
     }
     let Some(found) = r.people.iter().find(|p| p.key == key) else {
