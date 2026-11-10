@@ -705,7 +705,8 @@ def in_app_player(address, track):
     mark = len(logcat())
     said = re.findall(r"the page controls this zone zone=(\S+)", logcat())
     if not said or said[-1] != "browser":
-        pick('="This phone"', "the page's “This phone”")
+        # (the row's text starts with the name; "Playing on This phone: …" and "Move here: This phone" don't)
+        pick('="This phone', "the page's “This phone”")
         try:
             until("the page on “This phone”", lambda: "the page controls this zone zone=browser" in logcat()[mark:], timeout=20)
         except RuntimeError:
@@ -918,7 +919,7 @@ def run(node):
                 raise SystemExit(f"FAIL: the app cannot load the node's page ({err.group(1) if err else 'Webpage not available'})")
             return "Now playing" in nodes
 
-        def diagnose():
+        def page_diagnosis():
             """What the app shows, and whether the node still answers the runner."""
             try:
                 screen = " / ".join(t for t in re.findall(r'text="([^"]+)"', "\n".join(ui_nodes())) if t.strip())[:300]
@@ -943,7 +944,7 @@ def run(node):
                 try:
                     got = until(what, ready, timeout=90, every=3)
                 except RuntimeError as e:
-                    raise RuntimeError(f"{e}; {diagnose()}") from None
+                    raise RuntimeError(f"{e}; {page_diagnosis()}") from None
                 if got == "page":
                     return
                 kills = system_kills()
