@@ -50,6 +50,12 @@ pub struct Fake {
     pub list_started: tokio::sync::Notify,
     pub delete_started: tokio::sync::Notify,
     pub write_started: tokio::sync::Notify,
+    pub publication_gate: tokio::sync::RwLock<()>,
+    pub publication_started: tokio::sync::Notify,
+    pub collection_list_gate: tokio::sync::RwLock<()>,
+    pub collection_list_started: tokio::sync::Notify,
+    pub read_gate: tokio::sync::RwLock<()>,
+    pub read_started: tokio::sync::Notify,
     pub removal_gate: tokio::sync::RwLock<()>,
     pub remove_started: tokio::sync::Notify,
     pub remove_fails: AtomicBool,
@@ -170,6 +176,8 @@ impl PersonalHomeserver for Fake {
         Ok(())
     }
     async fn list(&self, key: &str, dir: &str, _expected: bool) -> Result<Vec<String>, PersonalError> {
+        self.collection_list_started.notify_one();
+        let _open = self.collection_list_gate.read().await;
         Self::moment().await;
         self.check(key, "list", dir)?;
         if self.list_fails.load(Ordering::SeqCst)
@@ -180,6 +188,8 @@ impl PersonalHomeserver for Fake {
         Ok(self.paths(key, dir))
     }
     async fn read(&self, key: &str, path: &str) -> Result<Option<Vec<u8>>, PersonalError> {
+        self.read_started.notify_one();
+        let _open = self.read_gate.read().await;
         Self::moment().await;
         self.check(key, "read", path)?;
         if self.unreadable.lock().unwrap().contains(path) {
@@ -195,6 +205,12 @@ impl PersonalHomeserver for Fake {
     async fn write(&self, key: &str, path: &str, body: &serde_json::Value) -> Result<(), PersonalError> {
         self.write_started.notify_one();
         let _open = self.gate.read().await;
+        let _publication = if path.starts_with("/pub/") {
+            self.publication_started.notify_one();
+            Some(self.publication_gate.read().await)
+        } else {
+            None
+        };
         Self::moment().await;
         self.check(key, "write", path)?;
         if self.rejects.lock().unwrap().contains(key) {

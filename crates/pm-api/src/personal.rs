@@ -57,13 +57,13 @@ tokio::task_local! {
     pub(crate) static AUTHENTICATED_ACCESS: u64;
 }
 
-fn request_started(s: &NodeState) -> u64 {
+pub(crate) fn request_started(s: &NodeState) -> u64 {
     AUTHENTICATED_ACCESS
         .try_with(|revision| *revision)
         .unwrap_or_else(|_| crate::people::access_started(s))
 }
 
-fn require_access(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
+pub(crate) fn require_access(s: &NodeState, key: &str, started: u64) -> Result<(), ApiError> {
     crate::people::access_current(s, key.trim_start_matches("pubky"), started)?;
     if !crate::people::may_use_music(s, key) {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "music access has ended"));
@@ -551,8 +551,7 @@ pub(crate) fn is_lost(s: &NodeState, key: &str) -> Result<bool, ApiError> {
 }
 
 /// Their homeserver refused the grant: nothing is tried until they approve the node again.
-pub(crate) async fn mark_lost(s: &NodeState, key: &str, why: &str) -> Result<(), ApiError> {
-    let started = request_started(s);
+pub(crate) async fn mark_lost(s: &NodeState, key: &str, why: &str, started: u64) -> Result<(), ApiError> {
     tracing::info!(%key, "a listener's homeserver refused the node: {why}");
     let mut c = load(s, key)?;
     c.lost = true;

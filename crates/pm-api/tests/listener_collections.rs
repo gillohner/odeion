@@ -2299,6 +2299,238 @@ async fn full_listings_rotate_past_pending_private_heads_with_held_public_heads(
 }
 
 #[tokio::test]
+async fn restore_during_collection_io_preserves_restored_intent_and_stops_old_work() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use futures_util::FutureExt;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    for operation in [
+        "list",
+        "read",
+        "replay",
+        "draft",
+        "publication",
+        "unshare",
+        "delete",
+        "refused-draft",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, fake, ann, _) = node(dir.path());
+        fake.connected.lock().unwrap().insert(ANN.to_string());
+        let app = router(s.clone());
+        let (_, shared) = create(&app, &ann, "Shared A", &[SONG_A]).await;
+        let shared_id = shared["summary"]["id"].as_str().unwrap().to_string();
+        let shared_at = format!("/v1/collections/{shared_id}");
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{shared_at}/visibility"),
+            Some(serde_json::json!({"public":true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (_, other) = create(&app, &ann, "Other A", &[SONG_B]).await;
+        let other_id = other["summary"]["id"].as_str().unwrap().to_string();
+        let mut old = stored_shelf(&s);
+        // B contains two accepted offline commands, including a privacy withdrawal that
+        // is absent from A. Restore must preserve these exact bytes, not just membership.
+        fake.down.store(true, Ordering::SeqCst);
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("{shared_at}/visibility"),
+            Some(serde_json::json!({"public":false})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (st, v) = call(
+            &app,
+            &ann,
+            "PUT",
+            &format!("/v1/collections/{other_id}"),
+            Some(serde_json::json!({"name":"Restored B", "uris":[SONG_C]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(pending_count(&s), 2);
+        let b = stored_shelf(&s);
+        assert!(b["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["id"] == shared_id.as_str()
+                && k["pending"] == true
+                && k["unshare"] == true
+                && k["public"] == false));
+        assert!(b["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["id"] == other_id.as_str()
+                && k["pending"] == true
+                && k["playlist"]["name"] == "Restored B"));
+        let shelf_key = format!("person.{ANN}.collections");
+        let copy_key = format!("person.{ANN}.bookmarks");
+        let copy = r#"{"items":[],"pending":[],"lost":false,"cleared":[]}"#;
+        s.library.lock().unwrap().set_setting(&copy_key, copy).unwrap();
+        let restored = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(&shelf_key)
+            .unwrap()
+            .unwrap();
+        let (backup, _) = pm_api::backup::make(&s, None).unwrap();
+        if operation == "replay" {
+            let k = old["items"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|k| k["id"] == shared_id.as_str())
+                .unwrap();
+            k["pending"] = true.into();
+            k["playlist"]["name"] = "Old queued publication".into();
+        }
+        store_shelf(&s, &old);
+        fake.down.store(false, Ordering::SeqCst);
+        if operation == "read" {
+            let good = fake.json(ANN, &newest(&fake, ANN, &shared_id).0);
+            remote_version(&fake, &shared_id, 60_000_000, &good, true);
+        }
+        if operation == "refused-draft" {
+            fake.refuse_draft_once.store(true, Ordering::SeqCst);
+        }
+        // Setup notifications cannot satisfy the upcoming gate. Every awaited event below
+        // is the next actual operation, with no timing assumption about scheduler progress.
+        for entered in [
+            &fake.collection_list_started,
+            &fake.read_started,
+            &fake.write_started,
+            &fake.publication_started,
+            &fake.remove_started,
+        ] {
+            while entered.notified().now_or_never().is_some() {}
+        }
+        fake.calls.lock().unwrap().clear();
+        let hold = match operation {
+            "list" => fake.collection_list_gate.write().await,
+            "read" => fake.read_gate.write().await,
+            "publication" => fake.publication_gate.write().await,
+            "unshare" | "delete" => fake.removal_gate.write().await,
+            _ => fake.gate.write().await,
+        };
+        let (a, token, at) = (app.clone(), ann.clone(), shared_at.clone());
+        let inflight = tokio::spawn(async move {
+            match operation {
+                "list" | "read" | "replay" => call(&a, &token, "GET", "/v1/collections", None).await,
+                "unshare" => {
+                    call(
+                        &a,
+                        &token,
+                        "PUT",
+                        &format!("{at}/visibility"),
+                        Some(serde_json::json!({"public":false})),
+                    )
+                    .await
+                }
+                "delete" => call(&a, &token, "DELETE", &at, None).await,
+                _ => {
+                    call(
+                        &a,
+                        &token,
+                        "PUT",
+                        &at,
+                        Some(serde_json::json!({"name":"Old in-flight edit"})),
+                    )
+                    .await
+                }
+            }
+        });
+        let entered = match operation {
+            "list" => &fake.collection_list_started,
+            "read" => &fake.read_started,
+            "publication" => &fake.publication_started,
+            "unshare" | "delete" => &fake.remove_started,
+            _ => &fake.write_started,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        let calls_before_release = fake.calls.lock().unwrap().len();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/restore")
+            .header("authorization", format!("Bearer {OWNER}"))
+            .header("content-type", "application/octet-stream")
+            .body(Body::from(backup))
+            .unwrap();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(10), app.clone().oneshot(request))
+            .await
+            .expect("restore must not wait for collection homeserver I/O")
+            .unwrap();
+        let status = response.status();
+        let report = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&report));
+        assert!(pm_api::people::may_use_music(&s, ANN));
+        assert_eq!(
+            s.library.lock().unwrap().get_setting(&shelf_key).unwrap(),
+            Some(restored.clone())
+        );
+        assert!(
+            !inflight.is_finished(),
+            "the actual remote operation is still held"
+        );
+        drop(hold);
+        let (st, v) = tokio::time::timeout(std::time::Duration::from_secs(10), inflight)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(st, StatusCode::CONFLICT, "{operation}: {v}");
+        assert!(
+            v["error"].as_str().unwrap().contains("music access changed"),
+            "{v}"
+        );
+        assert_ne!(
+            v["needs_connect"], true,
+            "stale commands must not request browser replay"
+        );
+        assert_eq!(
+            s.library.lock().unwrap().get_setting(&shelf_key).unwrap(),
+            Some(restored)
+        );
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(&copy_key)
+                .unwrap()
+                .as_deref(),
+            Some(copy)
+        );
+        assert_eq!(
+            fake.calls.lock().unwrap().len(),
+            calls_before_release + 1,
+            "only the already-issued call may finish; no stale follow-up or replay"
+        );
+        // A newly authenticated request can still apply B above any already-issued version.
+        fake.calls.lock().unwrap().clear();
+        let (st, list) = call(&router(s.clone()), &ann, "GET", "/v1/collections", None).await;
+        assert_eq!(st, StatusCode::OK, "{operation}: {list}");
+        assert!(fake.calls.lock().unwrap().len() <= 32);
+        assert_eq!(pending_count(&s), 0);
+        assert_eq!(names(&list), vec!["Restored B", "Shared A"]);
+        assert!(fake.paths(ANN, &format!("{PUBLISHED}{shared_id}/")).is_empty());
+        assert_eq!(item_uris(&newest(&fake, ANN, &shared_id).1), vec![SONG_A]);
+        assert_eq!(newest(&fake, ANN, &other_id).1["name"], "Restored B");
+        assert_eq!(item_uris(&newest(&fake, ANN, &other_id).1), vec![SONG_C]);
+    }
+}
+
+#[tokio::test]
 async fn unreadable_shelves_preserve_pending_edits_and_privacy_withdrawal() {
     for malformed in [false, true] {
         let dir = tempfile::tempdir().unwrap();

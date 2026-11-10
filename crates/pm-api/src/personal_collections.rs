@@ -46,15 +46,22 @@ const READS_PER_REQUEST: usize = 16;
 const CALLS_PER_REQUEST: usize = 32;
 const REQUEST_TIME: Duration = Duration::from_secs(8);
 
-struct Work {
+struct Work<'a> {
+    state: &'a NodeState,
+    key: &'a str,
+    /// The authenticated revision, captured before waiting for the person operation lock.
+    started: u64,
     left: usize,
     reads: usize,
     deadline: tokio::time::Instant,
 }
 
-impl Work {
-    fn new() -> Self {
+impl<'a> Work<'a> {
+    fn new(state: &'a NodeState, key: &'a str, started: u64) -> Self {
         Self {
+            state,
+            key,
+            started,
             left: CALLS_PER_REQUEST,
             reads: READS_PER_REQUEST,
             deadline: tokio::time::Instant::now() + REQUEST_TIME,
@@ -65,24 +72,31 @@ impl Work {
         self.left > 0 && tokio::time::Instant::now() < self.deadline
     }
 
+    /// Access failures escape the operation; backend failures retain their offline/retry
+    /// meaning. Keeping them separate prevents a stale revision being treated as a delay.
     async fn call<T>(
         &mut self,
         f: impl Future<Output = Result<T, PersonalError>>,
-    ) -> Result<T, PersonalError> {
+    ) -> Result<Result<T, PersonalError>, ApiError> {
+        personal::require_access(self.state, self.key, self.started)?;
         if !self.available() {
-            return Err(PersonalError::Unreachable(
+            return Ok(Err(PersonalError::Unreachable(
                 "collection work will continue on the next request".into(),
-            ));
+            )));
         }
         self.left -= 1;
-        tokio::time::timeout_at(self.deadline, f)
+        let result = tokio::time::timeout_at(self.deadline, f)
             .await
             .unwrap_or_else(|_| {
                 self.left = 0;
                 Err(PersonalError::Unreachable(
                     "collection request deadline reached".into(),
                 ))
-            })
+            });
+        // A completed call cannot be undone. Reject its stale result before any further
+        // remote call, error handling that writes a grant flag, or local checkpoint.
+        personal::require_access(self.state, self.key, self.started)?;
+        Ok(result)
     }
 
     async fn read(
@@ -90,11 +104,12 @@ impl Work {
         b: &dyn PersonalHomeserver,
         key: &str,
         path: &str,
-    ) -> Result<Option<Vec<u8>>, PersonalError> {
+    ) -> Result<Result<Option<Vec<u8>>, PersonalError>, ApiError> {
+        personal::require_access(self.state, self.key, self.started)?;
         if self.reads == 0 {
-            return Err(PersonalError::Unreachable(
+            return Ok(Err(PersonalError::Unreachable(
                 "collection downloads will continue on the next request".into(),
-            ));
+            )));
         }
         self.reads -= 1;
         self.call(b.read(key, path)).await
@@ -272,18 +287,17 @@ fn load(s: &NodeState, key: &str) -> Result<Shelf, ApiError> {
     })
 }
 
-fn save(s: &NodeState, key: &str, sh: &Shelf) -> Result<(), ApiError> {
+async fn save(s: &NodeState, key: &str, sh: &Shelf, started: u64) -> Result<(), ApiError> {
     let encoded = serde_json::to_string(sh).expect("serializes");
     if encoded.len() > MAX_SHELF_BYTES {
         return Err(shelf_full());
     }
+    // Restore invalidates the revision and replaces the database under this same guard.
+    // Every acceptance, progress checkpoint and final save must commit on that boundary,
+    // even if the restored roster still enables this person. No network work holds it.
+    let _roster = s.roster.lock().await;
+    personal::require_access(s, key, started)?;
     let lib = s.library.lock().expect("library poisoned");
-    // Removed (People › Remove) while this request waited on their homeserver: nothing of
-    // theirs comes back. Checked under the same hold as the write, so a removal can't land
-    // between the two
-    if !crate::people::listed_for_music(&lib, key.trim_start_matches("pubky")) {
-        return Ok(());
-    }
     lib.set_setting(&shelf_key(key), &encoded)?;
     Ok(())
 }
@@ -456,7 +470,7 @@ async fn push(
     id: &str,
     remote: &Remote,
     held: Option<Held>,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<Pushed, ApiError> {
     let mut k = sh
         .items
@@ -477,7 +491,7 @@ async fn push(
         if replace(sh, k.clone()).is_err() {
             return Ok(Pushed::Full);
         }
-        save(s, key, sh)?;
+        save(s, key, sh, work.started).await?;
         Some(prepared)
     } else {
         None
@@ -491,17 +505,17 @@ async fn push(
             if !crate::people::may_use_music(s, key) {
                 return Ok(Pushed::Waiting(PersonalError::NoGrant));
             }
-            if let Err(e) = work.call(b.remove(key, &path)).await {
+            if let Err(e) = work.call(b.remove(key, &path)).await? {
                 return Ok(Pushed::Waiting(e));
             }
             k.versions.retain(|p| p != &path);
             replace(sh, k.clone())?;
-            save(s, key, sh)?;
+            save(s, key, sh, work.started).await?;
         }
     }
     if k.deleted {
         sh.items.retain(|x| x.id != id);
-        save(s, key, sh)?;
+        save(s, key, sh, work.started).await?;
         return Ok(Pushed::Done);
     }
     if held.is_some() {
@@ -513,40 +527,40 @@ async fn push(
         if !crate::people::may_use_music(s, key) {
             return Ok(Pushed::Waiting(PersonalError::NoGrant));
         }
-        if let Err(e) = work.call(b.write(key, &path, &body)).await {
+        if let Err(e) = work.call(b.write(key, &path, &body)).await? {
             return Ok(Pushed::Waiting(e));
         }
         k.head = writing.edit.clone();
         k.writing.as_mut().expect("prepared write").drafted = true;
         replace(sh, k.clone())?;
-        save(s, key, sh)?;
+        save(s, key, sh, work.started).await?;
     }
     if let Some((dest, body)) = publication {
         if !writing.published {
             if !crate::people::may_use_music(s, key) {
                 return Ok(Pushed::Waiting(PersonalError::NoGrant));
             }
-            if let Err(e) = work.call(b.write(key, &dest, &body)).await {
+            if let Err(e) = work.call(b.write(key, &dest, &body)).await? {
                 return Ok(Pushed::Waiting(e));
             }
             k.writing.as_mut().expect("prepared write").published = true;
             replace(sh, k.clone())?;
-            save(s, key, sh)?;
+            save(s, key, sh, work.started).await?;
         }
     }
     k.pending = false;
     k.unshare = false;
     k.writing = None;
     replace(sh, k)?;
-    save(s, key, sh)?;
+    save(s, key, sh, work.started).await?;
     Ok(Pushed::Done)
 }
 
 /// What a homeserver answer means for a read: a refusal marks the grant lost.
-async fn read_outcome(s: &NodeState, key: &str, e: PersonalError) -> Result<bool, ApiError> {
+async fn read_outcome(s: &NodeState, key: &str, e: PersonalError, started: u64) -> Result<bool, ApiError> {
     match e {
         PersonalError::Refused(m) => {
-            personal::mark_lost(s, key, &m).await?;
+            personal::mark_lost(s, key, &m, started).await?;
             Ok(false)
         }
         _ => Ok(true),
@@ -585,7 +599,7 @@ async fn observe(
     id: &str,
     remote: &Remote,
     force: bool,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<Caught, ApiError> {
     let mut caught = Caught::default();
     let old = sh.items.iter().find(|k| k.id == id).cloned();
@@ -637,7 +651,7 @@ async fn observe(
         if !needs_read(head) {
             continue;
         }
-        let bytes = match work.read(b, key, &head.path).await {
+        let bytes = match work.read(b, key, &head.path).await? {
             Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 caught.stale = true;
@@ -648,7 +662,7 @@ async fn observe(
                 continue;
             }
             Err(e) => {
-                caught.stale = read_outcome(s, key, e).await?;
+                caught.stale = read_outcome(s, key, e, work.started).await?;
                 return Ok(caught);
             }
         };
@@ -727,12 +741,18 @@ async fn list_one(
     key: &str,
     id: &str,
     expected: (bool, bool),
-    work: &mut Work,
-) -> Result<Remote, PersonalError> {
+    work: &mut Work<'_>,
+) -> Result<Result<Remote, PersonalError>, ApiError> {
     let dir = |root| format!("{}{id}/", v1::posts_dir(root, v1::SOCIAL_NAMESPACE));
-    let private = v1::heads(work.call(b.list(key, &dir(v1::Root::Priv), expected.0)).await?).remove(id);
-    let public = v1::heads(work.call(b.list(key, &dir(v1::Root::Pub), expected.1)).await?).remove(id);
-    Ok(Remote { private, public })
+    let private = match work.call(b.list(key, &dir(v1::Root::Priv), expected.0)).await? {
+        Ok(paths) => v1::heads(paths).remove(id),
+        Err(e) => return Ok(Err(e)),
+    };
+    let public = match work.call(b.list(key, &dir(v1::Root::Pub), expected.1)).await? {
+        Ok(paths) => v1::heads(paths).remove(id),
+        Err(e) => return Ok(Err(e)),
+    };
+    Ok(Ok(Remote { private, public }))
 }
 
 async fn catch_up_one(
@@ -741,17 +761,22 @@ async fn catch_up_one(
     key: &str,
     sh: &mut Shelf,
     id: &str,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<(Caught, Remote), ApiError> {
     let expected = sh.items.iter().find(|k| k.id == id).map_or((false, false), |k| {
         (!k.pending && !k.versions.is_empty(), !k.pending && k.public)
     });
-    let remote = match list_one(b, key, id, expected, work).await {
+    let remote = match list_one(b, key, id, expected, work).await? {
         Ok(r) => r,
-        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e).await?), Remote::default())),
+        Err(e) => {
+            return Ok((
+                Caught::stale(read_outcome(s, key, e, work.started).await?),
+                Remote::default(),
+            ))
+        }
     };
     let caught = observe(s, b, key, sh, id, &remote, true, work).await?;
-    save(s, key, sh)?;
+    save(s, key, sh, work.started).await?;
     Ok((caught, remote))
 }
 
@@ -778,12 +803,12 @@ async fn replay(
     id: &str,
     remote: &Remote,
     caught: &mut Caught,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<(), ApiError> {
     if !sh.items.iter().any(|k| k.id == id && k.pending) {
         return Ok(());
     }
-    save(s, key, sh)?;
+    save(s, key, sh, work.started).await?;
     match push(s, b, key, sh, id, remote, caught.held_back.get(id).copied(), work).await? {
         Pushed::Done | Pushed::Held => {}
         Pushed::Full => {
@@ -798,9 +823,9 @@ async fn replay(
             let read = observe(s, b, key, sh, id, remote, true, work).await?;
             caught.stale |= read.stale;
             caught.held_back.extend(read.held_back);
-            save(s, key, sh)?;
+            save(s, key, sh, work.started).await?;
         }
-        Pushed::Waiting(e) => caught.stale |= read_outcome(s, key, e).await?,
+        Pushed::Waiting(e) => caught.stale |= read_outcome(s, key, e, work.started).await?,
     }
     Ok(())
 }
@@ -814,16 +839,21 @@ async fn refresh(
     sh: &mut Shelf,
     first: Option<&str>,
     editing: bool,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<(Caught, HashMap<String, Remote>), ApiError> {
     let had = sh.items.iter().any(|k| !k.pending && !k.versions.is_empty());
     let had_public = sh.items.iter().any(|k| !k.pending && k.public);
     let private = match work
         .call(b.list(key, &v1::posts_dir(v1::Root::Priv, v1::SOCIAL_NAMESPACE), had))
-        .await
+        .await?
     {
         Ok(paths) => v1::heads(paths),
-        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e).await?), HashMap::new())),
+        Err(e) => {
+            return Ok((
+                Caught::stale(read_outcome(s, key, e, work.started).await?),
+                HashMap::new(),
+            ))
+        }
     };
     let public = match work
         .call(b.list(
@@ -831,10 +861,15 @@ async fn refresh(
             &v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE),
             had_public,
         ))
-        .await
+        .await?
     {
         Ok(paths) => v1::heads(paths),
-        Err(e) => return Ok((Caught::stale(read_outcome(s, key, e).await?), HashMap::new())),
+        Err(e) => {
+            return Ok((
+                Caught::stale(read_outcome(s, key, e, work.started).await?),
+                HashMap::new(),
+            ))
+        }
     };
     let heads: std::collections::HashSet<&str> = private
         .values()
@@ -890,7 +925,7 @@ async fn refresh(
             public: public.get(&id).cloned(),
         };
         if pending.contains_key(&id) {
-            rotate_pending(s, key, sh, &id)?;
+            rotate_pending(s, key, sh, &id, work.started).await?;
         }
         // Work::read charges actual downloads. Known held heads cost no read allowance,
         // so unrelated or unrepresentable posts cannot starve older valid collections.
@@ -906,18 +941,24 @@ async fn refresh(
             break;
         }
     }
-    save(s, key, sh)?;
+    save(s, key, sh, work.started).await?;
     Ok((caught, remotes))
 }
 
-fn rotate_pending(s: &NodeState, key: &str, sh: &mut Shelf, id: &str) -> Result<(), ApiError> {
+async fn rotate_pending(
+    s: &NodeState,
+    key: &str,
+    sh: &mut Shelf,
+    id: &str,
+    started: u64,
+) -> Result<(), ApiError> {
     // The stored order is a round-robin queue (the UI sorts by playlist timestamps).
     // Move an attempted entry before awaiting: budget exhaustion or cancellation must
     // leave the next request a new starting point. Reordering adds no shelf metadata.
     let i = sh.items.iter().position(|k| k.id == id).expect("pending item");
     let k = sh.items.remove(i);
     sh.items.push(k);
-    save(s, key, sh)
+    save(s, key, sh, started).await
 }
 
 async fn drain_one_by_one(
@@ -926,7 +967,7 @@ async fn drain_one_by_one(
     key: &str,
     sh: &mut Shelf,
     skip: Option<&str>,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<(), ApiError> {
     let ids: Vec<String> = sh
         .items
@@ -940,7 +981,7 @@ async fn drain_one_by_one(
             sh.behind = true;
             break;
         }
-        rotate_pending(s, key, sh, &id)?;
+        rotate_pending(s, key, sh, &id, work.started).await?;
         let (mut caught, remote) = catch_up_one(s, b, key, sh, &id, work).await?;
         if caught.stale || personal::is_lost(s, key)? {
             break;
@@ -1012,21 +1053,22 @@ fn listener(c: &Caller) -> Option<String> {
 
 /// Their copy, refreshed from their homeserver when it answers; `None` when they haven't
 /// connected it (theirs aren't known here then).
-async fn read(s: &NodeState, key: &str) -> Result<Option<Shelf>, ApiError> {
+async fn read(s: &NodeState, key: &str, started: u64) -> Result<Option<Shelf>, ApiError> {
+    personal::require_access(s, key, started)?;
     let b = personal::backend(s);
     if !b.connected(key) {
         return Ok(None);
     }
     let mut sh = load(s, key)?;
     bound_existing(&mut sh, None)?;
-    let mut work = Work::new();
+    let mut work = Work::new(s, key, started);
     if !personal::is_lost(s, key)? {
         let (caught, _) = refresh(s, b.as_ref(), key, &mut sh, None, false, &mut work).await?;
         sh.behind = caught.stale;
         if caught.stale && !personal::is_lost(s, key)? {
             drain_one_by_one(s, b.as_ref(), key, &mut sh, None, &mut work).await?;
         }
-        save(s, key, &sh)?;
+        save(s, key, &sh, work.started).await?;
     }
     Ok(Some(sh))
 }
@@ -1043,9 +1085,11 @@ async fn change(
     id: Option<&str>,
     edit: impl FnOnce(&Library, Option<Kept>) -> Result<Kept, ApiError>,
 ) -> Result<Response, ApiError> {
+    let started = personal::request_started(s);
     let b = personal::backend(s);
     let lock = personal::person_lock(key);
     let _one = lock.lock().await;
+    personal::require_access(s, key, started)?;
     if !b.connected(key) {
         return Ok(personal::needs_connect(false));
     }
@@ -1058,7 +1102,7 @@ async fn change(
     if !recovering {
         sh = bounded;
     }
-    let mut work = Work::new();
+    let mut work = Work::new(s, key, started);
     // The target's old queued publication must never precede this request's newer intent.
     // Refresh validates it but replays nothing until the new edit has been saved durably.
     // Protected legacy intent may itself exceed today's budget. Let an explicit reducing
@@ -1079,7 +1123,7 @@ async fn change(
         }
     }
     if !recovering {
-        save(s, key, &sh)?;
+        save(s, key, &sh, work.started).await?;
     }
     if personal::is_lost(s, key)? {
         return Ok(personal::needs_connect(true));
@@ -1164,7 +1208,7 @@ async fn change(
         }
     }
     replace(&mut sh, k.clone())?;
-    save(s, key, &sh)?;
+    save(s, key, &sh, work.started).await?;
     let remote = remotes.remove(&k.id).unwrap_or_default();
     // An existing collection waits if it couldn't be listed/read first. A new collection has
     // no unseen head to overwrite. All remaining work uses the SAME deadline/call allowance.
@@ -1179,13 +1223,13 @@ async fn change(
                 sh.behind = true;
             }
             Pushed::Waiting(PersonalError::Refused(m)) => {
-                personal::mark_lost(s, key, &m).await?;
+                personal::mark_lost(s, key, &m, work.started).await?;
             }
             Pushed::Waiting(PersonalError::Rejected(m)) => {
                 if !k.deleted && !k.unshare {
                     discard_rejected(&mut sh, &k.id);
                 }
-                save(s, key, &sh)?;
+                save(s, key, &sh, work.started).await?;
                 return Err(ApiError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     format!("Your homeserver won't keep this collection: {m}"),
@@ -1199,7 +1243,7 @@ async fn change(
     if !recovering && work.available() && !personal::is_lost(s, key)? {
         drain_one_by_one(s, b.as_ref(), key, &mut sh, Some(&k.id), &mut work).await?;
     }
-    save(s, key, &sh)?;
+    save(s, key, &sh, work.started).await?;
     if k.deleted {
         return Ok(StatusCode::NO_CONTENT.into_response());
     }
@@ -1242,9 +1286,10 @@ pub(crate) async fn list(
     let Some(key) = listener(&c) else {
         return playlists::list(State(s)).await;
     };
+    let started = personal::request_started(&s);
     let lock = personal::person_lock(&key);
     let _one = lock.lock().await;
-    let Some(sh) = read(&s, &key).await? else {
+    let Some(sh) = read(&s, &key, started).await? else {
         return Ok(Json(Vec::new()));
     };
     let lib = s.library.lock().expect("library poisoned");
@@ -1267,9 +1312,10 @@ pub(crate) async fn get(
     let Some(key) = listener(&c) else {
         return playlists::get(State(s), Path(id)).await;
     };
+    let started = personal::request_started(&s);
     let lock = personal::person_lock(&key);
     let _one = lock.lock().await;
-    let sh = read(&s, &key).await?.ok_or_else(|| not_found(&id))?;
+    let sh = read(&s, &key, started).await?.ok_or_else(|| not_found(&id))?;
     let k = sh
         .items
         .iter()
@@ -1468,6 +1514,7 @@ pub(crate) async fn play(
     let Some(key) = listener(&c) else {
         return playlists::play(State(s), Path(id), Json(body)).await;
     };
+    personal::require_access(&s, &key, personal::request_started(&s))?;
     if !crate::accounts::may_use_zone(&s, &c, &body.zone) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -1529,6 +1576,101 @@ const RESERVED: &[&str] = &["from-queue", "import"];
 mod tests {
     use super::*;
     use axum::http::Method;
+
+    #[tokio::test]
+    async fn a_shelf_commit_rechecks_its_revision_after_waiting_for_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = crate::tests::state(dir.path(), Some("fixture-owner")).await;
+        let key = "b".repeat(52);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                "people",
+                &serde_json::json!({"people":[
+                    {"key":key, "access":"music", "music_enabled":true, "added_at":1}
+                ]})
+                .to_string(),
+            )
+            .unwrap();
+        let started = personal::request_started(&s);
+        let old = Shelf::default();
+        let roster = s.roster.lock().await;
+        let committing = save(&s, &key, &old, started);
+        tokio::pin!(committing);
+        assert!(futures_util::poll!(&mut committing).is_pending());
+        crate::people::restored_access(&s);
+        let restored = r#"{"items":[],"other":["restored-held-head"],"too_big":[],"behind":true}"#;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(&shelf_key(&key), restored)
+            .unwrap();
+        drop(roster);
+        assert_eq!(committing.await.unwrap_err().status, StatusCode::CONFLICT);
+        assert_eq!(
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting(&shelf_key(&key))
+                .unwrap()
+                .as_deref(),
+            Some(restored)
+        );
+    }
+
+    #[tokio::test]
+    async fn collection_requests_waiting_for_the_person_lock_keep_their_original_revision() {
+        for operation in ["list", "get", "change"] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = crate::tests::state(dir.path(), Some("fixture-owner")).await;
+            let key = "c".repeat(52);
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    "people",
+                    &serde_json::json!({"people":[
+                        {"key":key, "access":"music", "music_enabled":true, "added_at":1}
+                    ]})
+                    .to_string(),
+                )
+                .unwrap();
+            let lock = personal::person_lock(&key);
+            let held = lock.lock().await;
+            let calling = async {
+                let caller = Caller {
+                    role: Role::Listener,
+                    key: Some(key.clone()),
+                };
+                match operation {
+                    "list" => list(State(s.clone()), Extension(caller))
+                        .await
+                        .map(|v| v.into_response()),
+                    "get" => get(State(s.clone()), Extension(caller), Path("one".into()))
+                        .await
+                        .map(|v| v.into_response()),
+                    _ => {
+                        change(&s, &key, None, |_, _| {
+                            panic!("a stale command must not be applied")
+                        })
+                        .await
+                    }
+                }
+            };
+            tokio::pin!(calling);
+            assert!(futures_util::poll!(&mut calling).is_pending());
+            let roster = s.roster.lock().await;
+            crate::people::restored_access(&s);
+            drop(roster);
+            drop(held);
+            assert_eq!(
+                calling.await.unwrap_err().status,
+                StatusCode::CONFLICT,
+                "{operation}"
+            );
+        }
+    }
 
     #[test]
     fn a_listener_reaches_only_their_own_collection_routes() {
