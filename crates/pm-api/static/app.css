@@ -1305,20 +1305,20 @@ code.path { font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .set-fold[open] > summary::after { transform: rotate(225deg); }
 .set-fold:not([open]) > .set-rows { display: none; }
 /* Tag chips: 40 px to touch on phones and touch screens (UX sweep 2026-11-01 S4) */
+/* Tag chips (tagChip, pubky.app's): × and move a finger-sized target each, the chip a little wider for them */
 html[data-shell="phone"] :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
 html[data-shell="phone"] .ptag-add { width: 40px; }
-/* × and move: a finger-sized target each, the chip a little wider for them */
 html[data-shell="phone"] .ptag .chipx { min-width: 40px; }
-html[data-shell="phone"] span.ptag { padding-right: 0; gap: 0; }
-html[data-shell="phone"] span.ptag .chiplink { padding-right: 4px; }
-html[data-shell="phone"] .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; }
+html[data-shell="phone"] span.ptag { padding-right: 0; gap: 0; min-height: 42px; }
+html[data-shell="phone"] span.ptag .chiplink { padding-right: 4px; min-width: 40px; justify-content: center; }
+html[data-shell="phone"] .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; min-height: 40px; }
 @media (pointer: coarse) {
   :is(.ptag, .tagfaces, .tgroup-name) { min-height: 40px; height: auto; }
   .ptag-add { width: 40px; }
   .ptag .chipx { min-width: 40px; }
-  span.ptag { padding-right: 0; gap: 0; }
-  span.ptag .chiplink { padding-right: 4px; }
-  .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; }
+  span.ptag { padding-right: 0; gap: 0; min-height: 42px; }
+  span.ptag .chiplink { padding-right: 4px; min-width: 40px; justify-content: center; }
+  .ptag :is(.chiplink, .chipx) { align-self: stretch; height: auto; min-height: 40px; }
 }
 .tag-hint { margin: 0; }
 .switch { appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; flex: none; margin: 0 4px; border-radius: var(--r-pill); background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: background var(--dur-base); }
@@ -1401,9 +1401,9 @@ html[data-shell="phone"] .track .row-actions .icon-btn { width: 40px; height: 40
 html[data-shell="phone"] .q-actions .icon-btn { width: 40px; height: 40px; }
 html[data-shell="phone"] .btn.sm { min-height: 40px; }
 html[data-shell="phone"] .porder-grip { padding: 12px; margin: -8px 0; }
-html[data-shell="phone"] :is(.tagrow .input, .taginput) { min-height: 40px; }
+html[data-shell="phone"] .taginput { min-height: 40px; }
 @media (pointer: coarse) {
-  .chip, .btn.sm, .tagrow .input, .taginput { min-height: 40px; }
+  .chip, .btn.sm, .taginput { min-height: 40px; }
   .track .row-actions .icon-btn { width: 40px; height: 40px; flex: none; }
   .track .row-actions .icon-btn:not([data-act="more"]):not(.heart.on) { display: none; }
   .q-actions .icon-btn, .srow > .icon-btn, .menu-btn, .volbtn { width: 40px; height: 40px; }
@@ -1917,6 +1917,8 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 
 /* Your library: tabs under the head, a one-line status, file rows with their size */
 .libtabs { margin: 10px 0 14px; }
+/* The Library's section tabs and Add music entry points share a comfortable phone target. */
+html[data-shell="phone"] :is(.libtabs .chip, #libadd, [data-addmusic]) { min-height: 44px; }
 .libstatus + .muted.small { margin: -6px 0 14px; }
 .libstatus { font-size: var(--fs-sm); color: var(--fg-2); margin: 0 0 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 .libstatus .spin { margin-right: 4px; }
