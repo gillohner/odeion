@@ -212,8 +212,9 @@ pub struct NodeState {
     /// Pull outputs by stream name (they are also in `outputs`).
     pub pulls: Mutex<HashMap<String, Arc<pm_zones::outputs::PullOutput>>>,
     /// Held while the people roster is read, changed and stored (`people::update`), so no change
-    /// is made to a copy older than one stored meanwhile.
-    pub(crate) roster: tokio::sync::Mutex<()>,
+    /// is made to a copy older than one stored meanwhile. Public so tests can stand for a change
+    /// under way.
+    pub roster: tokio::sync::Mutex<()>,
     /// Removals whose roster change has landed but whose cleanup is still running. Restore
     /// waits for these without holding the roster lock, so it cannot re-add someone midway.
     pub(crate) removing_people: Mutex<std::collections::HashSet<String>>,

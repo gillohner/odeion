@@ -1248,6 +1248,16 @@
   // External resources that do not answer (Pinakes, the homeserver, a service), or that need a
   // change (the API token): one quiet line under
   // the node status, only when something is wrong; the library keeps playing without them.
+  // Help "?" in the top bar: Report a problem and My reports (feedback.js), for the owner and
+  // listeners, mounted once the node answers. The version comes from the node, once.
+  let helpMounted = false;
+  const mountHelp = () => {
+    if (helpMounted || !window.PM_FEEDBACK || !state.token) return;
+    helpMounted = true;
+    let version = '';
+    api('GET', '/info').then((i) => { version = (i && i.version) || ''; }).catch(() => {});
+    PM_FEEDBACK.mount($('#help'), { token: () => state.token, view: () => state.view, shell: shellMode, version: () => version });
+  };
   let healthTimer = null;
   const checkHealth = async () => {
     clearTimeout(healthTimer); healthTimer = setTimeout(checkHealth, 60000);
@@ -1280,6 +1290,7 @@
   const NODE_REFUSED = 'missing or wrong bearer token';
   const forgetAccount = () => {
     const mine = state.token; state.token = '';
+    if (window.PM_FEEDBACK) PM_FEEDBACK.reset(); // a draft or open report goes with the sign-in
     try {
       // Another tab may have logged in again meanwhile: its token stays
       if (localStorage.getItem('pm.token') !== mine) return;
@@ -7840,7 +7851,7 @@
     state.zones = Object.fromEntries(ev.zones.map((z) => [z.id, z])); state.zonesSeen = true; ensureZone(); renderZoneName();
     const wasUp = link.up;
     link.up = true; link.ever = true; link.attempt = 0; link.downSince = 0; clearInterval(link.tick);
-    setConn('ok', nodeLabel()); checkHealth(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
+    setConn('ok', nodeLabel()); checkHealth(); mountHelp(); if (isOwner()) findJob(); if (state.browserIndex < 0 && state.browserQueue.length) restoreBrowserQueue(); if (isOwner()) api('GET', '/node/settings').then((ns) => { const was = state.devOutputs; state.devOutputs = !!ns.dev_outputs; if (was !== state.devOutputs && state.view === 'zones') render(); }).catch(() => {});
     if (!wasUp) { clearInterval(link.ping); link.missed = 0; link.awaiting = false; sendPing(); link.ping = setInterval(sendPing, 10000); }
     flushWaiters();
     if (!first) {
@@ -7853,7 +7864,7 @@
   };
   // Scan indicator: while the node says it is scanning, poll /info until it is done.
   let scanTimer = null;
-  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning"><span class="spin"></span> Scanning library…</span>` : ''; };
+  const showScanning = (on) => { $('#status').innerHTML = on ? `<span class="scanning" title="Scanning library…"><span class="spin"></span><span class="scan-text">Scanning library…</span></span>` : ''; };
   // ---- identify library (Settings card and the review view) ----
   let idTimer = null; let idRenderGen = 0; // an older card draw that answers last is dropped
   // A run's identified songs by method: " (9 by album, 3 by fingerprint)"
