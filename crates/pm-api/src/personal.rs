@@ -503,11 +503,11 @@ fn load(s: &NodeState, key: &str) -> Result<Copy, ApiError> {
 
 /// One listener's copy changes one request at a time: two devices, or a read writing what waited
 /// while a heart comes in, would otherwise each save their own and lose the other's.
-type PersonLocks = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
+/// Kept per node ([`NodeState`]): another node in the same process (a test's) never shares them.
+pub(crate) type PersonLocks = Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>;
 
-pub(crate) fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static L: OnceLock<PersonLocks> = OnceLock::new();
-    L.get_or_init(Default::default)
+fn lock_of(locks: &PersonLocks, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    locks
         .lock()
         .expect("person locks")
         .entry(key.trim_start_matches("pubky").to_string())
@@ -515,17 +515,15 @@ pub(crate) fn person_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
         .clone()
 }
 
+pub(crate) fn person_lock(s: &NodeState, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    lock_of(&s.person_locks, key)
+}
+
 /// Membership changes and approval starts use a separate lock from homeserver operations.
 /// Remove takes this before revoking access, then keeps it until cleanup ends. A slow operation
 /// can delay cleanup, but cannot delay revocation or let a re-add overtake that cleanup.
-pub(crate) fn membership_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static L: OnceLock<PersonLocks> = OnceLock::new();
-    L.get_or_init(Default::default)
-        .lock()
-        .expect("membership locks")
-        .entry(key.trim_start_matches("pubky").to_string())
-        .or_default()
-        .clone()
+pub(crate) fn membership_lock(s: &NodeState, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    lock_of(&s.membership_locks, key)
 }
 
 fn save_guarded(
@@ -636,7 +634,7 @@ pub(crate) async fn bookmark_uris(
 ) -> Result<(Vec<String>, PersonalState), ApiError> {
     let started = request_started(s);
     let b = backend(s);
-    let lock = person_lock(key);
+    let lock = person_lock(s, key);
     let _one = lock.lock().await;
     require_access(s, key, started)?;
     let connected = b.connected(key);
@@ -717,7 +715,7 @@ pub(crate) async fn set_bookmark(
 ) -> Result<Response, ApiError> {
     let started = request_started(s);
     let b = backend(s);
-    let lock = person_lock(key);
+    let lock = person_lock(s, key);
     let _one = lock.lock().await;
     require_access(s, key, started)?;
     if !b.connected(key) {
@@ -856,7 +854,7 @@ async fn keep_if_current(
     key: &str,
     keep: impl FnOnce() -> serde_json::Value,
 ) -> serde_json::Value {
-    let lock = person_lock(key);
+    let lock = person_lock(s, key);
     let _one = lock.lock().await;
     // Restore/revocation cannot cross the final generation check and synchronous grant write.
     let roster = s.roster.lock().await;
@@ -1000,7 +998,7 @@ pub(crate) async fn disconnect(
 ) -> Result<Json<PersonalState>, ApiError> {
     let key = listener_key(&c)?;
     let started = request_started(&s);
-    let lock = person_lock(&key);
+    let lock = person_lock(&s, &key);
     let _one = lock.lock().await;
     require_access(&s, &key, started)?;
     // An approval still on its way would bring the grant back after this answer
@@ -1055,7 +1053,7 @@ pub(crate) async fn connect_start(
 
 async fn begin_approval(s: &NodeState, id: &str, key: &str) -> Result<(), ApiError> {
     let started = request_started(s);
-    let lock = membership_lock(key);
+    let lock = membership_lock(s, key);
     let _membership = lock.lock().await;
     // A request admitted before Remove must not inherit the membership of a later re-add.
     require_access(s, key, started)?;
@@ -1499,7 +1497,7 @@ mod tests {
         // A Disconnect holds her lock while it ends her approvals: an approval past the relay that
         // waits on that lock keeps nothing after
         waiting("t-keep-late", "keep-ann").await;
-        let lock = person_lock("keep-ann");
+        let lock = person_lock(&s, "keep-ann");
         let disconnecting = lock.lock().await;
         let keeping = keep_if_current(&s, "t-keep-late", "keep-ann", || -> serde_json::Value {
             panic!("a grant kept after her Disconnect")
@@ -1688,7 +1686,7 @@ mod tests {
         let s = listener_state(dir.path(), "rm-ann").await;
         waiting("t-rm-old", "rm-ann").await;
         // People › Remove holds her lock: an approval past the relay waits for it
-        let lock = person_lock("rm-ann");
+        let lock = person_lock(&s, "rm-ann");
         let removal = lock.lock().await;
         let keeping = keep_if_current(&s, "t-rm-old", "rm-ann", || -> serde_json::Value {
             panic!("a grant kept after her removal")
@@ -2144,7 +2142,7 @@ mod tests {
         // An older approval queued on the operation lock before Remove. The roster is already
         // revoked when it resumes, exactly as keep_grant checks before writing a credential.
         begin_approval(&s, "rm-waiting", key).await.unwrap();
-        let operation = person_lock(key);
+        let operation = person_lock(&s, key);
         let held = operation.lock().await;
         let old = keep_if_current(&s, "rm-waiting", key, || {
             assert!(!crate::people::may_use_music(&s, key));
@@ -2312,7 +2310,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let s = listener_state(dir.path(), key).await;
-        let operation = person_lock(key);
+        let operation = person_lock(&s, key);
         let held = operation.lock().await;
         let removal = tokio::spawn(crate::people::remove(State(s.clone()), Path(key.to_string())));
         revoked(&s, key).await;
@@ -2347,7 +2345,7 @@ mod tests {
         store.1.store(false, SeqCst);
 
         // An admitted old operation holds up cleanup retried by the re-add.
-        let operation = person_lock(key);
+        let operation = person_lock(&s, key);
         let held = operation.lock().await;
         let re_add = crate::people::invite(
             State(s.clone()),
@@ -2403,7 +2401,7 @@ mod tests {
                 .unwrap()
                 .set_setting("people", &serde_json::to_string(&roster).unwrap())
                 .unwrap();
-            let operation = person_lock(key);
+            let operation = person_lock(&s, key);
             let held = operation.lock().await;
             let removal = tokio::spawn(crate::people::remove(State(s.clone()), Path(key.into())));
             revoked(&s, key).await;
@@ -2469,7 +2467,7 @@ mod tests {
             .await
             .is_err());
         store.1.store(false, std::sync::atomic::Ordering::SeqCst);
-        let membership = membership_lock(key);
+        let membership = membership_lock(&s, key);
         let held = membership.lock().await;
         let re_add = crate::people::invite(
             State(s.clone()),

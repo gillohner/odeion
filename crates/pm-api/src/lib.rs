@@ -3617,7 +3617,7 @@ pub(crate) async fn mint_listener_sign_in(
     started: u64,
 ) -> Result<Option<String>, ApiError> {
     let key = who.trim_start_matches("pubky");
-    let membership = personal::membership_lock(key);
+    let membership = personal::membership_lock(s, key);
     let _membership = membership.lock().await;
     let _roster = s.roster.lock().await;
     people::access_current(s, key, started)?;
