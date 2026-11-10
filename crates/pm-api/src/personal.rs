@@ -740,6 +740,7 @@ fn connects() -> &'static Connects {
 }
 
 /// Whether approval `id` is still asked for: not replaced, expired away or ended by a Disconnect.
+#[cfg(test)]
 async fn still_asked(id: &str) -> bool {
     connects().lock().await.contains_key(id)
 }
@@ -2023,14 +2024,14 @@ mod tests {
         assert!(futures_util::poll!(&mut re_add).is_pending());
         drop(held);
         assert_eq!(old.await["state"], "denied");
-        removal.await.unwrap().unwrap();
+        let _ = removal.await.unwrap().unwrap();
         assert!(!file.exists(), "Remove deleted the grant kept before it");
         assert!(!still_asked("rm-waiting").await);
         assert!(
             too_early.await.is_err(),
             "an admitted old request cannot create a fresh approval"
         );
-        re_add.await.unwrap();
+        let _ = re_add.await.unwrap();
         begin_approval(&s, "rm-fresh", key).await.unwrap();
         assert_eq!(
             keep_if_current(&s, "rm-waiting", key, || panic!("old approval revived")).await["state"],
@@ -2073,10 +2074,10 @@ mod tests {
         tokio::pin!(old_start, old_disconnect);
         assert!(futures_util::poll!(&mut old_start).is_pending());
         assert!(futures_util::poll!(&mut old_disconnect).is_pending());
-        crate::people::remove(State(s.clone()), Path(key.into()))
+        let _ = crate::people::remove(State(s.clone()), Path(key.into()))
             .await
             .unwrap();
-        crate::people::invite(
+        let _ = crate::people::invite(
             State(s.clone()),
             Json(crate::people::NewInvite {
                 access: crate::people::Access::Music,
@@ -2176,7 +2177,7 @@ mod tests {
             "restore must not block other roster changes while waiting"
         );
         drop(held);
-        removal.await.unwrap().unwrap();
+        let _ = removal.await.unwrap().unwrap();
         let roster = restore.await;
         assert!(s.removing_people.lock().unwrap().is_empty());
         drop(roster);
@@ -2218,7 +2219,7 @@ mod tests {
         assert!(futures_util::poll!(&mut restore).is_pending());
         assert!(s.roster.try_lock().is_ok());
         drop(held);
-        re_add.await.unwrap();
+        let _ = re_add.await.unwrap();
         let roster = restore.await;
         crate::people::restored_access(&s);
         let setting = format!("person.{key}.tidal");
@@ -2301,7 +2302,7 @@ mod tests {
             };
             assert!(!answer.unwrap().0.music_enabled);
             drop(held);
-            removal.await.unwrap().unwrap();
+            let _ = removal.await.unwrap().unwrap();
             assert_eq!(enabling.await.unwrap_err().status, StatusCode::CONFLICT);
             assert!(!crate::people::may_use_music(&s, key));
             assert_eq!(crate::accounts::sessions_of(&s, key), 0);
@@ -2376,11 +2377,11 @@ mod tests {
         };
         tokio::pin!(old);
         assert!(futures_util::poll!(&mut old).is_pending());
-        crate::people::remove(State(s.clone()), Path(key.into()))
+        let _ = crate::people::remove(State(s.clone()), Path(key.into()))
             .await
             .unwrap();
         assert_eq!(crate::accounts::sessions_of(&s, key), 0);
-        crate::people::invite(
+        let _ = crate::people::invite(
             State(s.clone()),
             Json(crate::people::NewInvite {
                 access: crate::people::Access::Music,
@@ -2409,7 +2410,7 @@ mod tests {
         assert!(crate::accounts::caller(&s, Some(&token)).is_some());
         // Music off alone also ends what started before it, and nothing is minted after
         let off = crate::people::access_started(&s);
-        crate::people::change(
+        let turned_off = crate::people::change(
             State(s.clone()),
             Path(key.into()),
             Json(crate::people::PersonChange {
@@ -2419,6 +2420,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(!turned_off.0.music_enabled);
         assert_eq!(
             crate::mint_listener_sign_in(&s, key, off)
                 .await
