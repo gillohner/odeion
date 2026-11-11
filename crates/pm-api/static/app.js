@@ -4020,6 +4020,10 @@
   // A library track's page id: its canonical identity when known, else lib-<id>.
   const trackPageId = (t) => { const c = Array.isArray(t.canonical) ? t.canonical[0] : t.canonical; const u = canonicalUrl(c); return u ? idOf(u) : 'lib-' + t.id; };
   const trackHasId = (t) => !!canonicalUrl(Array.isArray(t.canonical) ? t.canonical[0] : t.canonical);
+  // How a song got its match (`auto`, `album_fit`, `tagged_mbid`…), when the node says
+  // "Wrong match?": the owner's, for a song with a match
+  const canFixMatch = (t) => isOwner() && t && t.id != null && trackHasId(t);
+  const MATCH_HOW = { album_fit: 'its folder as an album', fingerprint: 'how it sounds', 'fingerprint+release': 'how it sounds', tag_match: 'its exact title, artist and length', auto: 'picked automatically', confirmed_by_user: 'you', tagged_mbid: 'the IDs in its tags', tagged_isrc: 'the ISRC in its tags' };
   // Playlists and hearts name a song the way other apps understand (its MusicBrainz entry), so a
   // file nobody has matched yet asks "Which song is this?" first (fresh-eyes review: adding your
   // own songs to a playlist failed with "no canonical identity"). Resolves to the tracks, now
@@ -4043,6 +4047,67 @@
     if (pick == null) return null;
     const picked = c.suggestions.find((x) => x.id === pick);
     try { const done = await api('POST', `/library/suggestions/${pick}/accept?track_id=${encodeURIComponent(t.id)}${picked ? `&recording_mbid=${encodeURIComponent(picked.recording_mbid)}` : ''}`); rememberTracks([done]); return done; } catch (e) { toast(e.message, 'error'); return null; }
+  };
+  // "Wrong match?" (owner, 2026-11-11): the Confirm matches view for songs that have a match, each
+  // with its match now, the options it was chosen from, a MusicBrainz search and "Not matched".
+  // Nothing changes until Save; a choice names the match the page showed (409: reload).
+  const renderFixMatches = async (ids) => {
+    const gen = state.idGen = (state.idGen || 0) + 1;
+    const live = () => state.view === 'identify' && state.idGen === gen;
+    main.innerHTML = pageHead('Wrong match?', null) + '<p class="muted small idloading" role="status">Loading the songs’ matches…</p>';
+    let page; let st;
+    try { [page, st] = await Promise.all([api('GET', `/library/identify/fix?tracks=${ids.map(Number).join(',')}`), api('GET', '/library/identify').catch(() => null)]); } catch (e) { if (live()) main.innerHTML = pageHead('Wrong match?', null) + emptyState('search', 'Couldn’t load these songs', e.message); return; }
+    if (!live()) return;
+    const files = !st ? '' : st.write_ids ? '"Write IDs into my files" is on: the file’s IDs are replaced or removed (its tags are backed up first).' : 'Your files stay as they are ("Write IDs into my files" is off).';
+    const how = (o) => (o.source === 'fingerprint' ? 'audio fingerprint' : o.source === 'album' ? 'the folder as an album' : 'search');
+    const recOf = (o) => o.recording_mbid || o.recording;
+    // Each song's options: the kept ones, then what a search found (by recording, once each)
+    const extra = new Map(); const chosen = new Map();
+    const optRow = (t, o, k) => `<div class="idopt idpick"><input type="radio" id="fx-${t.id}-${k}" name="fx-${t.id}" value="${esc(recOf(o))}" data-rel="${esc(o.release_mbid || o.release || '')}" ${chosen.get(t.id) === recOf(o) ? 'checked' : ''}><label class="grow" for="fx-${t.id}-${k}"><span class="name">${esc(o.title || 'Recording')} <span class="muted small">${esc(o.artist || '')}</span></span><span class="sub">${o.release_title ? esc(o.release_title) + ' · ' : ''}${how(o)} · ${Math.round((o.score || 0) * 100)}%</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(recOf(o))}" target="_blank" rel="noopener" aria-label="${esc(`${o.title || 'Recording'} on MusicBrainz`)}">MusicBrainz ${icon('external')}</a></div>`;
+    const songHtml = (g) => {
+      const t = g.track; const cur = g.current;
+      const seen = new Set(cur ? [cur.recording_mbid] : []);
+      const opts = [...g.options, ...(extra.get(t.id) || [])].filter((o) => { const r = recOf(o); if (seen.has(r)) return false; seen.add(r); return true; });
+      const now = cur ? `<div class="idopt idpick"><input type="radio" id="fx-${t.id}-keep" name="fx-${t.id}" value="keep" ${chosen.get(t.id) === 'keep' ? 'checked' : ''}><label class="grow" for="fx-${t.id}-keep"><span class="name">Keep this match${cur.auto ? ' <span class="pill" data-auto>auto</span>' : ''}</span><span class="sub">${cur.auto ? 'Picked automatically: used in Odeion, not written into your file until you keep it here' : `Matched by ${esc(MATCH_HOW[cur.source] || cur.source)}`}</span></label><a class="idmb small" href="https://musicbrainz.org/recording/${esc(cur.recording_mbid)}" target="_blank" rel="noopener" aria-label="The match now on MusicBrainz">MusicBrainz ${icon('external')}</a></div>` : '';
+      const body = cur && cur.from_tags && !(st && st.write_ids) ? '<p class="small muted">Its file’s tags name this recording: turn on Write IDs into my files (Your library › Node library › Identify) to change it here, or correct the tags.</p>'
+        : `${now}${opts.map((o, k) => optRow(t, o, k)).join('')}<div class="idopt idpick"><input type="radio" id="fx-${t.id}-none" name="fx-${t.id}" value="none" ${chosen.get(t.id) === 'none' ? 'checked' : ''}><label class="grow small" for="fx-${t.id}-none">Not matched <span class="muted">(none of these: the song stays without a match)</span></label></div><div class="idopt idpick idlater"><input type="radio" id="fx-${t.id}-same" name="fx-${t.id}" value="" ${!chosen.get(t.id) ? 'checked' : ''}><label class="grow small muted" for="fx-${t.id}-same">No change</label></div><form class="toolbar" data-find="${t.id}"><input class="input" name="q" placeholder="Search MusicBrainz: title and artist" aria-label="${esc(`Search MusicBrainz for ${t.title}`)}" autocomplete="off"><button class="btn sm" type="submit">Search</button></form>`;
+      return `<div class="idrow" data-track="${t.id}" data-status="${esc(g.status)}"><div class="idfile"><div class="name">${t.track_no ? `<span class="muted">${t.track_no}.</span> ` : ''}${esc(t.title)}</div><div class="sub">${esc([artists(t), fmt(t.duration_ms), (t.file.path || '').split('/').pop()].filter(Boolean).join(' · '))}</div>${cur ? '' : '<p class="small muted">No match now.</p>'}</div><div class="idopts" role="radiogroup" aria-label="${esc(t.title)}">${body}</div></div>`;
+    };
+    const draw = () => {
+      const intro = `<p class="muted small idintro">Pick the right recording, search MusicBrainz for it, or choose Not matched. The match you replace is never picked again for this song. ${esc(files)} Tags you already published on Pubky for the old match stay on it.</p>`;
+      const albumHtml = (a, ai) => `<section class="section idalbum" data-album="${ai}"><div class="section-head"><h3>${esc(a.album || a.key.split('/').filter(Boolean).slice(-1)[0] || 'Library')}${a.artist ? ` <span class="muted small">${esc(a.artist)}</span>` : ''}</h3><span class="muted small">${countOf(a.songs.length, 'songs')}</span></div><div class="list">${a.songs.map(songHtml).join('')}</div><div class="actions idconfirm"><button class="btn primary" type="button" data-fixsave="${ai}">Save</button><span class="small muted" role="status" data-fixout="${ai}"></span></div></section>`;
+      main.innerHTML = pageHead('Wrong match?', page.songs) + intro + page.albums.map(albumHtml).join('');
+      $$('.idrow input[type=radio]', main).forEach((r) => r.onchange = () => chosen.set(Number(r.name.slice(3)), r.value));
+      $$('[data-find]', main).forEach((f) => f.onsubmit = async (e) => {
+        e.preventDefault(); const id = Number(f.dataset.find); const q = f.q.value.trim(); const b = $('button', f); b.disabled = true;
+        try {
+          const c = await api('GET', `/library/tracks/${id}/candidates${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+          if (!live()) return;
+          if (c.needs_contact) { toast('MusicBrainz needs your email or website first (Get started on Home)', 'error'); b.disabled = false; return; }
+          extra.set(id, [...(extra.get(id) || []), ...(c.found || [])]);
+          if (!(c.found || []).length) toast('MusicBrainz found nothing strong for that');
+          draw();
+        } catch (err) { toast(err.message, 'error'); b.disabled = false; }
+      });
+      $$('[data-fixsave]', main).forEach((btn) => btn.onclick = async () => {
+        const ai = Number(btn.dataset.fixsave); const a = page.albums[ai]; const out = $(`[data-fixout="${ai}"]`, main);
+        const todo = a.songs.filter((g) => chosen.get(g.track.id));
+        if (!todo.length) { out.textContent = 'Nothing chosen'; return; }
+        btn.disabled = true; out.textContent = 'Saving…'; let done = 0; let failed = null; let notWritten = 0;
+        for (const g of todo) {
+          const v = chosen.get(g.track.id); const cur = g.current ? g.current.recording_mbid : null;
+          const input = $(`input[name="fx-${g.track.id}"]:checked`, main);
+          const body = v === 'none' ? { none: true, expect: cur } : v === 'keep' ? { recording_mbid: cur, expect: cur } : { recording_mbid: v, release_mbid: (input && input.dataset.rel) || null, expect: cur };
+          try { const r = await api('POST', `/library/tracks/${g.track.id}/match`, body); done++; if (r.files && !r.files.written) notWritten++; } catch (e) { failed = e.message; break; }
+        }
+        toast(`${countOf(done, 'songs')} corrected${notWritten ? `; IDs not written into ${countOf(notWritten, 'files')}` : ''}${failed ? `; stopped: ${failed}` : ''}`, failed || notWritten ? 'error' : '');
+        if (!live()) return;
+        // What was saved is the page's now; a stale choice shows as it stands
+        if (failed) { await renderFixMatches(ids); return; }
+        await renderFixMatches(ids);
+      });
+    };
+    draw();
   };
   const trackRows = (tracks, { showAlbum = true, numbers = 'index', key = 'tr', start = 0, bare = false } = {}) => {
     rememberTracks(tracks);
@@ -4522,6 +4587,7 @@
       ...favItem,
       // Phones hide the "Match" chip in song rows (no room), so matching is offered here too
       ...(single && single.id != null && !trackHasId(single) && isOwner() ? [{ label: 'Which song is this?…', icon: 'search', run: async () => { const done = await whichSong(single); if (done) { toast(`Identified: ${done.title}`); render(); } } }] : []),
+      ...(single && canFixMatch(single) ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: [single.id] }) }] : []),
       { label: 'Add to playlist…', icon: 'playlist', run: () => playlistPicker((pl) => addToPlaylist(pl.id, tracks), (tracks.length === 1 ? tracks[0].title : (tracks[0].album ? tracks[0].album.title : 'New playlist')) || 'New playlist', async (name) => { try { const d = await api('POST', '/playlists', { name, track_ids: tracks.map((t) => t.id) }); state.playlists = await api('GET', '/playlists'); toast(`Created “${d.summary ? d.summary.name : name}”`); } catch (e) { toast(e.message, 'error'); } }) },
       ...radioItem,
       ...versionItems,
@@ -4823,6 +4889,8 @@
       // The owner's library: edit tags on the node, take a song out (Your library › Node library)
       ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
       ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
+      // A library song's or album's match corrected: the Confirm matches view for its songs
+      ...(isOwner() && trackIds.length && /^\/(song|album)\//.test(o.path || '') ? [{ label: 'Wrong match?…', icon: 'search', run: () => setView('identify', { fix: trackIds.slice(0, 500) }) }] : []),
       ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
       ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
@@ -5737,6 +5805,8 @@
           break;
         }
         case 'identify': {
+          // "Wrong match?" from a song or album menu: those songs' matches
+          if (state.viewArg && Array.isArray(state.viewArg.fix) && state.viewArg.fix.length) { await renderFixMatches(state.viewArg.fix); break; }
           // Album review: each folder's songs together, every song with its own options and
           // evidence. A song with one strong option is offered ticked; a song whose options
           // disagree waits for the owner's pick. Confirm stores the album's choices in one go,
@@ -7962,8 +8032,8 @@
         const legend = parts.filter(([, v]) => v).map(([k, v, w]) => `<span class="idkey"><span class="idswatch ${k}" aria-hidden="true"></span>${k === 'suggested' ? `<a data-view="identify">${n(v)} ${w}</a>` : `${n(v)} ${w}`}</span>`).join(' ');
         return `${bar}<p class="small idlegend">${c.total ? `${n(c.total)} ${c.total === 1 ? 'song' : 'songs'}:` : ''}${legend ? ` <span class="idkeys">${legend}</span>` : ''}</p>`;
       })()}
-      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
-      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>` : ''}
+      ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.title_artist, 'by their exact title, artist and length'], [c.by.auto, 'picked automatically <span class="pill" data-auto>auto</span>'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
+      ${!p.running && p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}${(() => { const k = Object.values(p.settled || {}).reduce((a, b) => a + b, 0); return k ? `; ${k} unsure ${k === 1 ? 'song' : 'songs'} picked automatically` : ''; })()}.</p>` : ''}
       ${(() => {
         // The AcoustID key lives here, with its state and a Check (owner, 2026-10-31): Settings
         // keeps no copy. Matching by how songs sound needs it; without it, title and artist only
@@ -7974,7 +8044,9 @@
           : `Songs are matched by their title and artist only. Matching by how they sound (AcoustID) finds more: get a free key at ${where} (register an application) and paste it here.`;
         return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
       })()}
+      <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idauto" ${st.auto_match !== false ? 'checked' : ''}> Match new songs automatically <span class="muted">(after each scan that adds or changes songs, and once a week for songs not found; on by default)</span></label>
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
+      <p class="small muted" id="idautohelp">Unsure songs whose best match is clearly ahead are matched automatically (marked auto). Odeion uses those matches for albums, Pubky tags and Pinakes, but writes their IDs into your files only after you confirm them: Wrong match? on the song.</p>
       <div class="actions">${reviewFirst ? `<button class="btn primary" data-view="identify" id="idreview">Review ${matches(c.suggested)}</button>` : ''}<button class="btn ${reviewFirst ? '' : 'primary'}" id="idrun" ${p.running || ph === 'empty' ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested && !reviewFirst ? `<button class="btn" data-view="identify">Review ${n(c.suggested)} unsure</button>${p.running ? '' : '<button class="btn ghost" id="idskipall" title="Leave every unsure song as it is: it plays and shows as usual, and Identify again leaves it alone">Skip all unsure</button>'}` : ''}${c.skipped ? `<button class="btn ghost" id="idunskip" ${idUnskip.sending ? 'disabled' : ''}>${idUnskip.armedUntil > Date.now() ? `Bring back all ${n(c.skipped)}? Press again` : `Bring back ${n(c.skipped)} skipped`}</button>` : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
     const acf = $('#acidform'); if (acf) {
@@ -7986,6 +8058,7 @@
       chk.onclick = async () => { chk.disabled = true; out.textContent = 'Checking…'; out.classList.remove('warn-text'); const k = $('#acidkey').value.trim(); try { const r = await api('POST', '/library/identify/key/check', k ? { acoustid_key: k } : {}); out.textContent = r.detail; out.classList.toggle('warn-text', !r.ok); } catch (e) { out.textContent = e.message; out.classList.add('warn-text'); } chk.disabled = false; };
       const clr = $('#acidclear'); if (clr) clr.onclick = () => saveKey('');
     }
+    const au = $('#idauto'); if (au) au.onchange = async () => { try { await api('PUT', '/library/identify/settings', { auto_match: au.checked }); toast(au.checked ? 'New songs are matched after each scan' : 'Songs are matched only when you press Identify'); renderIdentify(); } catch (e) { toast(e.message, 'error'); au.checked = !au.checked; } };
     const wr = $('#idwrite'); if (wr) wr.onchange = async () => { try { await api('PUT', '/library/identify/settings', { write_ids: wr.checked }); toast(wr.checked ? 'IDs will be written into your files' : 'Your files stay as they are'); renderIdentify(); } catch (e) { toast(e.message, 'error'); wr.checked = !wr.checked; } };
     const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };

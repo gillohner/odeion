@@ -454,6 +454,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/identify/settings", put(identify::put_settings))
         .route("/library/identify/key/check", post(identify::check_key))
         .route("/library/identify/write", post(identify::write_now))
+        .route("/library/identify/fix", get(identify::fix_view))
         .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
         .route("/library/suggestions/albums", get(identify::review_albums))
@@ -461,6 +462,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/suggestions/skip", post(identify::skip))
         .route("/library/suggestions/unskip", post(identify::unskip))
         .route("/library/tracks/{id}/candidates", get(identify::track_candidates))
+        .route("/library/tracks/{id}/match", post(identify::set_match))
         .route("/library/suggestions/{id}/accept", post(identify::accept))
         .route("/library/suggestions/{id}", delete(identify::reject))
         .route("/discover/uri", get(discover::on_pubky))
@@ -24842,4 +24844,7 @@ exec sleep 300
         let (_, apps) = send("GET", "/v1/node/apps", "music.example.com").await;
         assert!(notes(&apps).is_empty(), "{apps}");
     }
+
+    // Automatic matching, automatic settling and "Wrong match?" (their own file)
+    mod identify_auto;
 }

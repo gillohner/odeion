@@ -14,6 +14,7 @@
 //! `spawn_blocking`.
 
 pub mod album_fit;
+pub mod auto_settle;
 pub mod canonical;
 pub mod credits;
 pub mod db;
@@ -39,7 +40,9 @@ pub use db::{
     AlbumArt, AlbumFormat, ArtistSummary, BackupCounts, BookmarkRow, Focus, GenreSummary, IdentifiedBy,
     IdentityCounts, PlayEntry, PlayedTrack, SuggestionRow, TagRow, UNKNOWN_ARTIST_ID,
 };
-pub use db::{AlbumEdit, ConfirmChoice, ConfirmReport, Library, LibraryStats, StaleChoice, TrackOverride};
+pub use db::{
+    AlbumEdit, ConfirmChoice, ConfirmReport, Library, LibraryStats, Rematch, StaleChoice, TrackOverride,
+};
 pub use error::{LibraryError, Result};
 pub use image::{file_image_type, image_extension, image_type};
 pub use import::{ImportFormat, ImportedList, ImportedTrack};
