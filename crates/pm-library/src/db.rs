@@ -3639,6 +3639,32 @@ impl Library {
         })
     }
 
+    /// The release an album's songs agree on, when its tags name none: the songs identified by a
+    /// run or the owner (never an automatic pick) whose release was singled out all name one
+    /// release, and they are at least half of the album's songs. Songs on different releases
+    /// leave the album without one.
+    pub fn agreed_release(&self, album_id: i64) -> Result<Option<Mbid>> {
+        let conn = self.lock();
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM tracks t WHERE t.album_id = ?1 AND {TRACK_PRESENT}"),
+            params![album_id],
+            |r| r.get(0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT s.release_mbid, COUNT(*) FROM tracks t JOIN identify_state s ON s.track_id = t.id
+             WHERE t.album_id = ?1 AND t.canonical_uri IS NOT NULL AND s.release_mbid IS NOT NULL
+               AND COALESCE(t.canonical_confidence_source, '') NOT IN ('auto', 'tagged_mbid', 'tagged_isrc') AND {TRACK_PRESENT}
+             GROUP BY s.release_mbid"
+        ))?;
+        let groups: Vec<(String, i64)> = stmt
+            .query_map(params![album_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(match groups.as_slice() {
+            [(release, n)] if n * 2 >= total => Mbid::parse(release).ok(),
+            _ => None,
+        })
+    }
+
     /// A song's match as a correction sees it: its recording (`None`: no match), and whether its
     /// file's tags name a recording (read by the scan, or written there by "Write IDs").
     pub fn match_now(&self, track: i64) -> Result<Option<(Option<String>, bool)>> {
