@@ -3343,6 +3343,29 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// How often a controller log in may warm the homeserver records (see `controller_login_start`).
+const CONTROLLER_WARM_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Run `work` unless it last succeeded less than `every` ago; one at a time (a caller that waited
+/// for another's run uses its result). A failure is not remembered: the next caller tries again.
+async fn now_and_then<F, Fut, E>(
+    last: &tokio::sync::Mutex<Option<std::time::Instant>>,
+    every: std::time::Duration,
+    work: F,
+) -> Result<(), E>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    let mut last = last.lock().await;
+    if last.is_some_and(|at| at.elapsed() < every) {
+        return Ok(());
+    }
+    work().await?;
+    *last = Some(std::time::Instant::now());
+    Ok(())
+}
 /// Sign-ins waiting at once, in all and from one address (security review 2026-10-30, #4).
 const MAX_LOGINS: usize = 64;
 const MAX_LOGINS_PER_ORIGIN: usize = 6;
@@ -3523,11 +3546,17 @@ async fn controller_login_start(
     // The newest records first, so the grant exchange routes on them: the owner's, to have them
     // ready. A listener on another homeserver may approve this log in too, so what is found of
     // the owner's homeserver never refuses it. Before the sign-ins' lock: these are network
-    // lookups, and the polls of every waiting sign-in take that lock too
+    // lookups, and the polls of every waiting sign-in take that lock too. Anyone may ask (no
+    // token), so the lookups run one at a time and at most every CONTROLLER_WARM_EVERY: what they
+    // found stays in the client's cache meanwhile
     let identity = pubky::PublicKey::try_from(identity.as_str()).ok();
-    hs.warm_for_sign_in(identity.as_ref(), s.bundled_homeserver().is_some())
-        .await
-        .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
+    now_and_then(&s.controller_warmed, CONTROLLER_WARM_EVERY, || async {
+        hs.warm_for_sign_in(identity.as_ref(), s.bundled_homeserver().is_some())
+            .await
+            .map(drop)
+    })
+    .await
+    .map_err(|why| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, why))?;
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at, _, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
@@ -9739,6 +9768,36 @@ mod tests {
         let mut tunnel = req(None, Some("127.0.0.1:1"));
         tunnel.extensions_mut().insert(peer::Remote);
         assert_eq!(login_origin(&tunnel), "iroh");
+    }
+
+    /// The controller log in's warm-up (`POST /v1/auth/pubky/start` needs no token): many asking
+    /// at once start one run, none runs again within the interval, a failed run is tried again by
+    /// the next caller, and once the interval has passed it runs again.
+    #[tokio::test]
+    async fn the_controller_warm_up_runs_now_and_then() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let last = tokio::sync::Mutex::new(None);
+        let every = std::time::Duration::from_secs(30);
+        let count = AtomicUsize::new(0);
+        let runs = &count;
+        let work = move || async move {
+            runs.fetch_add(1, SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            Ok::<(), String>(())
+        };
+        let all = futures_util::future::join_all((0..10).map(|_| now_and_then(&last, every, work))).await;
+        assert!(all.iter().all(Result::is_ok));
+        assert_eq!(runs.load(SeqCst), 1, "ten at once: one run");
+        now_and_then(&last, every, work).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 1, "within the interval: none");
+        *last.lock().await = None;
+        let failed = now_and_then(&last, every, || async { Err::<(), _>("refused".to_string()) });
+        assert_eq!(failed.await, Err("refused".to_string()));
+        now_and_then(&last, every, work).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 2, "a failure is tried again");
+        *last.lock().await = std::time::Instant::now().checked_sub(every);
+        now_and_then(&last, every, work).await.unwrap();
+        assert_eq!(runs.load(SeqCst), 3, "the interval passed: it runs again");
     }
 
     #[tokio::test]
