@@ -4,6 +4,14 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-11
+
+- **Songs are matched on their own, and a wrong match is fixed in a few clicks** (owner's ask).
+  - After each scan that adds or changes songs, the node matches them to MusicBrainz by itself, with the same pacing as **Identify**, never beside another run. Once a week it looks again for songs it found nothing for whose earlier answers have expired (at most 500 at a time). **Match new songs automatically** in Your library › Node library › Identify turns both off; **Identify** stays for a full run.
+  - Unsure songs whose best match is clearly ahead are matched without review and marked **auto**: when every sure audio-fingerprint match is the file's song (title, version and artist), when the audio agrees with the file's own tags on one song among others, or when the rest of the folder is on one release that has the song. Different versions (live, remix, edit, demo…), other artists and recordings you turned down stay for you. Songs left waiting by earlier rules are checked again once at start.
+  - Automatic matches are used in Odeion like any other (album pages, Pubky tags, Pinakes), but their IDs are written into your files only once you confirm them, also with **Write IDs into my files** on.
+  - **Wrong match?** in a song's or album's ⋯ menu (the owner's only) shows each song's match with the other options, a MusicBrainz search and **Not matched**. The match you replace is never picked again for that song; with Write IDs on, the file's IDs are replaced or removed after the usual backup. Pubky tags already published on the old match stay on it.
+
 ### 2026-11-10
 
 - **Sign-ins through the shared return page need a local node address.** The project's return page for TIDAL, Spotify, Google Drive and OneDrive sign-ins returns only to a node on a local address (a LAN or loopback address, a `.local` name). From any other address the node now says so before the sign-in starts (412, and a line in Settings › This node › Service apps): use TIDAL's code sign-in, or an app of your own with its secret (for OneDrive, whose apps have no secret, an app of your own with a return page of your own). A node's own `[auth] return_page` is unchanged.

@@ -3,9 +3,14 @@
 //! folder, see [`pm_library::album_fit`]), a Chromaprint fingerprint (cached by file key, decoded
 //! on every core) looked up on AcoustID (3 requests a second) and decided folder by folder with
 //! the folder as a release, and last a MusicBrainz search by the tags. What stays ambiguous, or
-//! where two methods disagree, becomes suggestions for the owner; suggestions never become
-//! identity on their own. The job resumes: tracks already looked at are skipped unless `retry`
-//! is set.
+//! where two methods disagree, becomes suggestions for the owner. At the end of every run, songs
+//! waiting for review whose stored evidence is clear on its own are settled as `auto`
+//! ([`pm_library::auto_settle`]): used in the node, never written into files until the owner
+//! confirms them. The job resumes: tracks already looked at are skipped unless `retry` is set.
+//! It also runs by itself: after a scan that added or changed songs ([`after_scan`]), once a week
+//! for "not found" songs whose kept answers expired, and at start for songs older rules left
+//! waiting ([`spawn_recheck`]); "Match new songs automatically" (on by default) turns the first
+//! two off.
 
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
@@ -53,6 +58,10 @@ pub struct IdentifyProgress {
     /// This run's identified songs by how (`album_fit`, `fingerprint`, `fingerprint+release`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub identified_by: BTreeMap<String, usize>,
+    /// Songs waiting for review (this run's or earlier ones') its end settled automatically, by
+    /// rule (`R1`, `R1b`, `R2`, `R3`); not in `identified`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settled: BTreeMap<String, usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     /// AcoustID refused the key during this run (why, in its words): nothing more was
@@ -119,6 +128,11 @@ pub struct RunOptions {
     /// Only songs waiting for review that older rules checked (the start's automatic run): no
     /// new song is fingerprinted, and IDs are written only for these.
     pub outdated_only: bool,
+    /// Only these songs (the weekly retry of "not found" songs).
+    pub only: Option<Vec<i64>>,
+    /// AcoustID answers kept from before this time are asked again (the weekly retry); the
+    /// fingerprint itself is reused.
+    pub refresh_before: Option<i64>,
 }
 
 impl RunOptions {
@@ -129,6 +143,18 @@ impl RunOptions {
             acoustid_interval: std::time::Duration::from_millis(340),
             mb_cache_max: None,
             outdated_only: false,
+            only: None,
+            refresh_before: None,
+        }
+    }
+
+    /// The weekly retry: these "not found" songs, their AcoustID answers from before `before`
+    /// asked again.
+    pub fn weekly(songs: Vec<i64>, before: i64) -> Self {
+        Self {
+            only: Some(songs),
+            refresh_before: Some(before),
+            ..Self::new(true)
         }
     }
 
@@ -148,6 +174,8 @@ impl RunOptions {
             acoustid_interval: std::time::Duration::ZERO,
             mb_cache_max: None,
             outdated_only: false,
+            only: None,
+            refresh_before: None,
         }
     }
 }
@@ -245,6 +273,10 @@ pub struct IdentifyStatus {
     pub acoustid_detail: Option<String>,
     /// "Write IDs into my files" (off by default).
     pub write_ids: bool,
+    /// "Match new songs automatically" (on by default): a run after each scan that added or
+    /// changed songs, and the weekly retry of "not found" songs.
+    #[serde(default)]
+    pub auto_match: bool,
 }
 
 /// `POST /v1/library/identify/key/check`.
@@ -277,6 +309,9 @@ pub struct IdentifyStart {
 pub struct IdentifySettings {
     #[serde(default)]
     pub write_ids: Option<bool>,
+    /// "Match new songs automatically".
+    #[serde(default)]
+    pub auto_match: Option<bool>,
     /// Your own AcoustID key; empty removes it.
     #[serde(default)]
     pub acoustid_key: Option<String>,
@@ -300,6 +335,19 @@ pub struct WriteSkip {
 }
 
 const WRITE_IDS_KEY: &str = "library.write_ids";
+
+/// "Match new songs automatically": `false` turns it off; on unless so.
+const AUTO_KEY: &str = "identify.auto";
+
+pub(crate) fn auto_match_on(s: &NodeState) -> bool {
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(AUTO_KEY)
+        .ok()
+        .flatten()
+        .is_none_or(|v| v != "false")
+}
 
 fn write_ids_on(s: &NodeState) -> bool {
     s.library
@@ -340,6 +388,27 @@ pub fn write_found_ids(s: &NodeState, only: Option<&[i64]>) -> Result<WriteRepor
         let Some((MusicUri::Recording { mbid }, _)) = t.canonical.clone() else {
             continue;
         };
+        // One writer at a time, and the song still what it was when listed (a correction made
+        // meanwhile wins)
+        let _one = id_writes();
+        let still = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .get_track(pm_model::TrackId(id))
+            .ok()
+            .flatten()
+            .and_then(|now| now.canonical)
+            .is_some_and(|(u, c)| {
+                u == MusicUri::Recording { mbid }
+                    && !matches!(
+                        c,
+                        Confidence::Auto { .. } | Confidence::TaggedMbid | Confidence::TaggedIsrc
+                    )
+            });
+        if !still {
+            continue;
+        }
         let ids = pm_library::tagwrite::Ids {
             recording: mbid,
             release,
@@ -374,6 +443,12 @@ pub(crate) async fn put_settings(
             .lock()
             .expect("library poisoned")
             .set_setting(WRITE_IDS_KEY, if w { "true" } else { "false" })?;
+    }
+    if let Some(a) = body.auto_match {
+        s.library
+            .lock()
+            .expect("library poisoned")
+            .set_setting(AUTO_KEY, if a { "true" } else { "false" })?;
     }
     if let Some(k) = body.acoustid_key {
         let k = k.trim().to_string();
@@ -499,6 +574,7 @@ fn status(s: &NodeState) -> Result<IdentifyStatus, ApiError> {
         acoustid_state: acoustid_state.into(),
         acoustid_detail,
         write_ids: write_ids_on(s),
+        auto_match: auto_match_on(s),
     })
 }
 
@@ -557,34 +633,193 @@ const RECHECK_AFTER_START: std::time::Duration = std::time::Duration::from_secs(
 /// and no run is going. The run checks only those songs (nothing new is fingerprinted); songs it
 /// settles are marked checked by these rules, so the next start finds nothing to do; with "Write
 /// IDs" on, the IDs found for them are written as after any run.
+///
+/// Then, every hour, the weekly retry of "not found" songs (`weekly_retry`).
 pub fn spawn_recheck(s: &Arc<NodeState>) {
     let s = s.clone();
     tokio::spawn(async move {
         tokio::time::sleep(RECHECK_AFTER_START).await;
         recheck_when_idle(&s, std::time::Duration::from_secs(5)).await;
+        loop {
+            weekly_retry(&s);
+            tokio::time::sleep(WEEKLY_LOOK).await;
+        }
     });
 }
 
-/// [`spawn_recheck`] without the wait at start: once no scan runs, start the run if there is
-/// something to check again. Whether it started one.
+/// Whether a scan or a run is going (an automatic run waits for both).
+fn busy(s: &NodeState) -> bool {
+    s.is_scanning()
+        || s.side_scans.load(std::sync::atomic::Ordering::SeqCst) > 0
+        || s.identify.lock().expect("identify lock").running
+}
+
+/// [`spawn_recheck`] without the wait at start: once no scan and no run is going, start the run
+/// if there is something to check again. Whether it started one.
 pub(crate) async fn recheck_when_idle(s: &Arc<NodeState>, poll: std::time::Duration) -> bool {
-    while s.is_scanning() {
-        tokio::time::sleep(poll).await;
+    loop {
+        while busy(s) {
+            tokio::time::sleep(poll).await;
+        }
+        let outdated = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .has_outdated_suggestions()
+            .unwrap_or(false);
+        if !outdated || s.contact().trim().is_empty() {
+            return false;
+        }
+        if launch(s, RunOptions::recheck()) {
+            tracing::info!("identify: checking songs that wait for review again under the current rules");
+            return true;
+        }
+        // Another run took the slot meanwhile (an automatic one after the start's scan): after it
     }
-    let outdated = s
+}
+
+/// How often an automatic run waiting for a scan or another run looks again.
+const AUTO_POLL: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(10)
+} else {
+    std::time::Duration::from_secs(5)
+};
+
+/// Tests: automatic runs after a scan only for the nodes that ask for them (the others scan
+/// without a run reaching for any service).
+#[cfg(test)]
+pub(crate) static AUTO_RUNS_FOR: std::sync::Mutex<Vec<std::sync::Weak<NodeState>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// A scan added or changed `changed` songs: with "Match new songs automatically" on and a
+/// MusicBrainz contact, a run for them starts once no scan and no other run is going. The same
+/// job and pacing as Identify: a plain run, which checks songs never checked and songs whose file
+/// or tags changed, nothing else. One waiter at a time; scans that end while it waits are covered
+/// by its run, and one that ends after its run started gets a run of its own after it.
+pub fn after_scan(s: &Arc<NodeState>, changed: u64) {
+    if changed == 0 {
+        return;
+    }
+    #[cfg(test)]
+    {
+        let asked = AUTO_RUNS_FOR.lock().expect("auto runs");
+        if !asked
+            .iter()
+            .any(|w| w.upgrade().is_some_and(|a| Arc::ptr_eq(&a, s)))
+        {
+            return;
+        }
+    }
+    let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    if s.identify_waiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let s = s.clone();
+    rt.spawn(async move {
+        run_after_scan(&s, AUTO_POLL).await;
+    });
+}
+
+/// [`after_scan`]'s waiter: whether it started a run.
+pub(crate) async fn run_after_scan(s: &Arc<NodeState>, poll: std::time::Duration) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    loop {
+        while busy(s) {
+            tokio::time::sleep(poll).await;
+        }
+        // From here a scan that ends starts a waiter of its own
+        s.identify_waiting.store(false, SeqCst);
+        if !auto_match_on(s) || s.contact().trim().is_empty() || !plain_run_has_work(s) {
+            return false;
+        }
+        if launch(s, RunOptions::new(false)) {
+            tracing::info!("identify: matching the songs a scan added or changed");
+            return true;
+        }
+        // A run started meanwhile: wait for it, unless another waiter does
+        if s.identify_waiting.swap(true, SeqCst) {
+            return false;
+        }
+    }
+}
+
+/// Whether a plain run has songs to check: never checked, or a "not found" or waiting song whose
+/// file, tags or the node's services changed (as [`run_with`] picks them). An automatic run with
+/// nothing to do would only replace the last run's summary.
+fn plain_run_has_work(s: &NodeState) -> bool {
+    let settings = s.acoustid.read().expect("acoustid lock").clone();
+    let services = services_key(s, &settings, !s.contact().trim().is_empty());
+    let lib = s.library.lock().expect("library poisoned");
+    match lib.tracks_to_identify(false) {
+        Ok(t) if t.is_empty() => {}
+        _ => return true,
+    }
+    let Ok(kept) = lib.identify_inputs() else {
+        return true;
+    };
+    if kept.is_empty() {
+        return false;
+    }
+    let Ok(all) = lib.all_tracks() else {
+        return true;
+    };
+    all.iter().any(|t| {
+        t.id.is_some_and(|id| {
+            kept.get(&id.0)
+                .is_some_and(|k| k.as_deref() != Some(pm_library::identify::input_key(t, &services).as_str()))
+        })
+    })
+}
+
+/// When the weekly retry last started (unix seconds).
+const WEEKLY_KEY: &str = "identify.weekly_at";
+const WEEK_SECS: i64 = 7 * 24 * 3600;
+/// How often the node looks whether the weekly retry is due.
+const WEEKLY_LOOK: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Songs one weekly retry checks at most (oldest first; the next week takes the next ones).
+pub const WEEKLY_MAX: usize = 500;
+
+/// Once a week, with "Match new songs automatically" on and a MusicBrainz contact, while nothing
+/// else runs: one run over "not found" songs last checked before their kept MusicBrainz answers
+/// expired (30 days), at most [`WEEKLY_MAX`], their AcoustID answers from then asked again.
+/// Whether it started one.
+pub(crate) fn weekly_retry(s: &Arc<NodeState>) -> bool {
+    if !auto_match_on(s) || s.contact().trim().is_empty() || busy(s) {
+        return false;
+    }
+    let now = pm_library::db::now_unix();
+    let before = now - Library::IDENTIFY_MB_TTL_SECS;
+    let songs = {
+        let lib = s.library.lock().expect("library poisoned");
+        let last = lib
+            .get_setting(WEEKLY_KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok());
+        if last.is_some_and(|t| now - t < WEEK_SECS) {
+            return false;
+        }
+        lib.stale_not_found(before, WEEKLY_MAX).unwrap_or_default()
+    };
+    if songs.is_empty() {
+        return false;
+    }
+    let n = songs.len();
+    if !launch(s, RunOptions::weekly(songs, before)) {
+        return false;
+    }
+    if let Err(e) = s
         .library
         .lock()
         .expect("library poisoned")
-        .has_outdated_suggestions()
-        .unwrap_or(false);
-    if !outdated || s.contact().trim().is_empty() {
-        return false;
+        .set_setting(WEEKLY_KEY, &now.to_string())
+    {
+        tracing::debug!("identify: the weekly retry's time not kept: {e}");
     }
-    let started = launch(s, RunOptions::recheck());
-    if started {
-        tracing::info!("identify: checking songs that wait for review again under the current rules");
-    }
-    started
+    tracing::info!(songs = n, "identify: the weekly look at songs not found");
+    true
 }
 
 /// Fingerprints decoded at once: the machine's cores, at most 8 (each decodes up to two minutes
@@ -688,7 +923,7 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             }
         }
         (
-            if opts.outdated_only {
+            if opts.outdated_only || opts.only.is_some() {
                 Vec::new()
             } else {
                 lib.tracks_to_identify(retry)?
@@ -712,7 +947,15 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
             Some((id, pm_library::identify::input_key(t, &services)))
         })
         .collect();
-    if opts.outdated_only {
+    if let Some(only) = &opts.only {
+        // The weekly retry: these songs, nothing else
+        let only: std::collections::HashSet<i64> = only.iter().copied().collect();
+        todo = all
+            .iter()
+            .filter(|t| t.id.is_some_and(|id| only.contains(&id.0)))
+            .cloned()
+            .collect();
+    } else if opts.outdated_only {
         // The start's automatic run: the songs older rules left waiting, nothing else
         let outdated = s
             .library
@@ -797,10 +1040,30 @@ pub async fn run_with(s: &Arc<NodeState>, opts: RunOptions) -> Result<(), ApiErr
     };
     let lanes = tokio::try_join!(
         album_lane,
-        fingerprint_lane(s, client.as_ref(), from_albums, to_search, &found),
+        fingerprint_lane(
+            s,
+            client.as_ref(),
+            from_albums,
+            to_search,
+            &found,
+            opts.refresh_before
+        ),
         search_lane(s, mb.as_ref(), misses, after_albums, &found),
     );
     let identified_now = found.found.into_inner().expect("found lock");
+    // Songs waiting for review whose stored evidence is clear on its own (this run's and earlier
+    // ones'): settled as `auto`, never written into the files here
+    match auto_settle_pass(s).await {
+        Ok(r) if r.settled > 0 => {
+            tracing::info!(settled = r.settled, by = ?r.by_rule, "identify: unsure songs settled automatically");
+            let mut p = s.identify.lock().expect("identify lock");
+            for (rule, n) in r.by_rule {
+                *p.settled.entry(rule).or_default() += n;
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("identify: unsure songs not settled automatically: {}", e.message),
+    }
     // "Write IDs into my files", when the owner turned it on: also for the songs a run that
     // stopped early identified before it stopped
     if !identified_now.is_empty() && write_ids_on(s) {
@@ -1114,6 +1377,7 @@ async fn fingerprint_lane(
     folders: mpsc::UnboundedReceiver<Folder>,
     misses: mpsc::UnboundedSender<Miss>,
     found: &RunCtx,
+    refresh_before: Option<i64>,
 ) -> Result<(), ApiError> {
     struct Meta {
         len: usize,
@@ -1138,7 +1402,7 @@ async fn fingerprint_lane(
             let decoding = &decoding;
             let gate = &gate;
             async move {
-                let r = lookup(s, client, &t, decoding, gate).await;
+                let r = lookup(s, client, &t, decoding, gate, refresh_before).await;
                 (meta, t, r)
             }
         })
@@ -1377,6 +1641,156 @@ async fn settle_with(
     Ok(())
 }
 
+/// What an automatic-settling pass did: songs looked at, settled (by rule), and why the others
+/// stay for the owner (by reason). Counts only: no title, path or id.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SettleReport {
+    pub looked: usize,
+    pub settled: usize,
+    pub by_rule: BTreeMap<String, usize>,
+    pub stay: BTreeMap<String, usize>,
+    /// What in particular kept them, by `reason/detail` (`version/title:live`, `artist/various`,
+    /// `different_songs/tags_row:strong`…; words of a closed list only).
+    #[serde(default)]
+    pub why: BTreeMap<String, usize>,
+}
+
+/// Settle songs waiting for review whose stored evidence is clear on its own
+/// ([`pm_library::auto_settle`]): their open options, their tags, and the release their folder is
+/// on (its songs identified by a run, their tags or the owner; never an automatic pick, so the
+/// order songs are looked at changes nothing). Reads only the library, asks no service. Songs the
+/// owner left as they are, or rejected a recording for, stay. Each pick is stored only while it
+/// holds ([`Library::settle_auto`]): a confirmation, rejection or rescan meanwhile wins.
+pub async fn auto_settle_pass(s: &NodeState) -> Result<SettleReport, ApiError> {
+    use pm_library::auto_settle::{decide_why, folder_release, with_answer, Opt, Song, Verdict};
+    let (waiting, rows, releases, rejected, read, all) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (
+            lib.suggested_tracks()?,
+            lib.suggestions()?,
+            lib.identified_releases()?,
+            lib.tracks_with_rejections()?,
+            lib.input_generations()?,
+            lib.all_tracks()?,
+        )
+    };
+    let mut report = SettleReport {
+        looked: waiting.len(),
+        ..Default::default()
+    };
+    if waiting.is_empty() {
+        return Ok(report);
+    }
+    let folder_of = |t: &Track| t.file.path.parent().map(PathBuf::from).unwrap_or_default();
+    let wanted: std::collections::HashSet<PathBuf> = waiting.iter().map(folder_of).collect();
+    // Each folder's votes: the release of its songs identified (not automatically), else the
+    // release their album's tags name
+    let mut votes: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for t in &all {
+        let dir = folder_of(t);
+        if !wanted.contains(&dir) {
+            continue;
+        }
+        let id = t.id.map(|i| i.0).unwrap_or_default();
+        // (an automatic pick's own release is never evidence; its album's tags are, as before
+        // it was settled, so what one pass settled changes nothing for the next)
+        let tagged = t
+            .album
+            .as_ref()
+            .and_then(|a| a.release_mbid)
+            .map(|m| m.to_string());
+        let auto = matches!(t.canonical, Some((_, Confidence::Auto { .. })));
+        let vote = if t.canonical.is_some() && !auto {
+            releases.get(&id).cloned().or(tagged)
+        } else {
+            tagged
+        };
+        if let Some(v) = vote {
+            votes.entry(dir).or_default().push(v);
+        }
+    }
+    drop(all);
+    let folder: HashMap<PathBuf, Option<String>> = votes
+        .into_iter()
+        .map(|(dir, v)| {
+            let r = folder_release(v.iter().map(String::as_str));
+            (dir, r)
+        })
+        .collect();
+    let mut options: HashMap<i64, Vec<Opt>> = HashMap::new();
+    for r in &rows {
+        options.entry(r.track_id).or_default().push(Opt::from(r));
+    }
+    drop(rows);
+    for t in &waiting {
+        let id = t.id.map(|i| i.0).unwrap_or_default();
+        let mut opts = options.remove(&id).unwrap_or_default();
+        // A song whose file is gone (nothing kept of what it is now) is not settled
+        let Some(was) = read.get(&id).map(String::as_str) else {
+            *report.stay.entry("no_file".to_string()).or_default() += 1;
+            continue;
+        };
+        // The run's kept AcoustID answer, read from the library (no file is read): its every sure
+        // recording, with lengths and release kinds
+        let kept = s
+            .library
+            .lock()
+            .expect("library poisoned")
+            .lookup_for_path(&t.file.path)
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<pm_library::identify::LookupResponse>(&j).ok());
+        let answer = kept.is_some();
+        if let Some(kept) = kept {
+            let none = |_: &str| false;
+            opts = with_answer(opts, &kept.results, &none);
+        }
+        let tags = file_tags(t);
+        let fr = folder.get(&folder_of(t)).cloned().flatten();
+        let (verdict, detail) = decide_why(&Song {
+            tags: &tags,
+            options: &opts,
+            folder_release: fr.as_deref(),
+            rejected: rejected.contains(&id),
+            answer,
+        });
+        let (recording, release, score, rule) = match verdict {
+            Verdict::Stay(why) => {
+                *report.stay.entry(why.name().to_string()).or_default() += 1;
+                if let Some(d) = detail {
+                    *report.why.entry(format!("{}/{d}", why.name())).or_default() += 1;
+                }
+                continue;
+            }
+            Verdict::Pick {
+                recording,
+                release,
+                score,
+                rule,
+            } => (recording, release, score, rule),
+        };
+        let (Ok(recording), release) = (
+            Mbid::parse(&recording),
+            release.and_then(|r| Mbid::parse(&r).ok()),
+        ) else {
+            *report.stay.entry("unreadable".to_string()).or_default() += 1;
+            continue;
+        };
+        let detail = format!("auto: {}", rule.name());
+        let stored = write_waiting(s, |lib| {
+            lib.settle_auto(id, &recording, release.as_ref(), score, &detail, Some(was))
+        })
+        .await?;
+        if stored {
+            report.settled += 1;
+            *report.by_rule.entry(rule.name().to_string()).or_default() += 1;
+        } else {
+            *report.stay.entry("changed".to_string()).or_default() += 1;
+        }
+    }
+    Ok(report)
+}
+
 enum Outcome {
     Identified {
         recording: Mbid,
@@ -1410,16 +1824,26 @@ async fn lookup(
     t: &Track,
     decoding: &tokio::sync::Semaphore,
     gate: &KeyGate,
+    refresh_before: Option<i64>,
 ) -> Result<Vec<AcoustIdResult>, String> {
     let path = t.file.path.clone();
     let key = content_key(s, t).await?;
-    let cached = s
-        .library
-        .lock()
-        .expect("library poisoned")
-        .cached_fingerprint(&key)
-        .map_err(|e| e.to_string())?;
-    if let Some((_, _, Some(j))) = &cached {
+    let (cached, asked_at) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (
+            lib.cached_fingerprint(&key).map_err(|e| e.to_string())?,
+            if refresh_before.is_some() {
+                lib.lookup_time(&key).map_err(|e| e.to_string())?
+            } else {
+                None
+            },
+        )
+    };
+    // The weekly retry asks AcoustID again about an answer kept from before `refresh_before`
+    // (with a key to ask it with; else the kept answer stands)
+    let expired =
+        client.is_some() && refresh_before.is_some_and(|before| asked_at.is_none_or(|at| at < before));
+    if let Some((_, _, Some(j))) = cached.as_ref().filter(|_| !expired) {
         let r: pm_library::identify::LookupResponse = serde_json::from_str(j).map_err(|e| e.to_string())?;
         work(s, |w| w.lookups_reused += 1);
         return Ok(r.results);
@@ -1891,6 +2315,50 @@ pub struct TrackCandidates {
     pub suggestions: Vec<pm_library::SuggestionRow>,
     /// MusicBrainz is asked only with a contact (Settings, or Get started on Home).
     pub needs_contact: bool,
+    /// What this search found (also for a song with a match, where nothing is stored; and for
+    /// `q`, a search by the owner's words, never stored): picked with `…/tracks/{id}/match`.
+    #[serde(default)]
+    pub found: Vec<Candidate>,
+}
+
+/// `GET /v1/library/tracks/{id}/candidates?q=`: `q`, the owner's own words for MusicBrainz.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CandidatesQuery {
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
+/// The longest search the owner may type.
+const MAX_QUERY: usize = 200;
+
+/// MusicBrainz's recordings for the owner's words (the "Wrong match?" search box): its strongest
+/// hits, as options to pick from, never stored.
+async fn words_search(s: &NodeState, q: &str) -> Result<Vec<Candidate>, String> {
+    let Some(mb) = mb_client(s, std::time::Duration::from_millis(1000)) else {
+        return Ok(Vec::new());
+    };
+    let query = [("query", q), ("limit", "10")];
+    work(s, |w| w.mb_asked += 1);
+    let v = mb
+        .get_json("recording", &query)
+        .await
+        .map_err(|e| e.to_string())?;
+    let hits = v
+        .map(|v| pm_library::musicbrainz::parse_search_hits(&v))
+        .unwrap_or_default();
+    Ok(hits
+        .into_iter()
+        .filter(|h| h.score >= 50)
+        .map(|h| Candidate {
+            recording: h.mbid,
+            release: h.release_mbid,
+            title: Some(h.title),
+            artist: Some(h.artist),
+            release_title: h.release,
+            score: h.score as f32 / 100.0,
+            source: "search".into(),
+        })
+        .collect())
 }
 
 /// `GET /v1/library/tracks/{id}/candidates`: search MusicBrainz by the track's tags now (with
@@ -1899,6 +2367,7 @@ pub struct TrackCandidates {
 pub(crate) async fn track_candidates(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<i64>,
+    axum::extract::Query(want): axum::extract::Query<CandidatesQuery>,
 ) -> ApiResult<TrackCandidates> {
     let track = s
         .library
@@ -1907,10 +2376,30 @@ pub(crate) async fn track_candidates(
         .get_track(pm_model::TrackId(id))?
         .ok_or_else(|| ApiError::not_found(format!("no track {id}")))?;
     let needs_contact = s.contact().trim().is_empty();
+    let words = want
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .map(|q| q.chars().take(MAX_QUERY).collect::<String>());
+    if let (false, Some(q)) = (needs_contact, words.as_deref()) {
+        let found = words_search(&s, q)
+            .await
+            .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("MusicBrainz: {e}")))?;
+        let suggestions = s.library.lock().expect("library poisoned").suggestions_for(id)?;
+        return Ok(Json(TrackCandidates {
+            track,
+            suggestions,
+            needs_contact,
+            found,
+        }));
+    }
+    let mut found_now = Vec::new();
     if !needs_contact {
         let found = search_suggestions(&s, &track)
             .await
             .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, format!("MusicBrainz: {e}")))?;
+        found_now = found.clone();
         // Stored like a run's answer: what the owner rejected stays out, and the song waits for
         // review only with something open (none: "unknown", so a retry looks at it again; a
         // song with an identity is left as it is)
@@ -1932,10 +2421,19 @@ pub(crate) async fn track_candidates(
         }
     }
     let suggestions = s.library.lock().expect("library poisoned").suggestions_for(id)?;
+    // What the owner rejected for the song is not offered again
+    let found: Vec<Candidate> = {
+        let lib = s.library.lock().expect("library poisoned");
+        found_now
+            .into_iter()
+            .filter(|c| !lib.is_rejected(id, &c.recording.to_string()).unwrap_or(false))
+            .collect()
+    };
     Ok(Json(TrackCandidates {
         track,
         suggestions,
         needs_contact,
+        found,
     }))
 }
 
@@ -2003,6 +2501,26 @@ pub struct ReviewSong {
     /// Why a single option is not ticked: `weak`, `search` or `other_release`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hold: Option<String>,
+    /// The song's match now ("Wrong match?" view only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<CurrentMatch>,
+}
+
+/// A song's match as the "Wrong match?" view shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CurrentMatch {
+    pub recording_mbid: String,
+    #[serde(default)]
+    pub release_mbid: Option<String>,
+    /// How it was found (`album_fit`, `fingerprint`, `tag_match`, `auto`, `confirmed_by_user`,
+    /// `tagged_mbid`…).
+    pub source: String,
+    pub score: f32,
+    /// Settled automatically: not written into the file until confirmed.
+    pub auto: bool,
+    /// The file's tags name a recording: corrected here only with "Write IDs into my files" on
+    /// (the file's IDs are rewritten), else in the file.
+    pub from_tags: bool,
 }
 
 /// A song as album review shows it: what the page needs of the track, not the whole record.
@@ -2121,6 +2639,7 @@ fn review_song(track: &Track, options: Vec<SuggestionRow>, release: Option<&str>
         status: if single { "single" } else { "conflict" }.into(),
         pick,
         hold: hold.map(str::to_string),
+        current: None,
     }
 }
 
@@ -2264,6 +2783,354 @@ pub(crate) async fn review_albums(
         offset,
         next,
     }))
+}
+
+/// `GET /v1/library/identify/fix?tracks=1,2,3`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FixQuery {
+    /// Song ids, comma-separated (at most [`MAX_CONFIRM`]).
+    #[serde(default)]
+    pub tracks: String,
+}
+
+/// A song's match as [`CurrentMatch`] says it (`None`: no match).
+fn current_match(t: &Track, release: Option<String>) -> Option<CurrentMatch> {
+    let (uri, c) = t.canonical.as_ref()?;
+    let recording_mbid = match uri {
+        MusicUri::Recording { mbid } => mbid.to_string(),
+        other => other.to_url(),
+    };
+    Some(CurrentMatch {
+        recording_mbid,
+        release_mbid: release,
+        source: c.label().to_string(),
+        score: c.score(),
+        auto: matches!(c, Confidence::Auto { .. }),
+        from_tags: t.recording_mbid.is_some() || matches!(c, Confidence::TaggedMbid | Confidence::TaggedIsrc),
+    })
+}
+
+/// `GET /v1/library/identify/fix?tracks=`: "Wrong match?" for these songs (one song, or an
+/// album's): the album review's shape, a folder per album, each song with its match now
+/// (`current`) and its open options (an automatic pick keeps the others it was chosen from).
+/// More are found with `…/tracks/{id}/candidates`; a choice is `POST …/tracks/{id}/match`.
+pub(crate) async fn fix_view(
+    State(s): State<Arc<NodeState>>,
+    axum::extract::Query(q): axum::extract::Query<FixQuery>,
+) -> ApiResult<ReviewPage> {
+    let mut ids: Vec<i64> = Vec::new();
+    for part in q.tracks.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let id = part
+            .parse::<i64>()
+            .map_err(|_| ApiError::bad_request("tracks: song ids, comma-separated"))?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        return Err(ApiError::bad_request("tracks: name at least one song"));
+    }
+    if ids.len() > MAX_CONFIRM {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_CONFIRM} songs at once"
+        )));
+    }
+    let (tracks, rows) = {
+        let lib = s.library.lock().expect("library poisoned");
+        let mut tracks = Vec::new();
+        for id in &ids {
+            if let Some(t) = lib.get_track(pm_model::TrackId(*id))? {
+                let release = lib.identify_release(*id)?;
+                tracks.push((t, release));
+            }
+        }
+        (tracks, lib.suggestions_for_tracks(&ids)?)
+    };
+    let mut options: HashMap<i64, Vec<SuggestionRow>> = HashMap::new();
+    for r in rows {
+        options.entry(r.track_id).or_default().push(r);
+    }
+    let mut by_folder: BTreeMap<String, Vec<(Track, Option<String>)>> = BTreeMap::new();
+    for (t, release) in tracks {
+        let folder = t
+            .file
+            .path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        by_folder.entry(folder).or_default().push((t, release));
+    }
+    let songs: usize = by_folder.values().map(Vec::len).sum();
+    let albums: Vec<ReviewAlbum> = by_folder
+        .into_iter()
+        .map(|(key, mut list)| {
+            list.sort_by(|(a, _), (b, _)| {
+                (a.disc_no.unwrap_or(1), a.track_no.unwrap_or(u32::MAX), &a.title).cmp(&(
+                    b.disc_no.unwrap_or(1),
+                    b.track_no.unwrap_or(u32::MAX),
+                    &b.title,
+                ))
+            });
+            let first = &list[0].0;
+            let album = first.album.as_ref().map(|a| a.title.clone());
+            let artist = first
+                .album
+                .as_ref()
+                .and_then(|a| a.album_artist.clone())
+                .or_else(|| first.artists.first().map(|a| a.name.clone()));
+            let songs: Vec<ReviewSong> = list
+                .into_iter()
+                .map(|(t, release)| {
+                    let id = t.id.map(|i| i.0).unwrap_or_default();
+                    let opts = options.remove(&id).unwrap_or_default();
+                    let current = current_match(&t, release);
+                    let mut song = review_song(&t, opts, None);
+                    // Nothing is offered ticked here: the owner picks
+                    song.pick = None;
+                    song.hold = None;
+                    if current.is_some() {
+                        song.status = "current".into();
+                    }
+                    song.current = current;
+                    song
+                })
+                .collect();
+            ReviewAlbum {
+                key,
+                album,
+                artist,
+                release: None,
+                ready: 0,
+                conflicts: songs.iter().filter(|x| x.status == "conflict").count(),
+                songs,
+            }
+        })
+        .collect();
+    let total_albums = albums.len();
+    Ok(Json(ReviewPage {
+        albums,
+        next_after: None,
+        songs,
+        total_albums,
+        offset: 0,
+        next: None,
+    }))
+}
+
+/// `POST /v1/library/tracks/{id}/match`: the owner's correction ("Wrong match?").
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MatchBody {
+    /// The recording that is this song (another one, or the current one to keep it).
+    #[serde(default)]
+    pub recording_mbid: Option<String>,
+    /// Its release, when the owner picked an option that names one.
+    #[serde(default)]
+    pub release_mbid: Option<String>,
+    /// "Not matched": none of them.
+    #[serde(default)]
+    pub none: bool,
+    /// The recording the page showed as the song's match (absent: no match).
+    #[serde(default)]
+    pub expect: Option<String>,
+}
+
+/// `POST /v1/library/tracks/{id}/match {recording_mbid? | none, release_mbid?, expect}`: the
+/// owner corrects a song's match. Another recording becomes the song's (`confirmed_by_user`), the
+/// current one kept becomes the owner's (an automatic pick turns into theirs), or "Not matched"
+/// takes the match away and leaves the song as it is (out of later runs). The recording replaced
+/// or taken away is rejected for the song: no run, retry or automatic settling brings it back.
+/// 409 when the song's match is no longer `expect`, or when the file's tags name a recording and
+/// "Write IDs into my files" is off (the next scan would read it back). With Write IDs on, the
+/// file's ID tags are replaced or removed (backed up first); off, the file is not touched. Pubky tags already published on the old recording stay on it.
+pub(crate) async fn set_match(
+    State(s): State<Arc<NodeState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<MatchBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let parse = |v: &str, what: &str| {
+        Mbid::parse(v).map_err(|_| ApiError::bad_request(format!("{what}: not a MusicBrainz id")))
+    };
+    let choice = match (body.recording_mbid.as_deref(), body.none) {
+        (Some(r), false) => Some((
+            parse(r, "recording_mbid")?,
+            body.release_mbid
+                .as_deref()
+                .map(|r| parse(r, "release_mbid"))
+                .transpose()?,
+        )),
+        (None, true) => None,
+        _ => {
+            return Err(ApiError::bad_request(
+                "Name the recording (recording_mbid) or say none of them (none: true)",
+            ))
+        }
+    };
+    let expect = body
+        .expect
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_string);
+    // With "Write IDs into my files" on, the file's IDs follow the correction, also for a song
+    // whose tags name a recording; off, such a song's tags would bring the old one back
+    let follow = write_ids_on(&s);
+    let st = s.clone();
+    let out = tokio::task::spawn_blocking(move || correct(&st, id, expect, choice, follow))
+        .await
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    let _ = s.events.send(crate::types::ApiEvent::LibraryChanged);
+    Ok(Json(out))
+}
+
+/// One ID write into a file at a time (a correction, "Write IDs" after a run or on the page), each
+/// checking what the song is right before it writes: two writers never leave a file naming what
+/// the other one replaced.
+static ID_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn id_writes() -> std::sync::MutexGuard<'static, ()> {
+    ID_WRITES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a correction answers when the song's match is not what the page showed, or can't be
+/// changed here.
+fn not_corrected(r: &pm_library::Rematch, id: i64) -> ApiError {
+    match r {
+        pm_library::Rematch::Gone => ApiError::not_found(format!("no track {id}")),
+        pm_library::Rematch::FromTags => ApiError::new(
+            StatusCode::CONFLICT,
+            "This song's file names its recording in its tags: turn on Write IDs into my files to change it here, or correct the tags.",
+        ),
+        _ => ApiError::new(
+            StatusCode::CONFLICT,
+            "This song's match changed since the page was loaded; nothing was changed. Reload to see it.",
+        ),
+    }
+}
+
+/// [`set_match`]'s work (blocking), one correction at a time with every ID write: checked
+/// against the library, then (`follow`) the file's IDs replaced or removed, then the library
+/// changed in one step that checks again. A file whose tags name a recording and that can't take
+/// the change changes nothing (the next scan would read the old recording back); when the
+/// library's step finds the song changed meanwhile, the file is put back from its backup.
+fn correct(
+    s: &NodeState,
+    id: i64,
+    expect: Option<String>,
+    choice: Option<(Mbid, Option<Mbid>)>,
+    follow: bool,
+) -> Result<serde_json::Value, ApiError> {
+    use pm_library::Rematch;
+    let _one = id_writes();
+    let (track, now, release_kept) = {
+        let lib = s.library.lock().expect("library poisoned");
+        (
+            lib.get_track(pm_model::TrackId(id))?,
+            lib.match_now(id)?,
+            lib.identify_release(id)?,
+        )
+    };
+    let (Some(track), Some((current, from_tags))) = (track, now) else {
+        return Err(not_corrected(&Rematch::Gone, id));
+    };
+    if current.as_deref() != expect.as_deref() {
+        return Err(not_corrected(&Rematch::Changed, id));
+    }
+    if from_tags && !follow {
+        return Err(not_corrected(&Rematch::FromTags, id));
+    }
+    let dir = backup_dir(s);
+    let mut backup: Option<PathBuf> = None;
+    let mut skipped: Option<String> = None;
+    if follow {
+        let kept = choice.is_some_and(|(r, _)| current.as_deref() == Some(r.to_string().as_str()));
+        let ids = choice.map(|(recording, release)| pm_library::tagwrite::Ids {
+            recording,
+            release: release.or_else(|| {
+                kept.then(|| release_kept.as_deref().and_then(|r| Mbid::parse(r).ok()))
+                    .flatten()
+            }),
+            acoustid: track.acoustid.clone(),
+        });
+        // A song left without a match: an ISRC in its tags would name it again
+        let drop_isrc = choice.is_none() && track.isrc.is_some();
+        match pm_library::tagwrite::replace_ids(&track.file.path, ids.as_ref(), drop_isrc, &dir) {
+            Ok(b) => backup = Some(b),
+            Err(e) if from_tags => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    format!("The IDs in this song's file couldn't be changed ({e}), so nothing was: correct the tags in the file."),
+                ))
+            }
+            Err(e) => skipped = Some(e.to_string()),
+        }
+    }
+    let done = s.library.lock().expect("library poisoned").rematch(
+        id,
+        expect.as_deref(),
+        choice.as_ref().map(|(r, rel)| (r, rel.as_ref())),
+        follow,
+    );
+    let old = match done {
+        Ok(Rematch::Done { old }) => old,
+        other => {
+            // The file goes back to what it was
+            if let Some(b) = &backup {
+                let back = std::fs::read(b)
+                    .ok()
+                    .and_then(|j| serde_json::from_slice::<pm_library::tagwrite::Backup>(&j).ok());
+                match back.map(|b| pm_library::tagwrite::restore(&b)) {
+                    Some(Ok(())) => {}
+                    Some(Err(e)) => {
+                        tracing::warn!("identify: a file's IDs not put back after a refused correction: {e}")
+                    }
+                    None => {
+                        tracing::warn!("identify: a file's ID backup unreadable after a refused correction")
+                    }
+                }
+            }
+            return Err(match other {
+                Ok(r) => not_corrected(&r, id),
+                Err(e) => ApiError::from(e),
+            });
+        }
+    };
+    if backup.is_some() {
+        // The file as the scan will find it: the rewrite is no change of the song's, so the
+        // owner's choice (a match, or none) stands through the next scan
+        let path = track.file.path.clone();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+                .max(pm_library::lyrics::sidecar_mtime(&path).unwrap_or(0));
+            let lib = s.library.lock().expect("library poisoned");
+            if let Err(e) = lib.note_rewritten(id, &path, meta.len(), mtime, choice.as_ref().map(|(r, _)| r))
+            {
+                tracing::warn!("identify: a rewritten file not noted: {e}");
+            }
+            if choice.is_some() {
+                let _ = lib.set_identify_state(id, "identified", Some("written into the file"));
+            }
+        }
+    }
+    let track = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_track(pm_model::TrackId(id))?
+        .ok_or_else(|| ApiError::not_found("track gone"))?;
+    let mut out = serde_json::json!({"track": track, "replaced": old});
+    if follow {
+        out["files"] = serde_json::json!({
+            "written": backup.is_some(),
+            "skipped": skipped,
+            "backup_dir": dir.display().to_string(),
+        });
+    }
+    Ok(out)
 }
 
 /// `POST /v1/library/suggestions/confirm {choices: [{track_id, suggestion_id, recording_mbid}]}`.

@@ -128,6 +128,12 @@ None of these needs to be open to the internet. Away from home, use
 Discover needs a contact: enter an email or website in **Settings › Discover**. MusicBrainz,
 Wikipedia and the Pubky music index ask every app for one.
 
+## A song or album has the wrong match
+
+Songs are matched to MusicBrainz on their own after each scan (**Your library › Node library ›
+Identify**, Match new songs automatically); a wrong one is fixed from the song's or album's ⋯ menu
+› **Wrong match?**: pick the right recording, search MusicBrainz, or choose **Not matched**.
+
 ## macOS or Windows won't open the app
 
 The app isn't signed. macOS: right-click › **Open**, or **System Settings › Privacy &
