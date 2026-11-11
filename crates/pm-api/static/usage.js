@@ -265,7 +265,7 @@
     n.querySelector('[data-usage="stop"]').onclick = async (e) => {
       const b = e.currentTarget; const had = n.contains(document.activeElement); b.disabled = true;
       // (a Stop the node didn't take still holds on this page; the notice says so and stays)
-      try { await choose(false); } catch (err) { const p = n.querySelector('p'); if (p) { p.setAttribute('role', 'alert'); p.textContent = `${err.message || 'That didn’t work.'} Nothing more is recorded on this page; try again, or open Settings › Privacy.`; } b.disabled = false; if (had) b.focus(); return; }
+      try { await choose(false); } catch (err) { if (err.stale) return; const p = n.querySelector('p'); if (p) { p.setAttribute('role', 'alert'); p.textContent = `${err.message || 'That didn’t work.'} Nothing more is recorded on this page; try again, or open Settings › Privacy.`; } b.disabled = false; if (had) b.focus(); return; }
       seen();
       if (had && (document.activeElement === document.body || !document.activeElement)) { const m = document.getElementById('main'); if (m) m.focus({ preventScroll: true }); }
     };
@@ -279,7 +279,8 @@
     const t = token;
     const r = await request('PUT', '/usage/me', share ? { share: true, choice: was ? was.choice : 0 } : { share: false }, { token: t });
     const j = await answer(r);
-    if (t !== token) return null; // another sign-in meanwhile: nothing of this answer is its
+    // Another sign-in meanwhile: nothing of this answer is its, and nothing is said as if it were
+    if (t !== token) { const e = new Error('Another sign-in started meanwhile: nothing changed for it.'); e.stale = true; throw e; }
     if (!r.ok) { const e = new Error(r.status === 409 ? 'Usage insights changed since this page showed them. Look again.' : 'The node didn’t take that; try again.'); e.status = r.status; if (r.status === 409) await readMe(); throw e; }
     if (share) fresh();
     apply(j); return j;

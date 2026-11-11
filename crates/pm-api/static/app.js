@@ -5907,10 +5907,10 @@
   // ---- render --------------------------------------------------------------
   // The page's code reads through its own `api`, tied to the navigation that draws it (navigate above)
   // (fromNav: this draw is a page being opened, not a redraw after a socket event or a timer;
-  // usage insights count only the reads of a page opened)
+  // usage insights count only the reads of a page opened or redrawn by a press)
   let lastDrawing = null; let fromNav = false;
   const render = () => {
-    const drawing = { on: true, nav: fromNav }; lastDrawing = drawing;
+    const drawing = { on: true, nav: fromNav || inHandler > 0 }; lastDrawing = drawing; // (or a press redraws it)
     // A page opened by a press is the page's own reading, not the press's
     const outer = inHandler; inHandler = 0; let p;
     try { p = renderPage(navApiFor(navGen, navCtl, drawing)); } finally { inHandler = outer; }

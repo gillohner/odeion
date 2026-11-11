@@ -127,9 +127,10 @@ const noOverlap = (page) => page.evaluate(() => {
         await page.click('.nav-item[data-view="tracks"]').catch(() => page.click('.nav-item[data-view="library"]')); await sleep(400);
         await hide(page);
         check(await until(() => u.events.length > 0), `on: events reach the node (${u.events.length})`);
-        const before = u.events.length; const actions = u.events.filter((e) => e.kind === 'action').length;
+        const actions = u.events.filter((e) => e.kind === 'action').length;
         // Nobody there: a page's own el.click() and a library change (the page redraws) are not use
-        await sleep(10500);
+        await sleep(10500); await hide(page); await sleep(500);
+        const before = u.events.length;
         await page.evaluate(() => { document.querySelector('.nav-item[data-view="albums"]').click(); }); await sleep(600);
         run.ws.send(JSON.stringify({ type: 'library_changed', seq: 1 })); await sleep(800);
         await hide(page); await sleep(500);
