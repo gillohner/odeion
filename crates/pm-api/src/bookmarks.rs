@@ -46,15 +46,17 @@ pub(crate) fn canonical_for(lib: &Library, r: &ItemRef) -> Result<MusicUri, ApiE
         let a = lib
             .get_album(id)?
             .ok_or_else(|| ApiError::not_found(format!("album {id}")))?;
-        return a
-            .release_mbid
-            .map(|mbid| MusicUri::Release { mbid })
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    format!("“{}” has no MusicBrainz release id yet", a.title),
-                )
-            });
+        // Its tags' release, else the one its identified songs agree on
+        let release = match a.release_mbid {
+            Some(m) => Some(m),
+            None => lib.agreed_release(id)?,
+        };
+        return release.map(|mbid| MusicUri::Release { mbid }).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("“{}” has no MusicBrainz release id yet", a.title),
+            )
+        });
     }
     if let Some(id) = r.artist_id {
         let a = lib
