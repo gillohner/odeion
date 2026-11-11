@@ -434,7 +434,6 @@ pub fn decide_why(song: &Song) -> (Verdict, Option<String>) {
         return settle_group(tags, &agreeing, song.folder_release, rule);
     }
     // A search by the file's tags that found the file's song: the tags and the audio disagree
-    let tags_row = song.options.iter().any(|o| agrees(tags, o));
     let tags_searched = song
         .options
         .iter()
