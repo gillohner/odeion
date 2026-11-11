@@ -13,7 +13,7 @@
 'use strict';
 const CACHE = 'odeion-shell';
 // The page's files. The page itself (/) is the same for every path the app shows.
-const FILES = ['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feedback.js', '/feedback.css', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'];
+const FILES = ['/', '/app.js', '/app.css', '/pwa.js', '/pwa.css', '/feedback.js', '/feedback.css', '/usage.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png'];
 // The app's own pages, exactly the node's page routes (lib.rs `web` router and WEB_VIEWS; checked
 // by tools/pwa-check.js); a party link, a sign-in return or anything else is left to the network.
 const PAGES = /^\/(?:|app\/?|now-playing|discover(?:\/.+)?|search|library|add-music|downloads|favourites|albums|artists|genres|tracks|playlists|radio|sources|queue|zones|settings|identify|(?:settings|library|sources|home)\/[^/]+|(?:song|album|artist|playlist|person|smart|genre|source|tag)\/[^/]+|artist\/[^/]+\/releases\/[^/]+|shared\/[^/]+(?:\/[^/]+)?)$/;
@@ -71,7 +71,7 @@ async function copyOf(path) {
 // The files the page can't start without (its stylesheets and scripts without async or defer): a
 // kept page is used only with all of them kept too, or it would wait for the node with no end and
 // show nothing (tools/pwa-check.js checks this list against index.html)
-const BLOCKING = ['/pwa.js', '/app.js', '/app.css', '/pwa.css', '/feedback.js', '/feedback.css'];
+const BLOCKING = ['/pwa.js', '/app.js', '/app.css', '/pwa.css', '/feedback.js', '/feedback.css', '/usage.js'];
 async function keptPage() {
   const root = await copyOf('/');
   if (!root) return null;

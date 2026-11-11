@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Usage insights record in the web app, still off unless the owner turns them on.** With the switch on, each signed-in browser records which page was opened and how it loaded, which kind of request it made and how it went, which kind of button was pressed and how, and a script error's kind: never anything typed, names, links, ids, error text or keys. Events wait in memory only and go to this node only. Each person sees a one-time notice and has Settings › You › Privacy (listeners: in their Settings) with Stop for me and Clear mine as separate buttons; the owner has Settings › This node › Usage insights with the switch and Clear all. The account menu says "Usage insights on" while they are.
+
 ## 0.2.3
 
 ### 2026-11-11

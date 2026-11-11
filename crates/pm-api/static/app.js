@@ -347,6 +347,8 @@
   // A listing of someone's shared playlists that may miss some (x-partial)
   const SHARED_PARTIAL = "Some of their posts couldn't be read, so this list may miss some.";
   const api = (method, path, body, opts = {}) => {
+    // Usage insights (usage.js) count only requests a press or a page the person opened made
+    if (opts.usage === undefined) opts = { ...opts, usage: inHandler > 0 || !!opts.navRead };
     if (method === 'GET') return apiSend(method, path, body, opts);
     // The body as it is now (a queued change sends what was asked, even if the object changes meanwhile)
     let sent; let snap; try { sent = body === undefined ? '' : JSON.stringify(body); snap = sent ? JSON.parse(sent) : body; } catch { return apiSend(method, path, body, opts); }
@@ -370,6 +372,7 @@
     if (method !== 'GET' && path.startsWith('/me/prefs')) { state.prefsCache = null; state.prefsGen = (state.prefsGen || 0) + 1; }
     if (method !== 'GET' && /^\/(sources|play-order)\b/.test(path)) { state.svcRank = null; state.svcRankLoading = null; state.svcRankGen = (state.svcRankGen || 0) + 1; }
     let r; const sent = state.token;
+    const t0 = performance.now(); const told = (status) => { if (opts.usage && window.PM_USAGE) PM_USAGE.apiDone(method, path, status, performance.now() - t0); };
     try {
       r = await fetch('/v1' + path, {
         method,
@@ -377,7 +380,8 @@
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: opts.signal,
       });
-    } catch (e) { if (opts.signal && opts.signal.aborted) throw e; linkHint(); throw new Error("Can't reach the node."); }
+    } catch (e) { if (opts.signal && opts.signal.aborted) throw e; told(0); linkHint(); throw new Error("Can't reach the node."); }
+    told(r.status);
     // opts.onHeaders: a caller that reads a header of the answer (x-partial on a listing that may miss some)
     if (opts.onHeaders) opts.onHeaders(r.headers);
     // and again once the change has landed: a read that started meanwhile isn't kept either
@@ -1356,6 +1360,7 @@
   const forgetAccount = () => {
     const mine = state.token; state.token = '';
     if (window.PM_FEEDBACK) PM_FEEDBACK.reset(); // a draft or open report goes with the sign-in
+    if (window.PM_USAGE) PM_USAGE.end(); // and anything usage insights still had (never sent after)
     try {
       // Another tab may have logged in again meanwhile: its token stays
       if (localStorage.getItem('pm.token') !== mine) return;
@@ -2751,7 +2756,7 @@
     // the node has a Pubky identity at all; unlinked, the way to link one
     const how = !state.token ? 'no token needed on this node' : /^pmo_|^pml_/.test(state.token) ? 'logged in with Pubky Ring' : 'logged in with the node’s API token';
     const unlinked = !isListener() && !me.key;
-    showMenu($('#me'), [{ title: `${name} · ${isListener() ? 'listening here' : 'this node’s owner'}` }, { label: how + (unlinked ? ' · not linked to Pubky' : ''), disabled: true }, ...(unlinked ? [{ label: 'Link a Pubky identity', icon: 'zone', run: () => setView('settings', 'accounts') }] : []), { label: 'Settings', icon: 'settings', run: () => setView('settings') }, ...(state.token ? [{ label: 'Log out', icon: 'logout', run: logOut }] : [])], { all: true });
+    showMenu($('#me'), [{ title: `${name} · ${isListener() ? 'listening here' : 'this node’s owner'}` }, { label: how + (unlinked ? ' · not linked to Pubky' : ''), disabled: true }, ...(unlinked ? [{ label: 'Link a Pubky identity', icon: 'zone', run: () => setView('settings', 'accounts') }] : []), ...(window.PM_USAGE && PM_USAGE.on() ? [{ label: 'Usage insights on', icon: 'eye', run: () => setView('settings', isListener() ? undefined : 'privacy') }] : []), { label: 'Settings', icon: 'settings', run: () => setView('settings') }, ...(state.token ? [{ label: 'Log out', icon: 'logout', run: logOut }] : [])], { all: true });
   };
   // The account button shows your picture once the node knows who you are
   const drawMe = async () => {
@@ -3861,7 +3866,7 @@
   const SETTINGS_GROUPS = { you: 'Saved on your homeserver: follows you to every node and device', device: 'Only on this device', node: 'For everyone on this node', homeserver: 'The homeserver this node runs' };
   const settingsTabs = ({ saved = {}, bundled = false, tunnel = false, dac = null }) => [
     { group: 'you', title: 'You', saved: saved.you || SETTINGS_GROUPS.you },
-    ['accounts', 'My accounts', 'artist'], ['home', 'Home', 'home'], ['quality', 'Playback quality', 'zone'], ['playfrom', 'Play from', 'play'],
+    ['accounts', 'My accounts', 'artist'], ['home', 'Home', 'home'], ['quality', 'Playback quality', 'zone'], ['playfrom', 'Play from', 'play'], ['privacy', 'Privacy', 'eye-off'],
     { group: 'device', title: 'This device', saved: saved.device || SETTINGS_GROUPS.device },
     ['appearance', 'Display', 'sun'],
     // The app's own output with a USB DAC on it (`dac`: "This phone"), read-only for now
@@ -3870,7 +3875,7 @@
     ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['playback', 'Zones and outputs', 'zone'],
     ['nodehome', 'Home for everyone', 'home'],
     ...(tunnel && !bundled ? [['remote', 'Remote access', 'external']] : []),
-    ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['about', 'About and updates', 'info'],
+    ['discover', 'Discover', 'compass'], ['usage', 'Usage insights', 'eye'], ['backup', 'Backup', 'download'], ['about', 'About and updates', 'info'],
     ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
   ];
   const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true, dac: 'This phone' }).filter(Array.isArray); // every tab, for routes
@@ -4008,6 +4013,7 @@
     }
     // Another page (not a new query on the search page): its skeleton shows if it is slow to draw
     const fresh = v !== 'search' && (v !== state.view || JSON.stringify(arg ?? null) !== JSON.stringify(state.viewArg ?? null));
+    if (window.PM_USAGE) PM_USAGE.nav(v, state.view ? how : 'initial'); // usage insights: which page, never its argument
     state.view = v; state.viewArg = arg; state.tab = tab;
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     markTabs();
@@ -4174,6 +4180,7 @@
     // Escape closes what is on top: a panel or menu, else the phone's sheet, else Now playing
     if (e.key === 'Escape') {
       if (document.querySelector('dialog[open]')) return; // (it closes itself, and only itself)
+      if (e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut('escape');
       const pops = !qPanel.hidden || !$('#zonepop').hidden || !menuEl.hidden || !volPop().hidden;
       if (pops) { closePop(); closeMenu(); closeQPanel(); closeVolPop(); return; }
       if (npSheetTr.open()) { closeNpSheet(); return; }
@@ -4191,6 +4198,7 @@
     const onControl = e.target.closest('button, a, summary, .clickable[tabindex], [role="button"], [role="tab"], [role="menuitem"], [role="slider"]');
     if (e.code === 'Space' && onControl && !(focusByPointer && document.activeElement === e.target)) return;
     if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && e.target.closest('[role="tab"], [role="menuitem"], [role="slider"]')) return;
+    { const plain = !e.metaKey && !e.ctrlKey; const sc = e.key === '/' ? 'search' : e.code === 'Space' ? 'toggle' : e.key === 'ArrowRight' && plain ? 'next' : e.key === 'ArrowLeft' && plain ? 'prev' : e.key.toLowerCase() === 'n' ? 'now_playing' : e.key === '?' ? 'help' : null; if (sc && e.isTrusted && window.PM_USAGE) PM_USAGE.shortcut(sc); }
     // (the search field is under an open Now playing, out of reach there: it closes first)
     if (e.key === '/') { e.preventDefault(); if (!overlay.hidden) toggleNowPlaying(false); search.focus(); search.select(); return; }
     if (e.code === 'Space') { e.preventDefault(); transport({ action: 'toggle' }); }
@@ -5859,7 +5867,7 @@
     // slower extras are never held back
     if (!drawing.on) return api(method, path, body, opts);
     if (gen !== navGen) return NEVER();
-    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal })
+    return api(method, path, body, { ...opts, signal: opts.signal || ctl.signal, navRead: true })
       .then((r) => (gen === navGen ? r : NEVER()), (e) => (gen === navGen ? Promise.reject(e) : NEVER()));
   };
   const NAV_SKELETON = `<div class="navskel" aria-busy="true"><div class="skeleton" style="height:28px;width:220px"></div><div class="skeleton sk-row" style="height:16px;width:140px;margin:10px 0 22px"></div>${skelRows(6)}${SLOW}</div>`;
@@ -5885,7 +5893,10 @@
     const pageIn = () => { if (!fresh) return; clearTimeout(main.viewInT); main.classList.remove('view-in'); void main.offsetWidth; main.classList.add('view-in'); main.viewInT = setTimeout(() => main.classList.remove('view-in'), 900); };
     const drawn = new Promise((res) => { mo = new MutationObserver(() => { if (gen === navGen && pageDrawn(before)) { if (drawing) drawing.on = false; pageIn(); res(); } }); /* a newer page's first draw isn't this one's */ mo.observe(main, { childList: true }); cap = setTimeout(res, 15000); });
     const end = () => { clearTimeout(skel); clearTimeout(cap); mo.disconnect(); if (gen === navGen) { bar.hidden = true; said.textContent = ''; } };
+    const t0 = performance.now(); const shown = state.view;
     const rendering = render(); navRendering = rendering; drawing = lastDrawing;
+    // Usage insights: how this page went (drawn or its code failed); a newer page first says nothing
+    if (window.PM_USAGE) Promise.race([rendering.then(() => 'ok', () => 'failed'), superseded.then(() => null), drawn.then(() => 'ok')]).then((o) => { if (o) PM_USAGE.loaded(shown, o, performance.now() - t0); });
     return Promise.race([rendering, superseded, drawn]).finally(end);
   };
 
@@ -7733,9 +7744,11 @@
               // Your own streaming accounts: nobody else on the node plays with them (node apps stay the owner's)
               + group('My streaming accounts', svcs ? svcs.map((v) => `<details class="set-row svc-own" data-svc="${esc(v.source)}"><summary class="set-label"><span class="set-name">${esc(v.name)}</span><span class="set-help">${v.connected ? `Signed in${v.user ? ' as ' + esc(v.user) : ''}.` : v.available ? 'Not signed in. Sign in with your own account to play from it here.' : esc(v.reason || 'Not set up on this node yet.')}</span></summary><div class="svc-body"></div></details>`).join('') : row('Streaming accounts', 'The node can’t say right now.', ''))
               + group('Play from', row('Your personal source order', 'Applies to every playlist you play.', '<div id="gorder"></div>'))
+              + group('Usage insights', '<div id="usageme"></div>')
               + group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
             $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
             loadOrder();
+            if (window.PM_USAGE) PM_USAGE.renderPersonal($('#usageme', main));
             $('#lsignout').onclick = logOut;
             // A service opens its own sign-in ways (the same as the owner's, without the node's setup)
             $$('details[data-svc]', main).forEach((d) => d.addEventListener('toggle', () => {
@@ -7865,8 +7878,10 @@
             + (dv.settings ? group('Settings', row('Preferred mode', 'Bit-perfect plays at full level: Android applies no volume of its own then, and the level is the DAC’s or the amplifier’s. So Auto plays bit-perfect only while Android’s volume is at full (it never gets louder), and shared otherwise. Bit-perfect plays bit-perfect at any volume: turn the DAC or amplifier down first. Exclusive USB: this app drives the DAC itself with its own USB driver, on any Android; Android asks you once to allow it, and other apps’ sounds go to the phone’s speaker meanwhile. It starts the DAC’s own volume no louder than Android played. Changes apply from the next song.', `<select class="input" id="dvmode" aria-label="Preferred mode">${[['auto', 'Auto'], ['bit_perfect', 'Bit-perfect'], ['exclusive', 'Exclusive USB'], ['shared', 'Shared']].map(([v, l]) => `<option value="${v}" ${(dv.settings.mode || 'auto') === v ? 'selected' : ''} ${(v === 'bit_perfect' || v === 'exclusive') && !(dv.modes || []).includes(v) ? 'disabled' : ''}>${l}</option>`).join('')}</select>`)
               // Exclusive USB on a DAC with its own volume: the zone's volume moves it
               + (dv.settings.mode === 'exclusive' && dv.hardware_volume ? row('Use the DAC’s volume', 'The zone’s volume sets the DAC’s own volume; the music stays untouched. Off: the DAC stays where it started, and the zone’s volume changes the samples.', `<input type="checkbox" id="dvvol" aria-label="Use the DAC’s volume" ${dv.settings.dac_volume !== false ? 'checked' : ''}>`) : '')) : '');
-          main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
+          main.innerHTML = tabs.page(`${dv ? panel('dac', dacTab) : ''}${panel('playfrom', personalPlayFrom)}${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}${panel('privacy', group('Usage insights', '<div id="usageme"></div>'))}${panel('usage', group('Usage insights', '<div id="usagenode"></div>'))}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
+          // Usage insights (usage.js): yours, and the node's switch
+          if (window.PM_USAGE) { PM_USAGE.renderPersonal($('#usageme', main)); PM_USAGE.renderNode($('#usagenode', main)); }
           // This phone: the choices go to the node, which passes them to the app's player
           const putDev = async (body, what) => { try { await api('PUT', `/outputs/${encodeURIComponent(myOut.id)}/device`, body); toast(`${what}: from the next song`); refreshOutputs(); } catch (e) { toast(e.message, 'error'); } };
           // Bit-perfect plays at full level: below Android's full volume only with the listener's OK
@@ -8456,6 +8471,8 @@
       try { state.me = await api('GET', '/me'); } catch { state.me = { role: 'owner' }; }
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
+      // Usage insights (usage.js): off unless the owner turned them on; asks the node once
+      if (window.PM_USAGE) PM_USAGE.mount({ token: () => state.token, view: () => state.view, shell: shellMode, offline: isOffline, open: () => setView('settings', isListener() ? undefined : 'privacy'), ask: (title, text, label) => choiceDialog({ title, text, choices: [{ label, value: true, primary: true }] }).then((v) => v === true) });
       if (isOwner()) {
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
