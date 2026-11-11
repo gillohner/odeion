@@ -7766,7 +7766,10 @@ mod tests {
         for _ in 0..15 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let z = zone().await;
-            assert_eq!(z["transport"], "playing", "the zone stopped after the player registered again: {z}");
+            assert_eq!(
+                z["transport"], "playing",
+                "the zone stopped after the player registered again: {z}"
+            );
             assert_eq!(z["now_playing"]["item"]["title"], "A", "{z}");
             assert_eq!(z["queue_index"], 0, "{z}");
             let pos = z["now_playing"]["position_ms"].as_u64().unwrap_or(0);
