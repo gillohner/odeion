@@ -455,10 +455,27 @@ def open_picker():
         return False
     opened = False
     if not find(lambda n: "choose another zone" in n):
-        tap(lambda n: "Open Now playing" in n or 'content-desc="Now playing"' in n, "the mini player")
+        tap_mini_player()
         opened = True
     tap(lambda n: "choose another zone" in n, "Now playing's zone")
     return opened
+
+
+MINI_PLAYER = ('"Now playing"', "Open Now playing", '"Nothing playing"', '"Stopped"')
+
+
+def tap_mini_player():
+    """Open Now playing from the mini player: its cover ("Open Now playing") while a song is on,
+    else the bar itself ("Now playing") or its "Nothing playing" line. The lowest match on the
+    screen is the bar (Home can say "Nothing playing" too)."""
+    def lowest():
+        hits = [n for n in ui_nodes() if any(k in n for k in MINI_PLAYER) and "Close Now playing" not in n and center(n) != (0, 0)]
+        return max(hits, key=lambda n: center(n)[1]) if hits else None
+    node = until("the mini player", lowest, timeout=90, every=1)
+    x, y = center(node)
+    adb("shell", "input", "tap", str(x), str(y))
+    log(f"tapped the mini player at {x},{y}")
+    time.sleep(1)
 
 
 def close_now_playing():
