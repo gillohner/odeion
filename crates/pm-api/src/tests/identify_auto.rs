@@ -1625,3 +1625,66 @@ async fn the_replay_of_a_library_copy_counts_only() {
     assert!(replay_refusal(&node.path().join("library.sqlite")).is_some());
     assert!(replay_refusal(&path).is_none());
 }
+
+/// An album whose tags name no release is matched when its identified songs agree on one (its
+/// page then takes tags); songs on different releases, or only automatic picks, leave it
+/// unmatched.
+#[tokio::test]
+async fn an_album_takes_the_release_its_identified_songs_agree_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = state(dir.path(), None).await;
+    let app = router(s.clone());
+    let song = |album: &str, no: u32, release: &str, confidence: pm_model::Confidence| {
+        let mut t = untagged_track(
+            dir.path().join(format!("music/{album}/{no:02}.flac")),
+            &format!("Song {no}"),
+            "Band",
+        );
+        t.album = Some(pm_model::Album {
+            id: None,
+            title: album.into(),
+            album_artist: Some("Band".into()),
+            release_mbid: None,
+            release_group_mbid: None,
+            year: None,
+            upc: None,
+            total_discs: None,
+        });
+        let lib = s.library.lock().unwrap();
+        let id = lib.upsert_track(&t).unwrap();
+        lib.settle(
+            id.0,
+            &pm_library::db::SettleAnswer::Identified {
+                recording: pm_model::MusicUri::Recording {
+                    mbid: mbid(&rec(no + album.len() as u32 * 10)),
+                },
+                confidence,
+                acoustid: None,
+                detail: "test".into(),
+                release: Some(mbid(release)),
+                input_key: None,
+            },
+        )
+        .unwrap();
+        lib.get_track(id).unwrap().unwrap().album.unwrap().id.unwrap()
+    };
+    let fit = pm_model::Confidence::AlbumFit { score: 0.95 };
+    let agreed = song("Four", 1, REL, fit);
+    song("Four", 2, REL, fit);
+    let split = song("Split", 1, REL, fit);
+    song("Split", 2, REL2, fit);
+    let auto = song("Auto", 1, REL, pm_model::Confidence::Auto { score: 0.95 });
+    let tags = |album: i64| {
+        let app = app.clone();
+        async move {
+            call(&app, "GET", &format!("/v1/tags?album_id={album}"), None)
+                .await
+                .1
+        }
+    };
+    let t = tags(agreed).await;
+    assert_eq!(t["uri"], format!("https://musicbrainz.org/release/{REL}"), "{t}");
+    assert!(t.get("needs_match").is_none(), "{t}");
+    assert_eq!(tags(split).await["needs_match"], true);
+    assert_eq!(tags(auto).await["needs_match"], true);
+}
